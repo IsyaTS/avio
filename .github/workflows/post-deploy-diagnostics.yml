@@ -1,0 +1,30 @@
+name: Post-Deploy Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  post-deploy-diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy application
+        run: make deploy
+
+      - name: Run diagnostics
+        env:
+          AVIO_URL: ${{ secrets.POST_DEPLOY_AVIO_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: make diag
+
+      - name: Upload diagnostics report
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-report
+          path: diagnostics/report-*.txt
+          if-no-files-found: warn
