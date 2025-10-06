@@ -1,0 +1,778 @@
+{
+  "tree": {
+    "migrations/": {
+      "014_metrics_followup_ab.sql": 1118,
+      "015_states_tags_retry.sql": 2059
+    },
+    "db/": {
+      "init/": {
+        "002_schema.sql": 2414,
+        "003_contacts.sql": 820,
+        "001_extensions.sql": 85
+      }
+    },
+    "monitoring/": {
+      "prometheus/": {
+        "prometheus.yml": 290
+      },
+      "grafana/": {
+        "dashboards/": "…"
+      }
+    },
+    "ops/": {
+      "requirements.txt": 100,
+      "Dockerfile": 272,
+      "app/": {
+        "static/": "…",
+        "templates/": "…",
+        "main.py": 8518,
+        "__pycache__/": "…"
+      }
+    },
+    "wa_watchdog.sh": 799,
+    "Dockerfile": 1371,
+    "waweb/": {
+      "index.js": 11991,
+      "Dockerfile": 402,
+      "package.json": 299
+    },
+    "scripts/": {
+      "check_template_blocks.py": 1950,
+      "project_diagnostics.py": 6205
+    },
+    "create_project_snapshot.py": 5569,
+    "docker-compose.yml": 3674,
+    "data/": {
+      "tenants/": {
+        "1/": "…"
+      },
+      "stop_phrases.json": 501,
+      "redis/": {
+        "appendonlydir/": "…",
+        "dump.rdb": 88
+      }
+    },
+    "snapshot_parts/": {
+      "project_snapshot_part_10.txt": 2973151,
+      "project_snapshot_part_06.txt": 2960240,
+      "project_snapshot_part_08.txt": 2937257,
+      "project_snapshot_part_02.txt": 2945126,
+      "project_snapshot_part_07.txt": 2936132,
+      "project_snapshot_part_04.txt": 2934658,
+      "project_snapshot_part_09.txt": 2934847,
+      "project_snapshot_part_03.txt": 2934693,
+      "project_snapshot_part_01.txt": 2934690,
+      "project_snapshot_part_05.txt": 2973072
+    },
+    "app/": {
+      "__init__.py": 0,
+      "worker.py": 6367,
+      "requirements.txt": 265,
+      "tenants/": {
+        "5/": "…",
+        "3/": "…",
+        "2/": "…",
+        "1/": "…",
+        "11/": "…",
+        "4/": "…",
+        "0/": "…",
+        "9/": "…"
+      },
+      "core.py": 109195,
+      "tests/": {
+        "test_main_catalog.py": 5395,
+        "test_brain_planner.py": 2362,
+        "test_core_paths.py": 1338,
+        "test_catalog_index_parser.py": 3367,
+        "test_main_webhook.py": 13294,
+        "test_onboarding_preconditions.py": 3316,
+        "test_client_settings.py": 2593,
+        "test_sales_engine.py": 4701,
+        "test_catalog_retriever.py": 2999,
+        "test_client_catalog_upload.py": 6525,
+        "test_catalog_knowledge.py": 2805,
+        "__pycache__/": "…"
+      },
+      "brain/": {
+        "__init__.py": 298,
+        "quality.py": 1966,
+        "planner.py": 7143,
+        "__pycache__/": "…"
+      },
+      "cli.py": 54325,
+      "catalog/": {
+        "pipeline.py": 16567,
+        "__init__.py": 516,
+        "io.py": 2214,
+        "indexer.py": 2853,
+        "retriever.py": 3590,
+        "__pycache__/": "…"
+      },
+      "static/": {
+        "js/": "…",
+        "css/": "…"
+      },
+      "templates/": {
+        "client/": "…",
+        "admin/": "…",
+        "layouts/": "…",
+        "public/": "…"
+      },
+      "web/": {
+        "__init__.py": 0,
+        "public.py": 20747,
+        "common.py": 6240,
+        "client.py": 21272,
+        "admin.py": 6943,
+        "ui.py": 570,
+        "__pycache__/": "…"
+      },
+      "data/": {
+        "catalog_sample.csv": 1206
+      },
+      "main.py": 14062,
+      "db.py": 7450,
+      "onboarding_chat.py": 18657,
+      "catalog_index.py": 29456,
+      "ui/": {
+        "design_tokens.json": 1101
+      },
+      "__pycache__/": {
+        "main.cpython-312.pyc": 18827,
+        "db.cpython-312.pyc": 11462,
+        "catalog_index.cpython-312.pyc": 41902,
+        "__init__.cpython-312.pyc": 122,
+        "onboarding_chat.cpython-312.pyc": 24392,
+        "core.cpython-312.pyc": 139889
+      }
+    },
+    "diagnostics.json": 0,
+    "docs/": {
+      "ui-brief.md": 6435
+    },
+    "AGENTS.md": 2561
+  },
+  "loc_by_extension": {
+    ".py": 1951017,
+    ".pyc": 1043987,
+    ".so": 861623,
+    ".txt": 858081,
+    "<none>": 615849,
+    ".dat": 61178,
+    ".pyi": 45795,
+    ".12": 45773,
+    ".pyx": 38181,
+    ".csv": 38158,
+    ".3": 37511,
+    ".0": 30180,
+    ".npz": 18127,
+    ".h": 12605,
+    ".pem": 9373,
+    ".pxd": 8702,
+    ".jpg": 2506,
+    ".200": 2374,
+    ".c": 2341,
+    ".1": 2337,
+    ".json": 2068,
+    ".gz": 1605,
+    ".17": 1532,
+    ".rst": 1399,
+    ".2": 1346,
+    ".npy": 1297,
+    ".f90": 1236,
+    ".js": 975,
+    ".sample": 868,
+    ".sav": 847,
+    ".css": 813,
+    ".apache2": 606,
+    ".a": 561,
+    ".f": 484,
+    ".html": 426,
+    ".arff": 410,
+    ".mat": 373,
+    ".pxi": 373,
+    ".md": 363,
+    ".wav": 326,
+    ".python": 298,
+    ".build": 255,
+    ".ps1": 247,
+    ".pkl": 200,
+    ".apache": 177,
+    ".sql": 177,
+    ".cpp": 170,
+    ".yml": 160,
+    ".pyf": 76,
+    ".fish": 69,
+    ".mit": 62,
+    ".bz2": 61,
+    ".template": 55,
+    ".gzip": 48,
+    ".xz": 42,
+    ".5": 41,
+    ".ini": 41,
+    ".lzma": 35,
+    ".sh": 35,
+    ".csh": 27,
+    ".bsd": 23,
+    ".nc": 20,
+    ".typed": 12,
+    ".png": 9,
+    ".cfg": 8,
+    ".hash": 8,
+    ".test": 8,
+    ".pc": 7,
+    ".f95": 5,
+    ".tag": 4,
+    ".example": 3,
+    ".z": 3,
+    ".pdf": 2,
+    ".rdb": 2,
+    ".ani": 1,
+    ".fits": 1,
+    ".inc": 1,
+    ".aof": 0,
+    ".manifest": 0
+  },
+  "python_modules": [
+    "app/__init__.py",
+    "app/brain/__init__.py",
+    "app/brain/planner.py",
+    "app/brain/quality.py",
+    "app/catalog/__init__.py",
+    "app/catalog/indexer.py",
+    "app/catalog/io.py",
+    "app/catalog/pipeline.py",
+    "app/catalog/retriever.py",
+    "app/catalog_index.py",
+    "app/cli.py",
+    "app/core.py",
+    "app/db.py",
+    "app/main.py",
+    "app/onboarding_chat.py",
+    "app/tests/test_brain_planner.py",
+    "app/tests/test_catalog_index_parser.py",
+    "app/tests/test_catalog_knowledge.py",
+    "app/tests/test_catalog_retriever.py",
+    "app/tests/test_client_catalog_upload.py",
+    "app/tests/test_client_settings.py",
+    "app/tests/test_core_paths.py",
+    "app/tests/test_main_catalog.py",
+    "app/tests/test_main_webhook.py",
+    "app/tests/test_onboarding_preconditions.py",
+    "app/tests/test_sales_engine.py",
+    "app/web/__init__.py",
+    "app/web/admin.py",
+    "app/web/client.py",
+    "app/web/common.py",
+    "app/web/public.py",
+    "app/web/ui.py",
+    "app/worker.py"
+  ],
+  "templates": [],
+  "static_assets": [],
+  "tests": [
+    "app/tests/test_brain_planner.py",
+    "app/tests/test_catalog_index_parser.py",
+    "app/tests/test_catalog_knowledge.py",
+    "app/tests/test_catalog_retriever.py",
+    "app/tests/test_client_catalog_upload.py",
+    "app/tests/test_client_settings.py",
+    "app/tests/test_core_paths.py",
+    "app/tests/test_main_catalog.py",
+    "app/tests/test_main_webhook.py",
+    "app/tests/test_onboarding_preconditions.py",
+    "app/tests/test_sales_engine.py"
+  ],
+  "import_graph": {
+    "outgoing": {
+      "app.worker": [
+        "core"
+      ],
+      "app.core": [
+        "catalog",
+        "catalog_index"
+      ],
+      "app.onboarding_chat": [
+        "core"
+      ],
+      "app.catalog_index": [
+        "app.catalog",
+        "app.catalog.pipeline"
+      ],
+      "app.tests.test_core_paths": [
+        "core"
+      ],
+      "app.tests.test_catalog_index_parser": [
+        "app.catalog_index"
+      ],
+      "app.tests.test_main_webhook": [
+        "core"
+      ],
+      "app.tests.test_onboarding_preconditions": [
+        "core"
+      ],
+      "app.tests.test_client_settings": [
+        "app.web"
+      ],
+      "app.tests.test_sales_engine": [
+        "core"
+      ],
+      "app.tests.test_catalog_retriever": [
+        "catalog"
+      ],
+      "app.tests.test_client_catalog_upload": [
+        "app.main",
+        "core"
+      ],
+      "app.tests.test_catalog_knowledge": [
+        "core"
+      ],
+      "app.catalog.io": [
+        "core"
+      ],
+      "app.web.public": [
+        "core"
+      ],
+      "app.web.common": [
+        "app.core",
+        "core"
+      ],
+      "app.web.admin": [
+        "core"
+      ]
+    },
+    "incoming": {
+      "app.__init__": [],
+      "app.worker": [],
+      "core": [
+        "app.catalog.io",
+        "app.onboarding_chat",
+        "app.tests.test_catalog_knowledge",
+        "app.tests.test_client_catalog_upload",
+        "app.tests.test_core_paths",
+        "app.tests.test_main_webhook",
+        "app.tests.test_onboarding_preconditions",
+        "app.tests.test_sales_engine",
+        "app.web.admin",
+        "app.web.common",
+        "app.web.public",
+        "app.worker"
+      ],
+      "app.core": [
+        "app.web.common"
+      ],
+      "catalog": [
+        "app.core",
+        "app.tests.test_catalog_retriever"
+      ],
+      "catalog_index": [
+        "app.core"
+      ],
+      "app.cli": [],
+      "app.main": [
+        "app.tests.test_client_catalog_upload"
+      ],
+      "app.db": [],
+      "app.onboarding_chat": [],
+      "app.catalog_index": [
+        "app.tests.test_catalog_index_parser"
+      ],
+      "app.catalog": [
+        "app.catalog_index"
+      ],
+      "app.catalog.pipeline": [
+        "app.catalog_index"
+      ],
+      "app.tests.test_main_catalog": [],
+      "app.tests.test_brain_planner": [],
+      "app.tests.test_core_paths": [],
+      "app.tests.test_catalog_index_parser": [],
+      "app.tests.test_main_webhook": [],
+      "app.tests.test_onboarding_preconditions": [],
+      "app.tests.test_client_settings": [],
+      "app.web": [
+        "app.tests.test_client_settings"
+      ],
+      "app.tests.test_sales_engine": [],
+      "app.tests.test_catalog_retriever": [],
+      "app.tests.test_client_catalog_upload": [],
+      "app.tests.test_catalog_knowledge": [],
+      "app.brain.__init__": [],
+      "app.brain.quality": [],
+      "app.brain.planner": [],
+      "app.catalog.__init__": [],
+      "app.catalog.io": [],
+      "app.catalog.indexer": [],
+      "app.catalog.retriever": [],
+      "app.web.__init__": [],
+      "app.web.public": [],
+      "app.web.common": [],
+      "app.web.client": [],
+      "app.web.admin": [],
+      "app.web.ui": []
+    },
+    "orphans": [
+      "app.__init__",
+      "app.worker",
+      "app.cli",
+      "app.db",
+      "app.onboarding_chat",
+      "app.tests.test_main_catalog",
+      "app.tests.test_brain_planner",
+      "app.tests.test_core_paths",
+      "app.tests.test_catalog_index_parser",
+      "app.tests.test_main_webhook",
+      "app.tests.test_onboarding_preconditions",
+      "app.tests.test_client_settings",
+      "app.tests.test_sales_engine",
+      "app.tests.test_catalog_retriever",
+      "app.tests.test_client_catalog_upload",
+      "app.tests.test_catalog_knowledge",
+      "app.brain.__init__",
+      "app.brain.quality",
+      "app.brain.planner",
+      "app.catalog.__init__",
+      "app.catalog.io",
+      "app.catalog.indexer",
+      "app.catalog.retriever",
+      "app.web.__init__",
+      "app.web.public",
+      "app.web.common",
+      "app.web.client",
+      "app.web.admin",
+      "app.web.ui"
+    ]
+  },
+  "routes": [
+    {
+      "path": "/",
+      "methods": [
+        "GET"
+      ],
+      "name": "root",
+      "endpoint": "app.main.root"
+    },
+    {
+      "path": "/admin",
+      "methods": [
+        "GET"
+      ],
+      "name": "dashboard",
+      "endpoint": "app.web.admin.dashboard"
+    },
+    {
+      "path": "/admin/key/generate",
+      "methods": [
+        "POST"
+      ],
+      "name": "admin_key_generate",
+      "endpoint": "app.web.admin.admin_key_generate"
+    },
+    {
+      "path": "/admin/key/get",
+      "methods": [
+        "GET"
+      ],
+      "name": "admin_key_get",
+      "endpoint": "app.web.admin.admin_key_get"
+    },
+    {
+      "path": "/admin/key/save",
+      "methods": [
+        "POST"
+      ],
+      "name": "admin_key_save",
+      "endpoint": "app.web.admin.admin_key_save"
+    },
+    {
+      "path": "/admin/keys/delete",
+      "methods": [
+        "POST"
+      ],
+      "name": "keys_delete",
+      "endpoint": "app.web.admin.keys_delete"
+    },
+    {
+      "path": "/admin/keys/generate",
+      "methods": [
+        "POST"
+      ],
+      "name": "keys_generate",
+      "endpoint": "app.web.admin.keys_generate"
+    },
+    {
+      "path": "/admin/keys/list",
+      "methods": [
+        "GET"
+      ],
+      "name": "keys_list",
+      "endpoint": "app.web.admin.keys_list"
+    },
+    {
+      "path": "/admin/keys/save",
+      "methods": [
+        "POST"
+      ],
+      "name": "keys_save",
+      "endpoint": "app.web.admin.keys_save"
+    },
+    {
+      "path": "/admin/keys/set_primary",
+      "methods": [
+        "POST"
+      ],
+      "name": "keys_set_primary",
+      "endpoint": "app.web.admin.keys_set_primary"
+    },
+    {
+      "path": "/admin/login",
+      "methods": [
+        "GET"
+      ],
+      "name": "login",
+      "endpoint": "app.web.admin.login"
+    },
+    {
+      "path": "/admin/wa/qr.svg",
+      "methods": [
+        "GET"
+      ],
+      "name": "admin_wa_qr",
+      "endpoint": "app.web.admin.admin_wa_qr"
+    },
+    {
+      "path": "/admin/wa/status",
+      "methods": [
+        "GET"
+      ],
+      "name": "admin_wa_status",
+      "endpoint": "app.web.admin.admin_wa_status"
+    },
+    {
+      "path": "/client/{tenant}/catalog/csv",
+      "methods": [
+        "GET"
+      ],
+      "name": "catalog_csv_get",
+      "endpoint": "app.web.client.catalog_csv_get"
+    },
+    {
+      "path": "/client/{tenant}/catalog/csv",
+      "methods": [
+        "POST"
+      ],
+      "name": "catalog_csv_save",
+      "endpoint": "app.web.client.catalog_csv_save"
+    },
+    {
+      "path": "/client/{tenant}/catalog/upload",
+      "methods": [
+        "POST"
+      ],
+      "name": "catalog_upload",
+      "endpoint": "app.web.public.catalog_upload"
+    },
+    {
+      "path": "/client/{tenant}/catalog/upload",
+      "methods": [
+        "POST"
+      ],
+      "name": "catalog_upload",
+      "endpoint": "app.web.client.catalog_upload"
+    },
+    {
+      "path": "/client/{tenant}/onboarding/message",
+      "methods": [
+        "POST"
+      ],
+      "name": "onboarding_message",
+      "endpoint": "app.web.client.onboarding_message"
+    },
+    {
+      "path": "/client/{tenant}/onboarding/reset",
+      "methods": [
+        "POST"
+      ],
+      "name": "onboarding_reset",
+      "endpoint": "app.web.client.onboarding_reset"
+    },
+    {
+      "path": "/client/{tenant}/onboarding/state",
+      "methods": [
+        "GET"
+      ],
+      "name": "onboarding_state",
+      "endpoint": "app.web.client.onboarding_state"
+    },
+    {
+      "path": "/client/{tenant}/persona",
+      "methods": [
+        "POST"
+      ],
+      "name": "save_persona",
+      "endpoint": "app.web.client.save_persona"
+    },
+    {
+      "path": "/client/{tenant}/settings",
+      "methods": [
+        "GET"
+      ],
+      "name": "client_settings",
+      "endpoint": "app.web.client.client_settings"
+    },
+    {
+      "path": "/client/{tenant}/settings/json",
+      "methods": [
+        "POST"
+      ],
+      "name": "save_json",
+      "endpoint": "app.web.client.save_json"
+    },
+    {
+      "path": "/client/{tenant}/settings/save",
+      "methods": [
+        "POST"
+      ],
+      "name": "save_form",
+      "endpoint": "app.web.client.save_form"
+    },
+    {
+      "path": "/connect/wa",
+      "methods": [
+        "GET"
+      ],
+      "name": "connect_wa",
+      "endpoint": "app.web.public.connect_wa"
+    },
+    {
+      "path": "/health",
+      "methods": [
+        "GET"
+      ],
+      "name": "health",
+      "endpoint": "app.main.health"
+    },
+    {
+      "path": "/internal/tenant/{tenant}/catalog-file",
+      "methods": [
+        "GET"
+      ],
+      "name": "internal_catalog_file",
+      "endpoint": "app.main.internal_catalog_file"
+    },
+    {
+      "path": "/pub/settings/get",
+      "methods": [
+        "GET"
+      ],
+      "name": "settings_get",
+      "endpoint": "app.web.public.settings_get"
+    },
+    {
+      "path": "/pub/settings/save",
+      "methods": [
+        "POST"
+      ],
+      "name": "settings_save",
+      "endpoint": "app.web.public.settings_save"
+    },
+    {
+      "path": "/pub/wa/qr.svg",
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "name": "wa_qr",
+      "endpoint": "app.web.public.wa_qr"
+    },
+    {
+      "path": "/pub/wa/status",
+      "methods": [
+        "GET"
+      ],
+      "name": "wa_status",
+      "endpoint": "app.web.public.wa_status"
+    },
+    {
+      "path": "/webhook",
+      "methods": [
+        "POST"
+      ],
+      "name": "webhook_in",
+      "endpoint": "app.main.webhook_in"
+    },
+    {
+      "path": "/webhook/provider",
+      "methods": [
+        "POST"
+      ],
+      "name": "webhook_provider",
+      "endpoint": "app.main.webhook_provider"
+    }
+  ],
+  "unused_functions": [
+    "app.core.http_json",
+    "app.core.summarize_sales_state",
+    "app.main.root",
+    "app.catalog_index.repl",
+    "app.tests.test_main_catalog.sandbox",
+    "app.tests.test_main_catalog.test_internal_catalog_file_uses_original_name_and_normalizes_path",
+    "app.tests.test_main_catalog.test_read_catalog_auto_maps_russian_headers",
+    "app.tests.test_main_catalog.test_read_catalog_handles_cp1251_when_marked_utf8",
+    "app.tests.test_main_catalog.test_read_catalog_missing_custom_returns_empty",
+    "app.tests.test_main_catalog.test_resolve_catalog_attachment_uses_request_url",
+    "app.tests.test_core_paths.test_default_tenants_dir_prefers_app_directory",
+    "app.tests.test_core_paths.test_write_persona_uses_resolved_tenants_dir",
+    "app.tests.test_catalog_index_parser.test_index_to_catalog_items_extracts_products",
+    "app.tests.test_main_webhook.create",
+    "app.tests.test_main_webhook.decorator",
+    "app.tests.test_main_webhook.fake_load_state",
+    "app.tests.test_main_webhook.fake_record_bot_reply",
+    "app.tests.test_main_webhook.fake_save_state",
+    "app.tests.test_main_webhook.test_webhook_returns_pdf_attachment",
+    "app.tests.test_main_webhook.test_webhook_skips_pdf_after_first_send",
+    "app.tests.test_onboarding_preconditions.tenant_context",
+    "app.tests.test_onboarding_preconditions.test_channels_missing_with_inactive_session",
+    "app.tests.test_onboarding_preconditions.test_channels_missing_without_link_or_key",
+    "app.tests.test_onboarding_preconditions.test_channels_ready_with_primary_key",
+    "app.tests.test_onboarding_preconditions.test_channels_ready_with_session_status",
+    "app.tests.test_onboarding_preconditions.test_channels_ready_with_whatsapp_link",
+    "app.tests.test_client_settings.test_client_settings_handles_non_mapping_sections",
+    "app.tests.test_client_settings.test_save_form_normalizes_and_writes",
+    "app.tests.test_sales_engine.anyio_backend",
+    "app.tests.test_sales_engine.test_conversion_score_tracks_sentiment",
+    "app.tests.test_sales_engine.test_rule_based_reply_reflects_empathy_and_history",
+    "app.tests.test_sales_engine.test_rule_based_reply_respects_persona_hints",
+    "app.tests.test_sales_engine.test_rule_based_reply_uses_sales_strategies",
+    "app.tests.test_sales_engine.tmp_core",
+    "app.tests.test_catalog_retriever.reset_catalog_cache",
+    "app.tests.test_catalog_retriever.test_indexer_invalidation_rebuilds_matrix",
+    "app.tests.test_catalog_retriever.test_retrieve_context_prioritises_relevant_items",
+    "app.tests.test_catalog_retriever.test_retrieve_context_returns_single_when_threshold_not_met",
+    "app.tests.test_client_catalog_upload.api_client",
+    "app.tests.test_client_catalog_upload.test_catalog_upload_accepts_header_only",
+    "app.tests.test_client_catalog_upload.test_catalog_upload_detects_cp1251_encoding",
+    "app.tests.test_client_catalog_upload.test_catalog_upload_indexes_pdf",
+    "app.tests.test_client_catalog_upload.test_catalog_upload_prefers_query_key",
+    "app.tests.test_client_catalog_upload.test_catalog_upload_redirects_for_html_forms",
+    "app.tests.test_client_catalog_upload.test_persona_save_persists_to_disk",
+    "app.tests.test_catalog_knowledge.catalog_core",
+    "app.tests.test_catalog_knowledge.test_rule_based_reply_mentions_requested_item",
+    "app.tests.test_catalog_knowledge.test_search_catalog_ranks_by_keywords",
+    "app.catalog.pipeline.repl",
+    "app.web.public.connect_wa",
+    "app.web.public.settings_get",
+    "app.web.public.wa_qr",
+    "app.web.common.ensure_bytes",
+    "app.web.client.catalog_csv_get",
+    "app.web.client.client_settings",
+    "app.web.admin.admin_key_generate",
+    "app.web.admin.admin_key_get",
+    "app.web.admin.admin_key_save",
+    "app.web.admin.admin_wa_qr",
+    "app.web.admin.admin_wa_status",
+    "app.web.admin.dashboard",
+    "app.web.admin.keys_list",
+    "app.web.admin.login"
+  ]
+}

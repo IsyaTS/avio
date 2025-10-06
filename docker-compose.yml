@@ -1,0 +1,154 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server","--appendonly","yes"]
+    volumes: [ "redis-data:/data" ]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    image: avio/app:local
+    env_file: .env
+    environment:
+      - TENANTS_DIR=/app/tenants
+    depends_on: [redis, postgres]
+    working_dir: /app
+    command: ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]
+    restart: unless-stopped
+
+    volumes:
+      - ./data:/data
+      - ./data/tenants:/app/tenants
+    ports:
+    - "0.0.0.0:8000:8000"
+  worker:
+    image: avio/app:local
+    env_file: .env
+    environment:
+      - TENANTS_DIR=/app/tenants
+    depends_on: [redis, postgres, waweb]
+    command: ["python","/app/worker.py"]
+    restart: unless-stopped
+
+    volumes:
+      - ./data:/data
+      - ./data/tenants:/app/tenants
+  waweb:
+    build: ./waweb
+    env_file: .env
+    restart: unless-stopped
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    ports: ["127.0.0.1:9091:9091"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    depends_on: [pushgateway]
+    ports: ["127.0.0.1:9090:9090"]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    depends_on: [redis]
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    privileged: true
+    ports: ["127.0.0.1:18081:8080"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: unless-stopped
+
+  ops:
+    build: ./ops
+    env_file: .env
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - OPS_DB_URL=${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}
+      - OPS_USER=${OPS_USER:-admin}
+      - OPS_PASS=${OPS_PASS:-admin}
+    depends_on: [redis, postgres]
+    ports: ["127.0.0.1:18080:8000"]
+    restart: unless-stopped
+
+  metrics:
+    image: avio/app:local
+    env_file: .env
+    environment:
+      - TENANTS_DIR=/app/tenants
+    depends_on: [app, pushgateway]
+    command: sh -lc 'while :; do python /app/scripts/metrics_push.py || true; sleep 60; done'
+    restart: unless-stopped
+
+    volumes:
+      - ./data:/data
+      - ./data/tenants:/app/tenants
+  diagnostics:
+    image: avio/app:local
+    env_file: .env
+    environment:
+      - AVIO_URL=http://app:8000
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - TENANTS_DIR=/app/tenants
+    depends_on:
+      app:
+        condition: service_started
+    command:
+      - bash
+      - -lc
+      - "exec /app/scripts/diag.sh \"$$@\""
+    restart: "no"
+    volumes:
+      - ./data:/data
+      - ./data/tenants:/app/tenants
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare-tunnel
+    entrypoint: ["cloudflared","--no-autoupdate"]
+    command: ["tunnel","run","--token","${CF_TOKEN}"]
+    env_file: [ .env ]
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  redis-data:
