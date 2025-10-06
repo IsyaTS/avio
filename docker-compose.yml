@@ -36,6 +36,11 @@ services:
     ports:
     - "0.0.0.0:8000:8000"
   worker:
+    healthcheck:
+      test: ["CMD-SHELL","exit 0"]
+      interval: 30s
+      timeout: 5s
+      retries: 1
     image: avio/app:local
     env_file: .env
     environment:
