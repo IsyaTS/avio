@@ -1,0 +1,6 @@
+.env
+.env.*
+.venv/
+app/.venv/
+app/tenants/
+docker-compose.override.yml
