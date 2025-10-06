@@ -31,4 +31,4 @@
 - Scrub WhatsApp IDs, lead IDs, and queue payloads before sharing logs.
 - Reset waweb sessions via API (`POST /session/:tenant/restart`) instead of deleting container state.
 
-proverka12345678
+
