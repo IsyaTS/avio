@@ -30,4 +30,5 @@
 - `.env` carries secrets; share sanitized samples only and rotate credentials if committed accidentally.
 - Scrub WhatsApp IDs, lead IDs, and queue payloads before sharing logs.
 - Reset waweb sessions via API (`POST /session/:tenant/restart`) instead of deleting container state.
-test test test test123 test555
+
+proverka1234567
