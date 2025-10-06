@@ -1,0 +1,103 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Админка' %}
+{% block content %}
+<section class="surface stack" data-testid="admin-hero">
+    <div class="toolbar">
+        <div class="stack" style="gap: 10px;">
+            <h1 class="section-title">Центр управления арендаторами</h1>
+            <p class="section-subtitle">Создавайте ключи доступа, следите за статусом WhatsApp и делитесь ссылками с клиентами в пару кликов.</p>
+        </div>
+        <form id="tenant-form" class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(140px, auto)); align-items: end;">
+            <label>
+                <span class="label">Tenant ID</span>
+                <input type="number" id="tenant-input" min="1" value="{{ tenant }}" required>
+            </label>
+            <button type="submit" class="btn btn--secondary">Перейти</button>
+        </form>
+    </div>
+    {% if primary_key %}
+    <div class="hint" style="display: inline-flex; align-items: center; gap: 12px;">
+        <span class="badge">Основной ключ</span>
+        <code class="code-inline">{{ primary_key.key }}</code>
+        {% if primary_key.label %}<span class="badge tag-neutral">{{ primary_key.label }}</span>{% endif %}
+    </div>
+    {% else %}
+    <div class="alert-box">У арендатора ещё нет основного ключа. Сгенерируйте его, чтобы клиенты могли подключаться.</div>
+    {% endif %}
+</section>
+
+<section class="surface stack" data-testid="admin-keys">
+    <div class="toolbar">
+        <div class="stack" style="gap: 6px;">
+            <h2 class="section-title" style="font-size: 1.35rem;">Ключи доступа</h2>
+            <p class="section-subtitle">Поддерживайте актуальный набор ключей. Основной ключ используется для клиентского кабинета и API.</p>
+        </div>
+        <div class="actions" style="display:flex; gap: 12px; flex-wrap: wrap;">
+            <button id="generate-key" type="button">Создать ключ</button>
+            <button id="refresh-keys" type="button" class="btn btn--secondary">Обновить список</button>
+        </div>
+    </div>
+    <div id="keys-empty" class="table-empty" style="display: none;">Для выбранного арендатора пока нет сохранённых ключей.</div>
+    <div class="surface surface--muted" style="padding: 0; overflow: hidden;">
+        <div style="overflow-x: auto;">
+            <table id="keys-table" class="table" data-testid="keys-table" style="min-width: 640px;">
+                <thead>
+                    <tr>
+                        <th style="width: 160px;">Метка</th>
+                        <th>Ключ</th>
+                        <th style="width: 220px;">Ссылка для клиента</th>
+                        <th style="width: 240px;">Действия</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+    <form id="manual-key-form" class="form-grid" style="margin-top: 18px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+        <label>
+            <span class="label">Существующий ключ</span>
+            <input name="key" placeholder="Вставьте ключ клиента" maxlength="64">
+        </label>
+        <label>
+            <span class="label">Метка</span>
+            <input name="label" placeholder="Например: demo" maxlength="32">
+        </label>
+        <label style="display:flex;align-items:flex-end;gap:8px;">
+            <input type="checkbox" name="primary" value="1" style="width:auto;"> Сделать основным
+        </label>
+        <button type="submit" class="btn btn--secondary">Сохранить ключ</button>
+    </form>
+    <div id="keys-message" class="status-text"></div>
+</section>
+
+<section class="grid grid--two">
+    <div class="surface stack" data-testid="wa-status-card">
+        <div class="stack" style="gap: 6px;">
+            <h2 class="section-title" style="font-size: 1.35rem;">WhatsApp-сессия</h2>
+            <p class="section-subtitle">Следите за состоянием подключения и держите QR-код под рукой для перепривязки аккаунта.</p>
+        </div>
+        <div id="wa-status" class="badge tag-neutral" style="padding: 10px 16px; font-size: 0.88rem;">Проверяем статус…</div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; margin-top:8px;">
+            <a id="wa-open" class="btn btn--secondary" target="_blank" rel="noopener">Открыть QR</a>
+            <button id="wa-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
+        </div>
+    </div>
+    <div class="surface stack" data-testid="admin-hints" style="gap: 12px;">
+        <h2 class="section-title" style="font-size: 1.35rem;">Подсказки</h2>
+        <div class="hint">
+            <ul style="margin:0; padding-left: 18px; display: grid; gap: 8px;">
+                <li>Держите один ключ с меткой <strong>primary</strong> — его использует клиентский кабинет.</li>
+                <li>Если waweb потерял сессию, откройте QR и войдите заново в WhatsApp Business.</li>
+                <li>Удаляйте устаревшие ключи: это не влияет на активные подключения клиентов.</li>
+            </ul>
+        </div>
+    </div>
+</section>
+<script id="admin-dashboard-state" type="application/json">{{ {
+    "tenant": tenant,
+    "keys": keys,
+    "primary": primary_key,
+    "public_base": public_base
+} | tojson }}</script>
+<script src="{{ static_url(request, 'js/admin-dashboard.js') }}" defer></script>
+{% endblock %}

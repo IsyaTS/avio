@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% set page_title = title or page_title or 'Avio' %}
+    <title>{{ page_title }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ static_url(request, 'css/portal.css') }}">
+    {# Optional page-level head injections #}
+    {% if extra_head %}{{ extra_head | safe }}{% endif %}
+</head>
+<body class="{{ body_class or '' }}">
+<header class="topbar">
+    <div class="brand">Avio</div>
+    {% if subtitle %}<div class="subtitle">{{ subtitle }}</div>{% endif %}
+    <div class="top-actions">
+        {% if top_actions %}{{ top_actions | safe }}{% endif %}
+        <button id="theme-toggle" class="btn btn--secondary" type="button" style="padding:8px 12px;">Тема</button>
+    </div>
+</header>
+<main class="shell">
+    {% block content %}{% endblock %}
+ </main>
+<footer class="site-footer">Платформа Avio · {{ page_title }}</footer>
+<script>
+  (function() {
+    const storageKey = 'theme';
+    const btn = document.getElementById('theme-toggle');
+    const root = document.documentElement; // <html>
+    function apply(theme) {
+      // Use data-theme attribute (light|dark)
+      if (theme !== 'dark' && theme !== 'light') theme = 'light';
+      root.setAttribute('data-theme', theme);
+    }
+    function getPreferred() {
+      try {
+        const saved = localStorage.getItem(storageKey);
+        if (saved === 'dark' || saved === 'light') return saved;
+      } catch (e) {}
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+    function toggle() {
+      const cur = root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+      const next = cur === 'dark' ? 'light' : 'dark';
+      apply(next);
+      try { localStorage.setItem(storageKey, next); } catch (e) {}
+    }
+    // Apply on load
+    apply(getPreferred());
+    // Bind single handler
+    if (btn) {
+      btn.addEventListener('click', toggle);
+    }
+  })();
+  </script>
+  {% if extra_scripts %}{{ extra_scripts | safe }}{% endif %}
+</body>
+</html>

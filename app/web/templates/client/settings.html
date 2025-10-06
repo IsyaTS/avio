@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or 'Личный кабинет' }}</title>
+  <link rel="stylesheet" href="/static/css/portal.css">
+    <style>
+    .container { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    @media (min-width: 980px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+    .card h2 { margin: 0 0 12px; font-size: 18px; }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; font-size: 12px; color: #374151; margin-bottom: 4px; font-weight: 600; }
+    .field input, .field textarea, .field select {
+      width: 100%; padding: 10px 12px; border: 1px solid #9ca3af; border-radius: 8px;
+      background: #fff; color: #111827; font-size: 14px;
+    }
+    .field input::placeholder, .field textarea::placeholder { color: #6b7280; opacity: 1; }
+    .field input:focus, .field textarea:focus, .field select:focus {
+      outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+    }
+    .btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .btn { padding: 10px 14px; border-radius: 8px; border: 1px solid #2563eb; background: #2563eb; color: #fff; cursor: pointer; font-weight: 600; }
+    .btn.secondary { background: #fff; color: #1d4ed8; border-color: #93c5fd; }
+    .status-text { font-size: 12px; }
+    .status-text.alert { color: #b91c1c; }
+    .status-text.muted { color: #6b7280; }
+    .progress { width: 100%; height: 8px; border-radius: 6px; background: #f3f4f6; overflow: hidden; }
+    .progress > .bar { height: 100%; width: 0; background: #2563eb; transition: width 0.2s; }
+    /* Scope CSV editor styles to avoid page-wide table overrides */
+    #csv-container { overflow: auto; max-width: 100%; border: 1px solid #e5e7eb; border-radius: 6px; min-height: 240px; max-height: 60vh; }
+    #csv-container thead th { white-space: normal; }
+    #csv-container td[contenteditable="true"] { background: #fff; outline: none; }
+    .section-title { font-size: 14px; color: #374151; margin: 8px 0; }
+    </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{{ subtitle or 'Личный кабинет клиента' }}</h1>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Паспорт бренда</h2>
+        <form id="settings-form">
+          <div class="field">
+            <label>Бренд</label>
+            <input type="text" name="brand" value="{{ form.brand }}">
+          </div>
+          <div class="field">
+            <label>Имя агента</label>
+            <input type="text" name="agent" value="{{ form.agent }}">
+          </div>
+          <div class="field">
+            <label>Город</label>
+            <input type="text" name="city" value="{{ form.city }}">
+          </div>
+          <div class="field">
+            <label>Валюта</label>
+            <input type="text" name="currency" value="{{ form.currency }}">
+          </div>
+          <div class="field">
+            <label>Тональность (tone)</label>
+            <input type="text" name="tone" value="{{ form.tone }}">
+          </div>
+        </form>
+        <div class="btn-row">
+          <button class="btn" id="save-settings">Сохранить</button>
+          <span id="settings-message" class="status-text"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Персона</h2>
+        <div class="field">
+          <label>Текст персоны</label>
+          <textarea id="persona-text" rows="8">{{ persona }}</textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="save-persona">Сохранить</button>
+          <button class="btn secondary" id="download-config" type="button">Скачать JSON конфиг</button>
+          <span id="persona-message" class="status-text"></span>
+        </div>
+      </div>
+
+      <div class="card" style="grid-column: 1 / -1;">
+        <h2>Каталог: загрузка и CSV</h2>
+        <div class="section-title">Загрузка файла (CSV, XLSX/XLS, PDF)</div>
+        <form id="upload-form">
+          <input type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
+          <div class="btn-row" style="margin-top: 8px;">
+            <button class="btn" type="submit">Загрузить</button>
+            <span id="upload-message" class="status-text"></span>
+          </div>
+          <div id="upload-progress" class="progress" hidden>
+            <div id="upload-progress-bar" class="bar"></div>
+          </div>
+        </form>
+
+        <div class="section-title" style="margin-top: 12px;">CSV редактор</div>
+        <div class="btn-row" style="margin-bottom: 8px;">
+          <button class="btn secondary" id="csv-refresh" type="button">Обновить данные</button>
+          <button class="btn secondary" id="csv-add-row" type="button">Добавить строку</button>
+          <button class="btn" id="csv-save" type="button">Сохранить CSV</button>
+          <span id="csv-message" class="status-text"></span>
+        </div>
+
+        <div id="csv-container">
+          <div id="csv-empty" class="status-text muted">CSV ещё не готов — загрузите PDF или CSV файл</div>
+          <table id="csv-table" class="table" style="display:none;">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="grid-column: 1 / -1;">
+        <h2>Диалоги и обучение</h2>
+
+        <div class="section-title">Загрузка своих диалогов (JSONL/JSON/CSV)</div>
+        <form id="training-upload-form">
+          <input type="file" name="file" accept=".jsonl,.json,.csv" required>
+          <div class="btn-row" style="margin-top: 8px;">
+            <button class="btn" type="submit">Загрузить диалоги</button>
+            <button class="btn secondary" id="training-check-status" type="button">Проверить статус</button>
+            <span id="training-upload-message" class="status-text"></span>
+          </div>
+        </form>
+        <div id="training-status" class="status-text muted" style="margin: 8px 0 12px;"></div>
+
+        <div class="section-title">Экспорт переписок из БД (для правок/обучения)</div>
+        <div class="btn-row" style="margin-bottom: 6px;">
+          <span class="status-text muted">Выберите параметры и скачайте файл</span>
+        </div>
+        <div id="export-inline" class="field" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <label for="exp-days">Дней</label>
+          <input id="exp-days" type="number" value="30" min="0" style="max-width: 90px;">
+          <label for="exp-limit">Диалогов</label>
+          <input id="exp-limit" type="number" value="1000" min="1" style="max-width: 110px;">
+          <label for="exp-per">Сообщений/диалог</label>
+          <input id="exp-per" type="number" value="200" min="1" style="max-width: 130px;">
+          <label for="exp-min">Мин.пар</label>
+          <input id="exp-min" type="number" value="0" min="0" style="max-width: 110px;">
+          <label for="exp-anon">Анонимизировать</label>
+          <select id="exp-anon" style="max-width: 140px;">
+            <option value="1" selected>Да</option>
+            <option value="0">Нет</option>
+          </select>
+        </div>
+        <div class="btn-row" id="export-inline-actions">
+          <button class="btn" id="export-dialogs" type="button">Скачать JSONL</button>
+          <button class="btn secondary" id="export-dialogs-json" type="button">Скачать JSON</button>
+          <span class="status-text muted">NDJSON: одна беседа на строку.</span>
+        </div>
+      </div>
+    </div>
+
+    
+
+    <script id="client-settings-state" type="application/json">
+      {{ {
+        'tenant': tenant,
+        'key': key,
+        'urls': urls
+      } | tojson | safe }}
+    </script>
+    <script src="/static/js/client-settings.js"></script>
+  </div>
+</body>
+</html>

@@ -1,0 +1,343 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Настройки клиента' %}
+{% block content %}
+<section class="surface stack" data-testid="client-hero">
+    <div class="toolbar">
+        <div class="stack" style="gap: 10px;">
+            <h1 class="section-title">Личный кабинет клиента</h1>
+            <p class="section-subtitle">Обновляйте паспорт бренда, голос ассистента и каталоги. Изменения активируются сразу после сохранения.</p>
+        </div>
+        <div class="hint" style="min-width: 220px;">
+            <div style="font-size:0.85rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em;">Tenant</div>
+            <div style="font-size:1.1rem; font-weight:600;">#{{ tenant }}</div>
+            <div style="margin-top:8px; font-size:0.9rem;">Ключ доступа:</div>
+            <code class="code-inline" style="margin-top:4px;">{{ key }}</code>
+        </div>
+    </div>
+</section>
+
+<section class="surface stack" data-testid="client-passport">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Паспорт бренда</h2>
+        <p class="section-subtitle">Эти данные используются в промптах, чтобы ассистент звучал как ваша команда.</p>
+    </div>
+    <form id="settings-form" class="form-grid" autocomplete="off">
+        <label>
+            <span class="label">Бренд</span>
+            <input name="brand" value="{{ form.brand }}" placeholder="Например: Avio">
+        </label>
+        <label>
+            <span class="label">Имя ассистента</span>
+            <input name="agent" value="{{ form.agent }}" placeholder="Ирина">
+        </label>
+        <label>
+            <span class="label">Город</span>
+            <input name="city" value="{{ form.city }}" placeholder="Москва">
+        </label>
+        <label>
+            <span class="label">Валюта</span>
+            <input name="currency" value="{{ form.currency }}" placeholder="₽">
+        </label>
+        <label class="grid" style="grid-template-columns: 1fr;">
+            <span class="label">Тон общения</span>
+            <textarea name="tone" rows="3" style="min-height:120px; resize:vertical;">{{ form.tone }}</textarea>
+        </label>
+        <label>
+            <span class="label">CTA (основной)</span>
+            <input name="cta_primary" value="{{ form.cta_primary }}" placeholder="Оставить заявку">
+        </label>
+        <label>
+            <span class="label">CTA (fallback)</span>
+            <input name="cta_fallback" value="{{ form.cta_fallback }}" placeholder="Получить консультацию">
+        </label>
+    </form>
+    <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <button id="save-settings" type="button">Сохранить паспорт</button>
+        <span id="settings-message" class="status-text"></span>
+    </div>
+</section>
+
+<section class="grid grid--two">
+    <div class="surface stack" data-testid="client-persona">
+        <div class="stack" style="gap: 6px;">
+            <h2 class="section-title" style="font-size:1.35rem;">Персона ассистента</h2>
+            <p class="section-subtitle">Опишите стиль общения, запреты и задачи. Чем подробнее, тем точнее ответы.</p>
+        </div>
+        <textarea id="persona-text">{{ persona }}</textarea>
+        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            <button id="save-persona" type="button" class="btn btn--secondary">Сохранить персону</button>
+            <button id="download-config" type="button" class="btn btn--secondary">Скачать JSON</button>
+            <span id="persona-message" class="status-text"></span>
+        </div>
+    </div>
+
+    <div class="surface stack" data-testid="client-catalog">
+        <div class="stack" style="gap: 6px;">
+            <h2 class="section-title" style="font-size:1.35rem;">Каталог товаров</h2>
+            <p class="section-subtitle">Загружайте CSV, Excel или PDF. Мы построим индекс и покажем CSV для тонкой настройки.</p>
+        </div>
+        <form id="upload-form" class="stack" style="gap:12px;" enctype="multipart/form-data">
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Файл каталога</span>
+                <input type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
+            </label>
+            <div class="progress" id="upload-progress" hidden>
+                <div class="progress__bar" id="upload-progress-bar"></div>
+            </div>
+            <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                <button type="submit" class="btn btn--secondary">Загрузить</button>
+                {% if form.catalog_file %}
+                <span class="badge tag-neutral">Последний файл: {{ form.catalog_file }}</span>
+                {% endif %}
+            </div>
+            <span id="upload-message" class="status-text"></span>
+        </form>
+        <div class="hint">
+            <ul style="margin:0; padding-left: 18px; display:grid; gap: 8px;">
+                <li>PDF автоматически индексируется и конвертируется в CSV для правок.</li>
+                <li>Максимальный размер файла — 25 МБ. Для больших каталогов используйте ссылки.</li>
+                <li>После загрузки бот переключится на свежие данные без перезапуска.</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section class="surface stack" data-testid="client-csv-editor">
+    <div class="stack" style="gap:6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Редактор каталога</h2>
+        <p class="section-subtitle">Правьте данные каталога прямо здесь — изменения сохраняются в CSV.</p>
+    </div>
+    <div id="csv-toolbar" style="display:flex; gap:12px; flex-wrap:wrap;">
+        <button id="csv-refresh" type="button" class="btn btn--secondary">Обновить данные</button>
+        <button id="csv-add-row" type="button" class="btn btn--secondary">Добавить строку</button>
+        <button id="csv-save" type="button">Сохранить CSV</button>
+        <span id="csv-message" class="status-text"></span>
+    </div>
+    <div id="csv-container" class="surface surface--muted" style="padding: 0; overflow:auto;">
+        <div id="csv-empty" class="table-empty">Загрузите PDF или CSV, чтобы редактировать данные каталога.</div>
+        <table id="csv-table" class="table" style="display:none;">
+            <thead></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="surface stack" data-testid="client-dialogs-training">
+    <div class="stack" style="gap:6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Диалоги и обучение</h2>
+        <p class="section-subtitle">Загрузите собственные примеры или выгрузите недавние переписки из БД.</p>
+    </div>
+
+    <div class="grid grid--two" style="gap: 16px; align-items: start;">
+        <div class="surface stack" style="gap:12px;">
+            <h3 class="section-title" style="font-size:1.1rem;">Загрузка своих диалогов</h3>
+            <form id="training-upload-form" class="stack" style="gap:12px;" enctype="multipart/form-data">
+                <label class="grid" style="grid-template-columns: 1fr;">
+                    <span class="label">Файл (JSONL/JSON/CSV)</span>
+                    <input type="file" name="file" accept=".jsonl,.json,.csv" required>
+                </label>
+                <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                    <button type="submit" class="btn btn--secondary">Загрузить диалоги</button>
+                    <button type="button" id="training-check-status" class="btn btn--secondary">Проверить статус</button>
+                </div>
+                <div id="training-status" class="status-text"></div>
+                <span id="training-upload-message" class="status-text"></span>
+            </form>
+        </div>
+
+        <div class="surface stack" style="gap:12px;">
+            <h3 class="section-title" style="font-size:1.1rem;">Экспорт переписок из БД</h3>
+            <div class="status-text">WhatsApp: ZIP с отдельными .txt по диалогу</div>
+            <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
+                <label class="grid" style="grid-template-columns: 1fr;">
+                    <span class="label">Дней назад</span>
+                    <input id="exp-days" type="number" value="30" min="0" step="1">
+                </label>
+                <label class="grid" style="grid-template-columns: 1fr;">
+                    <span class="label">Количество диалогов</span>
+                    <input id="exp-limit" type="number" value="200" min="1" step="1">
+                </label>
+            </div>
+            <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+                <button class="btn" id="export-download" type="button">Скачать архив</button>
+                <span id="export-status" class="status-text"></span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<script id="client-settings-state" type="application/json">{{ {
+    "tenant": tenant,
+    "key": key,
+    "form": form,
+    "catalog": form.catalog_file,
+    "urls": urls
+} | tojson }}</script>
+<script src="{{ static_url(request, 'js/client-settings.js') }}" defer></script>
+<script>
+  (function(){
+    const statusEl = document.getElementById('export-status');
+    const btn = document.getElementById('export-download');
+    const daysEl = document.getElementById('exp-days');
+    const limitEl = document.getElementById('exp-limit');
+    const stateScript = document.getElementById('client-settings-state');
+
+    function setStatus(message, kind) {
+      if (!statusEl) {
+        return;
+      }
+      statusEl.textContent = message || '';
+      statusEl.className = 'status-text' + (kind ? ' ' + kind : '');
+    }
+
+    function parseIntOrNull(value) {
+      if (typeof value !== 'string') {
+        return null;
+      }
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+      const num = Number.parseInt(trimmed, 10);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    function normalizeDays(raw) {
+      const parsed = parseIntOrNull(raw);
+      if (parsed === null || parsed < 0) {
+        return 0;
+      }
+      return parsed;
+    }
+
+    function readState() {
+      if (!stateScript) {
+        return {};
+      }
+      try {
+        return JSON.parse(stateScript.textContent || '{}');
+      } catch (error) {
+        console.error('Failed to parse client settings state', error);
+        return {};
+      }
+    }
+
+    async function triggerDownload(blob, filename) {
+      const anchor = document.createElement('a');
+      anchor.style.display = 'none';
+      anchor.download = filename;
+      anchor.href = URL.createObjectURL(blob);
+      document.body.appendChild(anchor);
+      anchor.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(anchor.href);
+        document.body.removeChild(anchor);
+      }, 200);
+    }
+
+    async function requestExport(payload) {
+      const tenantId = Number.parseInt(String(payload.tenant), 10) || 0;
+      const query = new URLSearchParams();
+      if (payload.key) {
+        query.set('k', payload.key);
+      }
+      const daysVal = Number.isFinite(payload.days) && payload.days >= 0 ? payload.days : 0;
+      query.set('days', String(daysVal));
+      const limitVal = Number.isFinite(payload.limit) && payload.limit > 0 ? payload.limit : 10000;
+      query.set('limit', String(limitVal));
+      const perVal = Number.isFinite(payload.per) && payload.per > 0 ? payload.per : 0;
+      query.set('per', String(perVal));
+
+      const url = `/client/${tenantId}/training/export?${query.toString()}`;
+      const response = await fetch(url, { method: 'GET' });
+      if (response.status === 204) {
+        throw Object.assign(new Error('no_dialogs'), { code: 'no_dialogs' });
+      }
+      if (!response.ok) {
+        let text = '';
+        let parsed;
+        try {
+          text = await response.text();
+          if (text) {
+            try {
+              parsed = JSON.parse(text);
+            } catch (jsonError) {
+              parsed = null;
+            }
+          }
+        } catch (readError) {
+          text = '';
+          parsed = null;
+        }
+
+        const reason = parsed && typeof parsed.reason === 'string' ? parsed.reason.trim() : '';
+        const detail = parsed && typeof parsed.detail === 'string' ? parsed.detail.trim() : '';
+        const message = reason || detail || text || `HTTP ${response.status}`;
+        const error = new Error(message);
+        if (detail) {
+          error.code = detail;
+        }
+        if (reason) {
+          error.reason = reason;
+        }
+        throw error;
+      }
+      const blob = await response.blob();
+      const header = response.headers.get('content-disposition') || response.headers.get('Content-Disposition');
+      if (header && header.includes('filename=')) {
+        const match = header.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+        if (match) {
+          const encoded = (match[1] || match[2] || '').trim();
+          if (encoded) {
+            const decoded = decodeURIComponent(encoded);
+            await triggerDownload(blob, decoded || 'whatsapp_export.zip');
+            return;
+          }
+        }
+      }
+      const today = new Date();
+      const fallback = `training_export_${today.toISOString().slice(0, 10)}.zip`;
+      await triggerDownload(blob, fallback);
+    }
+
+    if (!btn) {
+      return;
+    }
+
+    btn.addEventListener('click', async () => {
+      const state = readState();
+      const tenant = Number.parseInt(state.tenant, 10) || 0;
+      const key = typeof state.key === 'string' ? state.key : '';
+      const daysBack = normalizeDays(daysEl ? daysEl.value : '0');
+      const rawLimit = limitEl ? parseIntOrNull(limitEl.value) : null;
+      const limitValue = rawLimit !== null && rawLimit > 0 ? rawLimit : 10000;
+
+      const payload = {
+        tenant,
+        key,
+        days: daysBack,
+        limit: limitValue,
+        per: 0,
+      };
+
+      btn.disabled = true;
+      setStatus('Готовим архив…', 'muted');
+      try {
+        await requestExport(payload);
+        setStatus('Архив сформирован', 'muted');
+      } catch (error) {
+        console.error('Export failed', error);
+        if (error && typeof error === 'object' && (error.code === 'no_dialogs' || error.message === 'no_dialogs')) {
+          setStatus('Диалоги не найдены за выбранный период', 'alert');
+        } else {
+          const reason = (error && (error.reason || error.message)) || 'Ошибка экспорта';
+          setStatus(reason, 'alert');
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
+  </script>
+
+{% endblock %}

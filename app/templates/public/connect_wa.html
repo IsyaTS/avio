@@ -1,0 +1,245 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Подключение WhatsApp' %}
+{% set extra_head %}
+{# NOTE: page-specific styles are injected via extra_head slot #}
+<style>
+    .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: rgba(37, 99, 235, 0.12);
+        color: var(--accent);
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+
+    .status-chip.offline {
+        background: rgba(220, 38, 38, 0.15);
+        color: var(--danger);
+    }
+
+    .qr-wrapper {
+        background: #ffffff;
+        border-radius: 18px;
+        padding: 16px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+        display: inline-block;
+    }
+
+    .info-grid {
+        display: grid;
+        gap: 28px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        align-items: flex-start;
+        margin-top: 24px;
+    }
+</style>
+{% endset %}
+{% block content %}
+<section class="surface">
+    <h2>Подключение WhatsApp</h2>
+    <p class="muted">Откройте приложение WhatsApp Business на телефоне владельца аккаунта, отсканируйте QR-код ниже и дождитесь, пока статус сменится на «Подключено».</p>
+    <div class="info-grid">
+        <div>
+            <div class="qr-wrapper">
+                <img id="qr" alt="QR-код" style="width:240px;height:240px;object-fit:contain;display:none;visibility:hidden;">
+                <p id="qr-message" class="muted" style="margin-top: 12px; text-align: center; display: none;">QR не готов</p>
+            </div>
+            <div class="actions" style="margin-top: 16px;">
+                <button id="refresh-qr" type="button" class="secondary">Обновить QR</button>
+                <button id="copy-link" type="button" class="secondary">Скопировать ссылку</button>
+                {% if settings_link %}
+                <a id="open-settings" href="{{ settings_link }}" target="_blank" rel="noopener" class="secondary">Открыть настройки</a>
+                {% endif %}
+            </div>
+        </div>
+        <div>
+            <h3>Информация о бренде</h3>
+            <div class="hint" style="margin-top: 12px;">
+                <ul style="margin: 0; padding-left: 18px; line-height: 1.6;">
+                    {% if passport.brand %}<li><strong>Бренд:</strong> {{ passport.brand }}</li>{% endif %}
+                    {% if passport.agent_name %}<li><strong>Менеджер:</strong> {{ passport.agent_name }}</li>{% endif %}
+                    {% if passport.city %}<li><strong>Город:</strong> {{ passport.city }}</li>{% endif %}
+                    <li><strong>Tenant ID:</strong> {{ tenant }}</li>
+                    <li><strong>API-ключ:</strong> <code class="inline">{{ key }}</code></li>
+                </ul>
+            </div>
+            {% if persona_preview %}
+            <p class="muted" style="margin-top: 16px;">Персона ассистента:</p>
+            <pre class="code" style="white-space: pre-wrap;">{{ persona_preview }}</pre>
+            {% endif %}
+            <div id="status-panel" class="status-chip offline" style="margin-top: 18px;">Проверяем статус…</div>
+        </div>
+    </div>
+</section>
+<section class="surface">
+    <h3>Полезно знать</h3>
+    <ul class="muted" style="padding-left: 18px; line-height: 1.6; margin-bottom: 0;">
+        <li>QR-код действует ограниченное время. Если он устарел, нажмите «Обновить QR» и попробуйте снова.</li>
+        <li>Держите телефон рядом до появления статуса «Подключено» — это займёт не более минуты.</li>
+        <li>При необходимости можно перезапустить сессию через админку или API <code class="inline">POST /session/:tenant/restart</code>.</li>
+    </ul>
+</section>
+{% endblock %}
+{% set extra_scripts %}
+<script>
+(() => {
+    const tenant = {{ tenant | tojson }};
+    const key = {{ key | tojson }};
+    if (!tenant || !key) {
+        console.debug('[wa-connect] missing tenant or key');
+        return;
+    }
+
+    const qrImg = document.getElementById('qr');
+    const qrMessage = document.getElementById('qr-message');
+    const refreshButton = document.getElementById('refresh-qr');
+    const copyButton = document.getElementById('copy-link');
+    const statusPanel = document.getElementById('status-panel');
+    const query = `tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(key)}`;
+
+    const showQr = () => {
+        if (!qrImg) return;
+        qrImg.style.display = '';
+        qrImg.style.visibility = 'visible';
+    };
+
+    const hideQr = () => {
+        if (!qrImg) return;
+        qrImg.style.display = 'none';
+        qrImg.style.visibility = 'hidden';
+    };
+
+    const setMessage = (text) => {
+        if (!qrMessage) return;
+        qrMessage.textContent = text;
+        qrMessage.style.display = '';
+    };
+
+    const clearMessage = () => {
+        if (!qrMessage) return;
+        qrMessage.style.display = 'none';
+    };
+
+    const buildQrUrl = () => `/pub/wa/qr.svg?${query}&t=${Date.now()}`;
+
+    const restartSession = async () => {
+        const url = `/pub/wa/restart?${query}`;
+        try {
+            const response = await fetch(url, { method: 'POST', cache: 'no-store' });
+            console.debug('[wa-connect] restart resp', response.status);
+        } catch (error) {
+            console.debug('[wa-connect] restart resp', 'error');
+            throw error;
+        }
+    };
+
+    const fetchQROnce = async () => {
+        const url = buildQrUrl();
+        try {
+            const response = await fetch(url, { cache: 'no-store' });
+            const contentType = response.headers.get('Content-Type') || '';
+            console.debug('[wa-connect] qr resp', response.status, contentType);
+            if (response.status === 200 && /^image\//i.test(contentType)) {
+                if (qrImg) {
+                    qrImg.src = url;
+                    showQr();
+                }
+                clearMessage();
+                return true;
+            }
+            if (response.status === 204) {
+                hideQr();
+                setMessage('QR не готов');
+                return false;
+            }
+        } catch (error) {
+            console.debug('[wa-connect] qr resp', 'error', '');
+        }
+        return false;
+    };
+
+    const pollQR = async (timeoutMs = 30000, stepMs = 500) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const success = await fetchQROnce();
+            if (success) {
+                return true;
+            }
+            await new Promise((resolve) => setTimeout(resolve, stepMs));
+        }
+        return false;
+    };
+
+    const requestQr = async () => {
+        const success = await pollQR(30000);
+        if (!success) {
+            setMessage('QR не готов');
+        }
+    };
+
+    const updateStatus = (text, offline) => {
+        if (!statusPanel) return;
+        statusPanel.textContent = text;
+        statusPanel.classList.toggle('offline', !!offline);
+    };
+
+    const fetchStatus = async () => {
+        if (!statusPanel) return;
+        const url = `/pub/wa/status?${query}`;
+        try {
+            const response = await fetch(url, { cache: 'no-store' });
+            if (!response.ok) {
+                updateStatus('Статус недоступен', true);
+                return;
+            }
+            const payload = await response.json();
+            const connected = !!(payload.connected ?? payload.ready);
+            if (connected) {
+                updateStatus('Подключено', false);
+                hideQr();
+                clearMessage();
+            } else {
+                updateStatus(payload.qr ? 'Ожидает сканирования' : 'Ожидаем QR…', true);
+            }
+        } catch (error) {
+            updateStatus('Статус недоступен', true);
+        }
+    };
+
+    if (refreshButton) {
+        refreshButton.addEventListener('click', async (event) => {
+            event.preventDefault();
+            hideQr();
+            setMessage('Обновляем QR…');
+            try {
+                await restartSession();
+            } catch (error) {
+                setMessage('Не удалось перезапустить сессию');
+            }
+            await requestQr();
+            fetchStatus();
+        });
+    }
+
+    if (copyButton) {
+        copyButton.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(window.location.href);
+                alert('Ссылка скопирована. Отправьте её коллеге, который подключает WhatsApp.');
+            } catch (error) {
+                alert('Не удалось скопировать ссылку: ' + (error && error.message ? error.message : 'неизвестная ошибка'));
+            }
+        });
+    }
+
+    window.addEventListener('load', () => {
+        requestQr();
+        fetchStatus();
+        setInterval(fetchStatus, 15000);
+    });
+})();
+</script>
+{% endset %}
