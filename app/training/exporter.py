@@ -80,15 +80,15 @@ def stream_json_array(items: Iterable[Dict]) -> Iterator[bytes]:
 
 
 def _dialog_label(dialog: Dict) -> str:
-    phone = dialog.get("whatsapp_phone")
-    if isinstance(phone, str) and phone.strip():
-        raw = phone.strip().split("@", 1)[0]
-        digits = re.sub(r"\D", "", raw)
-        if digits:
-            return f"chat_{digits}"
-        alnum = re.sub(r"[^0-9A-Za-z]", "", raw)
-        if alnum:
-            return f"chat_{alnum.lower()}"
+    jid_raw = dialog.get("whatsapp_phone") or ""
+    if isinstance(jid_raw, str):
+        jid = jid_raw.strip().split("@", 1)[0].strip()
+        if jid:
+            return jid
+
+    title = (dialog.get("title") or "").strip()
+    if title:
+        return title
 
     contact_id = dialog.get("contact_id")
     try:
@@ -96,7 +96,7 @@ def _dialog_label(dialog: Dict) -> str:
     except (TypeError, ValueError):
         contact_val = None
     if contact_val and contact_val > 0:
-        return f"chat_{contact_val}"
+        return f"contact_{contact_val}"
 
     lead_id = dialog.get("lead_id")
     try:

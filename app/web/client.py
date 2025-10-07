@@ -70,7 +70,7 @@ class WhatsAppExportPayload(BaseModel):
     days: Optional[int] = Field(default=None, ge=0)
     days_back: Optional[int] = Field(default=None, ge=0)
     limit: Optional[int] = Field(default=None, ge=0)
-    limit_dialogs: Optional[int] = Field(default=None, ge=1)
+    limit_dialogs: Optional[int] = Field(default=None, ge=0)
     per: Optional[int] = Field(default=None, ge=0)
     per_conversation_limit: Optional[int] = Field(default=None, ge=0)
 
@@ -729,7 +729,7 @@ async def whatsapp_export(request: Request):
             days_back,
             limit_dialogs if limit_dialogs is not None else "none",
         )
-        return Response(status_code=204)
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     now_local = now_utc.astimezone(tenant_tz or whatsapp_exporter.EXPORT_TZ)
     filename = f"whatsapp_export_{now_local.strftime('%Y-%m-%d')}.zip"
@@ -737,6 +737,7 @@ async def whatsapp_export(request: Request):
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         "X-Dialog-Count": str(stats.get("dialog_count", 0)),
         "X-Message-Count": str(stats.get("message_count", 0)),
+        "Cache-Control": "no-store",
     }
 
     took = time.time() - started_at
@@ -837,7 +838,7 @@ async def training_export(
             tenant,
             lookback_days,
         )
-        return Response(status_code=204)
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     archive_buffer, filenames = training_exporter.build_text_archive(dialogs)
     file_count = len(filenames)
@@ -858,6 +859,7 @@ async def training_export(
         "X-File-Count": str(file_count),
         "X-Message-Count": str(message_count),
         "X-Since-Ts": str(int(since_ts) if since_ts is not None else 0),
+        "Cache-Control": "no-store",
     }
 
     took = time.time() - started_at
