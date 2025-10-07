@@ -1,4 +1,4 @@
-console.info('[client-settings] script loaded');
+console.log('[client-settings] script loaded');
 
 (function () {
   const stateScript = document.getElementById('client-settings-state');

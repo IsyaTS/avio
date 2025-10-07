@@ -148,8 +148,18 @@
 
     
 
-    <script id="client-settings-state">
-      window.state = {{ state | tojson | safe }};
+    <script id="client-settings-state" type="application/json">{{ state | tojson | safe }}</script>
+    <script>
+      try {
+        const stateNode = document.getElementById('client-settings-state');
+        const rawState = stateNode ? stateNode.textContent || '{}' : '{}';
+        window.state = window.state || JSON.parse(rawState || '{}');
+      } catch (error) {
+        console.warn('Failed to bootstrap client settings state', error);
+        if (!window.state) {
+          window.state = {};
+        }
+      }
     </script>
     <script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
   </div>
