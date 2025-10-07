@@ -82,7 +82,11 @@ def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
         return str(request.url_for("whatsapp_export", tenant=tenant))
     except Exception:
         try:
-            return str(request.url_for("whatsapp_export"))
+            base_url = str(request.url_for("whatsapp_export"))
+            if "tenant=" not in base_url:
+                separator = "&" if "?" in base_url else "?"
+                return f"{base_url}{separator}tenant={tenant}"
+            return base_url
         except Exception:
             return "/export/whatsapp"
 
@@ -298,7 +302,6 @@ def client_settings(tenant: int, request: Request):
             "csv_save": str(request.url_for("catalog_csv_save", tenant=tenant)),
             "training_upload": str(request.url_for("training_upload", tenant=tenant)),
             "training_status": str(request.url_for("training_status", tenant=tenant)),
-            "training_export": str(request.url_for("training_export", tenant=tenant)),
             "whatsapp_export": _resolve_whatsapp_export_url(request, tenant),
         },
         "max_days": EXPORT_MAX_DAYS,

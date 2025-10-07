@@ -488,7 +488,7 @@
       try {
         const result = await requestWhatsappExport({ days, limit, per });
         if (result && result.empty) {
-          setStatus(dom.exportStatus, 'Нет диалогов за период', 'alert');
+          setStatus(dom.exportStatus, 'Нет диалогов за выбранный период', 'alert');
           return;
         }
 
@@ -503,7 +503,8 @@
         }
       } catch (error) {
         try { console.error('WhatsApp export failed', error); } catch (_) {}
-        const message = (error && (error.detail || error.reason || error.message)) || 'Ошибка экспорта';
+        const detail = error && (error.detail || error.reason);
+        const message = detail || (error && error.message) || 'Ошибка экспорта';
         setStatus(dom.exportStatus, message, 'alert');
       } finally {
         pending = false;
