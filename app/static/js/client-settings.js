@@ -54,7 +54,7 @@
     csvSave: urls.csv_save || `/client/${tenant}/catalog/csv`,
     trainingUpload: urls.training_upload || `/client/${tenant}/training/upload`,
     trainingStatus: urls.training_status || `/client/${tenant}/training/status`,
-    whatsappExport: urls.whatsapp_export || `/client/${tenant}/export/whatsapp`,
+    whatsappExport: urls.whatsapp_export || `/export/whatsapp`,
   };
 
   const dom = {
@@ -169,30 +169,18 @@
     const normalizedLimit = Number.isFinite(limit) && limit > 0 ? limit : 10000;
     const normalizedPer = Number.isFinite(per) && per > 0 ? per : 0;
 
-    const baseUrl = buildUrl(endpoints.whatsappExport, { includeKey: false });
-    let requestUrl;
-    try {
-      requestUrl = new URL(baseUrl, window.location.origin);
-    } catch (error) {
-      try { console.error('Failed to resolve export URL', baseUrl, error); } catch (_) {}
-      requestUrl = new URL(window.location.href);
-      requestUrl.pathname = baseUrl;
-      requestUrl.search = '';
-    }
+    const payload = {
+      tenant,
+      key: accessKey,
+      days: normalizedDays,
+      limit: normalizedLimit,
+      per: normalizedPer,
+    };
 
-    requestUrl.searchParams.set('days', String(normalizedDays));
-    requestUrl.searchParams.set('limit', String(normalizedLimit));
-    if (normalizedPer > 0) {
-      requestUrl.searchParams.set('per', String(normalizedPer));
-    } else {
-      requestUrl.searchParams.delete('per');
-    }
-    if (accessKey) {
-      requestUrl.searchParams.set('k', accessKey);
-    }
-
-    const response = await fetch(requestUrl.toString(), {
-      method: 'GET',
+    const response = await fetch(buildUrl(endpoints.whatsappExport, { includeKey: false }), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
 
     if (response.status === 204) {
@@ -200,31 +188,37 @@
     }
 
     if (!response.ok) {
-      let text = '';
-      try {
-        text = await response.text();
-      } catch (error) {
-        try { console.debug('Failed to read export error text', error); } catch (_) {}
-        text = '';
-      }
-
-      let parsed;
       let detail = '';
       let reason = '';
-      if (text) {
+      let message = '';
+      let raw = '';
+      try {
+        raw = await response.text();
+      } catch (error) {
+        try { console.debug('Failed to read export error text', error); } catch (_) {}
+      }
+
+      if (raw) {
         try {
-          parsed = JSON.parse(text);
-          if (parsed && typeof parsed === 'object') {
-            detail = typeof parsed.detail === 'string' ? parsed.detail : '';
-            reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+          const data = JSON.parse(raw);
+          if (data && typeof data === 'object') {
+            detail = typeof data.detail === 'string' ? data.detail : '';
+            reason = typeof data.reason === 'string' ? data.reason : '';
+            if (!detail && !reason && typeof data.message === 'string') {
+              message = data.message;
+            }
           }
-        } catch (_) {
-          parsed = null;
+        } catch (error) {
+          message = raw.trim();
         }
       }
 
-      const message = (reason || detail || text || `HTTP ${response.status}`).trim() || 'Ошибка экспорта';
-      const error = new Error(message);
+      if (!detail && !reason && !message && raw) {
+        message = raw.trim();
+      }
+
+      const finalMessage = (reason || detail || message || `HTTP ${response.status}`).trim() || 'Ошибка экспорта';
+      const error = new Error(finalMessage);
       if (detail) error.detail = detail;
       if (reason) error.reason = reason;
       error.status = response.status;
@@ -446,7 +440,7 @@
       try {
         const result = await requestWhatsappExport({ days, limit, per });
         if (result && result.empty) {
-          setStatus(dom.exportStatus, 'Диалоги не найдены за выбранный период', 'alert');
+          setStatus(dom.exportStatus, 'Нет диалогов за выбранный период', 'alert');
           return;
         }
 
