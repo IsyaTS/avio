@@ -1,45 +1,302 @@
-console.log('[client-settings] script loaded');
+function bindExportClicks(initialState) {
+  const state = initialState && typeof initialState === 'object' ? initialState : {};
+  const button = document.getElementById('export-download');
+  if (!button) {
+    return false;
+  }
 
-(function () {
-  const stateScript = document.getElementById('client-settings-state');
-  const globalState = typeof window !== 'undefined' ? window.state : undefined;
-  if (!stateScript && (!globalState || typeof globalState !== 'object')) return;
+  if (button.dataset && button.dataset.bound === '1') {
+    return true;
+  }
 
-  let state = {};
-  if (globalState && typeof globalState === 'object') {
-    state = globalState;
-  } else if (stateScript) {
-    const scriptType = (stateScript.getAttribute('type') || '').toLowerCase();
-    const raw = stateScript.textContent || '';
-    const parseJson = (text) => {
-      try {
-        return JSON.parse(text);
-      } catch (error) {
-        console.error('Failed to parse client settings state', error);
-        return {};
+  const statusNode = document.getElementById('export-status');
+  const daysInput = document.getElementById('exp-days');
+  const limitInput = document.getElementById('exp-limit');
+  const perInput = document.getElementById('exp-per');
+
+  const maxDays = Number.isFinite(state.max_days) && state.max_days > 0 ? Number(state.max_days) : null;
+
+  const resolveEndpoint = (raw) => {
+    const origin = window.location.origin;
+    try {
+      const url = new URL(raw || '/export/whatsapp', origin);
+      if (url.hostname !== window.location.hostname) {
+        url.hostname = window.location.hostname;
+        url.protocol = window.location.protocol;
+        url.port = window.location.port;
       }
-    };
-
-    if (scriptType === 'application/json') {
-      state = parseJson(raw || '{}');
-    } else {
-      const start = raw.indexOf('{');
-      const end = raw.lastIndexOf('}');
-      if (start !== -1 && end !== -1 && end >= start) {
-        const jsonCandidate = raw.slice(start, end + 1);
-        state = parseJson(jsonCandidate || '{}');
-      }
+      return url.toString();
+    } catch (error) {
+      return raw || '/export/whatsapp';
     }
+  };
+
+  const endpoint = resolveEndpoint(state?.urls?.whatsapp_export);
+  const tenant = Number.parseInt(state.tenant, 10) || 0;
+  const key = typeof state.key === 'string' ? state.key : '';
+
+  const updateStatus = (message, variant = 'muted') => {
+    if (!statusNode) return;
+    statusNode.className = `status-text ${variant}`.trim();
+    statusNode.textContent = message || '';
+  };
+
+  const parseNumber = (value, { min = null, fallback = 0 } = {}) => {
+    const numeric = Number.parseInt((value ?? '').toString().trim(), 10);
+    if (!Number.isFinite(numeric)) {
+      return fallback;
+    }
+    if (min !== null && numeric < min) {
+      return min;
+    }
+    return numeric;
+  };
+
+  const parseFilename = (headerValue) => {
+    if (!headerValue) {
+      return '';
+    }
+    const match = headerValue.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    if (!match) {
+      return '';
+    }
+    const encoded = (match[1] || match[2] || '').trim();
+    if (!encoded) {
+      return '';
+    }
+    try {
+      return decodeURIComponent(encoded);
+    } catch (error) {
+      return encoded;
+    }
+  };
+
+  const parseCountHeader = (headers, name) => {
+    const raw = headers.get(name);
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const buildDefaultFilename = () => {
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(now.getUTCDate()).padStart(2, '0');
+    return `whatsapp_export_${y}-${m}-${d}.zip`;
+  };
+
+  const requestArchive = async (payload) => {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (response.status === 204) {
+      return { status: 204 };
+    }
+
+    if (!response.ok) {
+      let detail = '';
+      let reason = '';
+      try {
+        const data = await response.clone().json();
+        if (data && typeof data === 'object') {
+          const { detail: detailValue, reason: reasonValue, message } = data;
+          if (typeof reasonValue === 'string') {
+            reason = reasonValue;
+          }
+          if (typeof detailValue === 'string') {
+            detail = detailValue;
+          } else if (Array.isArray(detailValue)) {
+            detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
+          } else if (detailValue && typeof detailValue === 'object') {
+            const parts = [];
+            Object.entries(detailValue).forEach(([keyName, value]) => {
+              if (value == null) return;
+              const text = Array.isArray(value) ? value.join(', ') : String(value);
+              parts.push(`${keyName}: ${text}`);
+            });
+            detail = parts.join('; ');
+          }
+          if (!detail && typeof message === 'string') {
+            detail = message;
+          }
+        }
+      } catch (error) {
+        try {
+          detail = (await response.text()) || '';
+        } catch (_) {
+          detail = '';
+        }
+      }
+
+      const message = (reason || detail || `Ошибка экспорта (HTTP ${response.status})`).trim() || 'Ошибка экспорта';
+      const exportError = new Error(message);
+      if (detail) exportError.detail = detail;
+      if (reason) exportError.reason = reason;
+      exportError.status = response.status;
+      throw exportError;
+    }
+
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.startsWith('application/zip')) {
+      let detail = '';
+      try {
+        if (contentType.includes('application/json')) {
+          const data = await response.clone().json();
+          if (data && typeof data === 'object') {
+            const { detail: detailValue, message } = data;
+            if (typeof detailValue === 'string') {
+              detail = detailValue;
+            } else if (Array.isArray(detailValue)) {
+              detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
+            } else if (detailValue && typeof detailValue === 'object') {
+              const parts = [];
+              Object.entries(detailValue).forEach(([keyName, value]) => {
+                if (value == null) return;
+                const text = Array.isArray(value) ? value.join(', ') : String(value);
+                parts.push(`${keyName}: ${text}`);
+              });
+              detail = parts.join('; ');
+            }
+            if (!detail && typeof message === 'string') {
+              detail = message;
+            }
+          }
+        } else {
+          detail = (await response.text()) || '';
+        }
+      } catch (error) {
+        try {
+          detail = (await response.text()) || '';
+        } catch (_) {
+          detail = '';
+        }
+      }
+      const exportError = new Error((detail || 'Ответ сервера не является ZIP-архивом').trim());
+      exportError.status = response.status;
+      if (detail) exportError.detail = detail;
+      throw exportError;
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || response.headers.get('Content-Disposition') || '';
+    const filename = parseFilename(disposition) || buildDefaultFilename();
+
+    return {
+      status: 200,
+      blob,
+      filename,
+      dialogCount: parseCountHeader(response.headers, 'X-Dialog-Count'),
+      messageCount: parseCountHeader(response.headers, 'X-Message-Count'),
+    };
+  };
+
+  button.type = 'button';
+
+  button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    let days = parseNumber(daysInput ? daysInput.value : '', { min: 0, fallback: 0 });
+    if (maxDays !== null && days > maxDays) {
+      days = maxDays;
+    }
+    if (daysInput) {
+      daysInput.value = String(days);
+    }
+
+    const limit = parseNumber(limitInput ? limitInput.value : '', { min: 1, fallback: 200 });
+    if (limitInput) {
+      limitInput.value = String(limit);
+    }
+
+    if (perInput) {
+      perInput.value = '0';
+    }
+
+    const payload = { tenant, key, days, limit, per: 0 };
+
+    button.disabled = true;
+    updateStatus('Готовим архив…', 'muted');
+
+    try {
+      const result = await requestArchive(payload);
+      if (result.status === 204) {
+        updateStatus('Нет диалогов за период', 'alert');
+        return;
+      }
+
+      const blobUrl = URL.createObjectURL(result.blob);
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = result.filename || 'whatsapp_export.zip';
+      document.body.appendChild(anchor);
+      anchor.click();
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(blobUrl);
+        } catch (error) {
+          console.warn('Failed to revoke export blob URL', error);
+        }
+        anchor.remove();
+      }, 120);
+
+      if (result.dialogCount != null && result.messageCount != null) {
+        updateStatus(`Сформировано: ${result.dialogCount} диалогов, ${result.messageCount} сообщений`, 'muted');
+      } else {
+        updateStatus('Архив сформирован', 'muted');
+      }
+    } catch (error) {
+      const message = (error && error.message) || 'Не удалось скачать архив';
+      updateStatus(message, 'alert');
+      try {
+        console.error('WhatsApp export failed', error);
+      } catch (_) {}
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  if (button.dataset) {
+    button.dataset.bound = '1';
   }
 
-  if (!state || typeof state !== 'object') {
-    state = {};
-  }
+  return true;
+}
 
-  const tenant = Number.parseInt(state.tenant, 10) || 1;
-  const accessKey = state.key || '';
-  const urls = state.urls || {};
-  const maxDays = Number.isFinite(state.max_days) && state.max_days > 0 ? Number(state.max_days) : 30;
+window.__EXPORT_ERROR__ = undefined;
+
+try {
+  const extractVersion = (src) => {
+    if (typeof src !== 'string' || !src) return 'unknown';
+    try {
+      const url = new URL(src, window.location.origin);
+      return url.searchParams.get('v') || 'unknown';
+    } catch (error) {
+      const match = src.match(/[?&]v=([^&]+)/);
+      if (match && match[1]) {
+        return match[1];
+      }
+      return 'unknown';
+    }
+  };
+
+  const scriptNode = document.currentScript;
+  const scriptVersion = extractVersion(scriptNode ? scriptNode.getAttribute('src') : '');
+  const startedAt = Date.now();
+  console.info('[client-settings] init version=%s started=%s', scriptVersion, new Date(startedAt).toISOString());
+
+  (function () {
+    const globalState = typeof window !== 'undefined' && window.state && typeof window.state === 'object' ? window.state : {};
+    const state = globalState && typeof globalState === 'object' ? globalState : {};
+
+    const tenant = Number.parseInt(state.tenant, 10) || 1;
+    const accessKey = typeof state.key === 'string' ? state.key : '';
+    const urls = state.urls || {};
+    const maxDays = Number.isFinite(state.max_days) && state.max_days > 0 ? Number(state.max_days) : 30;
 
   function buildUrl(path, options = {}) {
     const { includeKey = true } = options || {};
@@ -135,19 +392,6 @@ console.log('[client-settings] script loaded');
     return data;
   }
 
-  function downloadBlob(blob, filename) {
-    const anchor = document.createElement('a');
-    anchor.style.display = 'none';
-    anchor.download = filename;
-    anchor.href = URL.createObjectURL(blob);
-    document.body.appendChild(anchor);
-    anchor.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(anchor.href);
-      document.body.removeChild(anchor);
-    }, 250);
-  }
-
   function parseIntOrNull(value) {
     if (typeof value !== 'string') {
       return null;
@@ -177,166 +421,6 @@ console.log('[client-settings] script loaded');
       return 10000;
     }
     return parsed;
-  }
-
-  function parseHeaderCount(headers, name) {
-    const raw = headers.get(name);
-    if (!raw) return null;
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  async function requestWhatsappExport({ days, limit, exportState }) {
-    const effectiveState = exportState && typeof exportState === 'object' ? exportState : state;
-    const stateTenant = Number.parseInt(effectiveState.tenant, 10);
-    const requestTenant = Number.isFinite(stateTenant) ? stateTenant : tenant;
-    const stateKey = typeof effectiveState.key === 'string' ? effectiveState.key : accessKey;
-    const targetUrl = effectiveState?.urls?.whatsapp_export || endpoints.whatsappExport;
-
-    const normalizedDays = Number.isFinite(days) && days >= 0 ? Math.min(days, maxDays) : 0;
-    const normalizedLimit = Number.isFinite(limit) && limit > 0 ? limit : 10000;
-
-    const payload = {
-      tenant: requestTenant,
-      key: stateKey,
-      days: normalizedDays,
-      limit: normalizedLimit,
-      per: 0,
-    };
-
-    const response = await fetch(buildUrl(targetUrl, { includeKey: false }), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    if (response.status === 204) {
-      return { empty: true };
-    }
-
-    if (!response.ok) {
-      let detail = '';
-      let reason = '';
-      let fallbackMessage = '';
-      try {
-        const data = await response.clone().json();
-        if (data && typeof data === 'object') {
-          const detailValue = data.detail;
-          if (typeof detailValue === 'string') {
-            detail = detailValue;
-          } else if (Array.isArray(detailValue)) {
-            detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
-          } else if (detailValue && typeof detailValue === 'object') {
-            const detailParts = [];
-            Object.entries(detailValue).forEach(([key, value]) => {
-              if (value == null) return;
-              const text = Array.isArray(value) ? value.join(', ') : String(value);
-              detailParts.push(`${key}: ${text}`);
-            });
-            detail = detailParts.join('; ');
-          }
-
-          if (typeof data.reason === 'string') {
-            reason = data.reason;
-          }
-
-          if (!detail && !reason && typeof data.message === 'string') {
-            fallbackMessage = data.message;
-          }
-        }
-      } catch (error) {
-        try {
-          const rawText = await response.text();
-          fallbackMessage = (rawText || '').trim();
-        } catch (readError) {
-          try { console.debug('Failed to read export error text', readError); } catch (_) {}
-        }
-      }
-
-      const message = (reason || detail || fallbackMessage || `HTTP ${response.status}`).trim() || 'Ошибка экспорта';
-      const error = new Error(message);
-      if (detail) error.detail = detail;
-      if (reason) error.reason = reason;
-      if (!detail && fallbackMessage) error.detail = fallbackMessage;
-      error.status = response.status;
-      throw error;
-    }
-
-    const contentTypeHeader = response.headers.get('content-type') || response.headers.get('Content-Type') || '';
-    const normalizedContentType = contentTypeHeader.toLowerCase();
-    if (!normalizedContentType.startsWith('application/zip')) {
-      let detail = '';
-      try {
-        if (normalizedContentType.includes('application/json')) {
-          const data = await response.clone().json();
-          if (data && typeof data === 'object') {
-            const detailValue = data.detail;
-            if (typeof detailValue === 'string') {
-              detail = detailValue;
-            } else if (Array.isArray(detailValue)) {
-              detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
-            } else if (detailValue && typeof detailValue === 'object') {
-              const detailParts = [];
-              Object.entries(detailValue).forEach(([key, value]) => {
-                if (value == null) return;
-                const text = Array.isArray(value) ? value.join(', ') : String(value);
-                detailParts.push(`${key}: ${text}`);
-              });
-              detail = detailParts.join('; ');
-            }
-
-            if (!detail && typeof data.message === 'string') {
-              detail = data.message;
-            }
-          }
-        }
-      } catch (error) {
-        try {
-          const rawText = await response.text();
-          detail = (rawText || '').trim();
-        } catch (readError) {
-          try { console.debug('Failed to read non-zip response body', readError); } catch (_) {}
-        }
-      }
-
-      const error = new Error((detail || 'Ответ сервера не является ZIP-архивом').trim());
-      error.status = response.status;
-      if (detail) error.detail = detail;
-      throw error;
-    }
-
-    const blob = await response.blob();
-    const header = response.headers.get('content-disposition') || response.headers.get('Content-Disposition');
-    let filename = '';
-    if (header && header.includes('filename=')) {
-      const match = header.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-      if (match) {
-        const encoded = (match[1] || match[2] || '').trim();
-        if (encoded) {
-          try {
-            filename = decodeURIComponent(encoded);
-          } catch (error) {
-            try { console.warn('Failed to decode filename', encoded, error); } catch (_) {}
-            filename = encoded;
-          }
-        }
-      }
-    }
-
-    if (!filename) {
-      const today = new Date();
-      const y = today.getUTCFullYear();
-      const m = String(today.getUTCMonth() + 1).padStart(2, '0');
-      const d = String(today.getUTCDate()).padStart(2, '0');
-      filename = `whatsapp_export_${y}-${m}-${d}.zip`;
-    }
-
-    return {
-      blob,
-      filename,
-      dialogCount: parseHeaderCount(response.headers, 'X-Dialog-Count'),
-      messageCount: parseHeaderCount(response.headers, 'X-Message-Count'),
-    };
   }
 
   if (dom.saveSettings && dom.settingsForm) {
@@ -495,62 +579,6 @@ console.log('[client-settings] script loaded');
 
   bindTrainingUpload();
   refreshTrainingStatus();
-
-  function bindExportClicks(initialState) {
-    if (!dom.exportDownload) return;
-
-    let pending = false;
-    dom.exportDownload.addEventListener('click', async (event) => {
-      if (event && typeof event.preventDefault === 'function') {
-        event.preventDefault();
-      }
-      if (event && typeof event.stopPropagation === 'function') {
-        event.stopPropagation();
-      }
-      if (pending) return;
-      pending = true;
-      dom.exportDownload.disabled = true;
-
-      const days = normalizeDays(dom.expDays ? dom.expDays.value : '0', maxDays);
-      if (dom.expDays) {
-        dom.expDays.value = String(days);
-      }
-      const limit = normalizeLimit(dom.expLimit ? dom.expLimit.value : '10000');
-
-      if (dom.expPer) {
-        dom.expPer.value = '0';
-      }
-
-      setStatus(dom.exportStatus, 'Готовим архив…', 'muted');
-
-      try {
-        const exportState = initialState && typeof initialState === 'object' ? initialState : state;
-        const result = await requestWhatsappExport({ days, limit, exportState });
-        if (result && result.empty) {
-          setStatus(dom.exportStatus, 'Нет диалогов', 'alert');
-          return;
-        }
-
-        downloadBlob(result.blob, result.filename);
-
-        if (result.dialogCount != null || result.messageCount != null) {
-          const dialogs = result.dialogCount != null ? result.dialogCount : 0;
-          const messages = result.messageCount != null ? result.messageCount : 0;
-          setStatus(dom.exportStatus, `Сформировано: ${dialogs} диалогов, ${messages} сообщений`, 'muted');
-        } else {
-          setStatus(dom.exportStatus, 'Архив сформирован', 'muted');
-        }
-      } catch (error) {
-        try { console.error('WhatsApp export failed', error); } catch (_) {}
-        const detail = error && (error.detail || error.reason);
-        const message = detail || (error && error.message) || 'Ошибка экспорта';
-        setStatus(dom.exportStatus, message, 'alert');
-      } finally {
-        pending = false;
-        dom.exportDownload.disabled = false;
-      }
-    });
-  }
 
   if (dom.expDays) {
     dom.expDays.setAttribute('max', String(maxDays));
@@ -718,5 +746,18 @@ console.log('[client-settings] script loaded');
   // Автоподгрузка CSV при доступности
   loadCsv({ quiet: true });
 
-  bindExportClicks(state);
+  const exportBound = bindExportClicks(state);
+  if (exportBound) {
+    window.__EXPORT_BIND_OK__ = true;
+  }
 })();
+} catch (error) {
+  window.__EXPORT_ERROR__ = error;
+  try {
+    console.error('[client-settings] init failed', error);
+  } catch (_) {
+    /* noop */
+  }
+} finally {
+  window.__EXPORT_LOADED__ = true;
+}

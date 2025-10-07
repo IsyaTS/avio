@@ -145,23 +145,17 @@
         </div>
       </div>
     </div>
-
-    
-
-    <script id="client-settings-state" type="application/json">{{ state | tojson | safe }}</script>
     <script>
-      try {
-        const stateNode = document.getElementById('client-settings-state');
-        const rawState = stateNode ? stateNode.textContent || '{}' : '{}';
-        window.state = window.state || JSON.parse(rawState || '{}');
-      } catch (error) {
-        console.warn('Failed to bootstrap client settings state', error);
-        if (!window.state) {
-          window.state = {};
-        }
-      }
+      window.state = {
+        "tenant": {{ state.tenant | tojson }},
+        "key": {{ state.key | tojson }},
+        "urls": {{ state.urls | tojson }},
+        "max_days": {{ state.max_days | tojson }},
+      };
     </script>
+    <script src="{{ static_url(request, 'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
     <script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
+    <script src="{{ static_url(request, 'js/client-settings.fallback.js') }}?v={{ client_settings_version }}" defer></script>
   </div>
 </body>
 </html>
