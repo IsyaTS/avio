@@ -148,14 +148,14 @@
 
     
 
-    <script id="client-settings-state" type="application/json">
-      {{ {
+    <script id="client-settings-state">
+      window.state = {{ {
         'tenant': tenant,
         'key': key,
         'urls': urls
-      } | tojson | safe }}
+      } | tojson | safe }};
     </script>
-    <script src="/static/js/client-settings.js"></script>
+    <script src="/static/js/client-settings.js" defer></script>
   </div>
 </body>
 </html>

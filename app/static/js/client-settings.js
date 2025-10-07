@@ -1,12 +1,36 @@
 (function () {
   const stateScript = document.getElementById('client-settings-state');
-  if (!stateScript) return;
+  const globalState = typeof window !== 'undefined' ? window.state : undefined;
+  if (!stateScript && (!globalState || typeof globalState !== 'object')) return;
 
   let state = {};
-  try {
-    state = JSON.parse(stateScript.textContent || '{}');
-  } catch (error) {
-    console.error('Failed to parse client settings state', error);
+  if (globalState && typeof globalState === 'object') {
+    state = globalState;
+  } else if (stateScript) {
+    const scriptType = (stateScript.getAttribute('type') || '').toLowerCase();
+    const raw = stateScript.textContent || '';
+    const parseJson = (text) => {
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        console.error('Failed to parse client settings state', error);
+        return {};
+      }
+    };
+
+    if (scriptType === 'application/json') {
+      state = parseJson(raw || '{}');
+    } else {
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start !== -1 && end !== -1 && end >= start) {
+        const jsonCandidate = raw.slice(start, end + 1);
+        state = parseJson(jsonCandidate || '{}');
+      }
+    }
+  }
+
+  if (!state || typeof state !== 'object') {
     state = {};
   }
 

@@ -275,7 +275,7 @@ def client_settings(tenant: int, request: Request):
             "training_upload": str(request.url_for("training_upload", tenant=tenant)),
             "training_status": str(request.url_for("training_status", tenant=tenant)),
             "training_export": str(request.url_for("training_export", tenant=tenant)),
-            "whatsapp_export": str(request.url_for("whatsapp_export")),
+            "whatsapp_export": str(request.url_for("whatsapp_export", tenant=tenant)),
         },
     }
     return templates.TemplateResponse("client/settings.html", context)
@@ -756,7 +756,7 @@ async def _prepare_whatsapp_export_response(
     return Response(content=payload_bytes, media_type="application/zip", headers=headers)
 
 
-@router.post("/export/whatsapp")
+@router.post("/export/whatsapp", name="whatsapp_export")
 async def whatsapp_export(request: Request):
     started_at = time.time()
 
