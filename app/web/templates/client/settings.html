@@ -149,14 +149,9 @@
     
 
     <script id="client-settings-state">
-      window.state = {{ {
-        'tenant': tenant,
-        'key': key,
-        'urls': urls,
-        'max_days': max_days
-      } | tojson | safe }};
+      window.state = {{ state | tojson | safe }};
     </script>
-    <script src="/static/js/client-settings.js" defer></script>
+    <script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
   </div>
 </body>
 </html>
