@@ -14,7 +14,8 @@
   const accessKey = state.key || '';
   const urls = state.urls || {};
 
-  function buildUrl(path) {
+  function buildUrl(path, options = {}) {
+    const { includeKey = true } = options || {};
     const { origin, protocol, host, hostname, port } = window.location;
     let url;
     try {
@@ -39,7 +40,7 @@
       url.protocol = protocol;
     }
 
-    if (accessKey) {
+    if (includeKey && accessKey) {
       url.searchParams.set('k', accessKey);
     }
     return url.toString();
@@ -53,7 +54,6 @@
     csvSave: urls.csv_save || `/client/${tenant}/catalog/csv`,
     trainingUpload: urls.training_upload || `/client/${tenant}/training/upload`,
     trainingStatus: urls.training_status || `/client/${tenant}/training/status`,
-    trainingExport: urls.training_export || `/client/${tenant}/training/export`,
     whatsappExport: urls.whatsapp_export || '/export/whatsapp',
   };
 
@@ -81,17 +81,9 @@
     trainingStatus: document.getElementById('training-status'),
     expDays: document.getElementById('exp-days'),
     expLimit: document.getElementById('exp-limit'),
-    expMin: document.getElementById('exp-min'),
-    expAnon: document.getElementById('exp-anon'),
-    expStrict: document.getElementById('exp-strict'),
-    expProvider: document.getElementById('exp-provider'),
-    expFormat: document.getElementById('exp-format'),
-    expBundle: document.getElementById('exp-bundle'),
-    expBtnGo: document.getElementById('export-dialogs-go'),
+    expPer: document.getElementById('exp-per'),
     exportDownload: document.getElementById('export-download'),
     exportStatus: document.getElementById('export-status'),
-    // Inline export panel wrapper (optional)
-    exportInline: document.getElementById('export-inline'),
   };
 
   function setStatus(element, message, variant = 'muted') {
@@ -157,6 +149,14 @@
     return parsed;
   }
 
+  function normalizePer(raw) {
+    const parsed = parseIntOrNull(raw);
+    if (parsed == null || parsed < 0) {
+      return 0;
+    }
+    return parsed;
+  }
+
   function parseHeaderCount(headers, name) {
     const raw = headers.get(name);
     if (!raw) return null;
@@ -164,16 +164,16 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  async function requestWhatsappExport({ days, limit }) {
+  async function requestWhatsappExport({ days, limit, per }) {
     const payload = {
       tenant,
       key: accessKey,
       days: Number.isFinite(days) && days >= 0 ? days : 0,
       limit: Number.isFinite(limit) && limit > 0 ? limit : 10000,
-      per: 0,
+      per: Number.isFinite(per) && per >= 0 ? per : 0,
     };
 
-    const response = await fetch(buildUrl(endpoints.whatsappExport), {
+    const response = await fetch(buildUrl(endpoints.whatsappExport, { includeKey: false }), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -417,11 +417,12 @@
 
       const days = normalizeDays(dom.expDays ? dom.expDays.value : '0');
       const limit = normalizeLimit(dom.expLimit ? dom.expLimit.value : '10000');
+      const per = normalizePer(dom.expPer ? dom.expPer.value : '0');
 
       setStatus(dom.exportStatus, 'Готовим архив…', 'muted');
 
       try {
-        const result = await requestWhatsappExport({ days, limit });
+        const result = await requestWhatsappExport({ days, limit, per });
         if (result && result.empty) {
           setStatus(dom.exportStatus, 'Диалоги не найдены за выбранный период', 'alert');
           return;
@@ -438,8 +439,8 @@
         }
       } catch (error) {
         try { console.error('WhatsApp export failed', error); } catch (_) {}
-        const reason = (error && (error.reason || error.message)) || 'Ошибка экспорта';
-        setStatus(dom.exportStatus, reason, 'alert');
+        const message = (error && (error.detail || error.reason || error.message)) || 'Ошибка экспорта';
+        setStatus(dom.exportStatus, message, 'alert');
       } finally {
         pending = false;
         dom.exportDownload.disabled = false;
@@ -447,175 +448,7 @@
     });
   }
 
-  // -------- Экспорт: скачивание через fetch() --------
-  function bindExportClicks() {
-    if (!dom.expBtnGo) return;
-    let pending = false;
-    dom.expBtnGo.addEventListener('click', async (e) => {
-      try { e.preventDefault(); } catch (_) {}
-      if (pending) return; // debounce while pending
-      pending = true;
-      dom.expBtnGo.disabled = true;
-      const base = buildUrl(endpoints.trainingExport);
-      const qs = new URL(base);
-      const days = Number.parseInt(dom.expDays?.value || '30', 10) || 0;
-      const parsedLimit = Number.parseInt(dom.expLimit?.value || '10000', 10);
-      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10000;
-      const min = Number.parseInt(dom.expMin?.value || '0', 10) || 0;
-      const anon = String((dom.expAnon?.value || '1')).trim();
-      const strict = String((dom.expStrict?.value || '0')).trim();
-      const provider = (dom.expProvider?.value || '').trim();
-      const fmt = (dom.expFormat?.value || 'jsonl').trim();
-      const bundle = (dom.expBundle?.value || 'single').trim();
-      qs.searchParams.set('format', fmt);
-      qs.searchParams.set('days', String(days));
-      qs.searchParams.set('limit', String(limit));
-      qs.searchParams.set('per', '0');
-      qs.searchParams.set('min_turns', String(min));
-      qs.searchParams.set('anonymize', anon);
-      qs.searchParams.set('strict', strict);
-      qs.searchParams.set('bundle', bundle);
-      if (provider) qs.searchParams.set('provider', provider);
-      const href = qs.toString();
-      try { console.debug('[training] export click', href); } catch (_) {}
-      setStatus(dom.trainingStatus, 'Готовлю файл…', 'muted');
-      try {
-        const resp = await fetch(href);
-        try { console.debug('[training] export response', resp.status, resp.headers.get('X-Debug-Stage') || ''); } catch (_) {}
-        const stage = resp.headers.get('X-Debug-Stage') || '';
-        if (stage) setStatus(dom.trainingStatus, stage, 'muted');
-        if (resp.status === 204) {
-          setStatus(dom.trainingStatus, 'Нет диалогов под фильтры', 'alert');
-          return;
-        }
-        if (!resp.ok) {
-          const txt = await resp.text().catch(() => '');
-          setStatus(dom.trainingStatus, txt || 'Ошибка экспорта, см. логи сервера', 'alert');
-          return;
-        }
-        const blob = await resp.blob();
-        let filename = '';
-        const cd = resp.headers.get('content-disposition') || resp.headers.get('Content-Disposition');
-        if (cd && cd.includes('filename=')) {
-          const match = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-          filename = decodeURIComponent((match && (match[1] || match[2])) || '').trim();
-        }
-        if (!filename) {
-          const today = new Date();
-          const y = today.getUTCFullYear();
-          const m = String(today.getUTCMonth() + 1).padStart(2, '0');
-          const d = String(today.getUTCDate()).padStart(2, '0');
-          const defExt = fmt === 'json' ? 'json' : (fmt === 'zip' ? 'zip' : 'jsonl');
-          filename = `training_${tenant}_${y}${m}${d}.${defExt}`;
-        }
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.download = filename;
-        a.href = URL.createObjectURL(blob);
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          URL.revokeObjectURL(a.href);
-          document.body.removeChild(a);
-        }, 250);
-        setStatus(dom.trainingStatus, `Файл ${filename} загружен`, 'muted');
-      } catch (error) {
-        try { console.debug('[training] export failed', error); } catch (_) {}
-        setStatus(dom.trainingStatus, `Ошибка экспорта: ${error.message}`, 'alert');
-      } finally {
-        pending = false;
-        dom.expBtnGo.disabled = false;
-      }
-    });
-  }
-}
-
   bindWhatsappExport();
-
-  // Bind export buttons
-  bindExportClicks();
-
-  // Also support split export buttons used in settings.html
-  if (dom.expBtnJsonl) {
-    dom.expBtnJsonl.addEventListener('click', async (e) => {
-      try { e.preventDefault(); } catch (_) {}
-      dom.expBtnJsonl.disabled = true;
-      try {
-        const base = buildUrl(endpoints.trainingExport);
-        const qs = new URL(base);
-        const days = Number.parseInt(dom.expDays?.value || '30', 10) || 0;
-        const limit = Number.parseInt(dom.expLimit?.value || '1000', 10) || 1;
-        qs.searchParams.set('format', 'jsonl');
-        qs.searchParams.set('days', String(days));
-        qs.searchParams.set('limit', String(limit));
-        const href = qs.toString();
-        setStatus(dom.trainingStatus, 'Готовлю файл…', 'muted');
-        const resp = await fetch(href);
-        if (resp.status === 204) {
-          setStatus(dom.trainingStatus, 'Нет диалогов под фильтры', 'alert');
-          return;
-        }
-        if (!resp.ok) {
-          const txt = await resp.text().catch(() => '');
-          setStatus(dom.trainingStatus, txt || 'Ошибка экспорта, см. логи сервера', 'alert');
-          return;
-        }
-        const blob = await resp.blob();
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.download = `training_${tenant}_${new Date().toISOString().slice(0,10).replace(/-/g,'')}.jsonl`;
-        a.href = URL.createObjectURL(blob);
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 250);
-        setStatus(dom.trainingStatus, 'Файл скачан', 'muted');
-      } catch (error) {
-        setStatus(dom.trainingStatus, `Ошибка экспорта: ${error.message}`, 'alert');
-      } finally {
-        dom.expBtnJsonl.disabled = false;
-      }
-    });
-  }
-  if (dom.expBtnJson) {
-    dom.expBtnJson.addEventListener('click', async (e) => {
-      try { e.preventDefault(); } catch (_) {}
-      dom.expBtnJson.disabled = true;
-      try {
-        const base = buildUrl(endpoints.trainingExport);
-        const qs = new URL(base);
-        const days = Number.parseInt(dom.expDays?.value || '30', 10) || 0;
-        const limit = Number.parseInt(dom.expLimit?.value || '1000', 10) || 1;
-        qs.searchParams.set('format', 'json');
-        qs.searchParams.set('days', String(days));
-        qs.searchParams.set('limit', String(limit));
-        const href = qs.toString();
-        setStatus(dom.trainingStatus, 'Готовлю файл…', 'muted');
-        const resp = await fetch(href);
-        if (resp.status === 204) {
-          setStatus(dom.trainingStatus, 'Нет диалогов под фильтры', 'alert');
-          return;
-        }
-        if (!resp.ok) {
-          const txt = await resp.text().catch(() => '');
-          setStatus(dom.trainingStatus, txt || 'Ошибка экспорта, см. логи сервера', 'alert');
-          return;
-        }
-        const blob = await resp.blob();
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.download = `training_${tenant}_${new Date().toISOString().slice(0,10).replace(/-/g,'')}.json`;
-        a.href = URL.createObjectURL(blob);
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 250);
-        setStatus(dom.trainingStatus, 'Файл скачан', 'muted');
-      } catch (error) {
-        setStatus(dom.trainingStatus, `Ошибка экспорта: ${error.message}`, 'alert');
-      } finally {
-        dom.expBtnJson.disabled = false;
-      }
-    });
-  }
 
   const csvState = {
     columns: [],

@@ -129,29 +129,19 @@
         </form>
         <div id="training-status" class="status-text muted" style="margin: 8px 0 12px;"></div>
 
-        <div class="section-title">Экспорт переписок из БД (для правок/обучения)</div>
-        <div class="btn-row" style="margin-bottom: 6px;">
-          <span class="status-text muted">Выберите параметры и скачайте файл</span>
-        </div>
-        <div id="export-inline" class="field" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-          <label for="exp-days">Дней</label>
+        <div class="section-title">Экспорт переписок из БД</div>
+        <div class="status-text muted" style="margin-bottom: 6px;">WhatsApp: ZIP с отдельными .txt по диалогу</div>
+        <div class="field" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <label for="exp-days">Дней назад</label>
           <input id="exp-days" type="number" value="30" min="0" style="max-width: 90px;">
           <label for="exp-limit">Диалогов</label>
-          <input id="exp-limit" type="number" value="1000" min="1" style="max-width: 110px;">
+          <input id="exp-limit" type="number" value="200" min="1" style="max-width: 110px;">
           <label for="exp-per">Сообщений/диалог</label>
-          <input id="exp-per" type="number" value="200" min="1" style="max-width: 130px;">
-          <label for="exp-min">Мин.пар</label>
-          <input id="exp-min" type="number" value="0" min="0" style="max-width: 110px;">
-          <label for="exp-anon">Анонимизировать</label>
-          <select id="exp-anon" style="max-width: 140px;">
-            <option value="1" selected>Да</option>
-            <option value="0">Нет</option>
-          </select>
+          <input id="exp-per" type="number" value="0" min="0" style="max-width: 130px;">
         </div>
-        <div class="btn-row" id="export-inline-actions">
-          <button class="btn" id="export-dialogs" type="button">Скачать JSONL</button>
-          <button class="btn secondary" id="export-dialogs-json" type="button">Скачать JSON</button>
-          <span class="status-text muted">NDJSON: одна беседа на строку.</span>
+        <div class="btn-row" style="margin-top: 8px;">
+          <button class="btn" id="export-download" type="button">Скачать архив</button>
+          <span id="export-status" class="status-text"></span>
         </div>
       </div>
     </div>
