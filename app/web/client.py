@@ -9,17 +9,15 @@ import re
 import sys
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import quote, quote_plus
 
 import logging
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from zoneinfo import ZoneInfo
-
-from starlette.background import BackgroundTask
 
 from . import common as C
 from .ui import templates
@@ -681,6 +679,7 @@ async def _prepare_whatsapp_export_response(
     per_limit_raw: int | None,
     batch_size_raw: int | None,
     started_at: float | None = None,
+    background: BackgroundTasks,
 ):
     started = started_at if started_at is not None else time.time()
 
@@ -844,7 +843,7 @@ async def _prepare_whatsapp_export_response(
         meta.get("filtered_groups") if meta else None,
     )
 
-    background = BackgroundTask(
+    background.add_task(
         _finalize_whatsapp_export,
         stats,
         tenant,
@@ -855,11 +854,11 @@ async def _prepare_whatsapp_export_response(
         started,
     )
 
-    return StreamingResponse(zip_stream, media_type="application/zip", headers=headers, background=background)
+    return StreamingResponse(zip_stream, media_type="application/zip", headers=headers)
 
 
 @router.post("/export/whatsapp", name="whatsapp_export")
-async def whatsapp_export(request: Request):
+async def whatsapp_export(request: Request, background: BackgroundTasks):
     started_at = time.time()
 
     try:
@@ -884,11 +883,12 @@ async def whatsapp_export(request: Request):
         per_limit_raw=payload.per if payload.per is not None else payload.per_conversation_limit,
         batch_size_raw=payload.batch_size_dialogs,
         started_at=started_at,
+        background=background,
     )
 
 
 @router.get("/client/{tenant}/export/whatsapp")
-async def client_whatsapp_export(tenant: int, request: Request):
+async def client_whatsapp_export(tenant: int, request: Request, background: BackgroundTasks):
     started_at = time.time()
     qp = request.query_params
     key = _resolve_key(request, qp.get("k"))
@@ -901,6 +901,7 @@ async def client_whatsapp_export(tenant: int, request: Request):
         per_limit_raw=qp.get("per") or qp.get("per_conversation_limit"),
         batch_size_raw=qp.get("batch_size_dialogs"),
         started_at=started_at,
+        background=background,
     )
 
 
