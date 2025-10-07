@@ -186,19 +186,25 @@ console.info('[client-settings] script loaded');
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  async function requestWhatsappExport({ days, limit }) {
+  async function requestWhatsappExport({ days, limit, exportState }) {
+    const effectiveState = exportState && typeof exportState === 'object' ? exportState : state;
+    const stateTenant = Number.parseInt(effectiveState.tenant, 10);
+    const requestTenant = Number.isFinite(stateTenant) ? stateTenant : tenant;
+    const stateKey = typeof effectiveState.key === 'string' ? effectiveState.key : accessKey;
+    const targetUrl = effectiveState?.urls?.whatsapp_export || endpoints.whatsappExport;
+
     const normalizedDays = Number.isFinite(days) && days >= 0 ? Math.min(days, maxDays) : 0;
     const normalizedLimit = Number.isFinite(limit) && limit > 0 ? limit : 10000;
 
     const payload = {
-      tenant,
-      key: accessKey,
+      tenant: requestTenant,
+      key: stateKey,
       days: normalizedDays,
       limit: normalizedLimit,
       per: 0,
     };
 
-    const response = await fetch(buildUrl(endpoints.whatsappExport, { includeKey: false }), {
+    const response = await fetch(buildUrl(targetUrl, { includeKey: false }), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -454,7 +460,7 @@ console.info('[client-settings] script loaded');
   bindTrainingUpload();
   refreshTrainingStatus();
 
-  function bindExportClicksImpl() {
+  function bindExportClicks(initialState) {
     if (!dom.exportDownload) return;
 
     let pending = false;
@@ -482,9 +488,10 @@ console.info('[client-settings] script loaded');
       setStatus(dom.exportStatus, 'Готовим архив…', 'muted');
 
       try {
-        const result = await requestWhatsappExport({ days, limit });
+        const exportState = initialState && typeof initialState === 'object' ? initialState : state;
+        const result = await requestWhatsappExport({ days, limit, exportState });
         if (result && result.empty) {
-          setStatus(dom.exportStatus, 'Нет диалогов за выбранный период', 'alert');
+          setStatus(dom.exportStatus, 'Нет диалогов за период', 'alert');
           return;
         }
 
@@ -675,17 +682,5 @@ console.info('[client-settings] script loaded');
   // Автоподгрузка CSV при доступности
   loadCsv({ quiet: true });
 
-  if (typeof window !== 'undefined') {
-    window.__bindExportClicksImpl = bindExportClicksImpl;
-  }
+  bindExportClicks(state);
 })();
-
-function bindExportClicks(initialState) {
-  if (typeof window === 'undefined') return;
-  const impl = window.__bindExportClicksImpl;
-  if (typeof impl === 'function') {
-    impl(initialState);
-  }
-}
-
-bindExportClicks(window.state);
