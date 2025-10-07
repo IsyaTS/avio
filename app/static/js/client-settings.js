@@ -37,6 +37,7 @@
   const tenant = Number.parseInt(state.tenant, 10) || 1;
   const accessKey = state.key || '';
   const urls = state.urls || {};
+  const maxDays = Number.isFinite(state.max_days) && state.max_days > 0 ? Number(state.max_days) : 30;
 
   function buildUrl(path, options = {}) {
     const { includeKey = true } = options || {};
@@ -157,10 +158,13 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  function normalizeDays(raw) {
+  function normalizeDays(raw, maxAllowed) {
     const parsed = parseIntOrNull(raw);
     if (parsed == null || parsed < 0) {
       return 0;
+    }
+    if (Number.isFinite(maxAllowed) && maxAllowed > 0 && parsed > maxAllowed) {
+      return maxAllowed;
     }
     return parsed;
   }
@@ -189,7 +193,7 @@
   }
 
   async function requestWhatsappExport({ days, limit, per }) {
-    const normalizedDays = Number.isFinite(days) && days >= 0 ? days : 0;
+    const normalizedDays = Number.isFinite(days) && days >= 0 ? Math.min(days, maxDays) : 0;
     const normalizedLimit = Number.isFinite(limit) && limit > 0 ? limit : 10000;
     const normalizedPer = Number.isFinite(per) && per > 0 ? per : 0;
 
@@ -472,7 +476,10 @@
       pending = true;
       dom.exportDownload.disabled = true;
 
-      const days = normalizeDays(dom.expDays ? dom.expDays.value : '0');
+      const days = normalizeDays(dom.expDays ? dom.expDays.value : '0', maxDays);
+      if (dom.expDays) {
+        dom.expDays.value = String(days);
+      }
       const limit = normalizeLimit(dom.expLimit ? dom.expLimit.value : '10000');
       const per = normalizePer(dom.expPer ? dom.expPer.value : '0');
 
@@ -501,6 +508,17 @@
       } finally {
         pending = false;
         dom.exportDownload.disabled = false;
+      }
+    });
+  }
+
+  if (dom.expDays) {
+    dom.expDays.setAttribute('max', String(maxDays));
+    dom.expDays.addEventListener('input', (event) => {
+      const target = event && event.target ? event.target : dom.expDays;
+      const value = normalizeDays(target.value, maxDays);
+      if (String(value) !== target.value) {
+        target.value = String(value);
       }
     });
   }

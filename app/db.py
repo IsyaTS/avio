@@ -1,6 +1,6 @@
 import os, hashlib, json, time, logging, pathlib, threading, re
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, AsyncIterator
 
 try:
     import asyncpg  # type: ignore
@@ -496,31 +496,24 @@ async def get_recent_dialog_by_contact(contact_id: int, limit: int = 40) -> List
     data = list(reversed([dict(r) for r in rows]))
     return data
 
-async def _load_whatsapp_dialogs(
+async def stream_whatsapp_dialogs(
     tenant_val: int,
     since_ts: Optional[float],
     until_ts: Optional[float],
     limit_dialogs: Optional[int],
     channel: str = "whatsapp",
     per_message_limit: Optional[int] = None,
-    allow_offline: bool = True,
-) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Fetch WhatsApp conversations with normalization and diagnostics."""
+    batch_size_dialogs: int = 200,
+    message_batch_size: int = 1000,
+) -> tuple[AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]], Dict[str, Any]]:
+    """Yield WhatsApp dialogs with batched message loaders and export metadata."""
+
+    if channel not in {"whatsapp", "wa"}:
+        channel = "whatsapp"
 
     now_ts = time.time()
     lower_limit = float(since_ts) if since_ts is not None else None
     upper_limit = float(until_ts) if until_ts is not None else now_ts
-    meta: Dict[str, Any] = {
-        "tenant": tenant_val,
-        "since_ts": lower_limit,
-        "until_ts": upper_limit,
-        "limit_dialogs": limit_dialogs,
-        "filtered_groups": 0,
-        "candidate_chats": 0,
-        "dialog_count": 0,
-        "messages_in_range": 0,
-        "messages_exported": 0,
-    }
 
     try:
         limit_int = int(limit_dialogs) if limit_dialogs is not None else None
@@ -533,43 +526,40 @@ async def _load_whatsapp_dialogs(
         per_limit_int = int(per_message_limit) if per_message_limit is not None else None
     except (TypeError, ValueError):
         per_limit_int = None
-    if per_limit_int is not None and per_limit_int <= 0:
+    if per_limit_int is not None and per_limit_int < 0:
         per_limit_int = None
+
+    try:
+        batch_size = int(batch_size_dialogs)
+    except (TypeError, ValueError):
+        batch_size = 200
+    if batch_size <= 0:
+        batch_size = 200
+
+    try:
+        message_batch = int(message_batch_size)
+    except (TypeError, ValueError):
+        message_batch = 1000
+    if message_batch <= 0:
+        message_batch = 1000
 
     pool = await _ensure_pool()
     if not pool:
         raise DatabaseUnavailableError("postgres_pool_unavailable")
 
-    params_groups = [tenant_val]
-    group_conditions = [
+    base_params = [tenant_val]
+    base_conditions = [
         "COALESCE(l.tenant_id, 0) = $1",
         "l.channel IN ('whatsapp', 'wa')",
     ]
     if lower_limit is not None:
-        params_groups.append(float(lower_limit))
-        group_conditions.append(f"m.created_at >= to_timestamp(${len(params_groups)})")
+        base_params.append(float(lower_limit))
+        base_conditions.append(f"m.created_at >= to_timestamp(${len(base_params)})")
     if upper_limit is not None:
-        params_groups.append(float(upper_limit))
-        group_conditions.append(f"m.created_at <= to_timestamp(${len(params_groups)})")
+        base_params.append(float(upper_limit))
+        base_conditions.append(f"m.created_at <= to_timestamp(${len(base_params)})")
 
-    params = [tenant_val]
-    conditions = [
-        "COALESCE(l.tenant_id, 0) = $1",
-        "l.channel IN ('whatsapp', 'wa')",
-    ]
-    if lower_limit is not None:
-        params.append(float(lower_limit))
-        conditions.append(f"m.created_at >= to_timestamp(${len(params)})")
-    if upper_limit is not None:
-        params.append(float(upper_limit))
-        conditions.append(f"m.created_at <= to_timestamp(${len(params)})")
-
-    limit_clause = ""
-    if limit_int is not None:
-        params.append(limit_int)
-        limit_clause = f" LIMIT ${len(params)}"
-
-    candidate_sql = f"""
+    candidate_sql_template = """
         SELECT
             m.lead_id,
             lc.contact_id,
@@ -581,16 +571,72 @@ async def _load_whatsapp_dialogs(
         JOIN leads l ON l.lead_id = m.lead_id
         LEFT JOIN lead_contacts lc ON lc.lead_id = m.lead_id
         LEFT JOIN contacts c ON c.id = lc.contact_id
-        WHERE {' AND '.join(conditions)}
+        WHERE {conditions}
         GROUP BY m.lead_id, lc.contact_id, c.whatsapp_phone, c.is_group, l.title
         ORDER BY last_created_at DESC
-        {limit_clause}
+        LIMIT ${limit_idx} OFFSET ${offset_idx}
     """
 
-    rows = await _fetch(candidate_sql, *params)
-    meta["candidate_chats"] = len(rows)
+    candidate_rows: List[Dict[str, Any]] = []
+    offset = 0
+    remaining = limit_int
+    candidate_total = 0
+    while True:
+        if remaining is not None and remaining <= 0:
+            break
+        limit_current = batch_size if remaining is None else min(batch_size, remaining)
+        if limit_current <= 0:
+            break
 
-    if not rows:
+        params = list(base_params)
+        limit_idx = len(params) + 1
+        offset_idx = limit_idx + 1
+        sql = candidate_sql_template.format(
+            conditions=" AND ".join(base_conditions),
+            limit_idx=limit_idx,
+            offset_idx=offset_idx,
+        )
+        params.extend([int(limit_current), int(offset)])
+        rows = await _fetch(sql, *params)
+        batch_list = [dict(row) for row in rows]
+        candidate_total += len(batch_list)
+        if not batch_list:
+            break
+        for row in batch_list:
+            candidate_rows.append(row)
+            if remaining is not None:
+                remaining -= 1
+                if remaining <= 0:
+                    break
+        if remaining is not None and remaining <= 0:
+            break
+        offset += len(batch_list)
+
+    meta: Dict[str, Any] = {
+        "tenant": tenant_val,
+        "since_ts": lower_limit,
+        "until_ts": upper_limit,
+        "limit_dialogs": limit_dialogs,
+        "filtered_groups": 0,
+        "candidate_chats": candidate_total,
+        "dialog_count": 0,
+        "messages_in_range": 0,
+        "messages_exported": 0,
+    }
+
+    if not candidate_rows:
+        params_groups = [tenant_val]
+        group_conditions = [
+            "COALESCE(l.tenant_id, 0) = $1",
+            "l.channel IN ('whatsapp', 'wa')",
+        ]
+        if lower_limit is not None:
+            params_groups.append(float(lower_limit))
+            group_conditions.append(f"m.created_at >= to_timestamp(${len(params_groups)})")
+        if upper_limit is not None:
+            params_groups.append(float(upper_limit))
+            group_conditions.append(f"m.created_at <= to_timestamp(${len(params_groups)})")
+
         count_row = await _fetchrow(
             f"""
             SELECT COUNT(*) AS msg_count
@@ -605,6 +651,17 @@ async def _load_whatsapp_dialogs(
                 meta["messages_in_range"] = int(count_row["msg_count"] or 0)
             except (TypeError, ValueError):
                 meta["messages_in_range"] = 0
+        meta.setdefault("distinct_chat_ids", [])
+        meta.setdefault("top_chats", [])
+
+        async def _empty_message_batches() -> AsyncIterator[List[Dict[str, Any]]]:
+            if False:  # pragma: no cover - type guard
+                yield []
+
+        async def _empty_generator() -> AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]]:
+            if False:  # pragma: no cover - type guard
+                yield {}, _empty_message_batches()
+
         _log.info(
             "[db] wa_export no_candidates tenant=%s since_ts=%s until_ts=%s messages_in_range=%s",
             tenant_val,
@@ -612,12 +669,10 @@ async def _load_whatsapp_dialogs(
             upper_limit,
             meta.get("messages_in_range"),
         )
-        meta.setdefault("distinct_chat_ids", [])
-        meta.setdefault("top_chats", [])
-        return [], meta
+        return _empty_generator(), meta
 
     summaries: List[Dict[str, Any]] = []
-    for row in rows:
+    for row in candidate_rows:
         lead_id_raw = row.get("lead_id")
         try:
             lead_id = int(lead_id_raw)
@@ -638,7 +693,11 @@ async def _load_whatsapp_dialogs(
             chat_id = f"chat:{lead_id}"
         last_created = row.get("last_created_at")
         if isinstance(last_created, datetime):
-            last_ts = last_created.replace(tzinfo=last_created.tzinfo or timezone.utc).astimezone(timezone.utc).timestamp()
+            last_ts = (
+                last_created.replace(tzinfo=last_created.tzinfo or timezone.utc)
+                .astimezone(timezone.utc)
+                .timestamp()
+            )
         else:
             try:
                 last_ts = float(last_created) if last_created is not None else 0.0
@@ -656,92 +715,66 @@ async def _load_whatsapp_dialogs(
         )
 
     summaries.sort(key=lambda item: item.get("last_ts") or 0.0, reverse=True)
-    if limit_int is not None:
-        summaries = summaries[:limit_int]
 
     lead_ids = [summary["lead_id"] for summary in summaries]
-    message_rows: List[Dict[str, Any]] = []
-    if lead_ids:
-        params_messages: List[Any] = [tenant_val, lead_ids]
-        where_parts = [
-            "m.lead_id = ANY($2::BIGINT[])",
-            "COALESCE(l.tenant_id, 0) = $1",
-        ]
-        where_parts.append("l.channel IN ('whatsapp', 'wa')")
-        if lower_limit is not None:
-            params_messages.append(float(lower_limit))
-            where_parts.append(f"m.created_at >= to_timestamp(${len(params_messages)})")
-        if upper_limit is not None:
-            params_messages.append(float(upper_limit))
-            where_parts.append(f"m.created_at <= to_timestamp(${len(params_messages)})")
+    params_messages: List[Any] = [tenant_val, lead_ids]
+    where_parts = [
+        "m.lead_id = ANY($2::BIGINT[])",
+        "COALESCE(l.tenant_id, 0) = $1",
+        "l.channel IN ('whatsapp', 'wa')",
+    ]
+    if lower_limit is not None:
+        params_messages.append(float(lower_limit))
+        where_parts.append(f"m.created_at >= to_timestamp(${len(params_messages)})")
+    if upper_limit is not None:
+        params_messages.append(float(upper_limit))
+        where_parts.append(f"m.created_at <= to_timestamp(${len(params_messages)})")
 
-        message_sql = f"""
-            SELECT m.lead_id, m.direction, m.text, extract(epoch FROM m.created_at) AS ts
-            FROM messages m
-            JOIN leads l ON l.lead_id = m.lead_id
-            WHERE {' AND '.join(where_parts)}
-            ORDER BY m.lead_id ASC, m.created_at ASC, m.id ASC
-        """
-        message_rows = await _fetch(message_sql, *params_messages)
+    count_sql = f"""
+        SELECT m.lead_id, COUNT(*) AS msg_count
+        FROM messages m
+        JOIN leads l ON l.lead_id = m.lead_id
+        WHERE {' AND '.join(where_parts)}
+        GROUP BY m.lead_id
+    """
 
-    meta["messages_in_range"] = len(message_rows)
-
-    grouped_messages: Dict[int, List[Dict[str, Any]]] = {}
-    for row in message_rows:
-        lead_id_raw = row.get("lead_id")
+    count_rows = await _fetch(count_sql, *params_messages)
+    message_counts: Dict[int, int] = {}
+    for row in count_rows:
         try:
-            lead_id = int(lead_id_raw)
+            lead_id = int(row.get("lead_id"))
         except (TypeError, ValueError):
             continue
-        ts_raw = row.get("ts")
         try:
-            ts_val = float(ts_raw) if ts_raw is not None else 0.0
+            message_counts[lead_id] = int(row.get("msg_count") or 0)
         except (TypeError, ValueError):
-            ts_val = 0.0
-        direction_raw = row.get("direction")
-        try:
-            direction_val = int(direction_raw if direction_raw is not None else 0)
-        except (TypeError, ValueError):
-            direction_val = 0
-        text = (row.get("text") or "").strip()
-        grouped_messages.setdefault(lead_id, []).append(
-            {
-                "ts": ts_val,
-                "direction": direction_val,
-                "text": text,
-            }
-        )
+            message_counts[lead_id] = 0
 
-    dialogs: List[Dict[str, Any]] = []
-    exported_chat_ids: List[str] = []
+    selected_dialogs: List[Dict[str, Any]] = []
+    total_messages = 0
+    total_exported = 0
     for summary in summaries:
         lead_id = summary["lead_id"]
-        messages = grouped_messages.get(lead_id, [])
-        if not messages:
+        count = message_counts.get(lead_id, 0)
+        if count <= 0:
             continue
-        if per_limit_int is not None:
-            messages = messages[-per_limit_int:]
-        dialogs.append(
-            {
-                "lead_id": lead_id,
-                "contact_id": summary.get("contact_id"),
-                "whatsapp_phone": summary.get("whatsapp_phone"),
-                "title": summary.get("title") or "",
-                "messages": messages,
-                "last_ts": messages[-1]["ts"] if messages else summary.get("last_ts"),
-                "chat_id": summary.get("chat_id"),
-            }
-        )
-        exported_chat_ids.append(summary.get("chat_id"))
+        total_messages += count
+        limit_for_lead = count
+        if per_limit_int is not None and per_limit_int > 0:
+            limit_for_lead = min(count, per_limit_int)
+        total_exported += limit_for_lead
+        selected_dialogs.append({**summary, "message_limit": limit_for_lead, "message_total": count})
 
+    distinct_chat_ids = [dialog["chat_id"] for dialog in selected_dialogs]
     meta.update(
         {
-            "dialog_count": len(dialogs),
-            "messages_exported": sum(len(d.get("messages") or []) for d in dialogs),
-            "distinct_chat_ids": exported_chat_ids,
+            "dialog_count": len(selected_dialogs),
+            "messages_in_range": total_messages,
+            "messages_exported": total_exported,
+            "distinct_chat_ids": distinct_chat_ids,
             "top_chats": [
-                {"chat_id": d.get("chat_id"), "last_ts": d.get("last_ts")}
-                for d in dialogs[:5]
+                {"chat_id": dialog.get("chat_id"), "last_ts": dialog.get("last_ts")}
+                for dialog in selected_dialogs[:5]
             ],
         }
     )
@@ -749,10 +782,173 @@ async def _load_whatsapp_dialogs(
     _log.info(
         "[db] wa_export summary tenant=%s distinct=%s filtered_groups=%s top5=%s",
         tenant_val,
-        len(exported_chat_ids),
+        len(distinct_chat_ids),
         meta.get("filtered_groups", 0),
         meta.get("top_chats", [])[:5],
     )
+
+    async def _message_batches(
+        lead_id: int,
+        max_messages: Optional[int],
+        skip_messages: int = 0,
+    ) -> AsyncIterator[List[Dict[str, Any]]]:
+        remaining = max_messages if (max_messages is not None and max_messages > 0) else None
+        skip_remaining = max(skip_messages, 0)
+        last_created_at: Optional[datetime] = None
+        last_message_id: Optional[int] = None
+        while True:
+            if remaining is not None and remaining <= 0:
+                break
+            limit_current = message_batch if remaining is None else min(message_batch, remaining)
+            if limit_current <= 0:
+                break
+
+            params = [tenant_val, lead_id]
+            conditions = [
+                "COALESCE(l.tenant_id, 0) = $1",
+                "m.lead_id = $2",
+                "l.channel IN ('whatsapp', 'wa')",
+            ]
+            if lower_limit is not None:
+                params.append(float(lower_limit))
+                conditions.append(f"m.created_at >= to_timestamp(${len(params)})")
+            if upper_limit is not None:
+                params.append(float(upper_limit))
+                conditions.append(f"m.created_at <= to_timestamp(${len(params)})")
+            if last_created_at is not None and last_message_id is not None:
+                params.append(last_created_at)
+                idx_created = len(params)
+                params.append(int(last_message_id))
+                idx_id = len(params)
+                conditions.append(
+                    f"(m.created_at > ${idx_created} OR (m.created_at = ${idx_created} AND m.id > ${idx_id}))"
+                )
+
+            limit_idx = len(params) + 1
+            params.append(int(limit_current))
+
+            sql = f"""
+                SELECT
+                    m.id AS message_id,
+                    m.direction,
+                    m.text,
+                    m.created_at,
+                    extract(epoch FROM m.created_at) AS ts
+                FROM messages m
+                JOIN leads l ON l.lead_id = m.lead_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY m.created_at ASC, m.id ASC
+                LIMIT ${limit_idx}
+            """
+
+            rows = await _fetch(sql, *params)
+            if not rows:
+                break
+
+            batch_messages: List[Dict[str, Any]] = []
+            for row in rows:
+                if skip_remaining > 0:
+                    skip_remaining -= 1
+                else:
+                    ts_raw = row.get("ts")
+                    try:
+                        ts_val = float(ts_raw) if ts_raw is not None else 0.0
+                    except (TypeError, ValueError):
+                        ts_val = 0.0
+                    direction_raw = row.get("direction")
+                    try:
+                        direction_val = int(direction_raw if direction_raw is not None else 0)
+                    except (TypeError, ValueError):
+                        direction_val = 0
+                    text = (row.get("text") or "").strip()
+                    batch_messages.append(
+                        {
+                            "ts": ts_val,
+                            "direction": direction_val,
+                            "text": text,
+                        }
+                    )
+                    if remaining is not None:
+                        remaining -= 1
+                created_at = row.get("created_at")
+                if isinstance(created_at, datetime):
+                    last_created_at = created_at
+                message_id_raw = row.get("message_id")
+                try:
+                    last_message_id = int(message_id_raw) if message_id_raw is not None else last_message_id
+                except (TypeError, ValueError):
+                    last_message_id = last_message_id
+
+            if batch_messages:
+                yield batch_messages
+
+            if remaining is not None and remaining <= 0:
+                break
+
+            if len(rows) < limit_current and skip_remaining <= 0:
+                break
+
+    async def _dialog_generator() -> AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]]:
+        for dialog in selected_dialogs:
+            max_messages = dialog.get("message_limit")
+            skip_messages = max(dialog.get("message_total", 0) - (max_messages or 0), 0)
+            yield dialog, _message_batches(dialog["lead_id"], max_messages, skip_messages)
+
+    return _dialog_generator(), meta
+
+
+async def _load_whatsapp_dialogs(
+    tenant_val: int,
+    since_ts: Optional[float],
+    until_ts: Optional[float],
+    limit_dialogs: Optional[int],
+    channel: str = "whatsapp",
+    per_message_limit: Optional[int] = None,
+    allow_offline: bool = True,
+    batch_size_dialogs: int = 200,
+    message_batch_size: int = 1000,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Compatibility wrapper that materializes WhatsApp dialogs into memory."""
+
+    dialog_iter, meta = await stream_whatsapp_dialogs(
+        tenant_val=tenant_val,
+        since_ts=since_ts,
+        until_ts=until_ts,
+        limit_dialogs=limit_dialogs,
+        channel=channel,
+        per_message_limit=per_message_limit,
+        batch_size_dialogs=batch_size_dialogs,
+        message_batch_size=message_batch_size,
+    )
+
+    dialogs: List[Dict[str, Any]] = []
+    exported_messages = 0
+
+    async for dialog, message_batches in dialog_iter:
+        messages: List[Dict[str, Any]] = []
+        async for batch in message_batches:
+            messages.extend(batch)
+        if not messages:
+            continue
+        exported_messages += len(messages)
+        last_ts = messages[-1]["ts"] if messages else dialog.get("last_ts")
+        dialogs.append(
+            {
+                "lead_id": dialog.get("lead_id"),
+                "contact_id": dialog.get("contact_id"),
+                "whatsapp_phone": dialog.get("whatsapp_phone"),
+                "title": dialog.get("title") or "",
+                "messages": messages,
+                "last_ts": last_ts,
+                "chat_id": dialog.get("chat_id"),
+            }
+        )
+
+    meta = dict(meta)
+    meta["dialog_count"] = len(dialogs)
+    meta["messages_exported"] = exported_messages
+    if "distinct_chat_ids" not in meta:
+        meta["distinct_chat_ids"] = [dialog.get("chat_id") for dialog in dialogs]
 
     return dialogs, meta
 

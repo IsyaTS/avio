@@ -1,4 +1,5 @@
 import asyncio
+import io
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -11,24 +12,50 @@ if str(ROOT) not in sys.path:
 from app.export import whatsapp as whatsapp_export
 
 
-def test_whatsapp_export_allows_formerly_blocklisted_lead(monkeypatch):
-    async def fake_fetch(tenant, since, until, limit, per_message_limit=None):
-        dialogs = [
-            {
-                "lead_id": 2001,
-                "messages": [{"ts": 1.0, "direction": 0, "text": "hello"}],
-                "chat_id": "lead_2001",
-            }
-        ]
-        meta = {
-            "dialog_count": 1,
-            "messages_exported": 1,
-            "distinct_chat_ids": ["lead_2001"],
-            "filtered_groups": 0,
-        }
-        return dialogs, meta
+def _make_stream(dialogs, meta):
+    async def dialog_generator():
+        for dialog in dialogs:
+            messages = dialog.get("messages") or []
 
-    monkeypatch.setattr(whatsapp_export.db_module, "fetch_whatsapp_dialogs", fake_fetch)
+            async def message_batches():
+                if messages:
+                    yield list(messages)
+
+            yield dialog, message_batches()
+
+    async def wrapper(*_args, **_kwargs):
+        return dialog_generator(), meta
+
+    return wrapper
+
+
+def _consume_zip(stream):
+    async def _inner():
+        chunks = []
+        async for part in stream:
+            if part:
+                chunks.append(part)
+        return b"".join(chunks)
+
+    return asyncio.run(_inner())
+
+
+def test_whatsapp_export_allows_formerly_blocklisted_lead(monkeypatch):
+    dialogs = [
+        {
+            "lead_id": 2001,
+            "messages": [{"ts": 1.0, "direction": 0, "text": "hello"}],
+            "chat_id": "lead_2001",
+        }
+    ]
+    meta = {
+        "dialog_count": 1,
+        "messages_exported": 1,
+        "distinct_chat_ids": ["lead_2001"],
+        "filtered_groups": 0,
+    }
+
+    monkeypatch.setattr(whatsapp_export.db_module, "stream_whatsapp_dialogs", _make_stream(dialogs, meta))
 
     async def attempt():
         return await whatsapp_export.build_whatsapp_zip(
@@ -39,37 +66,38 @@ def test_whatsapp_export_allows_formerly_blocklisted_lead(monkeypatch):
             agent_name="Agent",
         )
 
-    buffer, stats = asyncio.run(attempt())
-    assert buffer is not None
+    stream, stats = asyncio.run(attempt())
+    assert stream is not None
+    payload = _consume_zip(stream)
+    archive = zipfile.ZipFile(io.BytesIO(payload))
+    assert archive.namelist() == ["lead_2001.txt"]
     assert stats["dialog_count"] == 1
     assert stats["message_count"] == 1
     assert stats["meta"].get("dialog_count") == 1
 
 
 def test_whatsapp_export_uses_contact_filename(monkeypatch):
-    async def fake_fetch(tenant, since, until, limit, per_message_limit=None):
-        dialogs = [
-            {
-                "lead_id": 42,
-                "contact_id": 987,
-                "whatsapp_phone": None,
-                "title": "",
-                "messages": [
-                    {"ts": 1.0, "direction": 0, "text": "hello"},
-                    {"ts": 2.0, "direction": 1, "text": "hi"},
-                ],
-                "chat_id": "contact:987",
-            }
-        ]
-        meta = {
-            "dialog_count": 1,
-            "messages_exported": 2,
-            "distinct_chat_ids": ["contact:987"],
-            "filtered_groups": 0,
+    dialogs = [
+        {
+            "lead_id": 42,
+            "contact_id": 987,
+            "whatsapp_phone": None,
+            "title": "",
+            "messages": [
+                {"ts": 1.0, "direction": 0, "text": "hello"},
+                {"ts": 2.0, "direction": 1, "text": "hi"},
+            ],
+            "chat_id": "contact:987",
         }
-        return dialogs, meta
+    ]
+    meta = {
+        "dialog_count": 1,
+        "messages_exported": 2,
+        "distinct_chat_ids": ["contact:987"],
+        "filtered_groups": 0,
+    }
 
-    monkeypatch.setattr(whatsapp_export.db_module, "fetch_whatsapp_dialogs", fake_fetch)
+    monkeypatch.setattr(whatsapp_export.db_module, "stream_whatsapp_dialogs", _make_stream(dialogs, meta))
 
     async def attempt():
         return await whatsapp_export.build_whatsapp_zip(
@@ -80,40 +108,38 @@ def test_whatsapp_export_uses_contact_filename(monkeypatch):
             agent_name="Agent",
         )
 
-    buffer, stats = asyncio.run(attempt())
-    assert buffer is not None
-    buffer.seek(0)
-    with zipfile.ZipFile(buffer) as archive:
-        names = archive.namelist()
-        assert names == ["contact_987.txt"]
-        content = archive.read(names[0]).decode("utf-8")
-        assert "hello" in content and "Agent" in content
+    stream, stats = asyncio.run(attempt())
+    assert stream is not None
+    payload = _consume_zip(stream)
+    archive = zipfile.ZipFile(io.BytesIO(payload))
+    names = archive.namelist()
+    assert names == ["contact_987.txt"]
+    content = archive.read(names[0]).decode("utf-8")
+    assert "hello" in content and "Agent" in content
 
 
 def test_whatsapp_export_uses_title_for_group(monkeypatch):
-    async def fake_fetch(tenant, since, until, limit, per_message_limit=None):
-        dialogs = [
-            {
-                "lead_id": 101,
-                "contact_id": None,
-                "whatsapp_phone": None,
-                "title": "Team Rocket",
-                "messages": [
-                    {"ts": 1.0, "direction": 0, "text": "prepare for trouble"},
-                    {"ts": 2.0, "direction": 1, "text": "make it double"},
-                ],
-                "chat_id": "lead:101",
-            }
-        ]
-        meta = {
-            "dialog_count": 1,
-            "messages_exported": 2,
-            "distinct_chat_ids": ["lead:101"],
-            "filtered_groups": 0,
+    dialogs = [
+        {
+            "lead_id": 101,
+            "contact_id": None,
+            "whatsapp_phone": None,
+            "title": "Team Rocket",
+            "messages": [
+                {"ts": 1.0, "direction": 0, "text": "prepare for trouble"},
+                {"ts": 2.0, "direction": 1, "text": "make it double"},
+            ],
+            "chat_id": "lead:101",
         }
-        return dialogs, meta
+    ]
+    meta = {
+        "dialog_count": 1,
+        "messages_exported": 2,
+        "distinct_chat_ids": ["lead:101"],
+        "filtered_groups": 0,
+    }
 
-    monkeypatch.setattr(whatsapp_export.db_module, "fetch_whatsapp_dialogs", fake_fetch)
+    monkeypatch.setattr(whatsapp_export.db_module, "stream_whatsapp_dialogs", _make_stream(dialogs, meta))
 
     async def attempt():
         return await whatsapp_export.build_whatsapp_zip(
@@ -124,9 +150,9 @@ def test_whatsapp_export_uses_title_for_group(monkeypatch):
             agent_name="Agent",
         )
 
-    buffer, stats = asyncio.run(attempt())
-    assert buffer is not None
-    buffer.seek(0)
-    with zipfile.ZipFile(buffer) as archive:
-        names = archive.namelist()
-        assert names == ["Team Rocket.txt"]
+    stream, _stats = asyncio.run(attempt())
+    assert stream is not None
+    payload = _consume_zip(stream)
+    archive = zipfile.ZipFile(io.BytesIO(payload))
+    names = archive.namelist()
+    assert names == ["Team Rocket.txt"]

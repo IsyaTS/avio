@@ -3,20 +3,23 @@ import importlib
 import io
 import json
 import mimetypes
+import os
 import pathlib
 import re
 import sys
 import time
 import uuid
-from typing import Optional
+from typing import Dict, Optional
 from urllib.parse import quote, quote_plus
 
 import logging
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, File, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from zoneinfo import ZoneInfo
+
+from starlette.background import BackgroundTask
 
 from . import common as C
 from .ui import templates
@@ -63,6 +66,18 @@ _wa_log = logging.getLogger("wa_export")
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB safety cap for catalog uploads
 
+DEFAULT_EXPORT_MAX_DAYS = 30
+try:
+    EXPORT_MAX_DAYS = int(os.getenv("EXPORT_MAX_DAYS", str(DEFAULT_EXPORT_MAX_DAYS)))
+except (TypeError, ValueError):
+    EXPORT_MAX_DAYS = DEFAULT_EXPORT_MAX_DAYS
+if EXPORT_MAX_DAYS <= 0:
+    EXPORT_MAX_DAYS = DEFAULT_EXPORT_MAX_DAYS
+
+WHATSAPP_LIMIT_DIALOGS_MAX = 2000
+WHATSAPP_PER_LIMIT_MAX = 20000
+DEFAULT_WHATSAPP_BATCH_SIZE = 200
+
 
 def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
     try:
@@ -83,6 +98,7 @@ class WhatsAppExportPayload(BaseModel):
     limit_dialogs: Optional[int] = Field(default=None, ge=0)
     per: Optional[int] = Field(default=None, ge=0)
     per_conversation_limit: Optional[int] = Field(default=None, ge=0)
+    batch_size_dialogs: Optional[int] = Field(default=None, ge=0)
 
 
 def _sanitize_text(text: str) -> str:
@@ -287,6 +303,7 @@ def client_settings(tenant: int, request: Request):
             "training_export": str(request.url_for("training_export", tenant=tenant)),
             "whatsapp_export": _resolve_whatsapp_export_url(request, tenant),
         },
+        "max_days": EXPORT_MAX_DAYS,
     }
     return templates.TemplateResponse("client/settings.html", context)
 
@@ -621,12 +638,48 @@ async def training_upload(tenant: int, request: Request, file: UploadFile = File
     return {"ok": True, "pairs": len(index.items), "stored_as": safe_name}
 
 
+def _finalize_whatsapp_export(
+    stats: Dict[str, Any],
+    tenant: int,
+    days_back: int,
+    limit_dialogs: Optional[int],
+    per_limit: Optional[int],
+    batch_size: int,
+    started_at: float,
+) -> None:
+    took_ms = int((time.time() - started_at) * 1000)
+    dialogs_selected = int(stats.get("dialog_count") or 0)
+    messages_selected = int(stats.get("message_count") or 0)
+    meta = stats.get("meta") if isinstance(stats.get("meta"), dict) else {}
+    meta.update(
+        {
+            "dialogs_selected": dialogs_selected,
+            "messages_selected": messages_selected,
+            "batch_size_dialogs": batch_size,
+            "duration_ms": took_ms,
+        }
+    )
+    stats["meta"] = meta
+    _wa_log.info(
+        "[wa_export] stream_complete tenant=%s days_back=%s limit=%s per=%s dialogs=%s messages=%s batch_size=%s duration_ms=%s",
+        tenant,
+        days_back,
+        limit_dialogs if limit_dialogs is not None else "none",
+        per_limit if per_limit is not None else "none",
+        dialogs_selected,
+        messages_selected,
+        batch_size,
+        took_ms,
+    )
+
+
 async def _prepare_whatsapp_export_response(
     tenant_raw: int,
     key: str,
     days_back_raw: int | None,
     limit_dialogs_raw: int | None,
     per_limit_raw: int | None,
+    batch_size_raw: int | None,
     started_at: float | None = None,
 ):
     started = started_at if started_at is not None else time.time()
@@ -652,6 +705,10 @@ async def _prepare_whatsapp_export_response(
         days_back = 0
     if days_back < 0:
         days_back = 0
+    if days_back > EXPORT_MAX_DAYS:
+        detail = f"days_back_too_large:max={EXPORT_MAX_DAYS};reduce_window"
+        _wa_log.warning("[wa_export] days_exceeded tenant=%s days_back=%s", tenant, days_back)
+        return JSONResponse({"detail": detail}, status_code=422)
 
     limit_dialogs: Optional[int] = None
     try:
@@ -659,6 +716,12 @@ async def _prepare_whatsapp_export_response(
     except (TypeError, ValueError):
         limit_candidate = None
     if limit_candidate is not None and limit_candidate > 0:
+        if limit_candidate > WHATSAPP_LIMIT_DIALOGS_MAX:
+            detail = f"limit_dialogs_too_large:max={WHATSAPP_LIMIT_DIALOGS_MAX};reduce_window_or_limit"
+            _wa_log.warning(
+                "[wa_export] limit_exceeded tenant=%s limit=%s", tenant, limit_candidate
+            )
+            return JSONResponse({"detail": detail}, status_code=422)
         limit_dialogs = limit_candidate
 
     per_limit: Optional[int] = None
@@ -667,7 +730,23 @@ async def _prepare_whatsapp_export_response(
     except (TypeError, ValueError):
         per_candidate = None
     if per_candidate is not None and per_candidate > 0:
+        if per_candidate > WHATSAPP_PER_LIMIT_MAX:
+            detail = f"per_limit_too_large:max={WHATSAPP_PER_LIMIT_MAX};reduce_per_limit"
+            _wa_log.warning(
+                "[wa_export] per_exceeded tenant=%s per=%s", tenant, per_candidate
+            )
+            return JSONResponse({"detail": detail}, status_code=422)
         per_limit = per_candidate
+
+    try:
+        batch_size_candidate = (
+            int(batch_size_raw) if batch_size_raw is not None else DEFAULT_WHATSAPP_BATCH_SIZE
+        )
+    except (TypeError, ValueError):
+        batch_size_candidate = DEFAULT_WHATSAPP_BATCH_SIZE
+    if batch_size_candidate <= 0:
+        batch_size_candidate = DEFAULT_WHATSAPP_BATCH_SIZE
+    batch_size_dialogs = batch_size_candidate
 
     now_utc = datetime.now(timezone.utc)
     since = now_utc - timedelta(days=days_back)
@@ -701,7 +780,7 @@ async def _prepare_whatsapp_export_response(
                 continue
 
     try:
-        zip_buffer, stats = await whatsapp_exporter.build_whatsapp_zip(
+        zip_stream, stats = await whatsapp_exporter.build_whatsapp_zip(
             tenant=tenant,
             since=since,
             until=now_utc,
@@ -709,6 +788,7 @@ async def _prepare_whatsapp_export_response(
             per_message_limit=per_limit,
             agent_name=agent_name,
             tz=tenant_tz,
+            batch_size_dialogs=batch_size_dialogs,
         )
     except getattr(db, "DatabaseUnavailableError", RuntimeError) as exc:
         _wa_log.error("[wa_export] db_unavailable tenant=%s error=%s", tenant, exc)
@@ -723,7 +803,7 @@ async def _prepare_whatsapp_export_response(
     stats = stats if isinstance(stats, dict) else {}
     meta = stats.get("meta") if isinstance(stats.get("meta"), dict) else {}
 
-    if zip_buffer is None:
+    if zip_stream is None:
         _wa_log.info(
             "[wa_export] empty tenant=%s days_back=%s limit=%s dialogs=%s messages=%s",
             tenant,
@@ -751,19 +831,31 @@ async def _prepare_whatsapp_export_response(
 
     took = time.time() - started
     _wa_log.info(
-        "[wa_export] complete tenant=%s days_back=%s limit=%s dialogs=%s messages=%s took=%.3fs top5=%s filtered_groups=%s",
+        "[wa_export] complete tenant=%s days_back=%s limit=%s per=%s dialogs=%s messages=%s took=%.3fs batch=%s top5=%s filtered_groups=%s",
         tenant,
         days_back,
         limit_dialogs if limit_dialogs is not None else "none",
+        per_limit if per_limit is not None else "none",
         stats.get("dialog_count", 0),
         stats.get("message_count", 0),
         took,
+        batch_size_dialogs,
         stats.get("top_five"),
         meta.get("filtered_groups") if meta else None,
     )
 
-    payload_bytes = zip_buffer.getvalue()
-    return Response(content=payload_bytes, media_type="application/zip", headers=headers)
+    background = BackgroundTask(
+        _finalize_whatsapp_export,
+        stats,
+        tenant,
+        days_back,
+        limit_dialogs,
+        per_limit,
+        batch_size_dialogs,
+        started,
+    )
+
+    return StreamingResponse(zip_stream, media_type="application/zip", headers=headers, background=background)
 
 
 @router.post("/export/whatsapp", name="whatsapp_export")
@@ -790,6 +882,7 @@ async def whatsapp_export(request: Request):
         days_back_raw=payload.days if payload.days is not None else payload.days_back,
         limit_dialogs_raw=payload.limit if payload.limit is not None else payload.limit_dialogs,
         per_limit_raw=payload.per if payload.per is not None else payload.per_conversation_limit,
+        batch_size_raw=payload.batch_size_dialogs,
         started_at=started_at,
     )
 
@@ -806,6 +899,7 @@ async def client_whatsapp_export(tenant: int, request: Request):
         days_back_raw=qp.get("days") or qp.get("days_back"),
         limit_dialogs_raw=qp.get("limit") or qp.get("limit_dialogs"),
         per_limit_raw=qp.get("per") or qp.get("per_conversation_limit"),
+        batch_size_raw=qp.get("batch_size_dialogs"),
         started_at=started_at,
     )
 
