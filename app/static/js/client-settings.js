@@ -678,12 +678,12 @@
   }
 })();
 
-function bindExportClicks(initialState) {
+const bindExportClicks = (initialState) => {
   if (typeof window === 'undefined') return;
   const impl = window.__bindExportClicksImpl;
   if (typeof impl === 'function') {
     impl(initialState);
   }
-}
+};
 
 bindExportClicks(window.state);
