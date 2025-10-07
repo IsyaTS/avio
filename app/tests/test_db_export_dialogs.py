@@ -2,6 +2,7 @@ import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,31 +92,29 @@ def test_load_whatsapp_dialogs_allows_missing_contacts(monkeypatch):
 
     monkeypatch.setattr(db, "_ensure_pool", fake_ensure_pool)
 
-    filtered_sql = {}
+    filtered_sql: Dict[str, Any] = {"called": False}
 
     async def fake_fetchrow(sql, *params):
+        filtered_sql["called"] = True
         filtered_sql["text"] = sql
-        # Tenant filter should rely on leads and support channel aliases
-        assert "COALESCE(l.tenant_id, 0) = $1" in sql
-        assert "l.channel IN ('whatsapp', 'wa')" in sql
-        assert "COALESCE(m.tenant_id, 0) = $1" not in sql
-        return {"group_count": 1}
+        return {"msg_count": 2}
 
     monkeypatch.setattr(db, "_fetchrow", fake_fetchrow)
 
     captured_sql = {}
 
     async def fake_fetch(sql, *params):
-        if "WITH candidate_chats" in sql:
+        if "MAX(m.created_at) AS last_created_at" in sql:
             captured_sql["candidate"] = sql
-            # Ensure the SQL no longer filters out chats without @s.whatsapp.net
+            # Ensure the SQL no longer filters out chats without group markers
             assert "%@s.whatsapp.net" not in sql
+            assert "%@g.us" not in sql
+            assert "COALESCE(c.is_group, FALSE) = FALSE" not in sql
+            assert "ROW_NUMBER()" not in sql
             # Channel and tenant filters should be updated
             assert "COALESCE(l.tenant_id, 0) = $1" in sql
             assert "l.channel IN ('whatsapp', 'wa')" in sql
             assert "COALESCE(m.tenant_id, 0) = $1" not in sql
-            assert "COALESCE(c.is_group, FALSE) = FALSE" in sql
-            assert "COALESCE(c.whatsapp_phone, '') NOT LIKE '%@g.us'" in sql
             # Tenant, since, and until parameters are passed through
             assert params[0] == tenant
             assert params[1] == float(since_ts)
@@ -167,7 +166,7 @@ def test_load_whatsapp_dialogs_allows_missing_contacts(monkeypatch):
     dialogs, meta = asyncio.run(run_load())
 
     assert "candidate" in captured_sql and "messages" in captured_sql
-    assert "text" in filtered_sql
+    assert filtered_sql["called"] is False
     assert len(dialogs) == 2
     by_lead = {dialog["lead_id"]: dialog for dialog in dialogs}
     assert set(by_lead) == {101, 102}
@@ -181,4 +180,4 @@ def test_load_whatsapp_dialogs_allows_missing_contacts(monkeypatch):
     assert with_contact["contact_id"] == 202
     assert with_contact["whatsapp_phone"].endswith("@s.whatsapp.net")
 
-    assert meta["filtered_groups"] == 1
+    assert meta["filtered_groups"] == 0

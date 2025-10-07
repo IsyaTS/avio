@@ -552,33 +552,10 @@ async def _load_whatsapp_dialogs(
         params_groups.append(float(upper_limit))
         group_conditions.append(f"m.created_at <= to_timestamp(${len(params_groups)})")
 
-    filtered_groups_row = await _fetchrow(
-        f"""
-        SELECT COUNT(DISTINCT m.lead_id) AS group_count
-        FROM messages m
-        JOIN leads l ON l.lead_id = m.lead_id
-        LEFT JOIN lead_contacts lc ON lc.lead_id = m.lead_id
-        LEFT JOIN contacts c ON c.id = lc.contact_id
-        WHERE {' AND '.join(group_conditions)}
-          AND (
-                COALESCE(c.is_group, FALSE) = TRUE
-             OR COALESCE(c.whatsapp_phone, '') LIKE '%@g.us'
-          )
-        """,
-        *params_groups,
-    )
-    if filtered_groups_row and "group_count" in filtered_groups_row:
-        try:
-            meta["filtered_groups"] = int(filtered_groups_row["group_count"] or 0)
-        except (TypeError, ValueError):
-            meta["filtered_groups"] = 0
-
     params = [tenant_val]
     conditions = [
         "COALESCE(l.tenant_id, 0) = $1",
         "l.channel IN ('whatsapp', 'wa')",
-        "COALESCE(c.is_group, FALSE) = FALSE",
-        "COALESCE(c.whatsapp_phone, '') NOT LIKE '%@g.us'",
     ]
     if lower_limit is not None:
         params.append(float(lower_limit))
@@ -593,28 +570,19 @@ async def _load_whatsapp_dialogs(
         limit_clause = f" LIMIT ${len(params)}"
 
     candidate_sql = f"""
-        WITH candidate_chats AS (
-            SELECT
-                m.lead_id,
-                lc.contact_id,
-                c.whatsapp_phone,
-                c.is_group,
-                l.title,
-                MAX(m.created_at) AS last_created_at,
-                ROW_NUMBER() OVER (
-                    PARTITION BY COALESCE(NULLIF(lower(c.whatsapp_phone), ''), CONCAT('lead:', m.lead_id::text))
-                    ORDER BY MAX(m.created_at) DESC
-                ) AS chat_rank
-            FROM messages m
-            JOIN leads l ON l.lead_id = m.lead_id
-            LEFT JOIN lead_contacts lc ON lc.lead_id = m.lead_id
-            LEFT JOIN contacts c ON c.id = lc.contact_id
-            WHERE {' AND '.join(conditions)}
-            GROUP BY m.lead_id, lc.contact_id, c.whatsapp_phone, c.is_group, l.title
-        )
-        SELECT *
-        FROM candidate_chats
-        WHERE chat_rank = 1
+        SELECT
+            m.lead_id,
+            lc.contact_id,
+            c.whatsapp_phone,
+            c.is_group,
+            l.title,
+            MAX(m.created_at) AS last_created_at
+        FROM messages m
+        JOIN leads l ON l.lead_id = m.lead_id
+        LEFT JOIN lead_contacts lc ON lc.lead_id = m.lead_id
+        LEFT JOIN contacts c ON c.id = lc.contact_id
+        WHERE {' AND '.join(conditions)}
+        GROUP BY m.lead_id, lc.contact_id, c.whatsapp_phone, c.is_group, l.title
         ORDER BY last_created_at DESC
         {limit_clause}
     """
