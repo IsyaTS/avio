@@ -1,11 +1,18 @@
+try {
+  console.info('client-settings loaded');
+
+  window.__EXPORT_ERROR__ = undefined;
+
 function bindExportClicks(initialState) {
   const state = initialState && typeof initialState === 'object' ? initialState : {};
   const button = document.getElementById('export-download');
   if (!button) {
+    window.__EXPORT_BIND_OK__ = false;
     return false;
   }
 
   if (button.dataset && button.dataset.bound === '1') {
+    window.__EXPORT_BIND_OK__ = true;
     return true;
   }
 
@@ -264,12 +271,11 @@ function bindExportClicks(initialState) {
     button.dataset.bound = '1';
   }
 
+  window.__EXPORT_BIND_OK__ = true;
+
   return true;
 }
 
-window.__EXPORT_ERROR__ = undefined;
-
-try {
   const extractVersion = (src) => {
     if (typeof src !== 'string' || !src) return 'unknown';
     try {
@@ -746,10 +752,7 @@ try {
   // Автоподгрузка CSV при доступности
   loadCsv({ quiet: true });
 
-  const exportBound = bindExportClicks(state);
-  if (exportBound) {
-    window.__EXPORT_BIND_OK__ = true;
-  }
+  bindExportClicks(state);
 })();
 } catch (error) {
   window.__EXPORT_ERROR__ = error;
