@@ -3,20 +3,20 @@ import importlib
 import io
 import json
 import mimetypes
-import os
 import pathlib
 import re
 import sys
 import time
 import uuid
 from typing import Optional
-from urllib.parse import quote, quote_plus, urlparse
+from urllib.parse import quote, quote_plus
 
 import logging
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, ValidationError
+from zoneinfo import ZoneInfo
 
 from . import common as C
 from .ui import templates
@@ -670,44 +670,28 @@ async def whatsapp_export(request: Request):
     default_agent = getattr(C.settings, "AGENT_NAME", "Менеджер")
     agent_name = (passport.get("agent_name") or default_agent).strip() or default_agent
 
-    def _dsn_host_port(dsn: str) -> tuple[str, int]:
-        if not dsn:
-            return ("", 0)
-        try:
-            parsed = urlparse(dsn if "://" in dsn else f"postgresql://{dsn}")
-        except Exception:
-            return ("", 0)
-        host = (parsed.hostname or "").lower()
-        port = parsed.port or 5432
-        return (host, port)
-
-    export_dsn = getattr(db, "DATABASE_URL", os.getenv("DATABASE_URL", ""))
-    writer_dsn = (
-        os.getenv("WA_WRITER_DATABASE_URL")
-        or os.getenv("WHATSAPP_DATABASE_URL")
-        or os.getenv("MESSAGES_DATABASE_URL")
-        or os.getenv("DATABASE_URL", "")
-    )
-    export_host, export_port = _dsn_host_port(export_dsn)
-    writer_host, writer_port = _dsn_host_port(writer_dsn)
-    if not export_host:
-        _wa_log.error("[wa_export] missing_export_dsn tenant=%s", tenant)
-        return JSONResponse({"detail": "database_missing"}, status_code=500)
-    if (export_host, export_port) != (writer_host, writer_port):
-        _wa_log.error(
-            "[wa_export] dsn_mismatch tenant=%s export_host=%s export_port=%s writer_host=%s writer_port=%s",
-            tenant,
-            export_host,
-            export_port,
-            writer_host,
-            writer_port,
-        )
-        return JSONResponse({"detail": "database_mismatch"}, status_code=500)
-
-    dsn_lower = (export_dsn or "").lower()
-    if "readonly" in dsn_lower or "replica" in dsn_lower:
-        _wa_log.error("[wa_export] readonly_dsn_blocked tenant=%s dsn=%s", tenant, export_dsn)
-        return JSONResponse({"detail": "readonly_database_not_supported"}, status_code=500)
+    tenant_tz: ZoneInfo | None = None
+    if isinstance(cfg, dict):
+        settings_raw = cfg.get("settings")
+        settings_cfg = settings_raw if isinstance(settings_raw, dict) else {}
+        tz_candidates = [
+            cfg.get("timezone"),
+            cfg.get("tz"),
+            settings_cfg.get("timezone"),
+            passport.get("timezone"),
+        ]
+        for tz_candidate in tz_candidates:
+            if not tz_candidate:
+                continue
+            name = str(tz_candidate).strip()
+            if not name:
+                continue
+            try:
+                tenant_tz = ZoneInfo(name)
+                break
+            except Exception:
+                _wa_log.warning("[wa_export] invalid_timezone tenant=%s tz=%s", tenant, name)
+                continue
 
     try:
         zip_buffer, stats = await whatsapp_exporter.build_whatsapp_zip(
@@ -717,6 +701,7 @@ async def whatsapp_export(request: Request):
             limit_dialogs=limit_dialogs,
             per_message_limit=per_limit,
             agent_name=agent_name,
+            tz=tenant_tz,
         )
     except getattr(db, "DatabaseUnavailableError", RuntimeError) as exc:
         _wa_log.error("[wa_export] db_unavailable tenant=%s error=%s", tenant, exc)
@@ -746,7 +731,7 @@ async def whatsapp_export(request: Request):
         )
         return Response(status_code=204)
 
-    now_local = now_utc.astimezone(whatsapp_exporter.EXPORT_TZ)
+    now_local = now_utc.astimezone(tenant_tz or whatsapp_exporter.EXPORT_TZ)
     filename = f"whatsapp_export_{now_local.strftime('%Y-%m-%d')}.zip"
     headers = {
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
