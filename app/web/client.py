@@ -275,6 +275,7 @@ def client_settings(tenant: int, request: Request):
             "training_upload": str(request.url_for("training_upload", tenant=tenant)),
             "training_status": str(request.url_for("training_status", tenant=tenant)),
             "training_export": str(request.url_for("training_export", tenant=tenant)),
+            "whatsapp_export": str(request.url_for("whatsapp_export", tenant=tenant)),
         },
     }
     return templates.TemplateResponse("client/settings.html", context)
