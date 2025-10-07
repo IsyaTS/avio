@@ -275,7 +275,7 @@ def client_settings(tenant: int, request: Request):
             "training_upload": str(request.url_for("training_upload", tenant=tenant)),
             "training_status": str(request.url_for("training_status", tenant=tenant)),
             "training_export": str(request.url_for("training_export", tenant=tenant)),
-            "whatsapp_export": str(request.url_for("whatsapp_export", tenant=tenant)),
+            "whatsapp_export": str(request.url_for("client_whatsapp_export", tenant=tenant)),
         },
     }
     return templates.TemplateResponse("client/settings.html", context)
@@ -611,57 +611,53 @@ async def training_upload(tenant: int, request: Request, file: UploadFile = File
     return {"ok": True, "pairs": len(index.items), "stored_as": safe_name}
 
 
-@router.post("/export/whatsapp")
-async def whatsapp_export(request: Request):
-    started_at = time.time()
+async def _prepare_whatsapp_export_response(
+    tenant_raw: int,
+    key: str,
+    days_back_raw: int | None,
+    limit_dialogs_raw: int | None,
+    per_limit_raw: int | None,
+    started_at: float | None = None,
+):
+    started = started_at if started_at is not None else time.time()
 
     try:
-        raw_body = await request.json()
-    except Exception:
-        raw_body = {}
+        tenant = int(tenant_raw)
+    except (TypeError, ValueError):
+        _wa_log.warning("[wa_export] invalid_tenant tenant=%s", tenant_raw)
+        return JSONResponse({"detail": "invalid_tenant"}, status_code=422)
 
-    if not isinstance(raw_body, dict):
-        raw_body = {}
-
-    try:
-        payload = WhatsAppExportPayload(**raw_body)
-    except ValidationError as exc:
-        _wa_log.warning("[wa_export] invalid_payload errors=%s", exc.errors())
-        return JSONResponse({"detail": "invalid_payload", "errors": exc.errors()}, status_code=422)
-
-    tenant = int(payload.tenant)
     if tenant <= 0:
         _wa_log.warning("[wa_export] invalid_tenant tenant=%s", tenant)
         return JSONResponse({"detail": "invalid_tenant"}, status_code=422)
-    key = (payload.key or "").strip()
-    if not _auth(tenant, key):
+
+    cleaned_key = (key or "").strip()
+    if not _auth(tenant, cleaned_key):
         _wa_log.warning("[wa_export] unauthorized tenant=%s", tenant)
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
-    raw_days = payload.days if payload.days is not None else payload.days_back
     try:
-        days_back = int(raw_days) if raw_days is not None else 0
+        days_back = int(days_back_raw or 0)
     except (TypeError, ValueError):
         days_back = 0
     if days_back < 0:
         days_back = 0
 
-    limit_candidate = payload.limit if payload.limit is not None else payload.limit_dialogs
+    limit_dialogs: Optional[int] = None
     try:
-        limit_value = int(limit_candidate) if limit_candidate is not None else None
+        limit_candidate = int(limit_dialogs_raw) if limit_dialogs_raw is not None else None
     except (TypeError, ValueError):
-        limit_value = None
-    if limit_value is None or limit_value <= 0:
-        limit_dialogs: Optional[int] = None
-    else:
-        limit_dialogs = limit_value
+        limit_candidate = None
+    if limit_candidate is not None and limit_candidate > 0:
+        limit_dialogs = limit_candidate
 
-    per_candidate = payload.per if payload.per is not None else payload.per_conversation_limit
+    per_limit: Optional[int] = None
     try:
-        per_value = int(per_candidate) if per_candidate is not None else 0
+        per_candidate = int(per_limit_raw) if per_limit_raw is not None else None
     except (TypeError, ValueError):
-        per_value = 0
-    per_limit: Optional[int] = per_value if per_value > 0 else None
+        per_candidate = None
+    if per_candidate is not None and per_candidate > 0:
+        per_limit = per_candidate
 
     now_utc = datetime.now(timezone.utc)
     since = now_utc - timedelta(days=days_back)
@@ -714,8 +710,10 @@ async def whatsapp_export(request: Request):
         _wa_log.exception("[wa_export] export_failed tenant=%s", tenant)
         return JSONResponse({"detail": "export_failed"}, status_code=500)
 
+    stats = stats if isinstance(stats, dict) else {}
+    meta = stats.get("meta") if isinstance(stats.get("meta"), dict) else {}
+
     if zip_buffer is None:
-        meta = (stats or {}).get("meta") if isinstance(stats, dict) else {}
         _wa_log.info(
             "[wa_export] empty tenant=%s days_back=%s limit=%s dialogs=%s messages=%s",
             tenant,
@@ -741,7 +739,7 @@ async def whatsapp_export(request: Request):
         "Cache-Control": "no-store",
     }
 
-    took = time.time() - started_at
+    took = time.time() - started
     _wa_log.info(
         "[wa_export] complete tenant=%s days_back=%s limit=%s dialogs=%s messages=%s took=%.3fs top5=%s filtered_groups=%s",
         tenant,
@@ -751,11 +749,55 @@ async def whatsapp_export(request: Request):
         stats.get("message_count", 0),
         took,
         stats.get("top_five"),
-        ((stats.get("meta") or {}).get("filtered_groups") if isinstance(stats, dict) else None),
+        meta.get("filtered_groups") if meta else None,
     )
 
     payload_bytes = zip_buffer.getvalue()
     return Response(content=payload_bytes, media_type="application/zip", headers=headers)
+
+
+@router.post("/export/whatsapp")
+async def whatsapp_export(request: Request):
+    started_at = time.time()
+
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raw_body = {}
+
+    if not isinstance(raw_body, dict):
+        raw_body = {}
+
+    try:
+        payload = WhatsAppExportPayload(**raw_body)
+    except ValidationError as exc:
+        _wa_log.warning("[wa_export] invalid_payload errors=%s", exc.errors())
+        return JSONResponse({"detail": "invalid_payload", "errors": exc.errors()}, status_code=422)
+
+    return await _prepare_whatsapp_export_response(
+        tenant_raw=payload.tenant,
+        key=payload.key or "",
+        days_back_raw=payload.days if payload.days is not None else payload.days_back,
+        limit_dialogs_raw=payload.limit if payload.limit is not None else payload.limit_dialogs,
+        per_limit_raw=payload.per if payload.per is not None else payload.per_conversation_limit,
+        started_at=started_at,
+    )
+
+
+@router.get("/client/{tenant}/export/whatsapp")
+async def client_whatsapp_export(tenant: int, request: Request):
+    started_at = time.time()
+    qp = request.query_params
+    key = _resolve_key(request, qp.get("k"))
+
+    return await _prepare_whatsapp_export_response(
+        tenant_raw=tenant,
+        key=key,
+        days_back_raw=qp.get("days") or qp.get("days_back"),
+        limit_dialogs_raw=qp.get("limit") or qp.get("limit_dialogs"),
+        per_limit_raw=qp.get("per") or qp.get("per_conversation_limit"),
+        started_at=started_at,
+    )
 
 
 @router.get("/client/{tenant}/training/export")
