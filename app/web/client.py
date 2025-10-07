@@ -678,8 +678,8 @@ async def _prepare_whatsapp_export_response(
     limit_dialogs_raw: int | None,
     per_limit_raw: int | None,
     batch_size_raw: int | None,
-    started_at: float | None = None,
     background: BackgroundTasks,
+    started_at: float | None = None,
 ):
     started = started_at if started_at is not None else time.time()
 
