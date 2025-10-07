@@ -1,11 +1,3 @@
-function bindExportClicks(initialState) {
-  if (typeof window === 'undefined') return;
-  const impl = window.__bindExportClicksImpl;
-  if (typeof impl === 'function') {
-    impl(initialState);
-  }
-}
-
 (function () {
   const stateScript = document.getElementById('client-settings-state');
   const globalState = typeof window !== 'undefined' ? window.state : undefined;
@@ -685,5 +677,13 @@ function bindExportClicks(initialState) {
     window.__bindExportClicksImpl = bindExportClicksImpl;
   }
 })();
+
+function bindExportClicks(initialState) {
+  if (typeof window === 'undefined') return;
+  const impl = window.__bindExportClicksImpl;
+  if (typeof impl === 'function') {
+    impl(initialState);
+  }
+}
 
 bindExportClicks(window.state);
