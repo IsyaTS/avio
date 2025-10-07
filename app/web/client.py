@@ -6,6 +6,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -62,6 +63,8 @@ _log = logging.getLogger("training")
 _LOG_PREFIX = "[training]"
 _wa_log = logging.getLogger("wa_export")
 
+_CLIENT_SETTINGS_VERSION: str | None = None
+
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB safety cap for catalog uploads
 
 DEFAULT_EXPORT_MAX_DAYS = 30
@@ -89,6 +92,30 @@ def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
             return base_url
         except Exception:
             return "/export/whatsapp"
+
+
+def _client_settings_static_version() -> str:
+    global _CLIENT_SETTINGS_VERSION
+    if _CLIENT_SETTINGS_VERSION:
+        return _CLIENT_SETTINGS_VERSION
+
+    for env_name in ("APP_GIT_SHA", "GIT_SHA", "HEROKU_SLUG_COMMIT"):
+        value = (os.getenv(env_name) or "").strip()
+        if value:
+            _CLIENT_SETTINGS_VERSION = value[:12]
+            return _CLIENT_SETTINGS_VERSION
+
+    try:
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_root),
+            stderr=subprocess.DEVNULL,
+        )
+        _CLIENT_SETTINGS_VERSION = output.decode("utf-8").strip()
+    except Exception:
+        _CLIENT_SETTINGS_VERSION = str(int(time.time()))
+    return _CLIENT_SETTINGS_VERSION
 
 
 class WhatsAppExportPayload(BaseModel):
@@ -276,6 +303,30 @@ def client_settings(tenant: int, request: Request):
     else:
         uploaded_display = ""
 
+    try:
+        whatsapp_export_url = str(request.url_for("whatsapp_export", tenant=tenant))
+    except Exception:
+        whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
+
+    urls = {
+        "settings": str(request.url_for("client_settings", tenant=tenant)),
+        "save_settings": str(request.url_for("save_form", tenant=tenant)),
+        "save_persona": str(request.url_for("save_persona", tenant=tenant)),
+        "upload_catalog": str(request.url_for("catalog_upload", tenant=tenant)),
+        "csv_get": str(request.url_for("catalog_csv_get", tenant=tenant)),
+        "csv_save": str(request.url_for("catalog_csv_save", tenant=tenant)),
+        "training_upload": str(request.url_for("training_upload", tenant=tenant)),
+        "training_status": str(request.url_for("training_status", tenant=tenant)),
+        "whatsapp_export": whatsapp_export_url,
+    }
+
+    state = {
+        "tenant": tenant,
+        "key": key,
+        "urls": urls,
+        "max_days": EXPORT_MAX_DAYS,
+    }
+
     context = {
         "request": request,
         "tenant": tenant,
@@ -293,18 +344,10 @@ def client_settings(tenant: int, request: Request):
         },
         "title": f"Настройки клиента · Tenant {tenant}",
         "subtitle": passport.get("brand") or "Личный кабинет клиента",
-        "urls": {
-            "settings": str(request.url_for("client_settings", tenant=tenant)),
-            "save_settings": str(request.url_for("save_form", tenant=tenant)),
-            "save_persona": str(request.url_for("save_persona", tenant=tenant)),
-            "upload_catalog": str(request.url_for("catalog_upload", tenant=tenant)),
-            "csv_get": str(request.url_for("catalog_csv_get", tenant=tenant)),
-            "csv_save": str(request.url_for("catalog_csv_save", tenant=tenant)),
-            "training_upload": str(request.url_for("training_upload", tenant=tenant)),
-            "training_status": str(request.url_for("training_status", tenant=tenant)),
-            "whatsapp_export": _resolve_whatsapp_export_url(request, tenant),
-        },
+        "urls": urls,
+        "state": state,
         "max_days": EXPORT_MAX_DAYS,
+        "client_settings_version": _client_settings_static_version(),
     }
     return templates.TemplateResponse("client/settings.html", context)
 
