@@ -54,6 +54,7 @@
     trainingUpload: urls.training_upload || `/client/${tenant}/training/upload`,
     trainingStatus: urls.training_status || `/client/${tenant}/training/status`,
     trainingExport: urls.training_export || `/client/${tenant}/training/export`,
+    whatsappExport: urls.whatsapp_export || '/export/whatsapp',
   };
 
   const dom = {
@@ -87,6 +88,8 @@
     expFormat: document.getElementById('exp-format'),
     expBundle: document.getElementById('exp-bundle'),
     expBtnGo: document.getElementById('export-dialogs-go'),
+    exportDownload: document.getElementById('export-download'),
+    exportStatus: document.getElementById('export-status'),
     // Inline export panel wrapper (optional)
     exportInline: document.getElementById('export-inline'),
   };
@@ -111,6 +114,139 @@
       throw new Error(data.error);
     }
     return data;
+  }
+
+  function downloadBlob(blob, filename) {
+    const anchor = document.createElement('a');
+    anchor.style.display = 'none';
+    anchor.download = filename;
+    anchor.href = URL.createObjectURL(blob);
+    document.body.appendChild(anchor);
+    anchor.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(anchor.href);
+      document.body.removeChild(anchor);
+    }, 250);
+  }
+
+  function parseIntOrNull(value) {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function normalizeDays(raw) {
+    const parsed = parseIntOrNull(raw);
+    if (parsed == null || parsed < 0) {
+      return 0;
+    }
+    return parsed;
+  }
+
+  function normalizeLimit(raw) {
+    const parsed = parseIntOrNull(raw);
+    if (parsed == null || parsed <= 0) {
+      return 10000;
+    }
+    return parsed;
+  }
+
+  function parseHeaderCount(headers, name) {
+    const raw = headers.get(name);
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  async function requestWhatsappExport({ days, limit }) {
+    const payload = {
+      tenant,
+      key: accessKey,
+      days: Number.isFinite(days) && days >= 0 ? days : 0,
+      limit: Number.isFinite(limit) && limit > 0 ? limit : 10000,
+      per: 0,
+    };
+
+    const response = await fetch(buildUrl(endpoints.whatsappExport), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (response.status === 204) {
+      return { empty: true };
+    }
+
+    if (!response.ok) {
+      let text = '';
+      try {
+        text = await response.text();
+      } catch (error) {
+        try { console.debug('Failed to read export error text', error); } catch (_) {}
+        text = '';
+      }
+
+      let parsed;
+      let detail = '';
+      let reason = '';
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+          if (parsed && typeof parsed === 'object') {
+            detail = typeof parsed.detail === 'string' ? parsed.detail : '';
+            reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+          }
+        } catch (_) {
+          parsed = null;
+        }
+      }
+
+      const message = (reason || detail || text || `HTTP ${response.status}`).trim() || 'Ошибка экспорта';
+      const error = new Error(message);
+      if (detail) error.detail = detail;
+      if (reason) error.reason = reason;
+      error.status = response.status;
+      throw error;
+    }
+
+    const blob = await response.blob();
+    const header = response.headers.get('content-disposition') || response.headers.get('Content-Disposition');
+    let filename = '';
+    if (header && header.includes('filename=')) {
+      const match = header.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+      if (match) {
+        const encoded = (match[1] || match[2] || '').trim();
+        if (encoded) {
+          try {
+            filename = decodeURIComponent(encoded);
+          } catch (error) {
+            try { console.warn('Failed to decode filename', encoded, error); } catch (_) {}
+            filename = encoded;
+          }
+        }
+      }
+    }
+
+    if (!filename) {
+      const today = new Date();
+      const y = today.getUTCFullYear();
+      const m = String(today.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(today.getUTCDate()).padStart(2, '0');
+      filename = `whatsapp_export_${y}-${m}-${d}.zip`;
+    }
+
+    return {
+      blob,
+      filename,
+      dialogCount: parseHeaderCount(response.headers, 'X-Dialog-Count'),
+      messageCount: parseHeaderCount(response.headers, 'X-Message-Count'),
+    };
   }
 
   if (dom.saveSettings && dom.settingsForm) {
@@ -270,6 +406,47 @@
   bindTrainingUpload();
   refreshTrainingStatus();
 
+  function bindWhatsappExport() {
+    if (!dom.exportDownload) return;
+
+    let pending = false;
+    dom.exportDownload.addEventListener('click', async () => {
+      if (pending) return;
+      pending = true;
+      dom.exportDownload.disabled = true;
+
+      const days = normalizeDays(dom.expDays ? dom.expDays.value : '0');
+      const limit = normalizeLimit(dom.expLimit ? dom.expLimit.value : '10000');
+
+      setStatus(dom.exportStatus, 'Готовим архив…', 'muted');
+
+      try {
+        const result = await requestWhatsappExport({ days, limit });
+        if (result && result.empty) {
+          setStatus(dom.exportStatus, 'Диалоги не найдены за выбранный период', 'alert');
+          return;
+        }
+
+        downloadBlob(result.blob, result.filename);
+
+        if (result.dialogCount != null || result.messageCount != null) {
+          const dialogs = result.dialogCount != null ? result.dialogCount : 0;
+          const messages = result.messageCount != null ? result.messageCount : 0;
+          setStatus(dom.exportStatus, `Сформировано: ${dialogs} диалогов, ${messages} сообщений`, 'muted');
+        } else {
+          setStatus(dom.exportStatus, 'Архив сформирован', 'muted');
+        }
+      } catch (error) {
+        try { console.error('WhatsApp export failed', error); } catch (_) {}
+        const reason = (error && (error.reason || error.message)) || 'Ошибка экспорта';
+        setStatus(dom.exportStatus, reason, 'alert');
+      } finally {
+        pending = false;
+        dom.exportDownload.disabled = false;
+      }
+    });
+  }
+
   // -------- Экспорт: скачивание через fetch() --------
   function bindExportClicks() {
     if (!dom.expBtnGo) return;
@@ -352,6 +529,8 @@
     });
   }
 }
+
+  bindWhatsappExport();
 
   // Bind export buttons
   bindExportClicks();
