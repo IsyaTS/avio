@@ -1,3 +1,11 @@
+function bindExportClicks(initialState) {
+  if (typeof window === 'undefined') return;
+  const impl = window.__bindExportClicksImpl;
+  if (typeof impl === 'function') {
+    impl(initialState);
+  }
+}
+
 (function () {
   const stateScript = document.getElementById('client-settings-state');
   const globalState = typeof window !== 'undefined' ? window.state : undefined;
@@ -177,14 +185,6 @@
     return parsed;
   }
 
-  function normalizePer(raw) {
-    const parsed = parseIntOrNull(raw);
-    if (parsed == null || parsed < 0) {
-      return 0;
-    }
-    return parsed;
-  }
-
   function parseHeaderCount(headers, name) {
     const raw = headers.get(name);
     if (!raw) return null;
@@ -192,17 +192,16 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  async function requestWhatsappExport({ days, limit, per }) {
+  async function requestWhatsappExport({ days, limit }) {
     const normalizedDays = Number.isFinite(days) && days >= 0 ? Math.min(days, maxDays) : 0;
     const normalizedLimit = Number.isFinite(limit) && limit > 0 ? limit : 10000;
-    const normalizedPer = Number.isFinite(per) && per > 0 ? per : 0;
 
     const payload = {
       tenant,
       key: accessKey,
       days: normalizedDays,
       limit: normalizedLimit,
-      per: normalizedPer,
+      per: 0,
     };
 
     const response = await fetch(buildUrl(endpoints.whatsappExport, { includeKey: false }), {
@@ -461,7 +460,7 @@
   bindTrainingUpload();
   refreshTrainingStatus();
 
-  function bindWhatsappExport() {
+  function bindExportClicksImpl() {
     if (!dom.exportDownload) return;
 
     let pending = false;
@@ -481,12 +480,15 @@
         dom.expDays.value = String(days);
       }
       const limit = normalizeLimit(dom.expLimit ? dom.expLimit.value : '10000');
-      const per = normalizePer(dom.expPer ? dom.expPer.value : '0');
+
+      if (dom.expPer) {
+        dom.expPer.value = '0';
+      }
 
       setStatus(dom.exportStatus, 'Готовим архив…', 'muted');
 
       try {
-        const result = await requestWhatsappExport({ days, limit, per });
+        const result = await requestWhatsappExport({ days, limit });
         if (result && result.empty) {
           setStatus(dom.exportStatus, 'Нет диалогов за выбранный период', 'alert');
           return;
@@ -523,8 +525,6 @@
       }
     });
   }
-
-  bindWhatsappExport();
 
   const csvState = {
     columns: [],
@@ -680,4 +680,10 @@
 
   // Автоподгрузка CSV при доступности
   loadCsv({ quiet: true });
+
+  if (typeof window !== 'undefined') {
+    window.__bindExportClicksImpl = bindExportClicksImpl;
+  }
 })();
+
+bindExportClicks(window.state);
