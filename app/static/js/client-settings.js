@@ -54,7 +54,7 @@
     csvSave: urls.csv_save || `/client/${tenant}/catalog/csv`,
     trainingUpload: urls.training_upload || `/client/${tenant}/training/upload`,
     trainingStatus: urls.training_status || `/client/${tenant}/training/status`,
-    whatsappExport: urls.whatsapp_export || '/export/whatsapp',
+    whatsappExport: urls.whatsapp_export || `/client/${tenant}/export/whatsapp`,
   };
 
   const dom = {
@@ -165,18 +165,34 @@
   }
 
   async function requestWhatsappExport({ days, limit, per }) {
-    const payload = {
-      tenant,
-      key: accessKey,
-      days: Number.isFinite(days) && days >= 0 ? days : 0,
-      limit: Number.isFinite(limit) && limit > 0 ? limit : 10000,
-      per: Number.isFinite(per) && per >= 0 ? per : 0,
-    };
+    const normalizedDays = Number.isFinite(days) && days >= 0 ? days : 0;
+    const normalizedLimit = Number.isFinite(limit) && limit > 0 ? limit : 10000;
+    const normalizedPer = Number.isFinite(per) && per > 0 ? per : 0;
 
-    const response = await fetch(buildUrl(endpoints.whatsappExport, { includeKey: false }), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    const baseUrl = buildUrl(endpoints.whatsappExport, { includeKey: false });
+    let requestUrl;
+    try {
+      requestUrl = new URL(baseUrl, window.location.origin);
+    } catch (error) {
+      try { console.error('Failed to resolve export URL', baseUrl, error); } catch (_) {}
+      requestUrl = new URL(window.location.href);
+      requestUrl.pathname = baseUrl;
+      requestUrl.search = '';
+    }
+
+    requestUrl.searchParams.set('days', String(normalizedDays));
+    requestUrl.searchParams.set('limit', String(normalizedLimit));
+    if (normalizedPer > 0) {
+      requestUrl.searchParams.set('per', String(normalizedPer));
+    } else {
+      requestUrl.searchParams.delete('per');
+    }
+    if (accessKey) {
+      requestUrl.searchParams.set('k', accessKey);
+    }
+
+    const response = await fetch(requestUrl.toString(), {
+      method: 'GET',
     });
 
     if (response.status === 204) {
@@ -410,7 +426,13 @@
     if (!dom.exportDownload) return;
 
     let pending = false;
-    dom.exportDownload.addEventListener('click', async () => {
+    dom.exportDownload.addEventListener('click', async (event) => {
+      if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault();
+      }
+      if (event && typeof event.stopPropagation === 'function') {
+        event.stopPropagation();
+      }
       if (pending) return;
       pending = true;
       dom.exportDownload.disabled = true;
