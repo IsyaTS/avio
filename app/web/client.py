@@ -16,7 +16,7 @@ from urllib.parse import quote, quote_plus
 import logging
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, BackgroundTasks, File, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 from zoneinfo import ZoneInfo
 
@@ -717,6 +717,19 @@ def _finalize_whatsapp_export(
     )
 
 
+def _cleanup_export_file(path: str | os.PathLike[str] | pathlib.Path) -> None:
+    target = pathlib.Path(path)
+    try:
+        target.unlink(missing_ok=True)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        try:
+            _wa_log.warning("[wa_export] cleanup_failed path=%s error=%s", target, exc)
+        except Exception:
+            pass
+
+
 async def _prepare_whatsapp_export_response(
     tenant_raw: int,
     key: str,
@@ -825,7 +838,7 @@ async def _prepare_whatsapp_export_response(
                 continue
 
     try:
-        zip_stream, stats = await whatsapp_exporter.build_whatsapp_zip(
+        zip_path, stats = await whatsapp_exporter.build_whatsapp_zip(
             tenant=tenant,
             since=since,
             until=now_utc,
@@ -848,7 +861,7 @@ async def _prepare_whatsapp_export_response(
     stats = stats if isinstance(stats, dict) else {}
     meta = stats.get("meta") if isinstance(stats.get("meta"), dict) else {}
 
-    if zip_stream is None:
+    if zip_path is None:
         _wa_log.info(
             "[wa_export] empty tenant=%s days_back=%s limit=%s dialogs=%s messages=%s",
             tenant,
@@ -867,12 +880,17 @@ async def _prepare_whatsapp_export_response(
 
     now_local = now_utc.astimezone(tenant_tz or whatsapp_exporter.EXPORT_TZ)
     filename = f"whatsapp_export_{now_local.strftime('%Y-%m-%d')}.zip"
-    headers = {
-        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
-        "X-Dialog-Count": str(stats.get("dialog_count", 0)),
-        "X-Message-Count": str(stats.get("message_count", 0)),
-        "Cache-Control": "no-store",
-    }
+    response = FileResponse(path=zip_path, media_type="application/zip", filename=filename)
+
+    safe_filename = filename.replace("\"", r"\"")
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{quote(filename)}"
+    )
+    response.headers["X-Dialog-Count"] = str(stats.get("dialog_count", 0))
+    response.headers["X-Message-Count"] = str(stats.get("message_count", 0))
+    response.headers["Cache-Control"] = "no-store"
+    if "content-encoding" in response.headers:
+        del response.headers["content-encoding"]
 
     took = time.time() - started
     _wa_log.info(
@@ -900,7 +918,9 @@ async def _prepare_whatsapp_export_response(
         started,
     )
 
-    return StreamingResponse(zip_stream, media_type="application/zip", headers=headers)
+    background.add_task(_cleanup_export_file, pathlib.Path(zip_path))
+
+    return response
 
 
 @router.post("/export/whatsapp", name="whatsapp_export")
