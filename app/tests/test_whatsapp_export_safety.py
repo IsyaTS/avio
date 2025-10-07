@@ -88,3 +88,45 @@ def test_whatsapp_export_uses_contact_filename(monkeypatch):
         assert names == ["contact_987.txt"]
         content = archive.read(names[0]).decode("utf-8")
         assert "hello" in content and "Agent" in content
+
+
+def test_whatsapp_export_uses_title_for_group(monkeypatch):
+    async def fake_fetch(tenant, since, until, limit, per_message_limit=None):
+        dialogs = [
+            {
+                "lead_id": 101,
+                "contact_id": None,
+                "whatsapp_phone": None,
+                "title": "Team Rocket",
+                "messages": [
+                    {"ts": 1.0, "direction": 0, "text": "prepare for trouble"},
+                    {"ts": 2.0, "direction": 1, "text": "make it double"},
+                ],
+                "chat_id": "lead:101",
+            }
+        ]
+        meta = {
+            "dialog_count": 1,
+            "messages_exported": 2,
+            "distinct_chat_ids": ["lead:101"],
+            "filtered_groups": 0,
+        }
+        return dialogs, meta
+
+    monkeypatch.setattr(whatsapp_export.db_module, "fetch_whatsapp_dialogs", fake_fetch)
+
+    async def attempt():
+        return await whatsapp_export.build_whatsapp_zip(
+            tenant=1,
+            since=datetime.now(timezone.utc),
+            until=datetime.now(timezone.utc),
+            limit_dialogs=None,
+            agent_name="Agent",
+        )
+
+    buffer, stats = asyncio.run(attempt())
+    assert buffer is not None
+    buffer.seek(0)
+    with zipfile.ZipFile(buffer) as archive:
+        names = archive.namelist()
+        assert names == ["Team Rocket.txt"]
