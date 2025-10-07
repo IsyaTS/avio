@@ -15,7 +15,7 @@
   }
 
   function parseNumber(value, { min = null, fallback = 0 } = {}) {
-    const numeric = Number.parseInt(value, 10);
+    const numeric = Number.parseInt((value ?? '').toString().trim(), 10);
     if (!Number.isFinite(numeric)) return fallback;
     if (min !== null && numeric < min) return min;
     return numeric;
@@ -37,9 +37,25 @@
       try {
         const data = await response.clone().json();
         if (data && typeof data === 'object') {
-          const candidate = data.detail || data.message || data.reason;
-          if (typeof candidate === 'string') {
-            detail = candidate;
+          const { detail: detailValue, message, reason } = data;
+          if (typeof detailValue === 'string') {
+            detail = detailValue;
+          } else if (Array.isArray(detailValue)) {
+            detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
+          } else if (detailValue && typeof detailValue === 'object') {
+            const parts = [];
+            Object.entries(detailValue).forEach(([keyName, value]) => {
+              if (value == null) return;
+              const text = Array.isArray(value) ? value.join(', ') : String(value);
+              parts.push(`${keyName}: ${text}`);
+            });
+            detail = parts.join('; ');
+          }
+          if (!detail && typeof reason === 'string') {
+            detail = reason;
+          }
+          if (!detail && typeof message === 'string') {
+            detail = message;
           }
         }
       } catch (error) {
@@ -49,10 +65,12 @@
           detail = '';
         }
       }
-      const message = detail || `Ошибка экспорта (HTTP ${response.status})`;
-      const error = new Error(message);
+      const messageText = (detail || `Ошибка экспорта (HTTP ${response.status})`).trim() || 'Ошибка экспорта';
+      const error = new Error(messageText);
       error.status = response.status;
-      error.detail = detail;
+      if (detail) {
+        error.detail = detail;
+      }
       throw error;
     }
 
@@ -60,20 +78,49 @@
     if (!contentType.startsWith('application/zip')) {
       let detail = '';
       try {
-        detail = (await response.text()) || '';
-      } catch (_) {
-        detail = '';
+        if (contentType.includes('application/json')) {
+          const data = await response.clone().json();
+          if (data && typeof data === 'object') {
+            const { detail: detailValue, message } = data;
+            if (typeof detailValue === 'string') {
+              detail = detailValue;
+            } else if (Array.isArray(detailValue)) {
+              detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
+            } else if (detailValue && typeof detailValue === 'object') {
+              const parts = [];
+              Object.entries(detailValue).forEach(([keyName, value]) => {
+                if (value == null) return;
+                const text = Array.isArray(value) ? value.join(', ') : String(value);
+                parts.push(`${keyName}: ${text}`);
+              });
+              detail = parts.join('; ');
+            }
+            if (!detail && typeof message === 'string') {
+              detail = message;
+            }
+          }
+        } else {
+          detail = (await response.text()) || '';
+        }
+      } catch (error) {
+        try {
+          detail = (await response.text()) || '';
+        } catch (_) {
+          detail = '';
+        }
       }
-      const error = new Error(detail || 'Ответ сервера не является ZIP-архивом');
+      const error = new Error((detail || 'Ответ сервера не является ZIP-архивом').trim() || 'Ошибка экспорта');
       error.status = response.status;
-      error.detail = detail;
+      if (detail) {
+        error.detail = detail;
+      }
       throw error;
     }
 
     const blob = await response.blob();
-    const disposition = response.headers.get('content-disposition') || '';
-    let filename = '';
+    const disposition = response.headers.get('content-disposition') || response.headers.get('Content-Disposition') || '';
     const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    let filename = '';
     if (match) {
       const encoded = (match[1] || match[2] || '').trim();
       if (encoded) {
@@ -93,21 +140,30 @@
       filename = `whatsapp_export_${y}-${m}-${d}.zip`;
     }
 
-    const dialogCount = Number.parseInt(response.headers.get('X-Dialog-Count') || '', 10);
-    const messageCount = Number.parseInt(response.headers.get('X-Message-Count') || '', 10);
+    const parseCount = (header) => {
+      const raw = response.headers.get(header);
+      if (!raw) return null;
+      const value = Number.parseInt(raw, 10);
+      return Number.isFinite(value) ? value : null;
+    };
 
     return {
       status: 200,
       blob,
       filename,
-      dialogCount: Number.isFinite(dialogCount) ? dialogCount : null,
-      messageCount: Number.isFinite(messageCount) ? messageCount : null,
+      dialogCount: parseCount('X-Dialog-Count'),
+      messageCount: parseCount('X-Message-Count'),
     };
   }
 
   function bindFallbackExport(state) {
     const button = document.getElementById('export-download');
-    if (!button || (button.dataset && button.dataset.bound === '1')) {
+    if (!button) {
+      window.__EXPORT_BIND_OK__ = false;
+      return false;
+    }
+    if (button.dataset && button.dataset.bound === '1') {
+      window.__EXPORT_BIND_OK__ = true;
       return false;
     }
 
@@ -133,10 +189,7 @@
       event.preventDefault();
       event.stopPropagation();
 
-      const daysRaw = daysInput ? daysInput.value : '';
-      const limitRaw = limitInput ? limitInput.value : '';
-
-      let days = parseNumber(daysRaw, { min: 0, fallback: 0 });
+      let days = parseNumber(daysInput ? daysInput.value : '', { min: 0, fallback: 0 });
       if (maxDays !== null && days > maxDays) {
         days = maxDays;
       }
@@ -144,7 +197,7 @@
         daysInput.value = String(days);
       }
 
-      const limit = parseNumber(limitRaw, { min: 1, fallback: 200 });
+      const limit = parseNumber(limitInput ? limitInput.value : '', { min: 1, fallback: 200 });
       if (limitInput) {
         limitInput.value = String(limit);
       }
@@ -172,19 +225,22 @@
         document.body.appendChild(anchor);
         anchor.click();
         setTimeout(() => {
-          URL.revokeObjectURL(blobUrl);
+          try {
+            URL.revokeObjectURL(blobUrl);
+          } catch (revokeError) {
+            console.warn('[client-settings.fallback] failed to revoke blob URL', revokeError);
+          }
           anchor.remove();
-        }, 100);
+        }, 120);
 
         if (result.dialogCount != null && result.messageCount != null) {
           updateStatus(`Сформировано: ${result.dialogCount} диалогов, ${result.messageCount} сообщений`, 'muted');
         } else {
           updateStatus('Архив сформирован', 'muted');
         }
-        window.__EXPORT_BIND_OK__ = true;
       } catch (error) {
-        const message = (error && error.message) || 'Не удалось скачать архив';
-        updateStatus(message, 'alert');
+        const messageText = (error && error.message) || 'Не удалось скачать архив';
+        updateStatus(messageText, 'alert');
       } finally {
         button.disabled = false;
       }
@@ -198,13 +254,13 @@
     return true;
   }
 
-  window.addEventListener('DOMContentLoaded', () => {
-    if (window.__EXPORT_BIND_OK__ === true) {
+  setTimeout(() => {
+    if (window.__EXPORT_BIND_OK__ === true && window.__EXPORT_LOADED__ === true) {
       return;
     }
 
     console.warn('[client-settings.fallback] primary bind missing; applying fallback handler');
     const state = (window.state && typeof window.state === 'object') ? window.state : {};
     bindFallbackExport(state);
-  });
+  }, 0);
 })();

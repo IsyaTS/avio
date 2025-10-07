@@ -303,7 +303,10 @@ def client_settings(tenant: int, request: Request):
     else:
         uploaded_display = ""
 
-    whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
+    try:
+        whatsapp_export_url = str(request.url_for("whatsapp_export", tenant=tenant))
+    except Exception:
+        whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
 
     urls = {
         "settings": str(request.url_for("client_settings", tenant=tenant)),
