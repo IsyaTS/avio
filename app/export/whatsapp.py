@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, AsyncIterator
+from typing import Any, Dict, Iterable, Optional
 
 from zoneinfo import ZoneInfo
 
@@ -157,6 +157,12 @@ def _ensure_export_workdir() -> Path:
         raise ExportSafetyError(f"export_tmp_unwritable:{root}")
     return root
 
+def _allocate_export_file(workdir: Path) -> Path:
+    fd, tmp_path = tempfile.mkstemp(dir=str(workdir), prefix="wa_export_", suffix=".zip")
+    os.close(fd)
+    return Path(tmp_path)
+
+
 async def build_whatsapp_zip(
     tenant: int,
     since: datetime,
@@ -166,7 +172,7 @@ async def build_whatsapp_zip(
     per_message_limit: Optional[int] = None,
     tz: ZoneInfo | None = None,
     batch_size_dialogs: int = 200,
-) -> tuple[Optional[AsyncIterator[bytes]], Dict[str, Any]]:
+) -> tuple[Optional[Path], Dict[str, Any]]:
     try:
         tenant_val = int(tenant)
     except (TypeError, ValueError):
@@ -247,70 +253,71 @@ async def build_whatsapp_zip(
 
     workdir = _ensure_export_workdir()
 
-    async def _stream() -> AsyncIterator[bytes]:
-        existing_names: set[str] = set()
-        actual_dialogs = 0
-        actual_messages = 0
+    existing_names: set[str] = set()
+    actual_dialogs = 0
+    actual_messages = 0
 
-        with tempfile.TemporaryDirectory(dir=str(workdir), prefix="wa_export_") as temp_dir:
-            spool_path = Path(temp_dir) / "whatsapp_export.zip"
-            with open(spool_path, "w+b") as write_fp, open(spool_path, "rb", buffering=0) as read_fp:
-                last_pos = 0
+    zip_path = _allocate_export_file(workdir)
+    try:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            async for dialog, message_batches in dialog_stream:
+                participant_name = _chat_label(dialog)
+                safe_base = _sanitize_filename(participant_name)
+                unique_name = _unique_name(safe_base, existing_names)
+                messages_written = 0
+                entry_handle = None
+                try:
+                    async for batch in message_batches:
+                        for message in batch:
+                            if entry_handle is None:
+                                entry_handle = archive.open(f"{unique_name}.txt", "w")
+                            text_raw = message.get("text") or ""
+                            text = _normalize_text(text_raw)
+                            direction = message.get("direction")
+                            try:
+                                direction_val = int(direction if direction is not None else 0)
+                            except (TypeError, ValueError):
+                                direction_val = 0
+                            sender_name = participant_name if direction_val != 1 else safe_agent
+                            ts_raw = message.get("ts")
+                            try:
+                                ts_val = float(ts_raw) if ts_raw is not None else 0.0
+                            except (TypeError, ValueError):
+                                ts_val = 0.0
+                            timestamp = _format_timestamp(ts_val, timezone_local)
+                            if not text:
+                                text = "[без текста]"
+                            line = f"[{timestamp}] {sender_name}: {text}\n"
+                            entry_handle.write(line.encode("utf-8"))
+                            messages_written += 1
+                            actual_messages += 1
+                finally:
+                    if entry_handle is not None:
+                        entry_handle.close()
 
-                def flush_new_chunks() -> Iterable[bytes]:
-                    nonlocal last_pos
-                    write_fp.flush()
-                    read_fp.seek(last_pos)
-                    while True:
-                        chunk = read_fp.read(64 * 1024)
-                        if not chunk:
-                            break
-                        last_pos += len(chunk)
-                        yield chunk
+                if messages_written:
+                    actual_dialogs += 1
+                else:
+                    existing_names.discard(unique_name)
 
-                with zipfile.ZipFile(write_fp, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
-                    async for dialog, message_batches in dialog_stream:
-                        participant_name = _chat_label(dialog)
-                        safe_base = _sanitize_filename(participant_name)
-                        unique_name = _unique_name(safe_base, existing_names)
-                        messages_written = 0
-
-                        with archive.open(f"{unique_name}.txt", "w") as entry:
-                            async for batch in message_batches:
-                                for message in batch:
-                                    text_raw = message.get("text") or ""
-                                    text = _normalize_text(text_raw)
-                                    direction = message.get("direction")
-                                    try:
-                                        direction_val = int(direction if direction is not None else 0)
-                                    except (TypeError, ValueError):
-                                        direction_val = 0
-                                    sender_name = participant_name if direction_val != 1 else safe_agent
-                                    ts_raw = message.get("ts")
-                                    try:
-                                        ts_val = float(ts_raw) if ts_raw is not None else 0.0
-                                    except (TypeError, ValueError):
-                                        ts_val = 0.0
-                                    timestamp = _format_timestamp(ts_val, timezone_local)
-                                    if not text:
-                                        text = "[без текста]"
-                                    line = f"[{timestamp}] {sender_name}: {text}\n"
-                                    entry.write(line.encode("utf-8"))
-                                    messages_written += 1
-                                    actual_messages += 1
-                                if messages_written:
-                                    for chunk in flush_new_chunks():
-                                        yield chunk
-
-                        if messages_written:
-                            actual_dialogs += 1
-
-                for chunk in flush_new_chunks():
-                    yield chunk
+        if actual_dialogs <= 0 or actual_messages <= 0:
+            try:
+                zip_path.unlink(missing_ok=True)
+            except Exception:
+                _log.warning("[wa_export] failed_to_remove_empty_zip path=%s", zip_path)
+            stats.update({"dialog_count": 0, "message_count": 0})
+            meta["dialog_count"] = 0
+            meta["messages_exported"] = 0
+            return None, stats
 
         stats["dialog_count"] = actual_dialogs
         stats["message_count"] = actual_messages
         meta["dialog_count"] = actual_dialogs
         meta["messages_exported"] = actual_messages
-
-    return _stream(), stats
+        return zip_path, stats
+    except Exception:
+        try:
+            zip_path.unlink(missing_ok=True)
+        except Exception as cleanup_exc:
+            _log.warning("[wa_export] failed_to_cleanup_zip path=%s error=%s", zip_path, cleanup_exc)
+        raise

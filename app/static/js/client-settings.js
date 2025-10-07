@@ -217,17 +217,58 @@ console.info('[client-settings] script loaded');
     if (!response.ok) {
       let detail = '';
       let reason = '';
-      let message = '';
-      let raw = '';
+      let fallbackMessage = '';
       try {
-        raw = await response.text();
+        const data = await response.clone().json();
+        if (data && typeof data === 'object') {
+          const detailValue = data.detail;
+          if (typeof detailValue === 'string') {
+            detail = detailValue;
+          } else if (Array.isArray(detailValue)) {
+            detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
+          } else if (detailValue && typeof detailValue === 'object') {
+            const detailParts = [];
+            Object.entries(detailValue).forEach(([key, value]) => {
+              if (value == null) return;
+              const text = Array.isArray(value) ? value.join(', ') : String(value);
+              detailParts.push(`${key}: ${text}`);
+            });
+            detail = detailParts.join('; ');
+          }
+
+          if (typeof data.reason === 'string') {
+            reason = data.reason;
+          }
+
+          if (!detail && !reason && typeof data.message === 'string') {
+            fallbackMessage = data.message;
+          }
+        }
       } catch (error) {
-        try { console.debug('Failed to read export error text', error); } catch (_) {}
+        try {
+          const rawText = await response.text();
+          fallbackMessage = (rawText || '').trim();
+        } catch (readError) {
+          try { console.debug('Failed to read export error text', readError); } catch (_) {}
+        }
       }
 
-      if (raw) {
-        try {
-          const data = JSON.parse(raw);
+      const message = (reason || detail || fallbackMessage || `HTTP ${response.status}`).trim() || 'Ошибка экспорта';
+      const error = new Error(message);
+      if (detail) error.detail = detail;
+      if (reason) error.reason = reason;
+      if (!detail && fallbackMessage) error.detail = fallbackMessage;
+      error.status = response.status;
+      throw error;
+    }
+
+    const contentTypeHeader = response.headers.get('content-type') || response.headers.get('Content-Type') || '';
+    const normalizedContentType = contentTypeHeader.toLowerCase();
+    if (!normalizedContentType.startsWith('application/zip')) {
+      let detail = '';
+      try {
+        if (normalizedContentType.includes('application/json')) {
+          const data = await response.clone().json();
           if (data && typeof data === 'object') {
             const detailValue = data.detail;
             if (typeof detailValue === 'string') {
@@ -244,28 +285,23 @@ console.info('[client-settings] script loaded');
               detail = detailParts.join('; ');
             }
 
-            if (typeof data.reason === 'string') {
-              reason = data.reason;
-            }
-
-            if (!detail && !reason && typeof data.message === 'string') {
-              message = data.message;
+            if (!detail && typeof data.message === 'string') {
+              detail = data.message;
             }
           }
-        } catch (error) {
-          message = raw.trim();
+        }
+      } catch (error) {
+        try {
+          const rawText = await response.text();
+          detail = (rawText || '').trim();
+        } catch (readError) {
+          try { console.debug('Failed to read non-zip response body', readError); } catch (_) {}
         }
       }
 
-      if (!detail && !reason && !message && raw) {
-        message = raw.trim();
-      }
-
-      const finalMessage = (reason || detail || message || `HTTP ${response.status}`).trim() || 'Ошибка экспорта';
-      const error = new Error(finalMessage);
-      if (detail) error.detail = detail;
-      if (reason) error.reason = reason;
+      const error = new Error((detail || 'Ответ сервера не является ZIP-архивом').trim());
       error.status = response.status;
+      if (detail) error.detail = detail;
       throw error;
     }
 
@@ -491,7 +527,7 @@ console.info('[client-settings] script loaded');
         const exportState = initialState && typeof initialState === 'object' ? initialState : state;
         const result = await requestWhatsappExport({ days, limit, exportState });
         if (result && result.empty) {
-          setStatus(dom.exportStatus, 'Нет диалогов за период', 'alert');
+          setStatus(dom.exportStatus, 'Нет диалогов', 'alert');
           return;
         }
 

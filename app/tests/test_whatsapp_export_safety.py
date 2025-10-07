@@ -1,5 +1,4 @@
 import asyncio
-import io
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -29,17 +28,6 @@ def _make_stream(dialogs, meta):
     return wrapper
 
 
-def _consume_zip(stream):
-    async def _inner():
-        chunks = []
-        async for part in stream:
-            if part:
-                chunks.append(part)
-        return b"".join(chunks)
-
-    return asyncio.run(_inner())
-
-
 def test_whatsapp_export_allows_formerly_blocklisted_lead(monkeypatch):
     dialogs = [
         {
@@ -66,11 +54,13 @@ def test_whatsapp_export_allows_formerly_blocklisted_lead(monkeypatch):
             agent_name="Agent",
         )
 
-    stream, stats = asyncio.run(attempt())
-    assert stream is not None
-    payload = _consume_zip(stream)
-    archive = zipfile.ZipFile(io.BytesIO(payload))
-    assert archive.namelist() == ["lead_2001.txt"]
+    zip_path, stats = asyncio.run(attempt())
+    assert zip_path is not None
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            assert archive.namelist() == ["lead_2001.txt"]
+    finally:
+        Path(zip_path).unlink(missing_ok=True)
     assert stats["dialog_count"] == 1
     assert stats["message_count"] == 1
     assert stats["meta"].get("dialog_count") == 1
@@ -108,14 +98,16 @@ def test_whatsapp_export_uses_contact_filename(monkeypatch):
             agent_name="Agent",
         )
 
-    stream, stats = asyncio.run(attempt())
-    assert stream is not None
-    payload = _consume_zip(stream)
-    archive = zipfile.ZipFile(io.BytesIO(payload))
-    names = archive.namelist()
-    assert names == ["contact_987.txt"]
-    content = archive.read(names[0]).decode("utf-8")
-    assert "hello" in content and "Agent" in content
+    zip_path, stats = asyncio.run(attempt())
+    assert zip_path is not None
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+            assert names == ["contact_987.txt"]
+            content = archive.read(names[0]).decode("utf-8")
+            assert "hello" in content and "Agent" in content
+    finally:
+        Path(zip_path).unlink(missing_ok=True)
 
 
 def test_whatsapp_export_uses_title_for_group(monkeypatch):
@@ -150,9 +142,11 @@ def test_whatsapp_export_uses_title_for_group(monkeypatch):
             agent_name="Agent",
         )
 
-    stream, _stats = asyncio.run(attempt())
-    assert stream is not None
-    payload = _consume_zip(stream)
-    archive = zipfile.ZipFile(io.BytesIO(payload))
-    names = archive.namelist()
-    assert names == ["Team Rocket.txt"]
+    zip_path, _stats = asyncio.run(attempt())
+    assert zip_path is not None
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+            assert names == ["Team Rocket.txt"]
+    finally:
+        Path(zip_path).unlink(missing_ok=True)
