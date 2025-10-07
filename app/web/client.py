@@ -64,6 +64,16 @@ _wa_log = logging.getLogger("wa_export")
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB safety cap for catalog uploads
 
 
+def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
+    try:
+        return str(request.url_for("whatsapp_export", tenant=tenant))
+    except Exception:
+        try:
+            return str(request.url_for("whatsapp_export"))
+        except Exception:
+            return "/export/whatsapp"
+
+
 class WhatsAppExportPayload(BaseModel):
     tenant: int
     key: Optional[str] = None
@@ -275,7 +285,7 @@ def client_settings(tenant: int, request: Request):
             "training_upload": str(request.url_for("training_upload", tenant=tenant)),
             "training_status": str(request.url_for("training_status", tenant=tenant)),
             "training_export": str(request.url_for("training_export", tenant=tenant)),
-            "whatsapp_export": str(request.url_for("whatsapp_export", tenant=tenant)),
+            "whatsapp_export": _resolve_whatsapp_export_url(request, tenant),
         },
     }
     return templates.TemplateResponse("client/settings.html", context)

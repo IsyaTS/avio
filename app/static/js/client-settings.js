@@ -226,8 +226,25 @@
         try {
           const data = JSON.parse(raw);
           if (data && typeof data === 'object') {
-            detail = typeof data.detail === 'string' ? data.detail : '';
-            reason = typeof data.reason === 'string' ? data.reason : '';
+            const detailValue = data.detail;
+            if (typeof detailValue === 'string') {
+              detail = detailValue;
+            } else if (Array.isArray(detailValue)) {
+              detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
+            } else if (detailValue && typeof detailValue === 'object') {
+              const detailParts = [];
+              Object.entries(detailValue).forEach(([key, value]) => {
+                if (value == null) return;
+                const text = Array.isArray(value) ? value.join(', ') : String(value);
+                detailParts.push(`${key}: ${text}`);
+              });
+              detail = detailParts.join('; ');
+            }
+
+            if (typeof data.reason === 'string') {
+              reason = data.reason;
+            }
+
             if (!detail && !reason && typeof data.message === 'string') {
               message = data.message;
             }
@@ -464,7 +481,7 @@
       try {
         const result = await requestWhatsappExport({ days, limit, per });
         if (result && result.empty) {
-          setStatus(dom.exportStatus, 'Нет диалогов за выбранный период', 'alert');
+          setStatus(dom.exportStatus, 'Нет диалогов за период', 'alert');
           return;
         }
 
