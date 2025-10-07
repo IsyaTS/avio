@@ -152,7 +152,8 @@
       window.state = {{ {
         'tenant': tenant,
         'key': key,
-        'urls': urls
+        'urls': urls,
+        'max_days': max_days
       } | tojson | safe }};
     </script>
     <script src="/static/js/client-settings.js" defer></script>

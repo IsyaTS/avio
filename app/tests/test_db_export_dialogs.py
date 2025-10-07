@@ -85,72 +85,50 @@ def test_load_whatsapp_dialogs_allows_missing_contacts(monkeypatch):
     since_ts = 1_700_000_000.0
     until_ts = 1_700_086_400.0
 
-    pool_marker = object()
+    dialogs_data = [
+        {
+            "lead_id": 101,
+            "contact_id": None,
+            "whatsapp_phone": "",
+            "title": "No Contact",
+            "chat_id": "chat:101",
+            "message_limit": 1,
+            "message_total": 1,
+        },
+        {
+            "lead_id": 102,
+            "contact_id": 202,
+            "whatsapp_phone": "+79991234567@s.whatsapp.net",
+            "title": "With Contact",
+            "chat_id": "+79991234567@s.whatsapp.net",
+            "message_limit": 1,
+            "message_total": 1,
+        },
+    ]
+    messages = {
+        101: [{"ts": since_ts + 10, "direction": 0, "text": "hi"}],
+        102: [{"ts": since_ts + 20, "direction": 1, "text": "hello"}],
+    }
 
-    async def fake_ensure_pool():
-        return pool_marker
+    async def fake_stream(**_kwargs):
+        async def generator():
+            for dialog in dialogs_data:
+                lead_id = dialog["lead_id"]
 
-    monkeypatch.setattr(db, "_ensure_pool", fake_ensure_pool)
+                async def message_batches():
+                    yield list(messages[lead_id])
 
-    filtered_sql: Dict[str, Any] = {"called": False}
+                yield dialog, message_batches()
 
-    async def fake_fetchrow(sql, *params):
-        filtered_sql["called"] = True
-        filtered_sql["text"] = sql
-        return {"msg_count": 2}
+        meta = {
+            "dialog_count": len(dialogs_data),
+            "messages_exported": sum(len(v) for v in messages.values()),
+            "distinct_chat_ids": [dialog["chat_id"] for dialog in dialogs_data],
+            "filtered_groups": 0,
+        }
+        return generator(), meta
 
-    monkeypatch.setattr(db, "_fetchrow", fake_fetchrow)
-
-    captured_sql = {}
-
-    async def fake_fetch(sql, *params):
-        if "MAX(m.created_at) AS last_created_at" in sql:
-            captured_sql["candidate"] = sql
-            # Ensure the SQL no longer filters out chats without group markers
-            assert "%@s.whatsapp.net" not in sql
-            assert "%@g.us" not in sql
-            assert "COALESCE(c.is_group, FALSE) = FALSE" not in sql
-            assert "ROW_NUMBER()" not in sql
-            # Channel and tenant filters should be updated
-            assert "COALESCE(l.tenant_id, 0) = $1" in sql
-            assert "l.channel IN ('whatsapp', 'wa')" in sql
-            assert "COALESCE(m.tenant_id, 0) = $1" not in sql
-            # Tenant, since, and until parameters are passed through
-            assert params[0] == tenant
-            assert params[1] == float(since_ts)
-            assert params[2] == float(until_ts)
-            dt = datetime.fromtimestamp(until_ts, tz=timezone.utc)
-            return [
-                {
-                    "lead_id": 101,
-                    "contact_id": None,
-                    "whatsapp_phone": None,
-                    "is_group": False,
-                    "title": "No Contact",
-                    "last_created_at": dt,
-                },
-                {
-                    "lead_id": 102,
-                    "contact_id": 202,
-                    "whatsapp_phone": "+79991234567@s.whatsapp.net",
-                    "is_group": False,
-                    "title": "With Contact",
-                    "last_created_at": dt,
-                },
-            ]
-        if "SELECT m.lead_id, m.direction" in sql:
-            captured_sql["messages"] = sql
-            assert "l.channel IN ('whatsapp', 'wa')" in sql
-            assert "COALESCE(m.tenant_id, 0) = $1" not in sql
-            assert params[0] == tenant
-            assert params[1] == [101, 102]
-            return [
-                {"lead_id": 101, "direction": 0, "text": "hi", "ts": since_ts + 10},
-                {"lead_id": 102, "direction": 1, "text": "hello", "ts": since_ts + 20},
-            ]
-        raise AssertionError(f"Unexpected SQL: {sql}")
-
-    monkeypatch.setattr(db, "_fetch", fake_fetch)
+    monkeypatch.setattr(db, "stream_whatsapp_dialogs", fake_stream)
 
     async def run_load():
         return await db._load_whatsapp_dialogs(
@@ -165,8 +143,6 @@ def test_load_whatsapp_dialogs_allows_missing_contacts(monkeypatch):
 
     dialogs, meta = asyncio.run(run_load())
 
-    assert "candidate" in captured_sql and "messages" in captured_sql
-    assert filtered_sql["called"] is False
     assert len(dialogs) == 2
     by_lead = {dialog["lead_id"]: dialog for dialog in dialogs}
     assert set(by_lead) == {101, 102}

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 import os
 import re
@@ -8,7 +7,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional, AsyncIterator
 
 from zoneinfo import ZoneInfo
 
@@ -166,15 +165,42 @@ async def build_whatsapp_zip(
     agent_name: str,
     per_message_limit: Optional[int] = None,
     tz: ZoneInfo | None = None,
-) -> tuple[Optional[io.BytesIO], Dict[str, Any]]:
-    dialogs, meta = await db_module.fetch_whatsapp_dialogs(
-        tenant, since, until, limit_dialogs, per_message_limit=per_message_limit
+    batch_size_dialogs: int = 200,
+) -> tuple[Optional[AsyncIterator[bytes]], Dict[str, Any]]:
+    try:
+        tenant_val = int(tenant)
+    except (TypeError, ValueError):
+        tenant_val = int(tenant or 0)
+
+    def _to_epoch(value: datetime) -> float:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).timestamp()
+
+    since_ts = _to_epoch(since)
+    until_ts = _to_epoch(until)
+
+    dialog_stream, meta = await db_module.stream_whatsapp_dialogs(
+        tenant_val=tenant_val,
+        since_ts=since_ts,
+        until_ts=until_ts,
+        limit_dialogs=limit_dialogs,
+        per_message_limit=per_message_limit,
+        batch_size_dialogs=batch_size_dialogs,
     )
 
     if not isinstance(meta, dict):
         meta = {}
 
-    filtered_groups = int(meta.get("filtered_groups", 0)) if isinstance(meta, dict) else 0
+    meta.setdefault("since_ts", since_ts)
+    meta.setdefault("until_ts", until_ts)
+    meta["batch_size_dialogs"] = batch_size_dialogs
+    if limit_dialogs is not None:
+        meta["limit_dialogs"] = limit_dialogs
+    if per_message_limit is not None:
+        meta["per_message_limit"] = per_message_limit if per_message_limit > 0 else None
+
+    filtered_groups = int(meta.get("filtered_groups", 0))
     distinct_chat_ids = [str(cid) for cid in (meta.get("distinct_chat_ids") or []) if cid is not None]
     top_chats: Iterable[Dict[str, Any]] = meta.get("top_chats") or []
     if not top_chats:
@@ -191,6 +217,9 @@ async def build_whatsapp_zip(
             )
         top_chats = fallback
 
+    predicted_dialogs = int(meta.get("dialog_count") or 0)
+    predicted_messages = int(meta.get("messages_exported") or 0)
+
     top_five = list(top_chats)[:5]
     _log.info(
         "[wa_export] summary tenant=%s distinct_chat_ids=%s filtered_groups=%s top5=%s",
@@ -200,70 +229,88 @@ async def build_whatsapp_zip(
         top_five,
     )
 
-    if not dialogs or not distinct_chat_ids:
+    if predicted_dialogs <= 0 or predicted_messages <= 0 or not distinct_chat_ids:
         empty_meta = dict(meta)
         empty_meta.update({"dialog_count": 0, "messages_exported": 0, "distinct_chat_ids": []})
-        return None, {"dialog_count": 0, "message_count": 0, "meta": empty_meta}
+        return None, {"dialog_count": 0, "message_count": 0, "meta": empty_meta, "top_five": top_five}
 
     timezone_local = tz or EXPORT_TZ
     safe_agent = (agent_name or "Менеджер").strip() or "Менеджер"
 
-    workdir = _ensure_export_workdir()
-    existing_names: set[str] = set()
-    dialog_count = 0
-    message_count = 0
-
-    with tempfile.TemporaryDirectory(dir=str(workdir), prefix="wa_export_") as temp_dir:
-        archive_path = Path(temp_dir) / "whatsapp_export.zip"
-        with zipfile.ZipFile(archive_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for dialog in dialogs:
-                messages = dialog.get("messages") or []
-                if per_message_limit is not None and per_message_limit > 0:
-                    messages = messages[-per_message_limit:]
-                if not messages:
-                    continue
-                participant_name = _chat_label(dialog)
-                safe_base = _sanitize_filename(participant_name)
-                unique_name = _unique_name(safe_base, existing_names)
-                lines: List[str] = []
-                for message in messages:
-                    text_raw = message.get("text") or ""
-                    text = _normalize_text(text_raw)
-                    direction = message.get("direction")
-                    try:
-                        direction_val = int(direction if direction is not None else 0)
-                    except (TypeError, ValueError):
-                        direction_val = 0
-                    sender_name = participant_name if direction_val != 1 else safe_agent
-                    ts_raw = message.get("ts")
-                    try:
-                        ts_val = float(ts_raw) if ts_raw is not None else 0.0
-                    except (TypeError, ValueError):
-                        ts_val = 0.0
-                    timestamp = _format_timestamp(ts_val, timezone_local)
-                    if not text:
-                        text = "[без текста]"
-                    lines.append(f"[{timestamp}] {sender_name}: {text}")
-                if not lines:
-                    continue
-                content = "\n".join(lines) + "\n"
-                archive.writestr(f"{unique_name}.txt", content.encode("utf-8"))
-                dialog_count += 1
-                message_count += len(lines)
-        payload_bytes = archive_path.read_bytes()
-
-    if dialog_count == 0:
-        sanitized_meta = dict(meta)
-        sanitized_meta.update({"dialog_count": 0, "messages_exported": 0})
-        return None, {"dialog_count": 0, "message_count": 0, "meta": sanitized_meta}
-
-    buf = io.BytesIO(payload_bytes)
     stats: Dict[str, Any] = {
-        "dialog_count": dialog_count,
-        "message_count": message_count,
+        "dialog_count": predicted_dialogs,
+        "message_count": predicted_messages,
         "meta": meta,
         "top_five": top_five,
         "distinct_chat_ids": distinct_chat_ids,
     }
 
-    return buf, stats
+    workdir = _ensure_export_workdir()
+
+    async def _stream() -> AsyncIterator[bytes]:
+        existing_names: set[str] = set()
+        actual_dialogs = 0
+        actual_messages = 0
+
+        with tempfile.TemporaryDirectory(dir=str(workdir), prefix="wa_export_") as temp_dir:
+            spool_path = Path(temp_dir) / "whatsapp_export.zip"
+            with open(spool_path, "w+b") as write_fp, open(spool_path, "rb", buffering=0) as read_fp:
+                last_pos = 0
+
+                def flush_new_chunks() -> Iterable[bytes]:
+                    nonlocal last_pos
+                    write_fp.flush()
+                    read_fp.seek(last_pos)
+                    while True:
+                        chunk = read_fp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        last_pos += len(chunk)
+                        yield chunk
+
+                with zipfile.ZipFile(write_fp, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+                    async for dialog, message_batches in dialog_stream:
+                        participant_name = _chat_label(dialog)
+                        safe_base = _sanitize_filename(participant_name)
+                        unique_name = _unique_name(safe_base, existing_names)
+                        messages_written = 0
+
+                        with archive.open(f"{unique_name}.txt", "w") as entry:
+                            async for batch in message_batches:
+                                for message in batch:
+                                    text_raw = message.get("text") or ""
+                                    text = _normalize_text(text_raw)
+                                    direction = message.get("direction")
+                                    try:
+                                        direction_val = int(direction if direction is not None else 0)
+                                    except (TypeError, ValueError):
+                                        direction_val = 0
+                                    sender_name = participant_name if direction_val != 1 else safe_agent
+                                    ts_raw = message.get("ts")
+                                    try:
+                                        ts_val = float(ts_raw) if ts_raw is not None else 0.0
+                                    except (TypeError, ValueError):
+                                        ts_val = 0.0
+                                    timestamp = _format_timestamp(ts_val, timezone_local)
+                                    if not text:
+                                        text = "[без текста]"
+                                    line = f"[{timestamp}] {sender_name}: {text}\n"
+                                    entry.write(line.encode("utf-8"))
+                                    messages_written += 1
+                                    actual_messages += 1
+                                if messages_written:
+                                    for chunk in flush_new_chunks():
+                                        yield chunk
+
+                        if messages_written:
+                            actual_dialogs += 1
+
+                for chunk in flush_new_chunks():
+                    yield chunk
+
+        stats["dialog_count"] = actual_dialogs
+        stats["message_count"] = actual_messages
+        meta["dialog_count"] = actual_dialogs
+        meta["messages_exported"] = actual_messages
+
+    return _stream(), stats

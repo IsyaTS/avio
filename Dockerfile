@@ -43,7 +43,7 @@ FROM python-base AS app
 COPY app/ .
 EXPOSE 8000
 HEALTHCHECK CMD curl -fsS http://localhost:8000/health || exit 1
-CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]
+CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000","--timeout-keep-alive","5"]
 
 ######## worker ########
 FROM python-base AS worker
