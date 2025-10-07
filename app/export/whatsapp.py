@@ -86,6 +86,9 @@ def _chat_label(dialog: Dict[str, Any]) -> str:
     jid = _normalize_whatsapp_jid(dialog.get("whatsapp_phone"))
     if jid:
         return jid.split("@", 1)[0] or "chat"
+    title = (dialog.get("title") or "").strip()
+    if title:
+        return title
     contact_id = dialog.get("contact_id")
     if contact_id is not None:
         try:
@@ -94,9 +97,18 @@ def _chat_label(dialog: Dict[str, Any]) -> str:
             contact_int = None
         if contact_int is not None:
             return f"contact_{contact_int}"
-    title = (dialog.get("title") or "").strip()
-    if title:
-        return title
+    chat_identifier = dialog.get("chat_id")
+    if isinstance(chat_identifier, str) and chat_identifier.strip():
+        cleaned = chat_identifier.strip().replace(":", "_")
+        return cleaned or "chat"
+    lead_id = dialog.get("lead_id")
+    if lead_id is not None:
+        try:
+            lead_int = int(lead_id)
+        except (TypeError, ValueError):
+            lead_int = None
+        if lead_int is not None:
+            return f"lead_{lead_int}"
     return "chat"
 
 
