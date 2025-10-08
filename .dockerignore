@@ -1,0 +1,10 @@
+# Prevent local virtual environments or vendored packages from shadowing installed dependencies.
+.venv/
+venv/
+**/site-packages/
+**/dist-packages/
+**/*.dist-info/
+**/*.egg-info/
+
+# Keep only suffixed compatibility shims (e.g. app/starlette_ext) under version control.
+**/starlette/

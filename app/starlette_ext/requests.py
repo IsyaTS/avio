@@ -1,4 +1,4 @@
-"""Starlette-compatible Request shim relying on the FastAPI stub."""
+"""Starlette-compatible Request shim exposed via ``starlette_ext.requests``."""
 
 from __future__ import annotations
 

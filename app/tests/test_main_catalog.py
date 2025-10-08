@@ -1,8 +1,8 @@
 import importlib
 
 import pytest
-from starlette.requests import Request
-from starlette.testclient import TestClient
+from starlette_ext.requests import Request
+from starlette_ext.testclient import TestClient
 
 
 @pytest.fixture()
