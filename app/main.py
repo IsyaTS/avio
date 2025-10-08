@@ -491,43 +491,30 @@ except Exception as _e:
 # decorator method.
 async def _log_requests(request: Request, call_next):
     start = time.time()
-    response: Response | None = None
-    exc: BaseException | None = None
     try:
         response = await call_next(request)
-    except BaseException as err:
-        exc = err
-        response = JSONResponse({"detail": "internal_error"}, status_code=500)
-    finally:
+    except BaseException:
         took = (time.time() - start) * 1000.0
-        try:
-            if exc is not None:
-                _access_logger.error(
-                    "%s %s -> 500 %.1fms",
-                    request.method,
-                    request.url.path,
-                    took,
-                    exc_info=exc,
-                )
-            elif response is not None:
-                _access_logger.info(
-                    "%s %s -> %s %.1fms",
-                    request.method,
-                    request.url.path,
-                    response.status_code,
-                    took,
-                )
-            else:
-                _access_logger.info(
-                    "%s %s -> %s %.1fms",
-                    request.method,
-                    request.url.path,
-                    0,
-                    took,
-                )
-        except Exception:
-            pass
-    return response or JSONResponse({"detail": "internal_error"}, status_code=500)
+        _access_logger.exception(
+            "%s %s -> 500 %.1fms",
+            request.method,
+            request.url.path,
+            took,
+        )
+        return JSONResponse({"detail": "internal_error"}, status_code=500)
+
+    took = (time.time() - start) * 1000.0
+    try:
+        _access_logger.info(
+            "%s %s -> %s %.1fms",
+            request.method,
+            request.url.path,
+            response.status_code,
+            took,
+        )
+    except Exception:
+        pass
+    return response
 
 
 if hasattr(app, "middleware"):
