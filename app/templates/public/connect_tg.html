@@ -1,0 +1,96 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Подключение Telegram' %}
+{% set extra_head %}
+<style>
+    .tg-grid {
+        display: grid;
+        gap: 24px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        align-items: start;
+    }
+
+    .qr-box {
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 16px;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        background: rgba(59, 130, 246, 0.12);
+        color: var(--accent);
+    }
+
+    .status-chip.offline { background: rgba(220, 38, 38, 0.15); color: var(--danger); }
+    .status-chip.waiting { background: rgba(251, 191, 36, 0.18); color: #b45309; }
+    .status-chip.authorized { background: rgba(16, 185, 129, 0.18); color: #047857; }
+</style>
+{% endset %}
+
+{% block content %}
+<section class="surface stack" style="gap: 20px;">
+    <div class="stack" style="gap: 8px;">
+        <h1 class="section-title">Подключение Telegram</h1>
+        <p class="section-subtitle">Отсканируйте QR-код в приложении Telegram, чтобы авторизовать рабочий аккаунт. Держите приложение открытым до смены статуса.</p>
+    </div>
+
+    <div class="tg-grid">
+        <div class="stack" style="gap: 16px;">
+            <div class="qr-box">
+                <img id="tg-qr" alt="QR-код Telegram" style="width:240px;height:240px;object-fit:contain;display:none;">
+                <div id="tg-qr-message" class="muted" style="text-align:center; font-size:0.9rem; display:none;">QR не готов</div>
+            </div>
+            <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                <button id="tg-start" type="button" class="btn">Обновить QR</button>
+                <button id="tg-logout" type="button" class="btn btn--secondary">Отключить</button>
+            </div>
+            <div id="tg-status" class="status-chip offline">Проверяем статус…</div>
+        </div>
+
+        <div class="surface surface--muted stack" style="gap: 12px;">
+            <h3 style="font-size:1.1rem; margin:0;">Информация</h3>
+            <ul class="muted" style="margin:0; padding-left: 18px; line-height:1.6;">
+                {% if passport.brand %}<li><strong>Бренд:</strong> {{ passport.brand }}</li>{% endif %}
+                {% if passport.agent_name %}<li><strong>Менеджер:</strong> {{ passport.agent_name }}</li>{% endif %}
+                {% if passport.city %}<li><strong>Город:</strong> {{ passport.city }}</li>{% endif %}
+                <li><strong>Tenant ID:</strong> {{ tenant }}</li>
+                <li><strong>API-ключ:</strong> <code class="inline">{{ key }}</code></li>
+            </ul>
+            {% if persona_preview %}
+            <div class="muted" style="font-size:0.9rem;">Персона ассистента:<br><pre class="code" style="white-space: pre-wrap; margin-top:8px;">{{ persona_preview }}</pre></div>
+            {% endif %}
+            {% if settings_link %}
+            <a href="{{ settings_link }}" target="_blank" rel="noopener" class="btn btn--secondary" style="align-self:flex-start;">Открыть настройки</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="surface surface--muted">
+        <ul class="muted" style="margin:0; padding-left:18px; line-height:1.6;">
+            <li>QR обновляется раз в несколько секунд. Если истёк, нажмите «Обновить QR».</li>
+            <li>Статус «waiting_qr» означает, что код готов к сканированию. После входа ожидайте смены статуса на «authorized».</li>
+            <li>Если аккаунт защищён паролем 2FA, введите его в приложении Telegram. Статус сменится на <code>needs_2fa</code>.</li>
+        </ul>
+    </div>
+</section>
+{% endblock %}
+
+{% set extra_scripts %}
+<script id="tg-connect-state" type="application/json">{{ {
+    "tenant": tenant,
+    "key": key,
+    "urls": urls
+} | tojson }}</script>
+<script src="{{ static_url(request, 'js/connect_tg.js') }}" defer></script>
+{% endset %}

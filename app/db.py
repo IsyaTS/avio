@@ -331,6 +331,8 @@ async def upsert_lead(
     channel: str = "avito",
     source_real_id: Optional[int] = None,
     tenant_id: Optional[int] = None,
+    telegram_user_id: Optional[int] = None,
+    telegram_username: Optional[str] = None,
 ):
     try:
         tenant_val = int(tenant_id) if tenant_id is not None else 0
@@ -338,8 +340,8 @@ async def upsert_lead(
         tenant_val = 0
     await _exec(
         """
-        INSERT INTO leads(lead_id, channel, source_real_id, tenant_id)
-        VALUES($1, $2, $3, $4)
+        INSERT INTO leads(lead_id, channel, source_real_id, tenant_id, telegram_user_id, telegram_username)
+        VALUES($1, $2, $3, $4, $5, $6)
         ON CONFLICT (lead_id)
         DO UPDATE SET channel = EXCLUDED.channel,
                       source_real_id = COALESCE(EXCLUDED.source_real_id, leads.source_real_id),
@@ -348,12 +350,16 @@ async def upsert_lead(
                           WHEN leads.tenant_id IS NULL OR leads.tenant_id = 0 THEN EXCLUDED.tenant_id
                           ELSE leads.tenant_id
                       END,
+                      telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, leads.telegram_user_id),
+                      telegram_username = COALESCE(NULLIF(EXCLUDED.telegram_username, ''), leads.telegram_username),
                       updated_at = now();
     """,
         lead_id,
         channel,
         source_real_id,
         tenant_val,
+        telegram_user_id,
+        telegram_username,
     )
 
 async def upsert_source_cache(lead_id: int, real_id: int):
@@ -371,23 +377,69 @@ async def resolve_or_create_contact(
     whatsapp_phone: Optional[str] = None,
     avito_user_id: Optional[int] = None,
     avito_login: Optional[str] = None,
+    telegram_user_id: Optional[int] = None,
+    telegram_username: Optional[str] = None,
 ) -> int:
     # поиск по приоритету: whatsapp_phone -> avito_user_id -> avito_login
+    contact_id: int | None = None
     if whatsapp_phone:
         row = await _fetchrow("SELECT id FROM contacts WHERE whatsapp_phone=$1", whatsapp_phone)
-        if row: return row["id"]
-    if avito_user_id:
+        if row:
+            contact_id = row["id"]
+    if contact_id is None and avito_user_id:
         row = await _fetchrow("SELECT id FROM contacts WHERE avito_user_id=$1", avito_user_id)
-        if row: return row["id"]
-    if avito_login:
+        if row:
+            contact_id = row["id"]
+    if contact_id is None and avito_login:
         row = await _fetchrow("SELECT id FROM contacts WHERE avito_login=$1 LIMIT 1", avito_login)
-        if row: return row["id"]
+        if row:
+            contact_id = row["id"]
+    if contact_id is None and telegram_user_id:
+        row = await _fetchrow("SELECT id FROM contacts WHERE telegram_user_id=$1", telegram_user_id)
+        if row:
+            contact_id = row["id"]
+    if contact_id is None and telegram_username:
+        row = await _fetchrow("SELECT id FROM contacts WHERE telegram_username=$1", telegram_username)
+        if row:
+            contact_id = row["id"]
 
-    row = await _fetchrow("""
-        INSERT INTO contacts(whatsapp_phone, avito_user_id, avito_login)
-        VALUES($1,$2,$3)
+    if contact_id is not None:
+        if telegram_user_id:
+            await _exec(
+                """
+                UPDATE contacts
+                SET telegram_user_id = COALESCE(telegram_user_id, $2),
+                    updated_at = now()
+                WHERE id = $1;
+                """,
+                contact_id,
+                telegram_user_id,
+            )
+        if telegram_username:
+            await _exec(
+                """
+                UPDATE contacts
+                SET telegram_username = COALESCE(NULLIF($2, ''), telegram_username),
+                    updated_at = now()
+                WHERE id = $1;
+                """,
+                contact_id,
+                telegram_username,
+            )
+        return int(contact_id)
+
+    row = await _fetchrow(
+        """
+        INSERT INTO contacts(whatsapp_phone, avito_user_id, avito_login, telegram_user_id, telegram_username)
+        VALUES($1,$2,$3,$4,$5)
         RETURNING id
-    """, whatsapp_phone, avito_user_id, avito_login)
+    """,
+        whatsapp_phone,
+        avito_user_id,
+        avito_login,
+        telegram_user_id,
+        telegram_username,
+    )
     # если БД недоступна — вернём фиктивный id, чтобы не падал вызов
     return int(row["id"]) if row and "id" in row else 0
 

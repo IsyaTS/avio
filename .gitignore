@@ -3,4 +3,5 @@
 .venv/
 app/.venv/
 app/tenants/
+tgworker/sessions/
 docker-compose.override.yml

@@ -16,6 +16,21 @@
     </div>
 </section>
 
+<section class="surface stack" data-testid="client-telegram">
+    <div class="stack" style="gap:6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Telegram</h2>
+        <p class="section-subtitle">Подключите Telegram через QR-код и управляйте сессией прямо из кабинета.</p>
+    </div>
+    <div class="integration-card" style="display:flex; flex-direction:column; gap:12px;">
+        <div id="tg-integration-status" class="status-text">Статус неизвестен</div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap;">
+            <a id="tg-integration-connect" href="{{ urls.tg_connect }}" target="_blank" rel="noopener" class="btn">Открыть QR</a>
+            <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
+            <button id="tg-integration-disconnect" type="button" class="btn btn--secondary">Отключить</button>
+        </div>
+    </div>
+</section>
+
 <section class="surface stack" data-testid="client-passport">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Паспорт бренда</h2>

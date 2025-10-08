@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+import json
+import os
+import time
+import pathlib
+from typing import Any, Dict, Tuple
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+try:
+    import core  # type: ignore
+except ImportError:  # pragma: no cover
+    from app import core  # type: ignore
+
+try:
+    from db import (  # type: ignore
+        resolve_or_create_contact,
+        link_lead_contact,
+        insert_message_in,
+        upsert_lead,
+    )
+except ImportError:  # pragma: no cover
+    from app.db import (  # type: ignore
+        resolve_or_create_contact,
+        link_lead_contact,
+        insert_message_in,
+        upsert_lead,
+    )
+
+try:
+    from . import common as C  # type: ignore
+except ImportError:  # pragma: no cover
+    from app.web import common as C  # type: ignore
+
+from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
+
+
+router = APIRouter()
+
+
+ask_llm = core.ask_llm  # type: ignore[attr-defined]
+build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
+settings = core.settings  # type: ignore[attr-defined]
+
+
+_redis_queue = settings.r
+_catalog_sent_cache: dict[Tuple[int, str], float] = {}
+
+
+def _digits(s: str) -> str:
+    return "".join(ch for ch in str(s) if ch.isdigit())
+
+
+def _ok(data: dict | None = None, status: int = 200) -> JSONResponse:
+    payload = {"ok": True}
+    if data:
+        payload.update(data)
+    return JSONResponse(payload, status_code=status)
+
+
+def _resolve_catalog_attachment(
+    cfg: dict | None,
+    tenant: int,
+    request: Request | None = None,
+) -> tuple[dict | None, str]:
+    if not isinstance(cfg, dict):
+        return None, ""
+    integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
+    meta = integrations.get("uploaded_catalog")
+    if not isinstance(meta, dict):
+        return None, ""
+    if (meta.get("type") or "").lower() != "pdf":
+        return None, ""
+    raw_path = (meta.get("path") or "").replace("\\", "/")
+    if not raw_path:
+        return None, ""
+    try:
+        safe = pathlib.PurePosixPath(raw_path)
+    except Exception:
+        return None, ""
+    if safe.is_absolute() or ".." in safe.parts:
+        return None, ""
+
+    try:
+        tenant_root = core.tenant_dir(tenant)
+        target = tenant_root / str(safe)
+    except Exception:
+        return None, ""
+
+    if not target.exists() or not target.is_file():
+        return None, ""
+
+    if request is not None:
+        base = str(request.url_for("internal_catalog_file", tenant=str(tenant)))
+    else:
+        base_root = settings.APP_INTERNAL_URL or settings.APP_PUBLIC_URL or ""
+        if not base_root:
+            base_root = "http://app:8000"
+        base = f"{base_root.rstrip('/')}/internal/tenant/{tenant}/catalog-file"
+
+    from urllib.parse import quote
+
+    url = f"{base}?path={quote(str(safe), safe='/')}"
+    token = settings.WEBHOOK_SECRET or ""
+    if token:
+        url += f"&token={quote(token)}"
+
+    filename = meta.get("original") or safe.name
+    mime = meta.get("mime") or "application/pdf"
+    caption = f"Каталог в PDF: {filename}"
+
+    attachment = {
+        "url": url,
+        "filename": filename,
+        "mime_type": mime,
+    }
+    return attachment, caption
+
+
+async def process_incoming(body: dict, request: Request | None = None) -> JSONResponse:
+    src = body.get("source") or {}
+    provider = (src.get("type") or body.get("provider") or "whatsapp").lower()
+    tenant = int(src.get("tenant") or body.get("tenant_id") or os.getenv("TENANT_ID", "1"))
+
+    msg = body.get("message") or {}
+    text = (msg.get("text") or msg.get("body") or body.get("text") or "").strip()
+    lead_id = body.get("leadId") or body.get("lead_id") or int(time.time() * 1000)
+    try:
+        lead_id = int(str(lead_id))
+    except Exception:
+        lead_id = int(time.time() * 1000)
+
+    whatsapp_phone = ""
+    telegram_user_id: int | None = None
+    telegram_username = None
+
+    if provider == "telegram":
+        raw_id = msg.get("telegram_user_id") or body.get("telegram_user_id") or body.get("user_id")
+        if raw_id is not None:
+            try:
+                telegram_user_id = int(raw_id)
+            except Exception:
+                telegram_user_id = None
+        telegram_username = msg.get("telegram_username") or body.get("username")
+    else:
+        from_id = msg.get("from") or msg.get("author") or body.get("from") or ""
+        whatsapp_phone = _digits(from_id.split("@", 1)[0] if from_id else "")
+
+    if not text and provider != "telegram":
+        return _ok({"skipped": True, "reason": "no_text"})
+
+    stored_incoming = False
+    contact_id = 0
+    try:
+        await upsert_lead(
+            lead_id,
+            channel=provider or "whatsapp",
+            tenant_id=tenant,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
+    except Exception:
+        pass
+
+    try:
+        contact_id = await resolve_or_create_contact(
+            whatsapp_phone=whatsapp_phone or None,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
+        if contact_id:
+            await link_lead_contact(lead_id, contact_id)
+            if text:
+                await insert_message_in(lead_id, text, status="received", tenant_id=tenant)
+                stored_incoming = True
+    except Exception:
+        pass
+
+    if text and not stored_incoming:
+        try:
+            await insert_message_in(lead_id, text, status="received", tenant_id=tenant)
+        except Exception:
+            pass
+
+    refer_id = contact_id or lead_id
+
+    cache_key: tuple[int, str] | None = None
+    now_ts = time.time()
+    if provider == "telegram" and telegram_user_id:
+        cache_key = (tenant, f"tg:{telegram_user_id}")
+    elif whatsapp_phone:
+        cache_key = (tenant, whatsapp_phone)
+
+    catalog_already_sent = False
+    if cache_key:
+        cached_ts = _catalog_sent_cache.get(cache_key)
+        if cached_ts and now_ts - cached_ts < core.STATE_TTL_SECONDS:
+            catalog_already_sent = True
+        elif cached_ts:
+            _catalog_sent_cache.pop(cache_key, None)
+
+    cfg = None
+    behavior: dict[str, object] = {}
+    attachment, caption = None, ""
+    try:
+        cfg = core.load_tenant(tenant)
+        if isinstance(cfg, dict):
+            raw_behavior = cfg.get("behavior")
+            if isinstance(raw_behavior, dict):
+                behavior = raw_behavior
+        attachment, caption = _resolve_catalog_attachment(cfg, tenant, request)
+    except Exception:
+        cfg = None
+        behavior = {}
+        attachment, caption = None, ""
+
+    if attachment and not catalog_already_sent:
+        catalog_text = (caption or "Каталог во вложении (PDF).").strip()
+        catalog_out: Dict[str, Any] = {
+            "lead_id": lead_id,
+            "text": catalog_text,
+            "provider": provider or "whatsapp",
+            "tenant_id": tenant,
+        }
+        if provider == "telegram":
+            if telegram_user_id:
+                catalog_out["peer_id"] = str(telegram_user_id)
+                catalog_out["telegram_user_id"] = telegram_user_id
+            if telegram_username:
+                catalog_out["username"] = telegram_username
+        else:
+            catalog_out["to"] = whatsapp_phone
+        catalog_out["attachment"] = attachment
+        await _redis_queue.lpush("outbox:send", json.dumps(catalog_out, ensure_ascii=False))
+        if cache_key:
+            _catalog_sent_cache[cache_key] = time.time()
+        try:
+            core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
+        except Exception:
+            pass
+        return _ok({"queued": True, "leadId": lead_id})
+
+    try:
+        msgs = await build_llm_messages(refer_id, text or "", provider, tenant=tenant)
+        reply = await ask_llm(msgs, tenant=tenant, contact_id=refer_id, channel=provider)
+    except Exception:
+        reply = "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
+
+    out: Dict[str, Any] = {
+        "lead_id": lead_id,
+        "text": reply,
+        "provider": provider or "whatsapp",
+        "tenant_id": tenant,
+    }
+    if provider == "telegram":
+        if telegram_user_id:
+            out["peer_id"] = str(telegram_user_id)
+            out["telegram_user_id"] = telegram_user_id
+        if telegram_username:
+            out["username"] = telegram_username
+    else:
+        out["to"] = whatsapp_phone
+
+    await _redis_queue.lpush("outbox:send", json.dumps(out, ensure_ascii=False))
+
+    behavior = behavior or {}
+    always_full = bool(behavior.get("always_full_catalog")) if behavior else False
+    send_pages_pref = bool(behavior.get("send_catalog_as_pages")) if behavior else False
+    should_send_catalog_pages = (always_full or send_pages_pref) and not catalog_already_sent
+
+    if should_send_catalog_pages:
+        try:
+            items = core.read_all_catalog(cfg)
+            pages = core.paginate_catalog_text(items, cfg, int(os.getenv("CATALOG_PAGE_SIZE", "10")))
+        except Exception:
+            pages = []
+        if pages:
+            for page in pages:
+                page_out = {
+                    "lead_id": lead_id,
+                    "text": page,
+                    "provider": provider or "whatsapp",
+                    "tenant_id": tenant,
+                }
+                if provider == "telegram":
+                    if telegram_user_id:
+                        page_out["peer_id"] = str(telegram_user_id)
+                        page_out["telegram_user_id"] = telegram_user_id
+                    if telegram_username:
+                        page_out["username"] = telegram_username
+                else:
+                    page_out["to"] = whatsapp_phone
+                await _redis_queue.lpush("outbox:send", json.dumps(page_out, ensure_ascii=False))
+            if cache_key:
+                _catalog_sent_cache[cache_key] = time.time()
+
+    return _ok({"queued": True, "leadId": lead_id})
+
+
+def _extract_token(request: Request) -> str:
+    query_token = (request.query_params.get("token") or "").strip()
+    headers = getattr(request, "headers", {}) or {}
+    header_token = headers.get("X-Webhook-Token") or ""
+    auth_header = headers.get("Authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        auth_header = auth_header[7:]
+    header_token = (header_token or auth_header).strip()
+    return query_token or header_token
+
+
+@router.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    token = _extract_token(request)
+    secret = settings.WEBHOOK_SECRET or ""
+    if secret and token != secret:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    tenant = int(payload.get("tenant_id") or os.getenv("TENANT_ID", "1"))
+    body = {
+        "source": {"type": "telegram", "tenant": tenant},
+        "message": {
+            "text": (payload.get("text") or "").strip(),
+            "telegram_user_id": payload.get("user_id"),
+            "telegram_username": payload.get("username"),
+            "media": payload.get("media"),
+        },
+        "telegram": payload,
+    }
+
+    return await process_incoming(body, request)
+
+
+__all__ = ["router", "process_incoming"]
