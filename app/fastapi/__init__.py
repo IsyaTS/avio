@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl
 
-from .responses import JSONResponse, Response  # re-exported subset
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from .staticfiles import StaticFiles
 
 
@@ -534,5 +534,8 @@ __all__ = [
     "BackgroundTasks",
     "UploadFile",
     "File",
+    "FileResponse",
+    "JSONResponse",
+    "RedirectResponse",
     "Response",
 ]
