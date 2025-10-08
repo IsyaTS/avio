@@ -7,7 +7,7 @@ from urllib.parse import quote
 import importlib
 import sys
 
-from fastapi import FastAPI, APIRouter, Request, HTTPException
+from fastapi import FastAPI, APIRouter, Request, HTTPException, Response
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import logging
@@ -186,14 +186,48 @@ def healthcheck():
     """Lightweight container health endpoint."""
     return JSONResponse({"ok": True})
 
-async def _handle(req: Request):
-    token = (req.query_params.get("token") or "").strip()
+async def _handle(request: Request):
+    query_token = (request.query_params.get("token") or "").strip()
+    headers = getattr(request, "headers", {}) or {}
+    header_token = headers.get("X-Webhook-Token") or ""
+    auth_header = headers.get("Authorization") or ""
+    if auth_header and auth_header.lower().startswith("bearer "):
+        auth_token = auth_header[7:]
+    else:
+        auth_token = auth_header
+    header_token = (header_token or auth_token).strip()
+    token = query_token or header_token
+
+    if not token:
+        secret = settings.WEBHOOK_SECRET
+        if secret:
+            return _err("unauthorized", 401)
+        return Response(status_code=204)
+
     secret = settings.WEBHOOK_SECRET
     if secret and token != secret:
         return _err("unauthorized", 401)
 
-    try: body = await req.json()
-    except Exception: body = {}
+    try:
+        raw_body = await request.body()
+    except Exception:
+        raw_body = b""
+
+    if raw_body:
+        try:
+            decoded = raw_body.decode("utf-8")
+        except UnicodeDecodeError:
+            return _err("invalid_json", 400)
+        try:
+            body = json.loads(decoded)
+        except json.JSONDecodeError:
+            return _err("invalid_json", 400)
+        except Exception:
+            return _err("invalid_payload", 400)
+        if not isinstance(body, dict):
+            body = {}
+    else:
+        body = {}
 
     src = body.get("source") or {}
     provider = (src.get("type") or "whatsapp").lower()
@@ -261,7 +295,7 @@ async def _handle(req: Request):
             raw_behavior = cfg.get("behavior")
             if isinstance(raw_behavior, dict):
                 behavior = raw_behavior
-        attachment, caption = _resolve_catalog_attachment(cfg, tenant, req)
+        attachment, caption = _resolve_catalog_attachment(cfg, tenant, request)
     except Exception:
         cfg = None
         behavior = {}
@@ -360,10 +394,12 @@ async def _handle(req: Request):
     return _ok({"queued": True, "leadId": lead_id})
 
 @webhook.post("/webhook")
-async def webhook_in(req: Request): return await _handle(req)
+async def webhook_in(request: Request):
+    return await _handle(request)
 
 @webhook.post("/webhook/provider")
-async def webhook_provider(req: Request): return await _handle(req)
+async def webhook_provider(request: Request):
+    return await _handle(request)
 
 
 @webhook.get("/internal/tenant/{tenant}/catalog-file")
@@ -455,14 +491,13 @@ except Exception as _e:
 # decorator method.
 async def _log_requests(request: Request, call_next):
     start = time.time()
-    response = None
+    response: Response | None = None
     exc: BaseException | None = None
     try:
         response = await call_next(request)
-        return response
     except BaseException as err:
         exc = err
-        raise
+        response = JSONResponse({"detail": "internal_error"}, status_code=500)
     finally:
         took = (time.time() - start) * 1000.0
         try:
@@ -492,6 +527,7 @@ async def _log_requests(request: Request, call_next):
                 )
         except Exception:
             pass
+    return response or JSONResponse({"detail": "internal_error"}, status_code=500)
 
 
 if hasattr(app, "middleware"):
