@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 try:
@@ -35,15 +35,20 @@ class SendRequest(BaseModel):
     username: Optional[str] = None
     media_url: Optional[str] = Field(None, max_length=2048)
 
-    @root_validator
-    def _validate_target(cls, values: dict[str, Any]) -> dict[str, Any]:
-        peer_id = values.get("peer_id")
-        username = values.get("username")
+    @model_validator(mode="after")
+    def _validate_target(self) -> "SendRequest":
+        peer_id = self.peer_id
+        username = self.username
         if not peer_id and not username:
             raise ValueError("peer_id_or_username_required")
-        if not values.get("text") and not values.get("media_url"):
+        if not self.text and not self.media_url:
             raise ValueError("text_or_media_required")
-        return values
+        if username:
+            normalized = username.strip()
+            if normalized and not normalized.startswith("@"):
+                normalized = f"@{normalized}"
+            self.username = normalized or None
+        return self
 
 
 def _resolve_webhook_url() -> tuple[str, Optional[str]]:
