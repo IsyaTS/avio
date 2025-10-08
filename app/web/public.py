@@ -61,6 +61,23 @@ wa_logger = logging.getLogger("wa")
 # Avoid duplicate logging of WA messages via root logger handlers
 wa_logger.propagate = False
 
+
+def _log_tg_proxy_error(path: str, status: int, body: bytes | bytearray | str | None) -> None:
+    if isinstance(body, (bytes, bytearray)):
+        text = body.decode("utf-8", errors="replace")
+    else:
+        text = str(body or "")
+    snippet = text if len(text) <= 500 else f"{text[:500]}…"
+    logger.warning("tg_proxy_error path=%s status=%s body=%s", path, status, snippet)
+
+
+def _tg_error_detail(body: bytes | bytearray | str | None) -> str:
+    if isinstance(body, (bytes, bytearray)):
+        text = body.decode("utf-8", errors="replace")
+    else:
+        text = str(body or "")
+    return text if len(text) <= 500 else f"{text[:500]}…"
+
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
 CSV_ENCODING_CANDIDATES = ["utf-8", "utf-8-sig", "cp1251", "windows-1251", "koi8-r"]
@@ -378,7 +395,7 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
         "public_base": C.public_base_url(request),
         "tg_link": tg_link,
     }
-    return templates.TemplateResponse("public/connect_wa.html", context)
+    return templates.TemplateResponse(request, "public/connect_wa.html", context)
 
 
 @router.get("/connect/tg")
@@ -400,6 +417,7 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
 
     urls = {
+        "start": str(request.url_for("tg_start")),
         "status": str(request.url_for("tg_status")),
         "qr": str(request.url_for("tg_qr_png")),
         "logout": str(request.url_for("tg_logout")),
@@ -418,7 +436,7 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         "public_base": C.public_base_url(request),
         "urls": urls,
     }
-    return templates.TemplateResponse("public/connect_tg.html", context)
+    return templates.TemplateResponse(request, "public/connect_tg.html", context)
 
 
 @router.get("/pub/wa/status")
@@ -576,97 +594,166 @@ def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
     return _proxy_qr_with_fallbacks(tenant_id)
 
 
-@router.get("/pub/tg/status")
-async def tg_status(tenant: int, k: str):
-    tenant = int(tenant)
-    if not C.valid_key(tenant, k):
-        return JSONResponse({"ok": False, "error": "invalid_key"}, status_code=401)
-
+@router.post("/pub/tg/start")
+async def tg_start(request: Request, k: str | None = None, key: str | None = None):
     try:
-        await C.tg_post("/session/start", {"tenant_id": tenant})
-    except Exception:
-        pass
-
-    code, raw = C.tg_http("GET", f"/session/status?tenant={tenant}")
-    payload: dict[str, Any]
-    try:
-        text = raw.decode("utf-8", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
-        payload = json.loads(text) if text else {}
+        payload = await request.json()
     except Exception:
         payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
 
-    response = {"ok": True}
-    if isinstance(payload, dict):
-        response.update(payload)
-    response.setdefault("status", payload.get("status") if isinstance(payload, dict) else None)
-    return JSONResponse(response)
-
-
-def _tg_qr_response(tenant: int, key: str, qr_id: str) -> Response:
-    if not qr_id:
-        return JSONResponse({"error": "missing_qr_id"}, status_code=400)
-
-    status, body = C.tg_http("GET", f"/session/qr/{qr_id}.png")
-    if status == 200 and isinstance(body, (bytes, bytearray)) and body:
-        headers = {"Cache-Control": "no-store"}
-        return Response(content=body, media_type="image/png", headers=headers)
-    if status == 204:
-        return Response(status_code=204, headers={"Cache-Control": "no-store"})
-    if status == 404:
-        return JSONResponse({"error": "qr_not_found"}, status_code=404)
+    tenant_raw = payload.get("tenant_id") or payload.get("tenant")
+    access_key = k or key or payload.get("k") or payload.get("key") or request.query_params.get("key")
+    ok = _ensure_valid_qr_request(tenant_raw, access_key)
+    if ok is None:
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
+    tenant_id, _ = ok
 
     try:
-        text = body.decode("utf-8", errors="ignore") if isinstance(body, (bytes, bytearray)) else str(body or "")
-        data = json.loads(text) if text else {}
+        response = await C.tg_post("/session/start", {"tenant_id": tenant_id})
+    except Exception as exc:
+        _log_tg_proxy_error("/session/start", 0, str(exc))
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    if response.status_code != 200:
+        _log_tg_proxy_error("/session/start", response.status_code, response.text)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    try:
+        data = response.json()
     except Exception:
         data = {}
-    return JSONResponse({"error": "tg_unavailable", "details": data}, status_code=502)
+    if not isinstance(data, dict):
+        data = {}
+
+    result = {"qr_id": data.get("qr_id"), "status": data.get("status")}
+    return JSONResponse(result)
+
+
+@router.get("/pub/tg/status")
+async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
+    media_type = "application/json; charset=utf-8"
+    tenant_raw = tenant if tenant is not None else request.query_params.get("tenant")
+    try:
+        tenant_id = _coerce_tenant(tenant_raw)
+    except ValueError:
+        return JSONResponse({"error": "invalid_tenant"}, status_code=400, media_type=media_type)
+
+    access_key = k or key or request.query_params.get("key")
+    if not access_key or not C.valid_key(tenant_id, access_key):
+        return JSONResponse({"error": "invalid_key"}, status_code=401, media_type=media_type)
+
+    try:
+        preflight = await C.tg_post("/session/start", {"tenant_id": tenant_id}, timeout=6.0)
+    except Exception as exc:
+        _log_tg_proxy_error("/session/start", 0, str(exc))
+        detail = f"preflight_error:{exc}"
+        return JSONResponse({"error": "tg_unavailable", "detail": detail}, status_code=502, media_type=media_type)
+
+    preflight_status = 200 if preflight is None else int(getattr(preflight, "status_code", 200) or 0)
+    if preflight_status != 200:
+        upstream_body = getattr(preflight, "text", "") if preflight is not None else ""
+        detail = _tg_error_detail(upstream_body) or "unexpected_status"
+        _log_tg_proxy_error("/session/start", preflight_status, upstream_body)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": f"preflight_status:{preflight_status} {detail}"},
+            status_code=502,
+            media_type=media_type,
+        )
+
+    status_code, body = C.tg_http("GET", f"/session/status?tenant={tenant_id}")
+    if status_code != 200:
+        _log_tg_proxy_error("/session/status", status_code, body)
+        detail = _tg_error_detail(body) or "status_error"
+        return JSONResponse({"error": "tg_unavailable", "detail": detail}, status_code=502, media_type=media_type)
+
+    text = _tg_error_detail(body)
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        _log_tg_proxy_error("/session/status", status_code, text)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": f"invalid_json:{exc}"},
+            status_code=502,
+            media_type=media_type,
+        )
+
+    if not isinstance(data, dict):
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": "invalid_payload"},
+            status_code=502,
+            media_type=media_type,
+        )
+
+    return JSONResponse(data, media_type=media_type)
 
 
 @router.get("/pub/tg/qr.png")
-def tg_qr_png(request: Request, tenant: int | str | None = None, k: str | None = None, qr_id: str | None = None):
-    ok = _ensure_valid_qr_request(tenant, k)
+def tg_qr_png(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+    qr_id: str | None = None,
+):
+    access_key = k or key or request.query_params.get("key")
+    ok = _ensure_valid_qr_request(tenant, access_key)
     if ok is None:
         return JSONResponse({"error": "invalid_key"}, status_code=401)
-    tenant_id, key = ok
-    qr = qr_id or request.query_params.get("qr_id")
-    return _tg_qr_response(tenant_id, key, qr or "")
+    _tenant_id, _ = ok
 
+    qr = qr_id or request.query_params.get("qr_id") or ""
+    if not qr:
+        return JSONResponse({"error": "missing_qr_id"}, status_code=400)
 
-@router.get("/pub/tg/qr.svg")
-def tg_qr_svg(request: Request, tenant: int | str | None = None, k: str | None = None, qr_id: str | None = None):
-    return tg_qr_png(request, tenant=tenant, k=k, qr_id=qr_id)
+    path = f"/session/qr/{qr}.png"
+    status_code, body = C.tg_http("GET", path)
+    headers = {"Cache-Control": "no-store"}
+    if status_code == 200 and isinstance(body, (bytes, bytearray)):
+        return Response(content=bytes(body), media_type="image/png", headers=headers)
+
+    _log_tg_proxy_error(path, status_code, body)
+    if status_code in (404, 410):
+        return JSONResponse({"error": "qr_not_found"}, status_code=404, headers=headers)
+    return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
 
 
 @router.post("/pub/tg/logout")
-async def tg_logout(request: Request, tenant: int | None = None, k: str | None = None):
-    payload: dict[str, Any] = {}
-    if tenant is None or not k:
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+async def tg_logout(request: Request, tenant: int | None = None, k: str | None = None, key: str | None = None):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
 
-    raw_tenant = tenant if tenant is not None else payload.get("tenant")
-    raw_key = k or payload.get("k") or payload.get("key")
-
-    if raw_tenant is None or raw_key is None:
+    raw_tenant = tenant if tenant is not None else payload.get("tenant_id") or payload.get("tenant")
+    access_key = k or key or payload.get("k") or payload.get("key")
+    ok = _ensure_valid_qr_request(raw_tenant, access_key)
+    if ok is None:
         return JSONResponse({"error": "invalid_key"}, status_code=401)
-
-    tenant_id = int(raw_tenant)
-    key = str(raw_key)
-
-    if not C.valid_key(tenant_id, key):
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+    tenant_id, _ = ok
 
     try:
-        await C.tg_post("/session/logout", {"tenant_id": tenant_id})
-    except Exception:
-        return JSONResponse({"ok": False, "error": "tg_unavailable"}, status_code=502)
+        response = await C.tg_post("/session/logout", {"tenant_id": tenant_id})
+    except Exception as exc:
+        _log_tg_proxy_error("/session/logout", 0, str(exc))
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
-    return JSONResponse({"ok": True})
+    if response.status_code != 200:
+        _log_tg_proxy_error("/session/logout", response.status_code, response.text)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    result = {"ok": True}
+    result.update({k: v for k, v in data.items() if k not in result})
+    return JSONResponse(result)
 
 
 @router.get("/pub/wa/qr.png")

@@ -2,22 +2,31 @@
 {% set title = title or 'Подключение Telegram' %}
 {% set extra_head %}
 <style>
-    .tg-grid {
+    .tg-session {
         display: grid;
         gap: 24px;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
         align-items: start;
     }
 
-    .qr-box {
+    .tg-session__qr-box {
         background: #ffffff;
         border-radius: 16px;
-        padding: 16px;
+        padding: 20px;
         box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-        display: inline-flex;
+        display: flex;
         flex-direction: column;
         align-items: center;
         gap: 12px;
+        min-height: 280px;
+        justify-content: center;
+    }
+
+    .tg-session__qr-img {
+        width: 260px;
+        height: 260px;
+        object-fit: contain;
+        display: none;
     }
 
     .status-chip {
@@ -32,9 +41,10 @@
         color: var(--accent);
     }
 
-    .status-chip.offline { background: rgba(220, 38, 38, 0.15); color: var(--danger); }
     .status-chip.waiting { background: rgba(251, 191, 36, 0.18); color: #b45309; }
     .status-chip.authorized { background: rgba(16, 185, 129, 0.18); color: #047857; }
+    .status-chip.needs-2fa { background: rgba(99, 102, 241, 0.18); color: #312e81; }
+    .status-chip.offline { background: rgba(220, 38, 38, 0.15); color: var(--danger); }
 </style>
 {% endset %}
 
@@ -42,20 +52,18 @@
 <section class="surface stack" style="gap: 20px;">
     <div class="stack" style="gap: 8px;">
         <h1 class="section-title">Подключение Telegram</h1>
-        <p class="section-subtitle">Отсканируйте QR-код в приложении Telegram, чтобы авторизовать рабочий аккаунт. Держите приложение открытым до смены статуса.</p>
+        <p class="section-subtitle">Отсканируйте QR-код в приложении Telegram. Держите окно открытым до смены статуса на «authorized».</p>
     </div>
 
-    <div class="tg-grid">
+    <div class="tg-session">
         <div class="stack" style="gap: 16px;">
-            <div class="qr-box">
-                <img id="tg-qr" alt="QR-код Telegram" style="width:240px;height:240px;object-fit:contain;display:none;">
-                <div id="tg-qr-message" class="muted" style="text-align:center; font-size:0.9rem; display:none;">QR не готов</div>
+            <div class="tg-session__qr-box">
+                <img id="tg-qr" class="tg-session__qr-img" alt="QR-код Telegram">
+                <div id="tg-qr-fallback" class="muted" style="text-align:center; font-size:0.9rem;">QR генерируется…</div>
             </div>
-            <div style="display:flex; gap:12px; flex-wrap:wrap;">
-                <button id="tg-start" type="button" class="btn">Обновить QR</button>
-                <button id="tg-logout" type="button" class="btn btn--secondary">Отключить</button>
-            </div>
-            <div id="tg-status" class="status-chip offline">Проверяем статус…</div>
+            <button id="tg-refresh" type="button" class="btn">Обновить QR</button>
+            <div id="tg-status" class="status-chip offline">Статус: неизвестен</div>
+            <div id="tg-status-message" class="muted" style="font-size:0.9rem;">Пробуем подключиться к Telegram…</div>
         </div>
 
         <div class="surface surface--muted stack" style="gap: 12px;">
@@ -68,7 +76,7 @@
                 <li><strong>API-ключ:</strong> <code class="inline">{{ key }}</code></li>
             </ul>
             {% if persona_preview %}
-            <div class="muted" style="font-size:0.9rem;">Персона ассистента:<br><pre class="code" style="white-space: pre-wrap; margin-top:8px;">{{ persona_preview }}</pre></div>
+            <div class="muted" style="font-size:0.9rem;">Персона ассистента:<br><pre class="code" style="white-space: pre-wrap;margin-top:8px;">{{ persona_preview }}</pre></div>
             {% endif %}
             {% if settings_link %}
             <a href="{{ settings_link }}" target="_blank" rel="noopener" class="btn btn--secondary" style="align-self:flex-start;">Открыть настройки</a>
@@ -78,9 +86,9 @@
 
     <div class="surface surface--muted">
         <ul class="muted" style="margin:0; padding-left:18px; line-height:1.6;">
-            <li>QR обновляется раз в несколько секунд. Если истёк, нажмите «Обновить QR».</li>
-            <li>Статус «waiting_qr» означает, что код готов к сканированию. После входа ожидайте смены статуса на «authorized».</li>
-            <li>Если аккаунт защищён паролем 2FA, введите его в приложении Telegram. Статус сменится на <code>needs_2fa</code>.</li>
+            <li>QR обновляется раз в несколько секунд. При истечении нажмите «Обновить QR».</li>
+            <li>Статус <code>waiting_qr</code> означает, что код готов к сканированию. После авторизации статус изменится на <code>authorized</code>.</li>
+            <li>Если видите статус <code>needs_2fa</code>, введите пароль в приложении Telegram.</li>
         </ul>
     </div>
 </section>
