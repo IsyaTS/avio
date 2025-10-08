@@ -70,6 +70,14 @@ def _log_tg_proxy_error(path: str, status: int, body: bytes | bytearray | str | 
     snippet = text if len(text) <= 500 else f"{text[:500]}…"
     logger.warning("tg_proxy_error path=%s status=%s body=%s", path, status, snippet)
 
+
+def _tg_error_detail(body: bytes | bytearray | str | None) -> str:
+    if isinstance(body, (bytes, bytearray)):
+        text = body.decode("utf-8", errors="replace")
+    else:
+        text = str(body or "")
+    return text if len(text) <= 500 else f"{text[:500]}…"
+
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
 CSV_ENCODING_CANDIDATES = ["utf-8", "utf-8-sig", "cp1251", "windows-1251", "koi8-r"]
@@ -387,7 +395,7 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
         "public_base": C.public_base_url(request),
         "tg_link": tg_link,
     }
-    return templates.TemplateResponse("public/connect_wa.html", context)
+    return templates.TemplateResponse(request, "public/connect_wa.html", context)
 
 
 @router.get("/connect/tg")
@@ -428,7 +436,7 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         "public_base": C.public_base_url(request),
         "urls": urls,
     }
-    return templates.TemplateResponse("public/connect_tg.html", context)
+    return templates.TemplateResponse(request, "public/connect_tg.html", context)
 
 
 @router.get("/pub/wa/status")
@@ -625,25 +633,60 @@ async def tg_start(request: Request, k: str | None = None, key: str | None = Non
 
 @router.get("/pub/tg/status")
 async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
+    media_type = "application/json; charset=utf-8"
+    tenant_raw = tenant if tenant is not None else request.query_params.get("tenant")
+    try:
+        tenant_id = _coerce_tenant(tenant_raw)
+    except ValueError:
+        return JSONResponse({"error": "invalid_tenant"}, status_code=400, media_type=media_type)
+
     access_key = k or key or request.query_params.get("key")
-    ok = _ensure_valid_qr_request(tenant, access_key)
-    if ok is None:
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
-    tenant_id, _ = ok
+    if not access_key or not C.valid_key(tenant_id, access_key):
+        return JSONResponse({"error": "invalid_key"}, status_code=401, media_type=media_type)
+
+    try:
+        preflight = await C.tg_post("/session/start", {"tenant_id": tenant_id}, timeout=6.0)
+    except Exception as exc:
+        _log_tg_proxy_error("/session/start", 0, str(exc))
+        detail = f"preflight_error:{exc}"
+        return JSONResponse({"error": "tg_unavailable", "detail": detail}, status_code=502, media_type=media_type)
+
+    preflight_status = 200 if preflight is None else int(getattr(preflight, "status_code", 200) or 0)
+    if preflight_status != 200:
+        upstream_body = getattr(preflight, "text", "") if preflight is not None else ""
+        detail = _tg_error_detail(upstream_body) or "unexpected_status"
+        _log_tg_proxy_error("/session/start", preflight_status, upstream_body)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": f"preflight_status:{preflight_status} {detail}"},
+            status_code=502,
+            media_type=media_type,
+        )
 
     status_code, body = C.tg_http("GET", f"/session/status?tenant={tenant_id}")
     if status_code != 200:
         _log_tg_proxy_error("/session/status", status_code, body)
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+        detail = _tg_error_detail(body) or "status_error"
+        return JSONResponse({"error": "tg_unavailable", "detail": detail}, status_code=502, media_type=media_type)
 
+    text = _tg_error_detail(body)
     try:
-        text = body.decode("utf-8", errors="ignore") if isinstance(body, (bytes, bytearray)) else str(body or "")
-        data = json.loads(text) if text else {}
-    except Exception:
-        data = {}
+        data = json.loads(text)
+    except Exception as exc:
+        _log_tg_proxy_error("/session/status", status_code, text)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": f"invalid_json:{exc}"},
+            status_code=502,
+            media_type=media_type,
+        )
+
     if not isinstance(data, dict):
-        data = {}
-    return JSONResponse(data)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": "invalid_payload"},
+            status_code=502,
+            media_type=media_type,
+        )
+
+    return JSONResponse(data, media_type=media_type)
 
 
 @router.get("/pub/tg/qr.png")
