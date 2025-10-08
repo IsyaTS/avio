@@ -406,6 +406,12 @@ try {
     whatsappExport: urls.whatsapp_export || `/export/whatsapp`,
   };
 
+  const telegram = {
+    statusUrl: urls.tg_status || `/pub/tg/status`,
+    logoutUrl: urls.tg_logout || `/pub/tg/logout`,
+    connectUrl: urls.tg_connect || `/connect/tg?tenant=${tenant}`,
+  };
+
   const dom = {
     settingsForm: document.getElementById('settings-form'),
     saveSettings: document.getElementById('save-settings'),
@@ -433,6 +439,10 @@ try {
     expPer: document.getElementById('exp-per'),
     exportDownload: document.getElementById('export-download'),
     exportStatus: document.getElementById('export-status'),
+    tgStatus: document.getElementById('tg-integration-status'),
+    tgRefresh: document.getElementById('tg-integration-refresh'),
+    tgDisconnect: document.getElementById('tg-integration-disconnect'),
+    tgConnect: document.getElementById('tg-integration-connect'),
   };
 
   function setStatus(element, message, variant = 'muted') {
@@ -810,6 +820,60 @@ try {
 
   // Автоподгрузка CSV при доступности
   loadCsv({ quiet: true });
+
+  function updateTelegramStatus(message, variant = 'muted') {
+    if (!dom.tgStatus) return;
+    dom.tgStatus.className = `status-text ${variant}`.trim();
+    dom.tgStatus.textContent = message || '';
+  }
+
+  async function refreshTelegramStatus() {
+    if (!dom.tgStatus || !telegram.statusUrl) return;
+    if (!accessKey) {
+      updateTelegramStatus('Нет ключа доступа', 'alert');
+      return;
+    }
+    const url = `${telegram.statusUrl}?tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(accessKey)}&t=${Date.now()}`;
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      const data = await response.json();
+      const status = (data && typeof data.status === 'string') ? data.status : '';
+      let variant = 'muted';
+      if (status === 'authorized') variant = 'muted';
+      else if (status === 'waiting_qr') variant = 'warning';
+      else if (status) variant = 'alert';
+      const suffix = data && data.needs_2fa ? ' (требуется пароль 2FA)' : '';
+      updateTelegramStatus(status ? `Статус: ${status}${suffix}` : 'Статус неизвестен', variant);
+    } catch (error) {
+      console.error('[client-settings] telegram status error', error);
+      updateTelegramStatus('Не удалось получить статус Telegram', 'alert');
+    }
+  }
+
+  async function disconnectTelegram() {
+    if (!telegram.logoutUrl || !accessKey) return;
+    const url = `${telegram.logoutUrl}?tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(accessKey)}`;
+    try {
+      await fetch(url, { method: 'POST', cache: 'no-store' });
+    } catch (error) {
+      console.error('[client-settings] telegram logout error', error);
+    } finally {
+      refreshTelegramStatus();
+    }
+  }
+
+  if (dom.tgConnect && telegram.connectUrl) {
+    dom.tgConnect.href = telegram.connectUrl;
+    dom.tgConnect.target = '_blank';
+  }
+  if (dom.tgRefresh) {
+    dom.tgRefresh.addEventListener('click', refreshTelegramStatus);
+  }
+  if (dom.tgDisconnect) {
+    dom.tgDisconnect.addEventListener('click', disconnectTelegram);
+  }
+
+  refreshTelegramStatus();
 
   bindExportClicks();
 })();

@@ -318,6 +318,10 @@ def client_settings(tenant: int, request: Request):
         "training_upload": str(request.url_for("training_upload", tenant=tenant)),
         "training_status": str(request.url_for("training_status", tenant=tenant)),
         "whatsapp_export": whatsapp_export_url,
+        "tg_status": str(request.url_for("tg_status")),
+        "tg_qr": str(request.url_for("tg_qr_png")),
+        "tg_logout": str(request.url_for("tg_logout")),
+        "tg_connect": C.public_url(request, f"/connect/tg?tenant={tenant}&k={quote_plus(key)}"),
     }
 
     state = {

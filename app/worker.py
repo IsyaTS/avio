@@ -25,6 +25,8 @@ REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
 WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088").rstrip("/")
 # Match waweb INTERNAL_SYNC_TOKEN resolution (WA_WEB_TOKEN or WEBHOOK_SECRET)
 WA_INTERNAL_TOKEN = (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
+TG_WORKER_URL = (os.getenv("TG_WORKER_URL", "http://tgworker:8085") or "http://tgworker:8085").rstrip("/")
+TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 SEND       = (os.getenv("SEND_ENABLED","true").lower() == "true")
 
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
@@ -97,12 +99,45 @@ async def send_avito(tenant_id: int, lead_id: int, text: str) -> tuple[int,str]:
     phone = ""
     return await send_whatsapp(tenant_id, phone, text)
 
+
+async def send_telegram(
+    tenant_id: int,
+    peer_id: int | None,
+    username: str | None,
+    text: str | None,
+    media_url: str | None = None,
+) -> tuple[int, str]:
+    url = f"{TG_WORKER_URL}/send"
+    payload: Dict[str, Any] = {"tenant_id": tenant_id}
+    if peer_id:
+        payload["peer_id"] = int(peer_id)
+    if username:
+        payload["username"] = username
+    if text:
+        payload["text"] = text
+    if media_url:
+        payload["media_url"] = media_url
+    headers: Dict[str, str] = {}
+    if TG_WORKER_TOKEN:
+        headers["X-Auth-Token"] = TG_WORKER_TOKEN
+    status, body = await asyncio.to_thread(_http_json, "POST", url, payload, 12.0, headers)
+    return status, body
+
 # ==== Core send ====
 async def do_send(item: dict) -> tuple[str, str]:
     provider = (item.get("provider") or "").lower()
     text     = (item.get("text") or "").strip()
     lead_id  = int(item.get("lead_id") or 0)
     phone    = _digits(item.get("to") or "")
+    peer_raw = item.get("peer_id")
+    username = item.get("username")
+    media_url = item.get("media_url") if isinstance(item.get("media_url"), str) else None
+    telegram_user_id = None
+    if item.get("telegram_user_id") is not None:
+        try:
+            telegram_user_id = int(item.get("telegram_user_id") or 0)
+        except Exception:
+            telegram_user_id = None
     tenant   = int(item.get("tenant_id") or os.getenv("TENANT_ID","1"))
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else None
 
@@ -116,6 +151,14 @@ async def do_send(item: dict) -> tuple[str, str]:
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
     elif provider == "avito":
         st, body = await send_avito(tenant, lead_id, text)
+    elif provider == "telegram":
+        peer_id = None
+        if peer_raw:
+            try:
+                peer_id = int(peer_raw)
+            except Exception:
+                peer_id = None
+        st, body = await send_telegram(tenant, peer_id, username, text or None, media_url)
     else:
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
 
@@ -131,13 +174,30 @@ async def write_result(item: dict, status: str):
     if not text and attachment:
         fname = attachment.get("filename") or ""
         text = f"[attachment] {fname}".strip()
+
+    telegram_user_id = None
+    raw_peer = item.get("telegram_user_id") or item.get("peer_id")
+    if raw_peer is not None:
+        try:
+            telegram_user_id = int(raw_peer)
+        except Exception:
+            telegram_user_id = None
+    username = item.get("username") if isinstance(item.get("username"), str) else None
+
     try:
-        await upsert_lead(lead_id, channel=item.get("provider") or "whatsapp", source_real_id=None, tenant_id=tenant_id)
+        await upsert_lead(
+            lead_id,
+            channel=item.get("provider") or "whatsapp",
+            source_real_id=None,
+            tenant_id=tenant_id,
+            telegram_user_id=telegram_user_id,
+            telegram_username=username,
+        )
     except Exception as e:
         log(f"[worker] upsert_lead err: {e}")
 
+    sent_status = "sent" if status.startswith("sent") else status
     try:
-        sent_status = "sent" if status.startswith("sent") else status
         await insert_message_out(lead_id, text, None, status=sent_status, tenant_id=tenant_id)
     except Exception as e:
         log(f"[worker] insert_message_out err: {e}")

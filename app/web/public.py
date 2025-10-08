@@ -360,6 +360,9 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
     if access_key:
         raw_settings = request.url_for('client_settings', tenant=str(tenant))
         settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
+        tg_link = C.public_url(request, f"/connect/tg?tenant={tenant}&k={quote_plus(access_key)}")
+    else:
+        tg_link = C.public_url(request, f"/connect/tg?tenant={tenant}")
 
     context = {
         "request": request,
@@ -373,8 +376,49 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
         "subtitle": subtitle,
         "settings_link": settings_link,
         "public_base": C.public_base_url(request),
+        "tg_link": tg_link,
     }
     return templates.TemplateResponse("public/connect_wa.html", context)
+
+
+@router.get("/connect/tg")
+def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | None = None):
+    tenant = int(tenant)
+    access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
+    if not C.valid_key(tenant, access_key):
+        return JSONResponse({"detail": "invalid_key"}, status_code=401)
+
+    C.ensure_tenant_files(tenant)
+    cfg = C.read_tenant_config(tenant)
+    passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
+    persona = C.read_persona(tenant)
+    persona_preview = "\n".join((persona or "").splitlines()[:6])
+
+    settings_link = ""
+    if access_key:
+        raw_settings = request.url_for("client_settings", tenant=str(tenant))
+        settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
+
+    urls = {
+        "status": str(request.url_for("tg_status")),
+        "qr": str(request.url_for("tg_qr_png")),
+        "logout": str(request.url_for("tg_logout")),
+    }
+
+    context = {
+        "request": request,
+        "tenant": tenant,
+        "key": access_key,
+        "timestamp": int(time.time()),
+        "passport": passport,
+        "persona_preview": persona_preview,
+        "title": "Подключение Telegram",
+        "subtitle": passport.get("brand") or "Подключение Telegram",
+        "settings_link": settings_link,
+        "public_base": C.public_base_url(request),
+        "urls": urls,
+    }
+    return templates.TemplateResponse("public/connect_tg.html", context)
 
 
 @router.get("/pub/wa/status")
@@ -530,6 +574,99 @@ def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
         return JSONResponse({"error": "invalid_key"}, status_code=401)
     tenant_id, _ = ok
     return _proxy_qr_with_fallbacks(tenant_id)
+
+
+@router.get("/pub/tg/status")
+async def tg_status(tenant: int, k: str):
+    tenant = int(tenant)
+    if not C.valid_key(tenant, k):
+        return JSONResponse({"ok": False, "error": "invalid_key"}, status_code=401)
+
+    try:
+        await C.tg_post("/session/start", {"tenant_id": tenant})
+    except Exception:
+        pass
+
+    code, raw = C.tg_http("GET", f"/session/status?tenant={tenant}")
+    payload: dict[str, Any]
+    try:
+        text = raw.decode("utf-8", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
+        payload = json.loads(text) if text else {}
+    except Exception:
+        payload = {}
+
+    response = {"ok": True}
+    if isinstance(payload, dict):
+        response.update(payload)
+    response.setdefault("status", payload.get("status") if isinstance(payload, dict) else None)
+    return JSONResponse(response)
+
+
+def _tg_qr_response(tenant: int, key: str, qr_id: str) -> Response:
+    if not qr_id:
+        return JSONResponse({"error": "missing_qr_id"}, status_code=400)
+
+    status, body = C.tg_http("GET", f"/session/qr/{qr_id}.png")
+    if status == 200 and isinstance(body, (bytes, bytearray)) and body:
+        headers = {"Cache-Control": "no-store"}
+        return Response(content=body, media_type="image/png", headers=headers)
+    if status == 204:
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    if status == 404:
+        return JSONResponse({"error": "qr_not_found"}, status_code=404)
+
+    try:
+        text = body.decode("utf-8", errors="ignore") if isinstance(body, (bytes, bytearray)) else str(body or "")
+        data = json.loads(text) if text else {}
+    except Exception:
+        data = {}
+    return JSONResponse({"error": "tg_unavailable", "details": data}, status_code=502)
+
+
+@router.get("/pub/tg/qr.png")
+def tg_qr_png(request: Request, tenant: int | str | None = None, k: str | None = None, qr_id: str | None = None):
+    ok = _ensure_valid_qr_request(tenant, k)
+    if ok is None:
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
+    tenant_id, key = ok
+    qr = qr_id or request.query_params.get("qr_id")
+    return _tg_qr_response(tenant_id, key, qr or "")
+
+
+@router.get("/pub/tg/qr.svg")
+def tg_qr_svg(request: Request, tenant: int | str | None = None, k: str | None = None, qr_id: str | None = None):
+    return tg_qr_png(request, tenant=tenant, k=k, qr_id=qr_id)
+
+
+@router.post("/pub/tg/logout")
+async def tg_logout(request: Request, tenant: int | None = None, k: str | None = None):
+    payload: dict[str, Any] = {}
+    if tenant is None or not k:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+    raw_tenant = tenant if tenant is not None else payload.get("tenant")
+    raw_key = k or payload.get("k") or payload.get("key")
+
+    if raw_tenant is None or raw_key is None:
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
+
+    tenant_id = int(raw_tenant)
+    key = str(raw_key)
+
+    if not C.valid_key(tenant_id, key):
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
+
+    try:
+        await C.tg_post("/session/logout", {"tenant_id": tenant_id})
+    except Exception:
+        return JSONResponse({"ok": False, "error": "tg_unavailable"}, status_code=502)
+
+    return JSONResponse({"ok": True})
 
 
 @router.get("/pub/wa/qr.png")

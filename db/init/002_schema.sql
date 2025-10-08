@@ -5,10 +5,15 @@ CREATE TABLE IF NOT EXISTS leads (
   channel        TEXT,              -- avito / whatsapp / etc
   source_real_id INTEGER,           -- кеш realId источника
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  telegram_user_id BIGINT,
+  telegram_username TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_updated_at ON leads(updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_tenant_telegram
+  ON leads(tenant_id, telegram_user_id)
+  WHERE telegram_user_id IS NOT NULL;
 
 -- Сообщения
 CREATE TABLE IF NOT EXISTS messages (

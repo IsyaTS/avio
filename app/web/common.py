@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - fallback when alias not yet registered
 
 T = TypeVar("T")
 
-# --- redis & waweb ---
+# --- redis & integrations ---
 _redis_client: redis.Redis | None = None
 WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088").rstrip("/")
 # Internal auth token that waweb expects in X-Auth-Token. It may be provided
@@ -53,6 +53,8 @@ WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088
 WA_INTERNAL_TOKEN = (
     (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 )
+TG_WORKER_URL = (os.getenv("TG_WORKER_URL", "http://tgworker:8085") or "http://tgworker:8085").rstrip("/")
+TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
 
 def redis_client() -> redis.Redis:
@@ -187,6 +189,33 @@ async def wa_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response
         raise RuntimeError("wa_post failed without response")
 
 
+async def tg_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response:
+    url = f"{TG_WORKER_URL}{path}"
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if TG_WORKER_TOKEN:
+        headers["X-Auth-Token"] = TG_WORKER_TOKEN
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(url, json=data, headers=headers)
+
+
+def tg_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+    url = f"{TG_WORKER_URL}{path}"
+    req = urllib.request.Request(url, data=body, method=method)
+    if body is not None:
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+    if TG_WORKER_TOKEN:
+        req.add_header("X-Auth-Token", TG_WORKER_TOKEN)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.status, raw
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        return exc.code, raw
+    except Exception as exc:  # pragma: no cover
+        return 0, str(exc).encode()
+
+
 # --- keys registry in Redis ---
 def valid_key(tenant: int, kk: str) -> bool:
     want = (get_tenant_pubkey(int(tenant)) or "").strip().lower()
@@ -241,9 +270,13 @@ def set_primary(tenant: int, key: str):
 __all__ = [
     "WA_WEB_URL",
     "WA_INTERNAL_TOKEN",
+    "TG_WORKER_URL",
+    "TG_WORKER_TOKEN",
     "redis_client",
     "http",
     "wa_post",
+    "tg_post",
+    "tg_http",
     "public_base_url",
     "public_url",
     "valid_key",
