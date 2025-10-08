@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, Tuple
 from urllib.parse import parse_qsl
 
-from fastapi import Request as _FastAPIRequest
+from app.fastapi_ext import Request as _FastAPIRequest
 
 
 def _decode_headers(raw: Iterable[Tuple[Any, Any]]) -> Dict[str, str]:
