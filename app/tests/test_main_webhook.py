@@ -70,10 +70,18 @@ def _install_fastapi_stub() -> None:
         def __init__(self, path: pathlib.Path | str, media_type: str | None = None, filename: str | None = None):
             super().__init__({"path": str(path), "filename": filename, "media_type": media_type})
 
+    class FakeResponse:
+        def __init__(self, content: object | None = None, status_code: int = 200):
+            self.body = content
+            self.status_code = status_code
+            self.headers: dict[str, str] = {}
+
     responses_mod.JSONResponse = FakeJSONResponse
     responses_mod.RedirectResponse = FakeRedirectResponse
     responses_mod.FileResponse = FakeFileResponse
+    responses_mod.Response = FakeResponse
     sys.modules["fastapi.responses"] = responses_mod
+    fastapi_mod.Response = FakeResponse
 
     staticfiles_mod = types.ModuleType("fastapi.staticfiles")
 
@@ -196,13 +204,23 @@ class _QueryParams:
 
 
 class DummyRequest:
-    def __init__(self, body: dict, base_url: str = "http://app:8000"):
+    def __init__(
+        self,
+        body: dict,
+        base_url: str = "http://app:8000",
+        query: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self._body = body
         self._base_url = base_url.rstrip("/")
-        self.query_params = _QueryParams({})
+        self.query_params = _QueryParams(query or {})
+        self.headers = headers or {}
 
     async def json(self) -> dict:
         return self._body
+
+    async def body(self) -> bytes:
+        return json.dumps(self._body).encode("utf-8")
 
     def url_for(self, name: str, **params: str) -> str:
         if name != "internal_catalog_file":
@@ -264,7 +282,7 @@ def test_webhook_returns_pdf_attachment(monkeypatch, tmp_path):
         "leadId": 123,
     }
 
-    request = DummyRequest(payload)
+    request = DummyRequest(payload, query={"token": "abc"})
     response = asyncio.run(main._handle(request))
 
     assert response.status_code == 200
@@ -343,7 +361,7 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
         "leadId": lead_id,
     }
 
-    first = DummyRequest(payload)
+    first = DummyRequest(payload, query={"token": "abc"})
     response_first = asyncio.run(main._handle(first))
     assert response_first.status_code == 200
     assert len(queue.pushed) == 1
@@ -356,7 +374,7 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
         "leadId": lead_id,
     }
 
-    second = DummyRequest(payload_second)
+    second = DummyRequest(payload_second, query={"token": "abc"})
     response_second = asyncio.run(main._handle(second))
     assert response_second.status_code == 200
     assert len(queue.pushed) == 2
