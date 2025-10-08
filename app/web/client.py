@@ -102,7 +102,7 @@ def _client_settings_static_version() -> str:
     for env_name in ("APP_GIT_SHA", "GIT_SHA", "HEROKU_SLUG_COMMIT"):
         value = (os.getenv(env_name) or "").strip()
         if value:
-            _CLIENT_SETTINGS_VERSION = value[:12]
+            _CLIENT_SETTINGS_VERSION = value[:8] or value
             return _CLIENT_SETTINGS_VERSION
 
     try:
@@ -304,7 +304,7 @@ def client_settings(tenant: int, request: Request):
         uploaded_display = ""
 
     try:
-        whatsapp_export_url = str(request.url_for("whatsapp_export", tenant=tenant))
+        whatsapp_export_url = str(request.url_for("whatsapp_export"))
     except Exception:
         whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
 
