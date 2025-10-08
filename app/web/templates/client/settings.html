@@ -145,13 +145,12 @@
         </div>
       </div>
     </div>
+    {% set state_json = state | tojson %}
+    <script id="client-settings-state" type="application/json">
+      {{ state_json }}
+    </script>
     <script>
-      window.state = {
-        "tenant": {{ state.tenant | tojson }},
-        "key": {{ state.key | tojson }},
-        "urls": {{ state.urls | tojson }},
-        "max_days": {{ state.max_days | tojson }},
-      };
+      window.state = {{ state_json }};
     </script>
     <script src="{{ static_url(request, 'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
     <script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
