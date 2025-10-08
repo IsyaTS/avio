@@ -1,8 +1,8 @@
 import os
 import json
 from urllib.parse import quote_plus
-from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
 from . import common as C
