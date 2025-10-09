@@ -62,21 +62,20 @@ wa_logger = logging.getLogger("wa")
 wa_logger.propagate = False
 
 
-def _log_tg_proxy_error(path: str, status: int, body: bytes | bytearray | str | None) -> None:
+def _warn_tg_failure(route: str, tenant_id: int, status: int, body: bytes | bytearray | str | None) -> None:
     if isinstance(body, (bytes, bytearray)):
-        text = body.decode("utf-8", errors="replace")
+        length = len(body)
+    elif isinstance(body, str):
+        length = len(body.encode("utf-8", errors="ignore"))
     else:
-        text = str(body or "")
-    snippet = text if len(text) <= 500 else f"{text[:500]}…"
-    logger.warning("tg_proxy_error path=%s status=%s body=%s", path, status, snippet)
-
-
-def _tg_error_detail(body: bytes | bytearray | str | None) -> str:
-    if isinstance(body, (bytes, bytearray)):
-        text = body.decode("utf-8", errors="replace")
-    else:
-        text = str(body or "")
-    return text if len(text) <= 500 else f"{text[:500]}…"
+        length = 0
+    logger.warning(
+        "tg_proxy_warning route=%s tenant=%s tg_code=%s tg_body_len=%s",
+        route,
+        tenant_id,
+        status,
+        length,
+    )
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
@@ -416,13 +415,6 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         raw_settings = request.url_for("client_settings", tenant=str(tenant))
         settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
 
-    urls = {
-        "start": str(request.url_for("tg_start")),
-        "status": str(request.url_for("tg_status")),
-        "qr": str(request.url_for("tg_qr_png")),
-        "logout": str(request.url_for("tg_logout")),
-    }
-
     query_params = {"tenant": str(tenant), "k": access_key}
 
     context = {
@@ -436,7 +428,6 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         "subtitle": passport.get("brand") or "Подключение Telegram",
         "settings_link": settings_link,
         "public_base": C.public_base_url(request),
-        "urls": urls,
         "query": query_params,
     }
     return templates.TemplateResponse(request, "public/connect_tg.html", context)
@@ -617,57 +608,70 @@ def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
 async def tg_start(tenant: int | str | None = None, k: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        return validation
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
 
     tenant_id, _ = validation
 
     try:
         upstream = await C.tg_post("/session/start", {"tenant_id": tenant_id})
-    except Exception as exc:
-        logger.info("stage=tg_start_proxy tenant=%s http=%s len=%s", tenant_id, 0, 0)
-        _log_tg_proxy_error("/session/start", 0, str(exc))
+    except Exception:
+        logger.info("stage=tg_start_proxy tenant=%s tg_http=%s bytes=%s", tenant_id, 0, 0)
+        _warn_tg_failure("/session/start", tenant_id, 0, None)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    logger.info("stage=tg_start_proxy tenant=%s http=%s len=%s", tenant_id, status_code, len(body_bytes))
+    logger.info(
+        "stage=tg_start_proxy tenant=%s tg_http=%s bytes=%s",
+        tenant_id,
+        status_code,
+        len(body_bytes),
+    )
 
     if status_code != 200:
-        _log_tg_proxy_error("/session/start", status_code, getattr(upstream, "text", ""))
+        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
-    media_type = "application/json"
-    if hasattr(upstream, "headers"):
-        media_type = upstream.headers.get("content-type", media_type)
-    return Response(content=body_bytes, media_type=media_type, status_code=200)
+    try:
+        payload = upstream.json()
+    except Exception:
+        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    if not isinstance(payload, dict):
+        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    if payload.get("status") is None or payload.get("qr_id") is None:
+        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    return JSONResponse(payload)
 
 
 @router.get("/pub/tg/status")
 async def tg_status(tenant: int | str | None = None, k: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        return validation
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
 
     tenant_id, _ = validation
 
     try:
         preflight = await C.tg_post("/session/start", {"tenant_id": tenant_id}, timeout=6.0)
-    except Exception as exc:
-        logger.info("stage=tg_status_proxy tenant=%s http=%s", tenant_id, 0)
-        _log_tg_proxy_error("/session/start", 0, str(exc))
+    except Exception:
+        _warn_tg_failure("/session/start", tenant_id, 0, None)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     preflight_status = int(getattr(preflight, "status_code", 0) or 0)
+    preflight_body = bytes(getattr(preflight, "content", b"") or b"")
     if preflight_status != 200:
-        logger.info("stage=tg_status_proxy tenant=%s http=%s", tenant_id, preflight_status)
-        _log_tg_proxy_error("/session/start", preflight_status, getattr(preflight, "text", ""))
+        _warn_tg_failure("/session/start", tenant_id, preflight_status, preflight_body)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     status_code, body = C.tg_http("GET", f"/session/status?tenant={tenant_id}")
-    logger.info("stage=tg_status_proxy tenant=%s http=%s", tenant_id, status_code)
-
     if status_code != 200:
-        _log_tg_proxy_error("/session/status", status_code, body)
+        _warn_tg_failure("/session/status", tenant_id, status_code, body)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     if isinstance(body, str):
@@ -681,7 +685,9 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
 def tg_qr_png(tenant: int | str | None = None, k: str | None = None, qr_id: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        return validation
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
+
+    tenant_id, _ = validation
 
     if not qr_id:
         return JSONResponse({"error": "missing_qr_id"}, status_code=400)
@@ -693,7 +699,7 @@ def tg_qr_png(tenant: int | str | None = None, k: str | None = None, qr_id: str 
     if status_code == 200 and isinstance(body, (bytes, bytearray)):
         return Response(content=bytes(body), media_type="image/png", headers=headers)
 
-    _log_tg_proxy_error(path, status_code, body)
+    _warn_tg_failure(path, tenant_id, status_code, body)
     if status_code in (404, 410):
         return JSONResponse({"error": "qr_expired"}, status_code=404, headers=headers)
 
@@ -701,40 +707,36 @@ def tg_qr_png(tenant: int | str | None = None, k: str | None = None, qr_id: str 
 
 
 @router.post("/pub/tg/logout")
-async def tg_logout(request: Request, tenant: int | None = None, k: str | None = None, key: str | None = None):
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-
-    raw_tenant = tenant if tenant is not None else payload.get("tenant_id") or payload.get("tenant")
-    access_key = k or key or payload.get("k") or payload.get("key")
-    ok = _ensure_valid_qr_request(raw_tenant, access_key)
-    if ok is None:
+async def tg_logout(tenant: int | str | None = None, k: str | None = None):
+    validation = require_client_key(tenant, k)
+    if isinstance(validation, Response):
         return JSONResponse({"error": "invalid_key"}, status_code=401)
-    tenant_id, _ = ok
+
+    tenant_id, _ = validation
 
     try:
-        response = await C.tg_post("/session/logout", {"tenant_id": tenant_id})
-    except Exception as exc:
-        _log_tg_proxy_error("/session/logout", 0, str(exc))
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
-
-    if response.status_code != 200:
-        _log_tg_proxy_error("/session/logout", response.status_code, response.text)
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
-
-    try:
-        data = response.json()
+        upstream = await C.tg_post("/session/logout", {"tenant_id": tenant_id})
     except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    result = {"ok": True}
-    result.update({k: v for k, v in data.items() if k not in result})
-    return JSONResponse(result)
+        _warn_tg_failure("/session/logout", tenant_id, 0, None)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    if status_code != 200:
+        _warn_tg_failure("/session/logout", tenant_id, status_code, body_bytes)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    try:
+        payload = upstream.json()
+    except Exception:
+        _warn_tg_failure("/session/logout", tenant_id, status_code, body_bytes)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    if not isinstance(payload, dict):
+        _warn_tg_failure("/session/logout", tenant_id, status_code, body_bytes)
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    return JSONResponse(payload)
 
 
 @router.get("/pub/wa/qr.png")
