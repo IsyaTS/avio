@@ -44,8 +44,9 @@ def telegram_config() -> TelegramConfig:
 def tg_worker_url() -> str:
     """Return base URL for the Telegram worker service."""
 
-    raw = (os.getenv("TG_WORKER_URL") or "http://tgworker:8085").strip()
-    cleaned = raw or "http://tgworker:8085"
+    raw = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or "http://tgworker:8085"
+    cleaned = raw.strip() if isinstance(raw, str) else "http://tgworker:8085"
+    cleaned = cleaned or "http://tgworker:8085"
     return cleaned.rstrip("/") or "http://tgworker:8085"
 
 
