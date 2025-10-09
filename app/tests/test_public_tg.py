@@ -70,7 +70,8 @@ def test_tg_start_passthrough(monkeypatch):
     resp = client.post("/pub/tg/start", params={"tenant": 11, "k": "secret"})
 
     assert resp.status_code == 200
-    assert resp.headers.get("cache-control") == "no-store"
+    cache_header = resp.headers.get("cache-control", "")
+    assert "no-store" in cache_header
     data = resp.json()
     assert data == {
         "status": "waiting_qr",
@@ -104,7 +105,8 @@ def test_tg_status_success(monkeypatch):
     resp = client.get("/pub/tg/status", params={"tenant": 3, "k": "key"})
 
     assert resp.status_code == 200
-    assert resp.headers.get("cache-control") == "no-store"
+    cache_header = resp.headers.get("cache-control", "")
+    assert "no-store" in cache_header
     data = resp.json()
     assert data["status"] == "waiting_qr"
     assert data["qr_id"] == "qr-test"
@@ -126,7 +128,10 @@ def test_tg_qr_png_proxy(monkeypatch):
     resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
 
     assert resp.status_code == 200
-    assert resp.headers.get("cache-control") == "no-store"
+    cache_header = resp.headers.get("cache-control", "")
+    assert "no-store" in cache_header
+    assert resp.headers.get("pragma") == "no-cache"
+    assert resp.headers.get("expires") == "0"
     assert resp.headers.get("content-type") == "image/png"
     assert resp.content == b"png-bytes"
 
@@ -136,7 +141,8 @@ def test_tg_qr_png_expired(monkeypatch):
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
         assert path == "http://tgworker:8085/session/qr/qr-1.png"
-        return 404, b"", {}
+        payload = json.dumps({"detail": "qr_expired"}).encode("utf-8")
+        return 404, payload, {"Content-Type": "application/json"}
 
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
 
@@ -144,4 +150,51 @@ def test_tg_qr_png_expired(monkeypatch):
     resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
 
     assert resp.status_code == 404
-    assert resp.json() == {"error": "qr_expired"}
+    assert resp.json() == {"detail": "qr_expired"}
+    cache_header = resp.headers.get("cache-control", "")
+    assert "no-store" in cache_header
+    assert resp.headers.get("pragma") == "no-cache"
+    assert resp.headers.get("expires") == "0"
+    assert resp.headers.get("x-telegram-upstream-status") == "404"
+
+
+def test_tg_qr_txt_proxy(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+        assert path == "http://tgworker:8085/session/qr/qr-1.txt"
+        return 200, b"tg://login?token=abc", {"Content-Type": "text/plain"}
+
+    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+
+    client = TestClient(app)
+    resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1"})
+
+    assert resp.status_code == 200
+    assert resp.text == "tg://login?token=abc"
+    cache_header = resp.headers.get("cache-control", "")
+    assert "no-store" in cache_header
+    assert resp.headers.get("pragma") == "no-cache"
+    assert resp.headers.get("expires") == "0"
+
+
+def test_tg_qr_txt_expired(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+        assert path == "http://tgworker:8085/session/qr/qr-1.txt"
+        payload = json.dumps({"detail": "qr_expired"}).encode("utf-8")
+        return 404, payload, {"Content-Type": "application/json"}
+
+    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+
+    client = TestClient(app)
+    resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1"})
+
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "qr_expired"}
+    cache_header = resp.headers.get("cache-control", "")
+    assert "no-store" in cache_header
+    assert resp.headers.get("pragma") == "no-cache"
+    assert resp.headers.get("expires") == "0"
+    assert resp.headers.get("x-telegram-upstream-status") == "404"
