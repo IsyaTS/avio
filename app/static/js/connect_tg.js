@@ -1,9 +1,7 @@
 ;(function () {
-  const bootstrap = document.getElementById('tg-connect-bootstrap');
-  if (!bootstrap) return;
-
-  const tenant = (bootstrap.dataset.tenant || '').trim();
-  const key = (bootstrap.dataset.key || '').trim();
+  const config = (window.__tgConnectConfig || {});
+  const tenant = String(config.tenant || '').trim();
+  const key = String(config.key || '').trim();
   if (!tenant || !key) {
     console.warn('[tg-connect] missing tenant or key');
     return;
