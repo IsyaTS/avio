@@ -20,7 +20,6 @@ def _resolve_sessions_dir(raw: str | None) -> Path:
     try:
         candidate.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Fall back to a writable directory inside the container.
         alt = Path("/tmp/tg_sessions")
         alt.mkdir(parents=True, exist_ok=True)
         return alt
