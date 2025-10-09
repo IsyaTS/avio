@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+
+import httpx
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
@@ -47,6 +49,29 @@ def test_connect_tg_renders(monkeypatch):
     assert "Persona" in body
 
 
+def test_tg_start_filters_payload(monkeypatch):
+    app = _base_app(monkeypatch)
+    called: dict[str, object] = {}
+
+    async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
+        called["path"] = path
+        called["payload"] = payload
+        return httpx.Response(
+            200,
+            json={"status": "waiting_qr", "qr_id": "qr-1", "needs_2fa": None, "extra": "ignore"},
+        )
+
+    monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
+
+    client = TestClient(app)
+    resp = client.post("/pub/tg/start", params={"tenant": 11, "k": "secret"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "waiting_qr", "qr_id": "qr-1"}
+    assert called["path"] == "/session/start"
+    assert called["payload"] == {"tenant_id": 11}
+
+
 def test_tg_status_success(monkeypatch):
     app = _base_app(monkeypatch)
     called = {"start": 0, "status": []}
@@ -54,6 +79,7 @@ def test_tg_status_success(monkeypatch):
     async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
         called["start"] += 1
         assert payload["tenant_id"] == 3
+        return httpx.Response(200, json={"ok": True})
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
         called["status"].append((method, path))
@@ -72,3 +98,34 @@ def test_tg_status_success(monkeypatch):
     assert data["qr_id"] == "qr-test"
     assert called["start"] == 1
     assert called["status"] == [("GET", "/session/status?tenant=3")]
+
+
+def test_tg_qr_png_proxy(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+        return 200, b"png-bytes"
+
+    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+
+    client = TestClient(app)
+    resp = client.get("/pub/tg/qr.png", params={"tenant": 5, "k": "secret", "qr_id": "qr-1"})
+
+    assert resp.status_code == 200
+    assert resp.headers.get("cache-control") == "no-store"
+    assert resp.content == b"png-bytes"
+
+
+def test_tg_qr_png_expired(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+        return 404, b""
+
+    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+
+    client = TestClient(app)
+    resp = client.get("/pub/tg/qr.png", params={"tenant": 5, "k": "secret", "qr_id": "qr-1"})
+
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "qr_expired"}

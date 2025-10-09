@@ -98,7 +98,8 @@
 <script id="tg-connect-state" type="application/json">{{ {
     "tenant": tenant,
     "key": key,
-    "urls": urls
+    "urls": urls,
+    "query": query
 } | tojson }}</script>
 <script src="{{ static_url(request, 'js/connect_tg.js') }}" defer></script>
 {% endset %}

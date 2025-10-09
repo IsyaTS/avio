@@ -12,8 +12,15 @@
 
   const tenantId = config.tenant;
   const accessKey = config.key;
+  const query = config.query || {};
+  const tenantQuery = query.tenant !== undefined && query.tenant !== null
+    ? String(query.tenant)
+    : (tenantId !== undefined && tenantId !== null ? String(tenantId) : '');
+  const keyQuery = query.k !== undefined && query.k !== null
+    ? String(query.k)
+    : (accessKey !== undefined && accessKey !== null ? String(accessKey) : '');
   const urls = config.urls || {};
-  if (!tenantId || !accessKey || !urls.start || !urls.status || !urls.qr) {
+  if (!tenantQuery || !keyQuery || !urls.start || !urls.status || !urls.qr) {
     console.warn('[tg-connect] missing config');
     return;
   }
@@ -74,10 +81,9 @@
     if (!qrImg) return;
     currentQrId = qrId;
     const src = withQuery(urls.qr, {
-      tenant: tenantId,
-      k: accessKey,
+      tenant: tenantQuery,
+      k: keyQuery,
       qr_id: qrId,
-      t: Date.now(),
     });
     qrImg.src = src;
     qrImg.style.display = '';
@@ -97,13 +103,11 @@
     hideQr('QR генерируется…');
     setStatus('waiting_qr', 'Готовим новый QR-код…');
 
-    const url = withQuery(urls.start, { k: accessKey });
+    const url = withQuery(urls.start, { tenant: tenantQuery, k: keyQuery });
     try {
       const resp = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
-        body: JSON.stringify({ tenant_id: tenantId }),
       });
       if (!resp.ok) throw new Error(`start failed: ${resp.status}`);
       const data = await resp.json();
@@ -135,13 +139,20 @@
 
   function applyStatus(data) {
     if (refreshBtn) refreshBtn.disabled = false;
-    const status = (data && data.status ? String(data.status) : '').toLowerCase();
-    if (status === 'authorized') {
+    const rawStatus = data && data.status ? String(data.status) : '';
+    let status = rawStatus.toLowerCase();
+    const needs2fa = Boolean(data && data.needs_2fa);
+
+    if (status === 'authorized' && !needs2fa) {
       authorized = true;
       hideQr('Аккаунт подключён. Можно закрыть страницу.');
       setStatus('authorized', 'Подключено. Можно закрыть страницу.');
       if (refreshBtn) refreshBtn.disabled = true;
       return;
+    }
+
+    if (needs2fa) {
+      status = 'needs_2fa';
     }
 
     let message = 'Проверяем статус…';
@@ -170,9 +181,8 @@
 
   async function pollStatus() {
     const url = withQuery(urls.status, {
-      tenant: tenantId,
-      k: accessKey,
-      t: Date.now(),
+      tenant: tenantQuery,
+      k: keyQuery,
     });
     try {
       const resp = await fetch(url, { cache: 'no-store' });
