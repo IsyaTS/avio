@@ -12,7 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import telegram_config
 
-from .manager import TelegramSessionManager, QRExpiredError, QRNotFoundError
+from .session_manager import SessionManager, QRExpiredError, QRNotFoundError
 
 
 logger = logging.getLogger("tgworker.api")
@@ -68,7 +68,7 @@ def _resolve_webhook_url() -> tuple[str, Optional[str]]:
 def create_app() -> FastAPI:
     cfg = telegram_config()
     webhook_url, webhook_token = _resolve_webhook_url()
-    manager = TelegramSessionManager(
+    manager = SessionManager(
         api_id=cfg.api_id,
         api_hash=cfg.api_hash,
         sessions_dir=cfg.sessions_dir,
@@ -100,64 +100,56 @@ def create_app() -> FastAPI:
 
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
-        state = await manager.start_session(payload.tenant_id, force=payload.force)
-        asyncio.create_task(manager.poll_login(payload.tenant_id))
-        needs_twofa = state.needs_2fa or state.twofa_pending
-        valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
-        twofa_since_ms = (
-            int(state.twofa_since * 1000) if state.twofa_since is not None else None
-        )
+        snapshot, qr_login = await manager.start_session(payload.tenant_id, force=payload.force)
+        if qr_login is not None:
+            asyncio.create_task(manager.poll_login(payload.tenant_id, qr_login))
+        needs_twofa = snapshot.needs_2fa or snapshot.twofa_pending
+        valid_until_ms = snapshot.qr_valid_until
+        twofa_since_ms = snapshot.twofa_since
         return {
             "tenant_id": payload.tenant_id,
-            "status": state.status,
-            "qr_id": state.qr_id,
+            "status": snapshot.status,
+            "qr_id": snapshot.qr_id,
             "needs_2fa": needs_twofa,
-            "twofa_pending": state.twofa_pending,
+            "twofa_pending": snapshot.twofa_pending,
             "twofa_since": twofa_since_ms,
-            "can_restart": state.can_restart,
             "qr_valid_until": valid_until_ms,
         }
 
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
-        await manager.hard_reset(payload.tenant_id)
-        state = await manager.start_session(payload.tenant_id, force=True)
-        asyncio.create_task(manager.poll_login(payload.tenant_id))
-        needs_twofa = state.needs_2fa or state.twofa_pending
-        valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
-        twofa_since_ms = (
-            int(state.twofa_since * 1000) if state.twofa_since is not None else None
-        )
+        snapshot, qr_login = await manager.start_session(payload.tenant_id, force=True)
+        if qr_login is not None:
+            asyncio.create_task(manager.poll_login(payload.tenant_id, qr_login))
+        needs_twofa = snapshot.needs_2fa or snapshot.twofa_pending
+        valid_until_ms = snapshot.qr_valid_until
+        twofa_since_ms = snapshot.twofa_since
         return {
             "tenant_id": payload.tenant_id,
-            "status": state.status,
-            "qr_id": state.qr_id,
+            "status": snapshot.status,
+            "qr_id": snapshot.qr_id,
             "needs_2fa": needs_twofa,
-            "twofa_pending": state.twofa_pending,
+            "twofa_pending": snapshot.twofa_pending,
             "twofa_since": twofa_since_ms,
-            "can_restart": state.can_restart,
             "qr_valid_until": valid_until_ms,
         }
 
     @app.get("/session/status")
     async def session_status(tenant: int = Query(..., ge=1)):
-        state = await manager.get_status(tenant)
-        snapshot = manager.stats_snapshot()
-        valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
-        needs_twofa = state.needs_2fa or state.twofa_pending
-        twofa_since_ms = (
-            int(state.twofa_since * 1000) if state.twofa_since is not None else None
-        )
+        session_snapshot = await manager.get_status(tenant)
+        stats = manager.stats_snapshot()
+        valid_until_ms = session_snapshot.qr_valid_until
+        needs_twofa = session_snapshot.needs_2fa or session_snapshot.twofa_pending
+        twofa_since_ms = session_snapshot.twofa_since
         return {
             "tenant_id": tenant,
-            "status": state.status,
-            "qr_id": state.qr_id,
+            "status": session_snapshot.status,
+            "qr_id": session_snapshot.qr_id,
             "needs_2fa": needs_twofa,
-            "twofa_pending": state.twofa_pending,
+            "twofa_pending": session_snapshot.twofa_pending,
             "twofa_since": twofa_since_ms,
-            "last_error": state.last_error,
-            "stats": snapshot,
-            "can_restart": state.can_restart,
+            "last_error": session_snapshot.last_error,
+            "stats": stats,
             "qr_valid_until": valid_until_ms,
         }
 

@@ -769,7 +769,6 @@ async def tg_start(
     key: str | None = None,
 ):
     force_flag = _parse_force_flag(request.query_params.get("force"))
-    force_param_present = "force" in request.query_params
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
     validation = require_client_key(tenant_candidate, key_candidate)
     if isinstance(validation, Response):
@@ -789,69 +788,33 @@ async def tg_start(
         return validation
 
     tenant_id, _ = validation
-    attempt_force = force_flag
+    payload = {"tenant_id": tenant_id}
+    if force_flag:
+        payload["force"] = True
 
     try:
-        upstream = None
-        status_code = 0
-        body_bytes: bytes | bytearray = b""
-        detail: str | None = None
-        for attempt in range(2):
-            try:
-                payload = {"tenant_id": tenant_id}
-                if attempt_force or force_param_present:
-                    payload["force"] = bool(attempt_force)
-                upstream = await C.tg_post(
-                    f"{TG_WORKER_BASE}/session/start",
-                    payload,
-                    timeout=15.0,
-                )
-            except Exception as exc:
-                _log_tg_proxy(
-                    "/pub/tg/start",
-                    tenant_id,
-                    0,
-                    None,
-                    error=str(exc),
-                    force=attempt_force,
-                )
-                raise
-
-            status_code = int(getattr(upstream, "status_code", 0) or 0)
-            body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-            if 200 <= status_code < 300:
-                detail = None
-            else:
-                detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
-
-            _log_tg_proxy(
-                "/pub/tg/start",
-                tenant_id,
-                status_code,
-                body_bytes,
-                error=detail,
-                force=attempt_force,
-            )
-
-            if (
-                status_code in {409, 422}
-                and not attempt_force
-            ):
-                attempt_force = True
-                continue
-            break
-    except Exception:
+        upstream = await C.tg_post(
+            f"{TG_WORKER_BASE}/session/start",
+            payload,
+            timeout=15.0,
+        )
+    except Exception as exc:
+        _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error=str(exc), force=force_flag)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
-    else:
-        if upstream is None:
-            status_code = 0
-            body_bytes = b""
-            detail = None
+
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    detail = None
+    if not (200 <= status_code < 300):
+        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
+
+    _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail, force=force_flag)
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
     headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
+    headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
@@ -922,6 +885,7 @@ async def tg_password(
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
     headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
+    headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
@@ -989,6 +953,7 @@ async def tg_restart(
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
     headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
+    headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
@@ -1027,6 +992,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
     response_headers = _proxy_headers(headers or {}, status_code)
+    response_headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
