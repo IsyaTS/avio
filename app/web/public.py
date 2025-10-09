@@ -710,10 +710,16 @@ def tg_qr_png(qr_id: str | None = None):
         return JSONResponse({"error": "missing_qr_id"}, status_code=400, headers={"Cache-Control": "no-store"})
 
     safe_qr = quote(qr_value, safe="")
-    status_code, body, _ = C.tg_http("GET", f"/session/qr/{safe_qr}.png", timeout=15.0)
+    status_code, body, headers = C.tg_http("GET", f"/session/qr/{safe_qr}.png", timeout=15.0)
 
-    if status_code == 200 and isinstance(body, (bytes, bytearray)):
-        _log_tg_proxy("/pub/tg/qr.png", None, status_code, body, error="")
+    is_success = status_code == 200 and isinstance(body, (bytes, bytearray))
+    detail = None if is_success else _stringify_detail(body) or f"status_{status_code}"
+    _log_tg_proxy("/pub/tg/qr.png", None, status_code, body, error=detail)
+
+    if status_code <= 0:
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+
+    if is_success:
         return Response(
             content=bytes(body),
             status_code=200,
@@ -721,16 +727,17 @@ def tg_qr_png(qr_id: str | None = None):
         )
 
     if status_code in (404, 410):
-        _log_tg_proxy("/pub/tg/qr.png", None, status_code, body, error="qr_expired")
-        return JSONResponse({"error": "qr_expired"}, status_code=status_code, headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            {"error": "qr_expired"},
+            status_code=status_code,
+            headers={"Cache-Control": "no-store"},
+        )
 
-    detail = _stringify_detail(body) or "tg_unavailable"
-    _log_tg_proxy("/pub/tg/qr.png", None, status_code, body, error=detail)
-
-    if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
-
-    return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        {"error": "tg_unavailable"},
+        status_code=502,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.head("/pub/tg/qr.png")
