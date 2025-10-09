@@ -35,21 +35,16 @@ RUN apt-get update \
 RUN mkdir -p /data && chown -R $(id -u):$(id -g) /data
 COPY app/requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
-COPY tgworker/ /app/tgworker/
-COPY scripts/ /app/scripts/
+COPY . /app
 RUN sed -i 's/\r$//' /app/scripts/diag.sh \
     && chmod +x /app/scripts/diag.sh
 
 ######## app ########
 FROM python-base AS app
-COPY app/ .
-COPY tgworker/ ./tgworker/
 EXPOSE 8000
 HEALTHCHECK CMD curl -fsS http://localhost:8000/health || exit 1
 CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000","--timeout-keep-alive","5"]
 
 ######## worker ########
 FROM python-base AS worker
-COPY app/ .
-COPY tgworker/ ./tgworker/
 CMD ["python","worker.py"]
