@@ -14,7 +14,7 @@ import httpx
 import redis  # sync client
 from redis import exceptions as redis_ex
 
-from config import tg_worker_url
+from app.config import tg_worker_url
 
 try:
     from core import (
