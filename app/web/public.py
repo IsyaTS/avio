@@ -1019,6 +1019,12 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
+@router.head("/pub/tg/qr.png")
+def tg_qr_png_head() -> Response:
+    headers = _no_store_headers({"Allow": "GET"})
+    return Response(status_code=405, headers=headers)
+
+
 @router.get("/pub/tg/qr.png")
 def tg_qr_png(qr_id: str | None = None):
     qr_value = "" if qr_id is None else str(qr_id).strip()
@@ -1027,7 +1033,7 @@ def tg_qr_png(qr_id: str | None = None):
         return JSONResponse(
             {"error": "missing_qr_id"},
             status_code=400,
-            headers=_no_store_headers(),
+            headers=_no_store_headers({"X-Telegram-Upstream-Status": "-"}),
         )
 
     safe_qr = quote(qr_value, safe="")
@@ -1048,32 +1054,27 @@ def tg_qr_png(qr_id: str | None = None):
     _log_tg_proxy("/pub/tg/qr.png", None, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        return JSONResponse(
-            {"error": "tg_unavailable"},
-            status_code=502,
-            headers=_no_store_headers({"X-Telegram-Upstream-Status": str(status_code)}),
-        )
+        fail_headers = _no_store_headers({
+            "Content-Type": "application/json",
+            "X-Telegram-Upstream-Status": str(status_code),
+        })
+        fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
+        return Response(content=fail_body, status_code=502, headers=fail_headers)
 
-    if status_code == 404:
-        detail_value = detail_from_json or "qr_not_found"
-        headers_out = _merge_no_store_headers(headers or {})
-        if not body_bytes:
-            body_bytes = json.dumps({"detail": detail_value}).encode("utf-8")
-        media_type = headers_out.get("Content-Type") or "application/json"
-        return Response(
-            content=body_bytes,
-            status_code=status_code,
-            headers=headers_out,
-            media_type=media_type,
-        )
+    if status_code == 200:
+        response_headers = _no_store_headers({"X-Telegram-Upstream-Status": "200"})
+        response_headers["Content-Type"] = "image/png"
+        return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
-    if status_code != 200:
-        headers_out = _merge_no_store_headers(headers or {})
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
-
-    response_headers = _merge_no_store_headers(headers or {})
-    response_headers["Content-Type"] = "image/png"
-    return Response(content=body_bytes, status_code=status_code, headers=response_headers)
+    headers_out = _merge_no_store_headers(headers or {})
+    headers_out["X-Telegram-Upstream-Status"] = str(status_code)
+    if not body_bytes:
+        if detail_from_json:
+            body_bytes = json.dumps({"detail": detail_from_json}, ensure_ascii=False).encode("utf-8")
+            headers_out.setdefault("Content-Type", "application/json")
+        else:
+            body_bytes = b""
+    return Response(content=body_bytes, status_code=status_code, headers=headers_out)
 
 
 @router.get("/pub/tg/qr.txt")
