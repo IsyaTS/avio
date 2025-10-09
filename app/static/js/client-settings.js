@@ -475,23 +475,6 @@ try {
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
 
-  function parseBooleanFlag(raw) {
-    if (raw === true) return true;
-    if (raw === false || raw == null) return false;
-    if (typeof raw === 'number') {
-      if (Number.isNaN(raw)) return false;
-      return raw !== 0;
-    }
-    if (typeof raw === 'string') {
-      const normalized = raw.trim().toLowerCase();
-      if (!normalized) return false;
-      if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-      if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-      return true;
-    }
-    return Boolean(raw);
-  }
-
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
     let url;
@@ -555,11 +538,19 @@ try {
 
   function showTelegramQr(qrId) {
     if (!dom.tgQrBlock || !dom.tgQrImage) return;
-    const src = buildTelegramQrUrl(qrId);
-    if (!src) return;
-    currentTelegramQrId = qrId;
+    const safeId = qrId ? String(qrId).trim() : '';
+    if (!safeId) {
+      hideTelegramQr();
+      return;
+    }
+    const src = buildTelegramQrUrl(safeId);
+    if (!src) {
+      hideTelegramQr();
+      return;
+    }
+    currentTelegramQrId = safeId;
     if (dom.tgQrBlock.dataset) {
-      dom.tgQrBlock.dataset.qrId = qrId;
+      dom.tgQrBlock.dataset.qrId = safeId;
     }
     dom.tgQrBlock.style.display = 'flex';
     dom.tgQrImage.style.display = 'block';
@@ -571,14 +562,11 @@ try {
       dom.tgQrFallback.style.display = 'none';
       dom.tgQrFallback.textContent = '';
     }
-    updateTelegramQrLink(qrId);
+    updateTelegramQrLink(safeId);
     qrImageReloadPending = false;
   }
 
-  function hideTelegramQr(message, options = {}) {
-    const preserveBlock = options && Object.prototype.hasOwnProperty.call(options, 'preserveBlock')
-      ? Boolean(options.preserveBlock)
-      : Boolean(message);
+  function hideTelegramQr(message = '') {
     currentTelegramQrId = '';
     if (dom.tgQrImage) {
       if (dom.tgQrImage.dataset) {
@@ -591,10 +579,10 @@ try {
       if (dom.tgQrBlock.dataset) {
         dom.tgQrBlock.dataset.qrId = '';
       }
-      dom.tgQrBlock.style.display = preserveBlock ? 'flex' : 'none';
+      dom.tgQrBlock.style.display = 'none';
     }
     if (dom.tgQrFallback) {
-      const text = message && preserveBlock ? String(message) : '';
+      const text = message ? String(message) : '';
       dom.tgQrFallback.textContent = text;
       dom.tgQrFallback.style.display = text ? 'block' : 'none';
     }
@@ -621,15 +609,12 @@ try {
       dom.tgNewQr.dataset.defaultLabel = dom.tgNewQr.textContent || 'Новый QR';
     }
     dom.tgNewQr.style.display = visible ? 'inline-flex' : 'none';
+    dom.tgNewQr.disabled = false;
     if (visible) {
-      dom.tgNewQr.disabled = false;
       const defaultLabel = dom.tgNewQr.dataset ? dom.tgNewQr.dataset.defaultLabel : '';
       dom.tgNewQr.textContent = label || defaultLabel || 'Новый QR';
-    } else {
-      dom.tgNewQr.disabled = false;
-      if (dom.tgNewQr.dataset && dom.tgNewQr.dataset.defaultLabel) {
-        dom.tgNewQr.textContent = dom.tgNewQr.dataset.defaultLabel;
-      }
+    } else if (dom.tgNewQr.dataset && dom.tgNewQr.dataset.defaultLabel) {
+      dom.tgNewQr.textContent = dom.tgNewQr.dataset.defaultLabel;
     }
   }
 
@@ -669,54 +654,51 @@ try {
   }
 
   function applyTelegramStatus(data) {
-    const status = data && typeof data.status === 'string' ? data.status.trim() : '';
-    const normalized = status.toLowerCase();
+    const rawStatus = data && typeof data.status === 'string' ? data.status.trim() : '';
+    const normalized = rawStatus.toLowerCase();
     const qrId = data && data.qr_id ? String(data.qr_id) : '';
-    const twofaPending = parseBooleanFlag(data ? data.twofa_pending : false);
-    const needsTwoFactorFlag = parseBooleanFlag(data ? data.needs_2fa : false);
+    const needsTwoFactor = Boolean(
+      (data && data.needs_2fa === true)
+      || (data && data.twofa_pending === true)
+      || rawStatus === 'needs_2fa',
+    );
     const lastError = data && typeof data.last_error === 'string' ? data.last_error : '';
-    const canRestart = Boolean(data && data.can_restart);
-    const requiresPassword = normalized === 'needs_2fa' || twofaPending || needsTwoFactorFlag;
+    const showNewQrButton = normalized === 'disconnected'
+      && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout');
 
-    if (normalized === 'waiting_qr' && !requiresPassword) {
-      if (qrId) {
-        showTelegramQr(qrId);
-      } else {
-        hideTelegramQr('Готовим QR-код…', { preserveBlock: true });
-      }
-      hideTwoFactorPrompt();
-      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
-      return { status: normalized, needsTwoFactor: false, lastError };
-    }
-
-    if (requiresPassword) {
-      hideTelegramQr('', { preserveBlock: false });
+    if (needsTwoFactor) {
+      hideTelegramQr();
       showTwoFactorPrompt('Введите пароль двухфакторной аутентификации в Telegram.');
       setNewQrVisibility(false);
       return { status: 'needs_2fa', needsTwoFactor: true, lastError };
     }
 
-    if (normalized === 'authorized') {
-      hideTelegramQr('', { preserveBlock: false });
-      hideTwoFactorPrompt();
-      setNewQrVisibility(false);
-      return { status: normalized, needsTwoFactor: false, lastError };
-    }
-
-    if (normalized === 'disconnected' && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout')) {
-      const message = lastError === 'twofa_timeout'
-        ? 'Время ожидания пароля истекло. Получите новый QR.'
-        : 'QR-код истёк. Получите новый, чтобы продолжить.';
-      hideTelegramQr(message, { preserveBlock: true });
-      hideTwoFactorPrompt();
-      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
-      return { status: normalized, needsTwoFactor: false, lastError };
-    }
-
-    hideTelegramQr('', { preserveBlock: false });
     hideTwoFactorPrompt();
-    setNewQrVisibility(Boolean(accessKey) && canRestart, 'Новый QR');
-    return { status: normalized, needsTwoFactor: false, lastError };
+
+    if (normalized === 'waiting_qr') {
+      if (qrId) {
+        showTelegramQr(qrId);
+      } else {
+        hideTelegramQr();
+      }
+      setNewQrVisibility(false);
+      return { status: 'waiting_qr', needsTwoFactor: false, lastError };
+    }
+
+    hideTelegramQr();
+
+    if (normalized === 'authorized') {
+      setNewQrVisibility(false);
+      return { status: 'authorized', needsTwoFactor: false, lastError };
+    }
+
+    if (showNewQrButton) {
+      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
+    } else {
+      setNewQrVisibility(false);
+    }
+
+    return { status: normalized || rawStatus, needsTwoFactor: false, lastError };
   }
 
   function stopTelegramPolling() {
@@ -1135,7 +1117,7 @@ try {
     if (!dom.tgStatus || !telegram.statusUrl) return;
     if (!accessKey) {
       updateTelegramStatus('Нет ключа доступа', 'alert');
-      hideTelegramQr('');
+      hideTelegramQr();
       hideTwoFactorPrompt();
       stopTelegramPolling();
       setNewQrVisibility(false);
@@ -1160,12 +1142,10 @@ try {
         throw new Error(`status failed: ${response.status}`);
       }
       const status = (data && typeof data.status === 'string') ? data.status.trim() : '';
-      const normalized = applied && applied.status ? applied.status : status.toLowerCase();
-      const needsTwoFactor = Boolean(
-        (applied && applied.needsTwoFactor === true)
-        || parseBooleanFlag(data ? data.needs_2fa : false)
-        || parseBooleanFlag(data ? data.twofa_pending : false),
-      );
+      const normalized = applied && typeof applied.status === 'string'
+        ? applied.status
+        : status.toLowerCase();
+      const needsTwoFactor = Boolean(applied && applied.needsTwoFactor === true);
       const lastError = applied && typeof applied.lastError === 'string'
         ? applied.lastError
         : (data && typeof data.last_error === 'string' ? data.last_error : '');
@@ -1197,7 +1177,7 @@ try {
     } catch (error) {
       console.error('[client-settings] telegram status error', error);
       updateTelegramStatus('Не удалось получить статус Telegram', 'alert');
-      hideTelegramQr('');
+      hideTelegramQr();
       if (!fromPoll) {
         scheduleTelegramPolling(6000);
       } else {
@@ -1216,7 +1196,7 @@ try {
     } catch (error) {
       console.error('[client-settings] telegram logout error', error);
     } finally {
-      hideTelegramQr('');
+      hideTelegramQr();
       hideTwoFactorPrompt();
       setNewQrVisibility(false);
       refreshTelegramStatus();
@@ -1227,7 +1207,7 @@ try {
     if (!dom.tgConnect || !telegram.startUrl) return;
     if (!accessKey) {
       updateTelegramStatus('Нет ключа доступа', 'alert');
-      hideTelegramQr('');
+      hideTelegramQr();
       hideTwoFactorPrompt();
       setNewQrVisibility(false);
       return;
@@ -1409,8 +1389,16 @@ try {
     });
   }
   if (dom.tgIntegrationCard && dom.tgIntegrationCard.dataset) {
-    const initialStatus = (dom.tgIntegrationCard.dataset.tgInitialStatus || '').toLowerCase();
+    const initialStatusRaw = dom.tgIntegrationCard.dataset.tgInitialStatus || '';
+    const initialStatus = initialStatusRaw.toLowerCase();
     const initialError = dom.tgIntegrationCard.dataset.tgInitialError || '';
+    const initialTwofa = dom.tgIntegrationCard.dataset.tgInitialTwofa === '1';
+    if (initialTwofa) {
+      showTwoFactorPrompt('Введите пароль двухфакторной аутентификации в Telegram.');
+    }
+    if (initialStatus === 'waiting_qr' && initialQrId && !initialTwofa) {
+      showTelegramQr(initialQrId);
+    }
     if (
       initialStatus === 'disconnected'
       && (initialError === 'qr_login_timeout' || initialError === 'twofa_timeout')

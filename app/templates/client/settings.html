@@ -51,10 +51,10 @@
         {% set initial_status_variant = 'alert' %}
     {% endif %}
     {% set show_new_qr = (initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout']) %}
-    <div class="integration-card stack" style="gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-poll-interval="2500">
+    <div class="integration-card stack" style="gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-initial-twofa="{% if show_2fa %}1{% else %}0{% endif %}" data-tg-poll-interval="2500">
         <div id="tg-integration-status" class="status-text {{ initial_status_variant }}">{{ initial_status_message }}</div>
         <div id="tg-qr-block" class="stack" data-qr-id="{{ current_qr_id }}" style="display:{% if show_qr %}flex{% else %}none{% endif %}; gap:12px; align-items:flex-start;">
-            <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr and current_qr_id %}src="{{ urls.tg_qr_png }}?qr_id={{ current_qr_id }}&t={{ qr_timestamp_ms }}"{% endif %} loading="lazy" style="display:{% if show_qr and current_qr_id %}block{% else %}none{% endif %}; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
+            <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr and initial_qr_src %}src="{{ initial_qr_src }}"{% endif %} loading="lazy" style="display:{% if show_qr and current_qr_id %}block{% else %}none{% endif %}; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
         </div>
         <div id="tg-2fa-block" class="stack" style="display:{% if show_2fa %}flex{% else %}none{% endif %}; gap:12px; max-width:360px;">
             <form id="tg-password-form" class="stack" style="gap:12px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
