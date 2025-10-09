@@ -65,7 +65,7 @@
   function showQr(qrId) {
     if (!qrImg) return;
     currentQrId = qrId;
-    qrImg.src = buildUrl('/pub/tg/qr.png', { qr_id: qrId });
+    qrImg.src = buildUrl('/pub/tg/qr.png', { qr_id: qrId, t: Date.now() });
     qrImg.style.display = 'block';
     if (qrFallback) qrFallback.style.display = 'none';
   }
@@ -158,8 +158,16 @@
     try {
       const resp = await fetch(currentSrc, { cache: 'no-store' });
       if (resp.status === 404 || resp.status === 410) {
-        requestStart(true);
-        return;
+        let data = null;
+        try {
+          data = await resp.clone().json();
+        } catch (jsonErr) {
+          data = null;
+        }
+        if (data && data.error === 'qr_expired') {
+          requestStart(true);
+          return;
+        }
       }
     } catch (err) {
       console.warn('[tg-connect] qr fetch error', err);

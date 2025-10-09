@@ -58,6 +58,7 @@ def test_tg_start_passthrough(monkeypatch):
     async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
         called["path"] = path
         called["payload"] = payload
+        called["timeout"] = timeout
         return httpx.Response(
             200,
             json={"status": "waiting_qr", "qr_id": "qr-1", "needs_2fa": None, "extra": "ignore"},
@@ -80,6 +81,7 @@ def test_tg_start_passthrough(monkeypatch):
     assert data["qr_id"] is not None
     assert called["path"] == "/session/start"
     assert called["payload"] == {"tenant_id": 11}
+    assert called["timeout"] == 15.0
 
 
 def test_tg_status_success(monkeypatch):
@@ -89,15 +91,16 @@ def test_tg_status_success(monkeypatch):
 
     async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
         called["start"] += 1
+        called.setdefault("start_timeouts", []).append(timeout)
         assert payload["tenant_id"] == 3
         events.append(("start", path))
-        return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json={"status": "waiting_qr", "qr_id": "qr-pre"})
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
-        called["status"].append((method, path))
+        called["status"].append((method, path, timeout))
         events.append(("status", path))
         payload = {"status": "waiting_qr", "tenant_id": 3, "qr_id": "qr-test"}
-        return 200, json.dumps(payload).encode("utf-8")
+        return 200, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
 
     monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
@@ -110,7 +113,8 @@ def test_tg_status_success(monkeypatch):
     assert data["status"] == "waiting_qr"
     assert data["qr_id"] == "qr-test"
     assert called["start"] == 1
-    assert called["status"] == [("GET", "/session/status?tenant=3")]
+    assert called["status"] == [("GET", "/session/status?tenant=3", 15.0)]
+    assert called["start_timeouts"] == [15.0]
     assert events == [("start", "/session/start"), ("status", "/session/status?tenant=3")]
 
 
@@ -118,7 +122,7 @@ def test_tg_qr_png_proxy(monkeypatch):
     app = _base_app(monkeypatch)
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
-        return 200, b"png-bytes"
+        return 200, b"png-bytes", {"Content-Type": "image/png"}
 
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
 
@@ -134,7 +138,7 @@ def test_tg_qr_png_expired(monkeypatch):
     app = _base_app(monkeypatch)
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
-        return 404, b""
+        return 404, b"", {}
 
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
 
