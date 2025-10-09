@@ -11,7 +11,7 @@ import re
 import sys
 import time
 import uuid
-from typing import Any, Iterable, Dict, List
+from typing import Any, Iterable
 
 from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response
@@ -593,6 +593,60 @@ def _ensure_valid_qr_request(raw_tenant: int | str | None, raw_key: str | None) 
     return tenant_id, key
 
 
+async def _resolve_tenant_and_key(
+    request: Request | None,
+    raw_tenant: int | str | None,
+    raw_key: str | None,
+) -> tuple[int | str | None, str | None]:
+    tenant_candidate: int | str | None = raw_tenant
+    key_candidate: str | None = raw_key
+
+    if request is not None:
+        if tenant_candidate is None:
+            tenant_candidate = request.query_params.get("tenant")
+        if not key_candidate:
+            key_candidate = request.query_params.get("key") or request.query_params.get("k")
+
+        needs_body = request.method.upper() in {"POST", "PUT", "PATCH"}
+        if needs_body and (tenant_candidate is None or not key_candidate):
+            try:
+                raw_body = await request.body()
+            except Exception:
+                raw_body = b""
+
+            payload: dict[str, Any] = {}
+            if raw_body:
+                try:
+                    decoded = raw_body.decode("utf-8")
+                except UnicodeDecodeError:
+                    decoded = ""
+                if decoded:
+                    try:
+                        data = json.loads(decoded)
+                    except json.JSONDecodeError:
+                        data = {}
+                    if isinstance(data, dict):
+                        payload.update(data)
+
+            if not payload:
+                try:
+                    form = await request.form()
+                except Exception:
+                    form = None
+                if form is not None:
+                    payload = {}
+                    for form_key, value in form.multi_items():
+                        if form_key not in payload:
+                            payload[form_key] = value
+
+            if tenant_candidate is None:
+                tenant_candidate = payload.get("tenant")
+            if not key_candidate:
+                key_candidate = payload.get("key") or payload.get("k")
+
+    return tenant_candidate, key_candidate
+
+
 def require_client_key(
     raw_tenant: int | str | None,
     raw_key: str | None,
@@ -619,10 +673,21 @@ def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
 
 
 @router.api_route("/pub/tg/start", methods=["GET", "POST"])
-async def tg_start(tenant: int | str | None = None, k: str | None = None):
-    validation = require_client_key(tenant, k)
+async def tg_start(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+):
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    validation = require_client_key(tenant_candidate, key_candidate)
     if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/start", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
+        tenant_for_log: int | str | None = tenant_candidate
+        try:
+            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
+        except Exception:
+            tenant_for_log = tenant_candidate
+        _log_tg_proxy("/pub/tg/start", tenant_for_log, getattr(validation, "status_code", 401), None, error="invalid_key")
         return validation
 
     tenant_id, _ = validation
@@ -635,9 +700,8 @@ async def tg_start(tenant: int | str | None = None, k: str | None = None):
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    is_success = 200 <= status_code < 300 or status_code == 409
     detail = None
-    if not is_success:
+    if not (200 <= status_code < 300):
         detail = _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail)
@@ -645,23 +709,21 @@ async def tg_start(tenant: int | str | None = None, k: str | None = None):
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
 
-    if 200 <= status_code < 300 or status_code == 409:
-        upstream_headers = getattr(upstream, "headers", {}) or {}
-        content_type = upstream_headers.get("content-type") if upstream_headers else None
-        headers = {
-            "Content-Type": content_type or "application/json",
-            "Cache-Control": "no-store",
-            "X-Telegram-Upstream-Status": str(status_code),
-        }
-        return Response(content=body_bytes, status_code=200, headers=headers)
-
-    return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+    upstream_headers = getattr(upstream, "headers", {}) or {}
+    content_type = upstream_headers.get("content-type") if upstream_headers else None
+    headers = {
+        "Content-Type": content_type or "application/json",
+        "Cache-Control": "no-store",
+        "X-Telegram-Upstream-Status": str(status_code),
+    }
+    return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
 @router.get("/pub/tg/status")
-async def tg_status(tenant: int | str | None = None, k: str | None = None):
+async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
     try:
-        tenant_id = _coerce_tenant(tenant)
+        tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+        tenant_id = _coerce_tenant(tenant_candidate)
     except ValueError:
         _log_tg_proxy("/pub/tg/status", tenant, 400, None, error="invalid_tenant")
         return JSONResponse(
@@ -670,9 +732,11 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
             headers={"Cache-Control": "no-store"},
         )
 
-    if k is not None:
-        key = str(k).strip()
-        if not key or not C.valid_key(tenant_id, key):
+    if key_candidate is not None:
+        key_value = str(key_candidate).strip()
+        if key_value and C.valid_key(tenant_id, key_value):
+            pass
+        else:
             _log_tg_proxy("/pub/tg/status", tenant_id, 401, None, error="invalid_key")
             return JSONResponse({"error": "invalid_key"}, status_code=401, headers={"Cache-Control": "no-store"})
 
@@ -685,21 +749,19 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
 
-    if 200 <= status_code < 300:
-        headers = headers or {}
-        content_type = ""
-        for key, value in headers.items():
-            if key.lower() == "content-type":
-                content_type = value
-                break
-        response_headers = {
-            "Content-Type": content_type or "application/json",
-            "Cache-Control": "no-store",
-            "X-Telegram-Upstream-Status": str(status_code),
-        }
-        return Response(content=body, status_code=200, headers=response_headers)
+    headers = headers or {}
+    content_type = ""
+    for header_name, value in headers.items():
+        if header_name.lower() == "content-type":
+            content_type = value
+            break
 
-    return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+    response_headers = {
+        "Content-Type": content_type or "application/json",
+        "Cache-Control": "no-store",
+        "X-Telegram-Upstream-Status": str(status_code),
+    }
+    return Response(content=body, status_code=status_code, headers=response_headers)
 
 
 @router.api_route("/pub/tg/qr.png", methods=["GET"])
@@ -744,10 +806,21 @@ def tg_qr_png(request: Request, qr_id: str | None = None):
 
 
 @router.api_route("/pub/tg/logout", methods=["GET", "POST"])
-async def tg_logout(tenant: int | str | None = None, k: str | None = None):
-    validation = require_client_key(tenant, k)
+async def tg_logout(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+):
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    validation = require_client_key(tenant_candidate, key_candidate)
     if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/logout", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
+        tenant_for_log: int | str | None = tenant_candidate
+        try:
+            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
+        except Exception:
+            tenant_for_log = tenant_candidate
+        _log_tg_proxy("/pub/tg/logout", tenant_for_log, getattr(validation, "status_code", 401), None, error="invalid_key")
         return validation
 
     tenant_id, _ = validation
@@ -760,9 +833,8 @@ async def tg_logout(tenant: int | str | None = None, k: str | None = None):
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    is_success = 200 <= status_code < 300 or status_code in (404, 409)
     detail = None
-    if not is_success:
+    if not (200 <= status_code < 300):
         detail = _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/logout", tenant_id, status_code, body_bytes, error=detail)
@@ -770,17 +842,14 @@ async def tg_logout(tenant: int | str | None = None, k: str | None = None):
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
 
-    if 200 <= status_code < 300 or status_code in (404, 409):
-        upstream_headers = getattr(upstream, "headers", {}) or {}
-        content_type = upstream_headers.get("content-type") if upstream_headers else None
-        headers = {
-            "Content-Type": content_type or "application/json",
-            "Cache-Control": "no-store",
-            "X-Telegram-Upstream-Status": str(status_code),
-        }
-        return Response(content=body_bytes, status_code=200, headers=headers)
-
-    return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+    upstream_headers = getattr(upstream, "headers", {}) or {}
+    content_type = upstream_headers.get("content-type") if upstream_headers else None
+    headers = {
+        "Content-Type": content_type or "application/json",
+        "Cache-Control": "no-store",
+        "X-Telegram-Upstream-Status": str(status_code),
+    }
+    return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
 @router.get("/pub/wa/qr.png")
