@@ -7,8 +7,19 @@ from functools import lru_cache
 from pathlib import Path
 
 
-TG_WORKER_URL = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or "http://tgworker:8085"
-TG_WORKER_URL = (TG_WORKER_URL.strip() or "http://tgworker:8085").rstrip("/") or "http://tgworker:8085"
+DEFAULT_TG_WORKER_URL = "http://tgworker:8085"
+
+
+def _normalize_worker_url(raw: str | None) -> str:
+    if not raw:
+        return DEFAULT_TG_WORKER_URL
+    cleaned = raw.strip()
+    if not cleaned:
+        return DEFAULT_TG_WORKER_URL
+    return cleaned.rstrip("/") or DEFAULT_TG_WORKER_URL
+
+
+TG_WORKER_URL = _normalize_worker_url(os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +59,7 @@ def tg_worker_url() -> str:
     """Return base URL for the Telegram worker service."""
 
     raw = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or TG_WORKER_URL
-    cleaned = raw.strip() if isinstance(raw, str) else TG_WORKER_URL
-    cleaned = cleaned or TG_WORKER_URL
-    return cleaned.rstrip("/") or TG_WORKER_URL
+    return _normalize_worker_url(raw)
 
 
 __all__ = ["TelegramConfig", "telegram_config", "tg_worker_url"]

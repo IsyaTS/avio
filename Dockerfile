@@ -35,7 +35,7 @@ RUN apt-get update \
 RUN mkdir -p /data && chown -R $(id -u):$(id -g) /data
 COPY app/requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
-COPY . /app
+COPY . .
 RUN sed -i 's/\r$//' /app/scripts/diag.sh \
     && chmod +x /app/scripts/diag.sh
 
