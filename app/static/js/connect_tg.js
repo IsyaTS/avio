@@ -68,7 +68,7 @@
     if (!qrImg) return;
     currentQrId = qrId;
     qrImg.src = buildUrl('/pub/tg/qr.png', { qr_id: qrId });
-    qrImg.style.display = '';
+    qrImg.style.display = 'block';
     if (qrFallback) qrFallback.style.display = 'none';
   }
 
@@ -80,7 +80,7 @@
     if (normalized === 'authorized' && !needs2fa) {
       authorized = true;
       setStatus('authorized', 'Подключено. Можно закрыть страницу.');
-      hideQr('Аккаунт подключён. Можно закрыть страницу.');
+      hideQr('Подключено');
       if (refreshBtn) refreshBtn.disabled = true;
       if (pollTimer) window.clearTimeout(pollTimer);
       return;
@@ -150,9 +150,27 @@
     }
   }
 
-  function handleQrError() {
+  async function handleQrError() {
     if (authorized) return;
-    requestStart(true);
+    const currentSrc = qrImg ? qrImg.currentSrc || qrImg.src || '' : '';
+    if (!currentSrc) {
+      requestStart(true);
+      return;
+    }
+    try {
+      const resp = await fetch(currentSrc, { cache: 'no-store' });
+      if (resp.status === 404 || resp.status === 410) {
+        requestStart(true);
+        return;
+      }
+    } catch (err) {
+      console.warn('[tg-connect] qr fetch error', err);
+    }
+    if (!loading) {
+      setStatus('offline', 'Не удалось загрузить QR. Попробуйте обновить.');
+      hideQr('QR недоступен. Обновите страницу.');
+      schedulePoll(3000);
+    }
   }
 
   if (qrImg) {
