@@ -411,7 +411,7 @@ try {
     startUrl: urls.tg_start || `/pub/tg/start`,
     statusUrl: urls.tg_status || `/pub/tg/status`,
     logoutUrl: urls.tg_logout || `/pub/tg/logout`,
-    qrUrl: urls.tg_qr || `/pub/tg/qr.png`,
+    qrUrl: urls.tg_qr_png || urls.tg_qr || `/pub/tg/qr.png`,
     qrTxtUrl: urls.tg_qr_txt || `/pub/tg/qr.txt`,
     passwordUrl: urls.tg_password || `/pub/tg/password`,
   };
@@ -473,6 +473,23 @@ try {
   const fallbackPollInterval = Math.max(500, waitingPollInterval + 500);
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
+
+  function parseBooleanFlag(raw) {
+    if (raw === true) return true;
+    if (raw === false || raw == null) return false;
+    if (typeof raw === 'number') {
+      if (Number.isNaN(raw)) return false;
+      return raw !== 0;
+    }
+    if (typeof raw === 'string') {
+      const normalized = raw.trim().toLowerCase();
+      if (!normalized) return false;
+      if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+      if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+      return true;
+    }
+    return Boolean(raw);
+  }
 
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
@@ -644,10 +661,11 @@ try {
     const status = data && typeof data.status === 'string' ? data.status.trim() : '';
     const normalized = status.toLowerCase();
     const qrId = data && data.qr_id ? String(data.qr_id) : '';
-    const twofaPending = Boolean(data && data.twofa_pending);
+    const twofaPending = parseBooleanFlag(data ? data.twofa_pending : false);
+    const needsTwoFactorFlag = parseBooleanFlag(data ? data.needs_2fa : false);
     const lastError = data && typeof data.last_error === 'string' ? data.last_error : '';
     const canRestart = Boolean(data && data.can_restart);
-    const requiresPassword = normalized === 'needs_2fa' || twofaPending;
+    const requiresPassword = normalized === 'needs_2fa' || twofaPending || needsTwoFactorFlag;
 
     if (normalized === 'waiting_qr' && !requiresPassword) {
       if (qrId) {
@@ -1132,19 +1150,24 @@ try {
       }
       const status = (data && typeof data.status === 'string') ? data.status.trim() : '';
       const normalized = applied && applied.status ? applied.status : status.toLowerCase();
+      const needsTwoFactor = Boolean(
+        (applied && applied.needsTwoFactor === true)
+        || parseBooleanFlag(data ? data.needs_2fa : false)
+        || parseBooleanFlag(data ? data.twofa_pending : false),
+      );
       const lastError = applied && typeof applied.lastError === 'string'
         ? applied.lastError
         : (data && typeof data.last_error === 'string' ? data.last_error : '');
       let message = 'Статус неизвестен';
       let variant = 'muted';
-      if (normalized === 'authorized') {
+      if (needsTwoFactor) {
+        message = 'Введите пароль двухфакторной аутентификации в Telegram.';
+        variant = 'alert';
+      } else if (normalized === 'authorized') {
         message = 'Подключено';
       } else if (normalized === 'waiting_qr') {
         message = 'Сканируйте QR в Telegram → Settings → Devices.';
         variant = 'warning';
-      } else if (normalized === 'needs_2fa') {
-        message = 'Введите пароль двухфакторной аутентификации в Telegram.';
-        variant = 'alert';
       } else if (normalized === 'disconnected' && lastError === 'qr_login_timeout') {
         message = 'QR-код истёк. Получите новый, чтобы продолжить.';
         variant = 'warning';
