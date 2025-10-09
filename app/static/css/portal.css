@@ -160,6 +160,7 @@ main.shell {
   gap: 16px;
 }
 
+.hidden,
 .is-hidden {
   display: none !important;
 }

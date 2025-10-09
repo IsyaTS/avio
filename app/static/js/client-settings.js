@@ -474,7 +474,7 @@ try {
   const fallbackPollInterval = Math.max(500, waitingPollInterval + 500);
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
-  const HIDDEN_CLASS = 'is-hidden';
+  const HIDDEN_CLASS = 'hidden';
 
   function showElement(element) {
     if (!element) return;
