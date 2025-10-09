@@ -635,8 +635,9 @@ async def tg_start(tenant: int | str | None = None, k: str | None = None):
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    detail = ""
-    if status_code < 200 or status_code >= 300:
+    is_success = 200 <= status_code < 300 or status_code == 409
+    detail = None
+    if not is_success:
         detail = _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail)
@@ -659,19 +660,27 @@ async def tg_start(tenant: int | str | None = None, k: str | None = None):
 
 @router.get("/pub/tg/status")
 async def tg_status(tenant: int | str | None = None, k: str | None = None):
-    validation = require_client_key(tenant, k)
-    if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/status", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
-        return validation
+    try:
+        tenant_id = _coerce_tenant(tenant)
+    except ValueError:
+        _log_tg_proxy("/pub/tg/status", tenant, 400, None, error="invalid_tenant")
+        return JSONResponse(
+            {"error": "invalid_tenant"},
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
 
-    tenant_id, _ = validation
+    if k is not None:
+        key = str(k).strip()
+        if not key or not C.valid_key(tenant_id, key):
+            _log_tg_proxy("/pub/tg/status", tenant_id, 401, None, error="invalid_key")
+            return JSONResponse({"error": "invalid_key"}, status_code=401, headers={"Cache-Control": "no-store"})
 
     status_code, body, headers = C.tg_http("GET", f"/session/status?tenant={tenant_id}", timeout=15.0)
-    detail = ""
-    if status_code < 200 or status_code >= 300:
-        detail = _stringify_detail(body) or f"status_{status_code}"
+    is_success = 200 <= status_code < 300
+    detail = None if is_success else _stringify_detail(body) or f"status_{status_code}"
 
-    _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body, error=detail if detail else "")
+    _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body, error=detail)
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
@@ -686,6 +695,7 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
         response_headers = {
             "Content-Type": content_type or "application/json",
             "Cache-Control": "no-store",
+            "X-Telegram-Upstream-Status": str(status_code),
         }
         return Response(content=body, status_code=200, headers=response_headers)
 
@@ -745,8 +755,9 @@ async def tg_logout(tenant: int | str | None = None, k: str | None = None):
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    detail = ""
-    if status_code < 200 or status_code >= 300:
+    is_success = 200 <= status_code < 300 or status_code in (404, 409)
+    detail = None
+    if not is_success:
         detail = _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/logout", tenant_id, status_code, body_bytes, error=detail)
