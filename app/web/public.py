@@ -53,6 +53,8 @@ except ImportError:  # pragma: no cover - fallback for isolated imports
 
 from urllib.parse import quote, quote_plus
 
+from config import tg_worker_url
+
 from . import common as C
 from .ui import templates
 
@@ -60,6 +62,8 @@ logger = logging.getLogger(__name__)
 wa_logger = logging.getLogger("wa")
 # Avoid duplicate logging of WA messages via root logger handlers
 wa_logger.propagate = False
+
+TG_WORKER_BASE = tg_worker_url()
 
 
 def _stringify_detail(value: bytes | bytearray | str | None) -> str:
@@ -706,7 +710,7 @@ async def tg_start(
     tenant_id, _ = validation
 
     try:
-        upstream = await C.tg_post("/session/start", {"tenant_id": tenant_id}, timeout=15.0)
+        upstream = await C.tg_post(f"{TG_WORKER_BASE}/session/start", {"tenant_id": tenant_id}, timeout=15.0)
     except Exception as exc:
         _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error=str(exc))
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
@@ -745,7 +749,11 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         _log_tg_proxy("/pub/tg/status", tenant_id, 401, None, error="invalid_key")
         return JSONResponse({"error": "invalid_key"}, status_code=401, headers={"Cache-Control": "no-store"})
 
-    status_code, body, headers = C.tg_http("GET", f"/session/status?tenant={tenant_id}", timeout=15.0)
+    status_code, body, headers = C.tg_http(
+        "GET",
+        f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
+        timeout=15.0,
+    )
     body_bytes = body if isinstance(body, (bytes, bytearray)) else ("" if body is None else str(body)).encode("utf-8")
     if 200 <= status_code < 300:
         detail = None
@@ -761,6 +769,11 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
+@router.head("/pub/tg/qr.png")
+async def tg_qr_png_head() -> Response:
+    return Response(status_code=405, headers={"Allow": "GET"})
+
+
 @router.get("/pub/tg/qr.png")
 def tg_qr_png(qr_id: str | None = None):
     qr_value = "" if qr_id is None else str(qr_id).strip()
@@ -773,7 +786,11 @@ def tg_qr_png(qr_id: str | None = None):
         )
 
     safe_qr = quote(qr_value, safe="")
-    status_code, body, headers = C.tg_http("GET", f"/session/qr/{safe_qr}.png", timeout=15.0)
+    status_code, body, headers = C.tg_http(
+        "GET",
+        f"{TG_WORKER_BASE}/session/qr/{safe_qr}.png",
+        timeout=15.0,
+    )
     body_bytes = body if isinstance(body, (bytes, bytearray)) else ("" if body is None else str(body)).encode("utf-8")
     if status_code == 200:
         detail = None
@@ -824,7 +841,11 @@ async def tg_logout(
     tenant_id, _ = validation
 
     try:
-        upstream = await C.tg_post("/session/logout", {"tenant_id": tenant_id}, timeout=15.0)
+        upstream = await C.tg_post(
+            f"{TG_WORKER_BASE}/session/logout",
+            {"tenant_id": tenant_id},
+            timeout=15.0,
+        )
     except Exception as exc:
         _log_tg_proxy("/pub/tg/logout", tenant_id, 0, None, error=str(exc))
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})

@@ -14,7 +14,7 @@ import httpx
 import redis  # sync client
 from redis import exceptions as redis_ex
 
-from app.config import tg_worker_url
+from config import tg_worker_url
 
 try:
     from core import (
@@ -57,6 +57,17 @@ WA_INTERNAL_TOKEN = (
 )
 TG_WORKER_URL = tg_worker_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
+
+
+def _build_tg_url(path: str) -> str:
+    if not path:
+        return TG_WORKER_URL
+    lowered = path.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{TG_WORKER_URL}{path}"
 
 
 def redis_client() -> redis.Redis:
@@ -192,7 +203,7 @@ async def wa_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response
 
 
 async def tg_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response:
-    url = f"{TG_WORKER_URL}{path}"
+    url = _build_tg_url(path)
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if TG_WORKER_TOKEN:
         headers["X-Auth-Token"] = TG_WORKER_TOKEN
@@ -206,7 +217,7 @@ def tg_http(
     body: bytes | None = None,
     timeout: float = 8.0,
 ) -> tuple[int, bytes, dict[str, str]]:
-    url = f"{TG_WORKER_URL}{path}"
+    url = _build_tg_url(path)
     req = urllib.request.Request(url, data=body, method=method)
     if body is not None:
         req.add_header("Content-Type", "application/json; charset=utf-8")

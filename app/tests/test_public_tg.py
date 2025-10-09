@@ -80,7 +80,7 @@ def test_tg_start_passthrough(monkeypatch):
     }
     assert data["status"] is not None
     assert data["qr_id"] is not None
-    assert called["path"] == "/session/start"
+    assert called["path"] == "http://tgworker:8085/session/start"
     assert called["payload"] == {"tenant_id": 11}
     assert called["timeout"] == 15.0
 
@@ -108,13 +108,16 @@ def test_tg_status_success(monkeypatch):
     data = resp.json()
     assert data["status"] == "waiting_qr"
     assert data["qr_id"] == "qr-test"
-    assert called["status"] == [("GET", "/session/status?tenant=3", 15.0)]
+    assert called["status"] == [
+        ("GET", "http://tgworker:8085/session/status?tenant=3", 15.0)
+    ]
 
 
 def test_tg_qr_png_proxy(monkeypatch):
     app = _base_app(monkeypatch)
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+        assert path == "http://tgworker:8085/session/qr/qr-1.png"
         return 200, b"png-bytes", {"Content-Type": "image/png"}
 
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
@@ -132,6 +135,7 @@ def test_tg_qr_png_expired(monkeypatch):
     app = _base_app(monkeypatch)
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+        assert path == "http://tgworker:8085/session/qr/qr-1.png"
         return 404, b"", {}
 
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
