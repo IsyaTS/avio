@@ -766,7 +766,11 @@ def tg_qr_png(qr_id: str | None = None):
     qr_value = "" if qr_id is None else str(qr_id).strip()
     if not qr_value:
         _log_tg_proxy("/pub/tg/qr.png", None, 400, None, error="missing_qr_id")
-        return JSONResponse({"error": "missing_qr_id"}, status_code=400, headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            {"error": "missing_qr_id"},
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
 
     safe_qr = quote(qr_value, safe="")
     status_code, body, headers = C.tg_http("GET", f"/session/qr/{safe_qr}.png", timeout=15.0)
@@ -779,7 +783,11 @@ def tg_qr_png(qr_id: str | None = None):
     _log_tg_proxy("/pub/tg/qr.png", None, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            {"error": "tg_unavailable"},
+            status_code=502,
+            headers={"Cache-Control": "no-store"},
+        )
 
     if status_code in (404, 410):
         headers_out = {"Cache-Control": "no-store", "X-Telegram-Upstream-Status": str(status_code)}
@@ -790,8 +798,8 @@ def tg_qr_png(qr_id: str | None = None):
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
 
     response_headers = _proxy_headers(headers or {}, status_code)
-    if status_code == 200:
-        response_headers.setdefault("Content-Type", "image/png")
+    response_headers["Content-Type"] = "image/png"
+    response_headers["Cache-Control"] = "no-store"
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
