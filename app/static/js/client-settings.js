@@ -443,6 +443,7 @@ try {
     expPer: document.getElementById('exp-per'),
     exportDownload: document.getElementById('export-download'),
     exportStatus: document.getElementById('export-status'),
+    tgIntegrationCard: document.querySelector('.integration-card[data-tg-initial-status]'),
     tgStatus: document.getElementById('tg-integration-status'),
     tgRefresh: document.getElementById('tg-integration-refresh'),
     tgDisconnect: document.getElementById('tg-integration-disconnect'),
@@ -460,6 +461,16 @@ try {
 
   let currentTelegramQrId = initialQrId;
   let telegramStatusPollTimer = null;
+  const waitingPollInterval = (() => {
+    if (dom.tgIntegrationCard && dom.tgIntegrationCard.dataset) {
+      const raw = Number(dom.tgIntegrationCard.dataset.tgPollInterval || '0');
+      if (Number.isFinite(raw) && raw > 0) {
+        return Math.max(500, raw);
+      }
+    }
+    return 2500;
+  })();
+  const fallbackPollInterval = Math.max(500, waitingPollInterval + 500);
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
 
@@ -529,8 +540,14 @@ try {
     const src = buildTelegramQrUrl(qrId);
     if (!src) return;
     currentTelegramQrId = qrId;
+    if (dom.tgQrContainer.dataset) {
+      dom.tgQrContainer.dataset.qrId = qrId;
+    }
     dom.tgQrContainer.style.display = 'flex';
     dom.tgQrImage.style.display = 'block';
+    if (dom.tgQrImage.dataset) {
+      dom.tgQrImage.dataset.cachebuster = String(Date.now());
+    }
     dom.tgQrImage.src = src;
     if (dom.tgQrFallback) {
       dom.tgQrFallback.style.display = 'none';
@@ -543,10 +560,16 @@ try {
   function hideTelegramQr(message) {
     currentTelegramQrId = '';
     if (dom.tgQrImage) {
+      if (dom.tgQrImage.dataset) {
+        dom.tgQrImage.dataset.cachebuster = '';
+      }
       dom.tgQrImage.removeAttribute('src');
       dom.tgQrImage.style.display = 'none';
     }
     if (dom.tgQrContainer) {
+      if (dom.tgQrContainer.dataset) {
+        dom.tgQrContainer.dataset.qrId = '';
+      }
       dom.tgQrContainer.style.display = message ? 'flex' : 'none';
     }
     if (dom.tgQrFallback) {
@@ -666,7 +689,7 @@ try {
       stopTelegramPolling();
       return;
     }
-    const delay = normalized === 'waiting_qr' ? 2500 : 3000;
+    const delay = normalized === 'waiting_qr' ? waitingPollInterval : fallbackPollInterval;
     scheduleTelegramPolling(delay);
   }
 
