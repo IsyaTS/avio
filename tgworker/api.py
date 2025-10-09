@@ -11,7 +11,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import telegram_config
 
-from .manager import TelegramSessionManager
+from .manager import TelegramSessionManager, QRExpiredError, QRNotFoundError
 
 
 logger = logging.getLogger("tgworker.api")
@@ -77,6 +77,12 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="tgworker")
 
+    NO_CACHE_HEADERS = {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     @app.on_event("startup")
     async def _startup() -> None:  # pragma: no cover - wiring
         await manager.start()
@@ -118,6 +124,7 @@ def create_app() -> FastAPI:
     async def session_status(tenant: int = Query(..., ge=1)):
         state = await manager.get_status(tenant)
         snapshot = manager.stats_snapshot()
+        valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
         return {
             "tenant_id": tenant,
             "status": state.status,
@@ -126,14 +133,31 @@ def create_app() -> FastAPI:
             "last_error": state.last_error,
             "stats": snapshot,
             "can_restart": state.can_restart,
+            "qr_valid_until": valid_until_ms,
         }
 
     @app.get("/session/qr/{qr_id}.png")
     async def session_qr(qr_id: str):
-        blob = manager.get_qr_png(qr_id)
-        if not blob:
-            raise HTTPException(status_code=404, detail="qr_not_found")
-        return Response(content=blob, media_type="image/png", headers={"Cache-Control": "no-store"})
+        try:
+            blob = manager.get_qr_png(qr_id)
+        except QRExpiredError as exc:
+            raise HTTPException(status_code=404, detail="qr_expired") from exc
+        except QRNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="qr_not_found") from exc
+        headers = dict(NO_CACHE_HEADERS)
+        headers["Cache-Control"] = NO_CACHE_HEADERS["Cache-Control"]
+        return Response(content=blob, media_type="image/png", headers=headers)
+
+    @app.get("/session/qr/{qr_id}.txt")
+    async def session_qr_txt(qr_id: str):
+        try:
+            login_url = manager.get_qr_url(qr_id)
+        except QRExpiredError as exc:
+            raise HTTPException(status_code=404, detail="qr_expired") from exc
+        except QRNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="qr_not_found") from exc
+        headers = dict(NO_CACHE_HEADERS)
+        return PlainTextResponse(login_url, headers=headers)
 
     @app.post("/session/logout")
     async def session_logout(payload: LogoutRequest):

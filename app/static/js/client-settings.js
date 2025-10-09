@@ -360,6 +360,7 @@ try {
     const tenant = determineTenant(state, { fallbackDefault: true });
     const accessKey = typeof state.key === 'string' ? state.key : '';
     const urls = state && typeof state === 'object' ? state.urls || {} : {};
+    const initialQrId = typeof state.qr_id === 'string' ? state.qr_id.trim() : '';
     const resolvedMaxDays = resolveMaxDays(state);
     const maxDays = resolvedMaxDays != null ? resolvedMaxDays : 30;
 
@@ -411,6 +412,7 @@ try {
     statusUrl: urls.tg_status || `/pub/tg/status`,
     logoutUrl: urls.tg_logout || `/pub/tg/logout`,
     qrUrl: urls.tg_qr || `/pub/tg/qr.png`,
+    qrTxtUrl: urls.tg_qr_txt || `/pub/tg/qr.txt`,
     passwordUrl: urls.tg_password || `/pub/tg/password`,
   };
 
@@ -449,15 +451,17 @@ try {
     tgQrContainer: document.getElementById('tg-integration-qr'),
     tgQrImage: document.getElementById('tg-integration-qr-image'),
     tgQrFallback: document.getElementById('tg-integration-qr-fallback'),
+    tgQrLink: document.getElementById('tg-integration-qr-link'),
     tgPasswordForm: document.getElementById('tg-password-form'),
     tgPasswordInput: document.getElementById('tg-password-input'),
     tgPasswordSubmit: document.getElementById('tg-password-submit'),
     tgPasswordMessage: document.getElementById('tg-password-message'),
   };
 
-  let currentTelegramQrId = '';
+  let currentTelegramQrId = initialQrId;
   let telegramStatusPollTimer = null;
   let passwordPromptVisible = false;
+  let qrImageReloadPending = false;
 
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
@@ -490,7 +494,34 @@ try {
       url = new URL(telegram.qrUrl, window.location.href);
     }
     url.searchParams.set('qr_id', qrId);
+    url.searchParams.set('t', String(Date.now()));
     return url.toString();
+  }
+
+  function buildTelegramQrTextUrl(qrId) {
+    if (!telegram.qrTxtUrl || !qrId) return '';
+    let url;
+    try {
+      url = new URL(telegram.qrTxtUrl, window.location.origin);
+    } catch (error) {
+      url = new URL(telegram.qrTxtUrl, window.location.href);
+    }
+    url.searchParams.set('qr_id', qrId);
+    return url.toString();
+  }
+
+  function updateTelegramQrLink(qrId) {
+    if (!dom.tgQrLink) return;
+    if (qrId) {
+      const href = buildTelegramQrTextUrl(qrId);
+      if (href) {
+        dom.tgQrLink.href = href;
+        dom.tgQrLink.style.display = 'inline-flex';
+        return;
+      }
+    }
+    dom.tgQrLink.href = '#';
+    dom.tgQrLink.style.display = 'none';
   }
 
   function showTelegramQr(qrId) {
@@ -500,13 +531,13 @@ try {
     currentTelegramQrId = qrId;
     dom.tgQrContainer.style.display = 'flex';
     dom.tgQrImage.style.display = 'block';
-    if (dom.tgQrImage.src !== src) {
-      dom.tgQrImage.src = src;
-    }
+    dom.tgQrImage.src = src;
     if (dom.tgQrFallback) {
       dom.tgQrFallback.style.display = 'none';
       dom.tgQrFallback.textContent = '';
     }
+    updateTelegramQrLink(qrId);
+    qrImageReloadPending = false;
   }
 
   function hideTelegramQr(message) {
@@ -522,6 +553,21 @@ try {
       dom.tgQrFallback.textContent = message || '';
       dom.tgQrFallback.style.display = message ? 'block' : 'none';
     }
+    updateTelegramQrLink('');
+    qrImageReloadPending = false;
+  }
+
+  function handleTelegramQrError() {
+    if (!currentTelegramQrId || qrImageReloadPending) {
+      return;
+    }
+    qrImageReloadPending = true;
+    if (dom.tgQrFallback) {
+      dom.tgQrFallback.textContent = 'Обновляем QR…';
+      dom.tgQrFallback.style.display = 'block';
+    }
+    stopTelegramPolling();
+    refreshTelegramStatus({ fromPoll: true });
   }
 
   function setNewQrVisibility(visible) {
@@ -575,10 +621,8 @@ try {
 
     if (normalized === 'waiting_qr' && !requiresPassword) {
       if (qrId) {
-        if (qrId !== currentTelegramQrId) {
-          showTelegramQr(qrId);
-        }
-      } else if (!currentTelegramQrId) {
+        showTelegramQr(qrId);
+      } else {
         hideTelegramQr('Готовим QR-код…');
       }
       hideTwoFactorPrompt();
@@ -621,7 +665,7 @@ try {
       stopTelegramPolling();
       return;
     }
-    const delay = normalized === 'waiting_qr' ? 3000 : 5000;
+    const delay = normalized === 'waiting_qr' ? 2500 : 5000;
     scheduleTelegramPolling(delay);
   }
 
@@ -1122,7 +1166,11 @@ try {
       if (options && options.force && dom.tgNewQr) {
         dom.tgNewQr.disabled = false;
       }
-      refreshTelegramStatus();
+    }
+    try {
+      await refreshTelegramStatus({ fromPoll: true });
+    } catch (error) {
+      console.error('[client-settings] telegram start refresh failed', error);
     }
   }
 
@@ -1215,12 +1263,29 @@ try {
     }
   }
 
+  if (initialQrId) {
+    updateTelegramQrLink(initialQrId);
+  }
+
   if (dom.tgConnect) {
     dom.tgConnect.addEventListener('click', (event) => {
       if (event && typeof event.preventDefault === 'function') {
         event.preventDefault();
       }
       startTelegramSession();
+    });
+  }
+
+  if (dom.tgQrImage) {
+    dom.tgQrImage.addEventListener('error', () => {
+      handleTelegramQrError();
+    });
+    dom.tgQrImage.addEventListener('load', () => {
+      qrImageReloadPending = false;
+      if (dom.tgQrFallback) {
+        dom.tgQrFallback.style.display = 'none';
+        dom.tgQrFallback.textContent = '';
+      }
     });
   }
   if (dom.tgNewQr) {

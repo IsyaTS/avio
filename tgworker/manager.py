@@ -44,12 +44,25 @@ EVENT_ERRORS = Counter(
 )
 
 
+class QRNotFoundError(Exception):
+    """Raised when a QR identifier is unknown or no longer tracked."""
+
+
+class QRExpiredError(Exception):
+    """Raised when a QR identifier has expired and should not be reused."""
+
+    def __init__(self, valid_until: Optional[float] = None) -> None:
+        super().__init__("qr_expired")
+        self.valid_until = valid_until
+
+
 @dataclass(slots=True)
 class SessionState:
     tenant_id: int
     status: str = "disconnected"
     qr_id: Optional[str] = None
     qr_png: Optional[bytes] = None
+    qr_url: Optional[str] = None
     qr_expires_at: Optional[float] = None
     waiting_task: Optional[asyncio.Task[Any]] = None
     last_error: Optional[str] = None
@@ -84,6 +97,7 @@ class TelegramSessionManager:
         self._clients: Dict[int, TelegramClient] = {}
         self._states: Dict[int, SessionState] = {}
         self._qr_lookup: Dict[str, int] = {}
+        self._expired_qr: Dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._loop = asyncio.get_event_loop()
         self._started = False
@@ -93,6 +107,70 @@ class TelegramSessionManager:
             return
         self._started = True
         await self._bootstrap_existing_sessions()
+
+    @staticmethod
+    def _qr_valid_until_ms(expires_at: Optional[float]) -> Optional[int]:
+        if not expires_at:
+            return None
+        try:
+            return int(expires_at * 1000)
+        except Exception:
+            return None
+
+    def _cleanup_expired_qr_cache(self) -> None:
+        cutoff = time.time() - 900
+        stale_keys = [
+            qr_id for qr_id, ts in list(self._expired_qr.items()) if ts and ts < cutoff
+        ]
+        for qr_id in stale_keys:
+            self._expired_qr.pop(qr_id, None)
+
+    def _record_qr_expired(
+        self,
+        tenant: int,
+        qr_id: str,
+        valid_until: Optional[float],
+        *,
+        reason: str,
+    ) -> None:
+        if not qr_id:
+            return
+        self._cleanup_expired_qr_cache()
+        timestamp = valid_until if valid_until is not None else time.time()
+        self._expired_qr[qr_id] = timestamp
+        LOGGER.info(
+            "event=qr_expired tenant_id=%s qr_id=%s qr_valid_until=%s reason=%s",
+            tenant,
+            qr_id,
+            self._qr_valid_until_ms(valid_until),
+            reason,
+        )
+
+    @staticmethod
+    def _clear_qr_state_locked(state: SessionState) -> None:
+        state.qr_id = None
+        state.qr_png = None
+        state.qr_url = None
+        state.qr_expires_at = None
+
+    def _expire_qr_locked(
+        self,
+        tenant: int,
+        state: SessionState,
+        *,
+        reason: str,
+        set_error: bool = True,
+    ) -> None:
+        if not state.qr_id:
+            return
+        qr_id = state.qr_id
+        self._qr_lookup.pop(qr_id, None)
+        valid_until = state.qr_expires_at
+        self._record_qr_expired(tenant, qr_id, valid_until, reason=reason)
+        self._clear_qr_state_locked(state)
+        if set_error:
+            state.last_error = "qr_expired"
+        state.can_restart = True
 
     def _extend_needs_2fa_ttl(self, state: SessionState) -> None:
         state.needs_2fa_expires_at = time.time() + NEEDS_2FA_TTL
@@ -176,7 +254,11 @@ class TelegramSessionManager:
             return None
 
     def _hard_reset_state_locked(
-        self, tenant: int, state: Optional[SessionState] = None
+        self,
+        tenant: int,
+        state: Optional[SessionState] = None,
+        *,
+        reason: str = "reset",
     ) -> tuple[SessionState, Optional[TelegramClient], Optional[asyncio.Task[Any]], bool]:
         state = state or self._states.setdefault(tenant, SessionState(tenant_id=tenant))
         client = self._clients.pop(tenant, None)
@@ -185,7 +267,7 @@ class TelegramSessionManager:
             task = state.waiting_task
         state.waiting_task = None
         if state.qr_id:
-            self._qr_lookup.pop(state.qr_id, None)
+            self._expire_qr_locked(tenant, state, reason=reason, set_error=False)
         removed_session_file = False
         path = self._sessions_dir / f"{tenant}.session"
         try:
@@ -194,9 +276,7 @@ class TelegramSessionManager:
         except FileNotFoundError:
             removed_session_file = False
         state.status = "disconnected"
-        state.qr_id = None
-        state.qr_png = None
-        state.qr_expires_at = None
+        self._clear_qr_state_locked(state)
         state.last_error = None
         state.needs_2fa = False
         if state.needs_2fa_expires_at and state.needs_2fa_expires_at <= time.time():
@@ -217,7 +297,7 @@ class TelegramSessionManager:
         async with self._lock:
             state = self._states.get(tenant)
             state, client_to_disconnect, task_to_cancel, removed_file = self._hard_reset_state_locked(
-                tenant, state
+                tenant, state, reason="hard_reset"
             )
         if task_to_cancel:
             task_to_cancel.cancel()
@@ -243,6 +323,7 @@ class TelegramSessionManager:
                     clients_to_disconnect.append(client)
             state = self._states.get(tenant) or state or SessionState(tenant_id=tenant)
             self._states[tenant] = state
+            state.restart_pending = False
 
             need_new_qr = force
             if not need_new_qr:
@@ -263,7 +344,9 @@ class TelegramSessionManager:
                         need_new_qr = True
 
             if need_new_qr:
-                state, client, task, _ = self._hard_reset_state_locked(tenant, state)
+                state, client, task, _ = self._hard_reset_state_locked(
+                    tenant, state, reason="regen"
+                )
                 if client:
                     clients_to_disconnect.append(client)
                 if task:
@@ -277,10 +360,21 @@ class TelegramSessionManager:
                 png = self._build_qr_png(qr_login.url)
                 qr_id = secrets.token_urlsafe(16)
 
+                qr_expires_at = time.time() + 180.0
+                expires_raw = getattr(qr_login, "expires", None)
+                if isinstance(expires_raw, (int, float)):
+                    qr_expires_at = float(expires_raw)
+                else:
+                    try:
+                        qr_expires_at = float(expires_raw.timestamp())  # type: ignore[arg-type]
+                    except Exception:
+                        pass
+
                 state.status = "waiting_qr"
                 state.qr_id = qr_id
                 state.qr_png = png
-                state.qr_expires_at = time.time() + 180
+                state.qr_url = qr_login.url
+                state.qr_expires_at = qr_expires_at
                 state.last_error = None
                 state.needs_2fa = False
                 state.awaiting_password = False
@@ -291,6 +385,12 @@ class TelegramSessionManager:
                 state.last_seen = time.time()
                 self._qr_lookup[qr_id] = tenant
                 LOGGER.info("stage=qr_start tenant_id=%s qr_id=%s", tenant, qr_id)
+                LOGGER.info(
+                    "event=qr_new tenant_id=%s qr_id=%s qr_valid_until=%s",
+                    tenant,
+                    qr_id,
+                    self._qr_valid_until_ms(state.qr_expires_at),
+                )
 
                 state.waiting_task = self._loop.create_task(
                     self._wait_for_authorization(tenant, client, state, qr_login)
@@ -315,15 +415,22 @@ class TelegramSessionManager:
 
     async def _wait_for_authorization(self, tenant: int, client: TelegramClient, state: SessionState, qr_login) -> None:
         qr_id = state.qr_id
+        valid_until = state.qr_expires_at
         try:
             result = await qr_login.wait(timeout=QR_LOGIN_TIMEOUT)
             LOGGER.info("stage=qr_ready tenant_id=%s", tenant)
             if result is None:
                 await asyncio.sleep(0.1)
             state.status = "authorized"
-            state.qr_id = None
-            state.qr_png = None
-            state.qr_expires_at = None
+            if qr_id:
+                LOGGER.info(
+                    "event=qr_scanned tenant_id=%s qr_id=%s qr_valid_until=%s",
+                    tenant,
+                    qr_id,
+                    self._qr_valid_until_ms(valid_until),
+                )
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="scanned")
+            self._clear_qr_state_locked(state)
             state.needs_2fa = False
             state.last_seen = time.time()
             self._register_handlers(tenant, client)
@@ -332,9 +439,9 @@ class TelegramSessionManager:
             state.status = "needs_2fa"
             state.needs_2fa = True
             state.awaiting_password = True
-            state.qr_id = None
-            state.qr_png = None
-            state.qr_expires_at = None
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="needs_2fa")
+            self._clear_qr_state_locked(state)
             state.last_error = "two_factor_required"
             state.last_seen = time.time()
             self._extend_needs_2fa_ttl(state)
@@ -350,6 +457,9 @@ class TelegramSessionManager:
             state.last_error = "qr_login_timeout"
             state.needs_2fa = False
             state.awaiting_password = False
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="timeout")
+            self._clear_qr_state_locked(state)
             EVENT_ERRORS.labels("timeout").inc()
             LOGGER.warning("stage=qr_timeout event=qr_timeout tenant_id=%s", tenant)
         except asyncio.CancelledError:
@@ -360,6 +470,9 @@ class TelegramSessionManager:
             state.last_error = str(exc)
             state.needs_2fa = False
             state.awaiting_password = False
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="rpc_error")
+            self._clear_qr_state_locked(state)
             EVENT_ERRORS.labels("rpc_error").inc()
             LOGGER.error("stage=send_fail tenant_id=%s error=%s", tenant, exc)
         except Exception as exc:
@@ -367,6 +480,9 @@ class TelegramSessionManager:
             state.last_error = str(exc)
             state.needs_2fa = False
             state.awaiting_password = False
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="exception")
+            self._clear_qr_state_locked(state)
             EVENT_ERRORS.labels("exception").inc()
             LOGGER.exception("stage=qr_fail tenant_id=%s", tenant)
         finally:
@@ -569,6 +685,20 @@ class TelegramSessionManager:
             else:
                 state.can_restart = False
             schedule_restart = False
+            now = time.time()
+            if state.status == "waiting_qr" and state.qr_id:
+                if state.qr_expires_at and state.qr_expires_at <= now:
+                    self._expire_qr_locked(tenant, state, reason="expired")
+                    if not state.restart_pending:
+                        state.restart_pending = True
+                        schedule_restart = True
+                elif (
+                    state.qr_expires_at
+                    and state.qr_expires_at - now <= 15.0
+                    and not state.restart_pending
+                ):
+                    state.restart_pending = True
+                    schedule_restart = True
             if (
                 state.status == "needs_2fa"
                 and not state.qr_id
@@ -681,22 +811,56 @@ class TelegramSessionManager:
 
         return result
 
-    def get_qr_png(self, qr_id: str) -> Optional[bytes]:
+    def _resolve_qr_state(self, qr_id: str) -> tuple[int, SessionState]:
         tenant = self._qr_lookup.get(qr_id)
         if tenant is None:
-            return None
+            expired_ts = self._expired_qr.get(qr_id)
+            if expired_ts is not None:
+                raise QRExpiredError(expired_ts)
+            raise QRNotFoundError(qr_id)
         state = self._states.get(tenant)
         if not state or state.qr_id != qr_id:
-            return None
-        if state.qr_expires_at and state.qr_expires_at < time.time():
-            return None
+            expired_ts = self._expired_qr.get(qr_id)
+            if expired_ts is not None:
+                raise QRExpiredError(expired_ts)
+            raise QRNotFoundError(qr_id)
+        return tenant, state
+
+    def get_qr_png(self, qr_id: str) -> bytes:
+        tenant, state = self._resolve_qr_state(qr_id)
+        if state.qr_expires_at and state.qr_expires_at <= time.time():
+            valid_until = state.qr_expires_at
+            self._expire_qr_locked(tenant, state, reason="timeout")
+            if not state.restart_pending:
+                state.restart_pending = True
+                self._loop.create_task(self.start_session(tenant, force=True))
+            raise QRExpiredError(valid_until)
+        if not state.qr_png:
+            raise QRNotFoundError(qr_id)
         return state.qr_png
 
+    def get_qr_url(self, qr_id: str) -> str:
+        tenant, state = self._resolve_qr_state(qr_id)
+        if state.qr_expires_at and state.qr_expires_at <= time.time():
+            valid_until = state.qr_expires_at
+            self._expire_qr_locked(tenant, state, reason="timeout")
+            if not state.restart_pending:
+                state.restart_pending = True
+                self._loop.create_task(self.start_session(tenant, force=True))
+            raise QRExpiredError(valid_until)
+        if not state.qr_url:
+            raise QRNotFoundError(qr_id)
+        return state.qr_url
+
     def _build_qr_png(self, url: str) -> bytes:
-        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=6, border=2)
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=14,
+            border=4,
+        )
         qr.add_data(url)
         qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        img = qr.make_image(fill_color="#000000", back_color="#FFFFFF").convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
