@@ -95,11 +95,9 @@
 {% endblock %}
 
 {% set extra_scripts %}
-<script id="tg-connect-state" type="application/json">{{ {
-    "tenant": tenant,
-    "key": key,
-    "urls": urls,
-    "query": query
-} | tojson }}</script>
+<div id="tg-connect-bootstrap"
+     data-tenant="{{ query.tenant }}"
+     data-key="{{ query.k }}"
+     hidden></div>
 <script src="{{ static_url(request, 'js/connect_tg.js') }}" defer></script>
 {% endset %}

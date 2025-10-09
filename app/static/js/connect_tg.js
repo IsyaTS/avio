@@ -1,27 +1,11 @@
-(function () {
-  const stateEl = document.getElementById('tg-connect-state');
-  if (!stateEl) return;
+;(function () {
+  const bootstrap = document.getElementById('tg-connect-bootstrap');
+  if (!bootstrap) return;
 
-  let config = {};
-  try {
-    config = JSON.parse(stateEl.textContent || '{}');
-  } catch (err) {
-    console.error('[tg-connect] failed to parse state', err);
-    return;
-  }
-
-  const tenantId = config.tenant;
-  const accessKey = config.key;
-  const query = config.query || {};
-  const tenantQuery = query.tenant !== undefined && query.tenant !== null
-    ? String(query.tenant)
-    : (tenantId !== undefined && tenantId !== null ? String(tenantId) : '');
-  const keyQuery = query.k !== undefined && query.k !== null
-    ? String(query.k)
-    : (accessKey !== undefined && accessKey !== null ? String(accessKey) : '');
-  const urls = config.urls || {};
-  if (!tenantQuery || !keyQuery || !urls.start || !urls.status || !urls.qr) {
-    console.warn('[tg-connect] missing config');
+  const tenant = (bootstrap.dataset.tenant || '').trim();
+  const key = (bootstrap.dataset.key || '').trim();
+  if (!tenant || !key) {
+    console.warn('[tg-connect] missing tenant or key');
     return;
   }
 
@@ -33,23 +17,26 @@
 
   let pollTimer = null;
   let currentQrId = '';
-  let loadingQr = false;
   let authorized = false;
+  let loading = false;
 
-  function withQuery(base, params) {
-    const connector = base.includes('?') ? '&' : '?';
-    const query = Object.entries(params)
-      .filter(([, value]) => value !== undefined && value !== null)
-      .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
-      .join('&');
-    return `${base}${connector}${query}`;
+  function buildUrl(path, params) {
+    const search = new URLSearchParams({ tenant, k: key, ...params });
+    return `${path}?${search.toString()}`;
+  }
+
+  function schedulePoll(delayMs) {
+    if (pollTimer) window.clearTimeout(pollTimer);
+    if (authorized) return;
+    const base = 3000 + Math.random() * 2000;
+    const timeout = typeof delayMs === 'number' ? delayMs : base;
+    pollTimer = window.setTimeout(pollStatus, timeout);
   }
 
   function setStatus(status, message) {
     if (!statusChip) return;
     const normalized = (status || '').toLowerCase();
-    const label = normalized ? `Статус: ${normalized}` : 'Статус: неизвестен';
-    statusChip.textContent = label;
+    statusChip.textContent = normalized ? `Статус: ${normalized}` : 'Статус: неизвестен';
     statusChip.classList.remove('waiting', 'authorized', 'offline', 'needs-2fa');
     if (normalized === 'authorized') statusChip.classList.add('authorized');
     else if (normalized === 'waiting_qr') statusChip.classList.add('waiting');
@@ -68,8 +55,8 @@
 
   function hideQr(message) {
     if (qrImg) {
-      qrImg.style.display = 'none';
       qrImg.removeAttribute('src');
+      qrImg.style.display = 'none';
     }
     if (qrFallback) {
       qrFallback.textContent = message || 'QR генерируется…';
@@ -80,115 +67,76 @@
   function showQr(qrId) {
     if (!qrImg) return;
     currentQrId = qrId;
-    const src = withQuery(urls.qr, {
-      tenant: tenantQuery,
-      k: keyQuery,
-      qr_id: qrId,
-    });
-    qrImg.src = src;
+    qrImg.src = buildUrl('/pub/tg/qr.png', { qr_id: qrId });
     qrImg.style.display = '';
     if (qrFallback) qrFallback.style.display = 'none';
   }
 
-  function schedulePoll(delay) {
-    if (pollTimer) window.clearTimeout(pollTimer);
-    const baseDelay = 3000 + Math.random() * 2000;
-    const timeout = typeof delay === 'number' ? delay : baseDelay;
-    pollTimer = window.setTimeout(pollStatus, timeout);
+  function applyStatus(data) {
+    const rawStatus = data && data.status ? String(data.status) : '';
+    const normalized = rawStatus.toLowerCase();
+    const needs2fa = Boolean(data && data.needs_2fa);
+
+    if (normalized === 'authorized' && !needs2fa) {
+      authorized = true;
+      setStatus('authorized', 'Подключено. Можно закрыть страницу.');
+      hideQr('Аккаунт подключён. Можно закрыть страницу.');
+      if (refreshBtn) refreshBtn.disabled = true;
+      if (pollTimer) window.clearTimeout(pollTimer);
+      return;
+    }
+
+    if (needs2fa) {
+      setStatus('needs_2fa', 'Введите пароль двухфакторной аутентификации в Telegram.');
+      hideQr('Откройте Telegram и введите пароль двухфакторной аутентификации.');
+      return;
+    }
+
+    if (normalized === 'waiting_qr' || !normalized) {
+      const qrId = data && data.qr_id ? String(data.qr_id) : '';
+      if (qrId && qrId !== currentQrId) {
+        showQr(qrId);
+      } else if (!qrId && !currentQrId && !loading) {
+        requestStart(true);
+      }
+      setStatus('waiting_qr', 'Отсканируйте QR в Telegram → Settings → Devices.');
+    } else {
+      setStatus(normalized, 'Ожидаем ответ от Telegram…');
+    }
   }
 
-  async function requestNewQr(force) {
-    if (loadingQr) return;
-    loadingQr = true;
+  async function requestStart(force) {
+    if (loading) return;
+    loading = true;
     if (force) currentQrId = '';
     hideQr('QR генерируется…');
     setStatus('waiting_qr', 'Готовим новый QR-код…');
 
-    const url = withQuery(urls.start, { tenant: tenantQuery, k: keyQuery });
     try {
-      const resp = await fetch(url, {
+      const resp = await fetch(buildUrl('/pub/tg/start'), {
         method: 'POST',
         cache: 'no-store',
       });
       if (!resp.ok) throw new Error(`start failed: ${resp.status}`);
       const data = await resp.json();
-      const upstreamStatus = data && data.status ? String(data.status) : '';
-      if (upstreamStatus) {
-        applyStatus(data);
-        if (authorized) return;
-      }
       const qrId = data && data.qr_id ? String(data.qr_id) : '';
       if (qrId) {
         showQr(qrId);
-        const normalizedStatus = upstreamStatus.toLowerCase();
-        if (!upstreamStatus || normalizedStatus === 'waiting_qr') {
-          setStatus(upstreamStatus || 'waiting_qr', 'Откройте Telegram → Settings → Devices → Link Desktop Device.');
-        }
-      } else if (!upstreamStatus || normalizedStatus === 'waiting_qr') {
-        hideQr('QR недоступен. Попробуйте обновить позже.');
-        setStatus('offline', 'Не удалось получить QR. Попробуйте обновить.');
       }
+      applyStatus(data);
     } catch (err) {
       console.error('[tg-connect] start error', err);
-      hideQr('Сервис Telegram недоступен.');
       setStatus('offline', 'Не удалось запросить QR. Попробуйте позже.');
+      hideQr('Сервис Telegram недоступен.');
     } finally {
-      loadingQr = false;
-      if (!authorized) {
-        schedulePoll();
-      }
-    }
-  }
-
-  function applyStatus(data) {
-    if (refreshBtn) refreshBtn.disabled = false;
-    const rawStatus = data && data.status ? String(data.status) : '';
-    let status = rawStatus.toLowerCase();
-    const needs2fa = Boolean(data && data.needs_2fa);
-
-    if (status === 'authorized' && !needs2fa) {
-      authorized = true;
-      hideQr('Аккаунт подключён. Можно закрыть страницу.');
-      setStatus('authorized', 'Подключено. Можно закрыть страницу.');
-      if (refreshBtn) refreshBtn.disabled = true;
-      return;
-    }
-
-    if (needs2fa) {
-      status = 'needs_2fa';
-    }
-
-    let message = 'Проверяем статус…';
-    if (status === 'waiting_qr') {
-      message = 'Отсканируйте QR в Telegram → Settings → Devices.';
-    } else if (status === 'needs_2fa') {
-      message = 'Введите пароль двухфакторной аутентификации в Telegram.';
-    } else if (!status) {
-      message = 'Проверяем статус…';
-    } else {
-      message = 'Ожидаем ответ от Telegram…';
-    }
-    setStatus(status || 'waiting_qr', message);
-
-    const upstreamQr = data && data.qr_id ? String(data.qr_id) : '';
-    if (status === 'waiting_qr') {
-      if (upstreamQr && upstreamQr !== currentQrId) {
-        showQr(upstreamQr);
-      } else if (!upstreamQr && !currentQrId && !loadingQr) {
-        requestNewQr(true);
-      }
-    } else if (status === 'needs_2fa') {
-      hideQr('Откройте Telegram и введите пароль двухфакторной аутентификации.');
+      loading = false;
+      if (!authorized) schedulePoll();
     }
   }
 
   async function pollStatus() {
-    const url = withQuery(urls.status, {
-      tenant: tenantQuery,
-      k: keyQuery,
-    });
     try {
-      const resp = await fetch(url, { cache: 'no-store' });
+      const resp = await fetch(buildUrl('/pub/tg/status'), { cache: 'no-store' });
       if (!resp.ok) throw new Error(`status failed: ${resp.status}`);
       const data = await resp.json();
       applyStatus(data);
@@ -204,8 +152,7 @@
 
   function handleQrError() {
     if (authorized) return;
-    console.warn('[tg-connect] qr load failed, requesting new code');
-    requestNewQr(true);
+    requestStart(true);
   }
 
   if (qrImg) {
@@ -214,9 +161,9 @@
 
   if (refreshBtn) {
     refreshBtn.addEventListener('click', function () {
-      requestNewQr(true);
+      requestStart(true);
     });
   }
 
-  requestNewQr(false);
+  requestStart(false);
 })();

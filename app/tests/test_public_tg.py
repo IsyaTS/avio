@@ -44,7 +44,9 @@ def test_connect_tg_renders(monkeypatch):
     assert response.status_code == 200
     body = response.text
     assert "Подключение Telegram" in body
-    assert "/pub/tg/status" in body
+    assert 'id="tg-connect-bootstrap"' in body
+    assert 'data-tenant="7"' in body
+    assert 'data-key="abc123"' in body
     assert "Test Brand" in body
     assert "Persona" in body
 
@@ -67,12 +69,15 @@ def test_tg_start_passthrough(monkeypatch):
     resp = client.post("/pub/tg/start", params={"tenant": 11, "k": "secret"})
 
     assert resp.status_code == 200
-    assert resp.json() == {
+    data = resp.json()
+    assert data == {
         "status": "waiting_qr",
         "qr_id": "qr-1",
         "needs_2fa": None,
         "extra": "ignore",
     }
+    assert data["status"] is not None
+    assert data["qr_id"] is not None
     assert called["path"] == "/session/start"
     assert called["payload"] == {"tenant_id": 11}
 
@@ -80,14 +85,17 @@ def test_tg_start_passthrough(monkeypatch):
 def test_tg_status_success(monkeypatch):
     app = _base_app(monkeypatch)
     called = {"start": 0, "status": []}
+    events: list[tuple[str, str]] = []
 
     async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
         called["start"] += 1
         assert payload["tenant_id"] == 3
+        events.append(("start", path))
         return httpx.Response(200, json={"ok": True})
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
         called["status"].append((method, path))
+        events.append(("status", path))
         payload = {"status": "waiting_qr", "tenant_id": 3, "qr_id": "qr-test"}
         return 200, json.dumps(payload).encode("utf-8")
 
@@ -103,6 +111,7 @@ def test_tg_status_success(monkeypatch):
     assert data["qr_id"] == "qr-test"
     assert called["start"] == 1
     assert called["status"] == [("GET", "/session/status?tenant=3")]
+    assert events == [("start", "/session/start"), ("status", "/session/status?tenant=3")]
 
 
 def test_tg_qr_png_proxy(monkeypatch):
