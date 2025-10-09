@@ -15,9 +15,13 @@ import qrcode
 from prometheus_client import Counter, Gauge
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, RPCError
+from telethon.errors.rpcerrorlist import PasswordHashInvalidError
 
 
 LOGGER = logging.getLogger("tgworker")
+
+
+QR_LOGIN_TIMEOUT = 120.0
 
 
 SESSIONS_AUTHORIZED = Gauge(
@@ -181,7 +185,7 @@ class TelegramSessionManager:
     async def _wait_for_authorization(self, tenant: int, client: TelegramClient, state: SessionState, qr_login) -> None:
         qr_id = state.qr_id
         try:
-            result = await qr_login.wait()
+            result = await qr_login.wait(timeout=QR_LOGIN_TIMEOUT)
             LOGGER.info("stage=qr_ready tenant_id=%s", tenant)
             if result is None:
                 await asyncio.sleep(0.1)
@@ -198,7 +202,12 @@ class TelegramSessionManager:
             state.needs_2fa = True
             state.last_error = "Two-factor authentication required"
             EVENT_ERRORS.labels("needs_2fa").inc()
-            LOGGER.warning("stage=needs_2fa tenant_id=%s", tenant)
+            LOGGER.warning("stage=needs_2fa event=needs_2fa tenant_id=%s", tenant)
+        except asyncio.TimeoutError:
+            state.status = "disconnected"
+            state.last_error = "qr_login_timeout"
+            EVENT_ERRORS.labels("timeout").inc()
+            LOGGER.warning("stage=qr_timeout event=qr_timeout tenant_id=%s", tenant)
         except asyncio.CancelledError:
             LOGGER.info("stage=qr_cancel tenant_id=%s", tenant)
             raise
@@ -217,6 +226,86 @@ class TelegramSessionManager:
                 self._qr_lookup.pop(qr_id, None)
             state.waiting_task = None
             self._update_metrics()
+
+    async def submit_password(self, tenant: int, password: str) -> SessionState:
+        secret = password or ""
+        if not secret:
+            raise ValueError("password_required")
+
+        async with self._lock:
+            state = self._states.get(tenant)
+            if not state:
+                raise ValueError("session_not_found")
+            if state.status != "needs_2fa":
+                raise ValueError("password_not_required")
+            client = self._clients.get(tenant)
+            if client is None:
+                client = self._build_client(tenant)
+                await client.connect()
+                self._clients[tenant] = client
+            elif not client.is_connected():
+                await client.connect()
+
+        try:
+            await client.sign_in(password=secret)
+            authorized = await client.is_user_authorized()
+        except PasswordHashInvalidError as exc:
+            async with self._lock:
+                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                state.status = "needs_2fa"
+                state.needs_2fa = True
+                state.last_error = "invalid_password"
+                self._update_metrics()
+            EVENT_ERRORS.labels("password_failed").inc()
+            LOGGER.warning("stage=password_failed event=password_failed tenant_id=%s error=invalid_password", tenant)
+            raise ValueError("invalid_password") from exc
+        except RPCError as exc:
+            message = str(exc) or "telegram_error"
+            async with self._lock:
+                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                state.status = "needs_2fa"
+                state.needs_2fa = True
+                state.last_error = message
+                self._update_metrics()
+            EVENT_ERRORS.labels("password_failed").inc()
+            LOGGER.error("stage=password_failed event=password_failed tenant_id=%s error=%s", tenant, message)
+            raise RuntimeError("telegram_error") from exc
+        except Exception as exc:
+            async with self._lock:
+                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                state.status = "needs_2fa"
+                state.needs_2fa = True
+                state.last_error = str(exc)
+                self._update_metrics()
+            EVENT_ERRORS.labels("password_failed").inc()
+            LOGGER.exception("stage=password_failed event=password_failed tenant_id=%s", tenant)
+            raise RuntimeError("telegram_error") from exc
+
+        if not authorized:
+            async with self._lock:
+                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                state.status = "needs_2fa"
+                state.needs_2fa = True
+                state.last_error = "authorization_pending"
+                self._update_metrics()
+            EVENT_ERRORS.labels("password_failed").inc()
+            LOGGER.warning("stage=password_failed event=password_failed tenant_id=%s error=authorization_pending", tenant)
+            raise RuntimeError("authorization_pending")
+
+        async with self._lock:
+            state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+            state.status = "authorized"
+            state.qr_id = None
+            state.qr_png = None
+            state.qr_expires_at = None
+            state.needs_2fa = False
+            state.last_error = None
+            state.last_seen = time.time()
+            state.waiting_task = None
+            self._register_handlers(tenant, client)
+            self._update_metrics()
+        LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)
+        return state
 
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):

@@ -77,6 +77,21 @@ def _stringify_detail(value: bytes | bytearray | str | None) -> str:
     return str(value)
 
 
+_JSON_DBL_PASSWORD = re.compile(r'("password"\s*:\s*")([^"\\]*)(")', re.IGNORECASE)
+_JSON_SGL_PASSWORD = re.compile(r"('password'\s*:\s*')([^'\\]*)(')", re.IGNORECASE)
+_QUERY_PASSWORD = re.compile(r'(password\s*=\s*)([^&\s]+)', re.IGNORECASE)
+
+
+def _mask_sensitive_detail(detail: str | None) -> str:
+    if not detail:
+        return ""
+    masked = str(detail)
+    masked = _JSON_DBL_PASSWORD.sub(lambda m: f"{m.group(1)}******{m.group(3)}", masked)
+    masked = _JSON_SGL_PASSWORD.sub(lambda m: f"{m.group(1)}******{m.group(3)}", masked)
+    masked = _QUERY_PASSWORD.sub(r"\1******", masked)
+    return masked
+
+
 def _log_tg_proxy(
     route: str,
     tenant: int | str | None,
@@ -85,7 +100,8 @@ def _log_tg_proxy(
     *,
     error: str | None = None,
 ) -> None:
-    detail = error if error is not None else _stringify_detail(body)
+    detail_raw = error if error is not None else _stringify_detail(body)
+    detail = _mask_sensitive_detail(detail_raw)
     log_fn = logger.info if 200 <= int(status or 0) < 300 else logger.warning
     log_fn(
         "tg_proxy route=%s tenant=%s tg_code=%s detail=%s",
@@ -723,6 +739,76 @@ async def tg_start(
         detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail)
+
+    if status_code <= 0:
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+
+    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
+    return Response(content=body_bytes, status_code=status_code, headers=headers)
+
+
+@router.post("/pub/tg/password")
+async def tg_password(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+):
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    validation = require_client_key(tenant_candidate, key_candidate)
+    if isinstance(validation, Response):
+        tenant_for_log: int | str | None = tenant_candidate
+        try:
+            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
+        except Exception:
+            tenant_for_log = tenant_candidate
+        _log_tg_proxy("/pub/tg/password", tenant_for_log, getattr(validation, "status_code", 401), None, error="invalid_key")
+        return validation
+
+    tenant_id, _ = validation
+
+    password_value: str | None = None
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict) and "password" in data:
+        candidate = data.get("password")
+        if isinstance(candidate, str):
+            password_value = candidate
+    if password_value is None:
+        try:
+            form = await request.form()
+        except Exception:
+            form = None
+        if form is not None:
+            candidate = form.get("password")
+            if isinstance(candidate, str):
+                password_value = candidate
+
+    password_text = password_value or ""
+    if not password_text.strip():
+        _log_tg_proxy("/pub/tg/password", tenant_id, 400, None, error="password_required")
+        return JSONResponse({"error": "password_required"}, status_code=400, headers={"Cache-Control": "no-store"})
+
+    try:
+        upstream = await C.tg_post(
+            f"{TG_WORKER_BASE}/session/password",
+            {"tenant_id": tenant_id, "password": password_text},
+            timeout=15.0,
+        )
+    except Exception as exc:
+        _log_tg_proxy("/pub/tg/password", tenant_id, 0, None, error=str(exc))
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    if 200 <= status_code < 300:
+        detail = None
+    else:
+        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
+
+    _log_tg_proxy("/pub/tg/password", tenant_id, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})

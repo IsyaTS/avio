@@ -322,6 +322,7 @@ def client_settings(tenant: int, request: Request):
         "tg_status": str(request.url_for("tg_status")),
         "tg_qr": str(request.url_for("tg_qr_png")),
         "tg_logout": str(request.url_for("tg_logout")),
+        "tg_password": str(request.url_for("tg_password")),
     }
 
     state = {
