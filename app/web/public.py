@@ -65,7 +65,7 @@ wa_logger.propagate = False
 
 TG_WORKER_BASE = tg_worker_url()
 
-NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
+NO_STORE_CACHE_VALUE = "no-store"
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -769,6 +769,7 @@ async def tg_start(
     key: str | None = None,
 ):
     force_flag = _parse_force_flag(request.query_params.get("force"))
+    force_param_present = "force" in request.query_params
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
     validation = require_client_key(tenant_candidate, key_candidate)
     if isinstance(validation, Response):
@@ -798,8 +799,8 @@ async def tg_start(
         for attempt in range(2):
             try:
                 payload = {"tenant_id": tenant_id}
-                if attempt_force:
-                    payload["force"] = True
+                if attempt_force or force_param_present:
+                    payload["force"] = bool(attempt_force)
                 upstream = await C.tg_post(
                     f"{TG_WORKER_BASE}/session/start",
                     payload,

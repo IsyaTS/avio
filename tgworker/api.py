@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -77,8 +78,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="tgworker")
 
-    NO_CACHE_HEADERS = {
-        "Cache-Control": "no-store, no-cache, must-revalidate",
+    NO_STORE_HEADERS = {
+        "Cache-Control": "no-store",
         "Pragma": "no-cache",
         "Expires": "0",
     }
@@ -100,24 +101,42 @@ def create_app() -> FastAPI:
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
         state = await manager.start_session(payload.tenant_id, force=payload.force)
+        asyncio.create_task(manager.poll_login(payload.tenant_id))
+        needs_twofa = state.needs_2fa or state.twofa_pending
+        valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
+        twofa_since_ms = (
+            int(state.twofa_since * 1000) if state.twofa_since is not None else None
+        )
         return {
             "tenant_id": payload.tenant_id,
             "status": state.status,
             "qr_id": state.qr_id,
-            "needs_2fa": state.needs_2fa,
+            "needs_2fa": needs_twofa,
+            "twofa_pending": state.twofa_pending,
+            "twofa_since": twofa_since_ms,
             "can_restart": state.can_restart,
+            "qr_valid_until": valid_until_ms,
         }
 
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
         await manager.hard_reset(payload.tenant_id)
         state = await manager.start_session(payload.tenant_id, force=True)
+        asyncio.create_task(manager.poll_login(payload.tenant_id))
+        needs_twofa = state.needs_2fa or state.twofa_pending
+        valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
+        twofa_since_ms = (
+            int(state.twofa_since * 1000) if state.twofa_since is not None else None
+        )
         return {
             "tenant_id": payload.tenant_id,
             "status": state.status,
             "qr_id": state.qr_id,
-            "needs_2fa": state.needs_2fa,
+            "needs_2fa": needs_twofa,
+            "twofa_pending": state.twofa_pending,
+            "twofa_since": twofa_since_ms,
             "can_restart": state.can_restart,
+            "qr_valid_until": valid_until_ms,
         }
 
     @app.get("/session/status")
@@ -125,11 +144,17 @@ def create_app() -> FastAPI:
         state = await manager.get_status(tenant)
         snapshot = manager.stats_snapshot()
         valid_until_ms = int(state.qr_expires_at * 1000) if state.qr_expires_at else None
+        needs_twofa = state.needs_2fa or state.twofa_pending
+        twofa_since_ms = (
+            int(state.twofa_since * 1000) if state.twofa_since is not None else None
+        )
         return {
             "tenant_id": tenant,
             "status": state.status,
             "qr_id": state.qr_id,
-            "needs_2fa": state.needs_2fa,
+            "needs_2fa": needs_twofa,
+            "twofa_pending": state.twofa_pending,
+            "twofa_since": twofa_since_ms,
             "last_error": state.last_error,
             "stats": snapshot,
             "can_restart": state.can_restart,
@@ -144,8 +169,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="qr_expired") from exc
         except QRNotFoundError as exc:
             raise HTTPException(status_code=404, detail="qr_not_found") from exc
-        headers = dict(NO_CACHE_HEADERS)
-        headers["Cache-Control"] = NO_CACHE_HEADERS["Cache-Control"]
+        headers = dict(NO_STORE_HEADERS)
         return Response(content=blob, media_type="image/png", headers=headers)
 
     @app.get("/session/qr/{qr_id}.txt")
@@ -156,7 +180,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="qr_expired") from exc
         except QRNotFoundError as exc:
             raise HTTPException(status_code=404, detail="qr_not_found") from exc
-        headers = dict(NO_CACHE_HEADERS)
+        headers = dict(NO_STORE_HEADERS)
         return PlainTextResponse(login_url, headers=headers)
 
     @app.post("/session/logout")
@@ -168,7 +192,7 @@ def create_app() -> FastAPI:
     async def session_password(payload: PasswordRequest):
         tenant = payload.tenant_id
         password = payload.password.get_secret_value()
-        cache_headers = {"Cache-Control": "no-store"}
+        cache_headers = dict(NO_STORE_HEADERS)
         if not password:
             return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
 

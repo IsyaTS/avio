@@ -610,7 +610,8 @@ try {
   function applyTelegramStatus(data) {
     const status = data && typeof data.status === 'string' ? data.status.trim() : '';
     const normalized = status.toLowerCase();
-    const requiresPassword = normalized === 'needs_2fa' || Boolean(data && data.needs_2fa);
+    const twofaPending = Boolean(data && (data.twofa_pending || data.needs_2fa));
+    const requiresPassword = normalized === 'needs_2fa' || twofaPending;
     const qrId = data && data.qr_id ? String(data.qr_id) : '';
     const canRestart = Boolean(data && data.can_restart);
     const shouldShowNewQr = Boolean(accessKey) && (canRestart || normalized === 'waiting_qr' || (normalized === 'needs_2fa' && !qrId));
@@ -665,7 +666,7 @@ try {
       stopTelegramPolling();
       return;
     }
-    const delay = normalized === 'waiting_qr' ? 2500 : 5000;
+    const delay = normalized === 'waiting_qr' ? 2500 : 3000;
     scheduleTelegramPolling(delay);
   }
 
@@ -1084,7 +1085,7 @@ try {
       const normalized = applied && applied.status ? applied.status : status.toLowerCase();
       const needsTwoFactor = applied
         ? applied.needsTwoFactor
-        : normalized === 'needs_2fa' || Boolean(data && data.needs_2fa);
+        : normalized === 'needs_2fa' || Boolean(data && (data.needs_2fa || data.twofa_pending));
       let variant = 'muted';
       if (status === 'authorized') variant = 'muted';
       else if (status === 'waiting_qr') variant = 'warning';

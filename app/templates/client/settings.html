@@ -39,7 +39,8 @@
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
             <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>
-        {% set show_password_form = initial_status == 'needs_2fa' %}
+        {% set initial_twofa_pending = (state.get('twofa_pending') if state is defined and state else False) %}
+        {% set show_password_form = (initial_status == 'needs_2fa') or initial_twofa_pending %}
         <form id="tg-password-form" class="stack" style="display:{{ 'flex' if show_password_form else 'none' }}; gap:12px; max-width:360px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
             <label class="grid" style="grid-template-columns: 1fr; gap:6px;">
                 <span class="label">Пароль 2FA</span>
