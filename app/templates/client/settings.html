@@ -27,8 +27,11 @@
             <img id="tg-integration-qr-image" alt="QR-код Telegram" style="display:none; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" loading="lazy">
             <div id="tg-integration-qr-fallback" class="status-text" style="display:none;"></div>
         </div>
+        {% set current_qr_id = (state.get('qr_id') if state is defined and state else None) %}
+        {% set show_new_qr = (initial_status == 'waiting_qr') or (initial_status == 'needs_2fa' and not current_qr_id) %}
         <div style="display:flex; gap:12px; flex-wrap:wrap;">
             <a id="tg-integration-connect" href="{{ urls.tg_start }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn" role="button">Подключить Telegram</a>
+            <button id="tg-integration-new-qr" type="button" class="btn btn--secondary" style="display:{{ 'inline-flex' if show_new_qr else 'none' }};">Получить новый QR</button>
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
             <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>

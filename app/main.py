@@ -120,6 +120,10 @@ def _err(msg: str, status: int = 400):
     return JSONResponse({"ok": False, "error": msg}, status_code=status)
 
 
+def _resolve_catalog_attachment(cfg, tenant, request=None):
+    return _webhooks_mod._resolve_catalog_attachment(cfg, tenant, request)
+
+
 @app.get("/health")
 def healthcheck():
     """Lightweight container health endpoint."""

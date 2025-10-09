@@ -445,6 +445,7 @@ try {
     tgRefresh: document.getElementById('tg-integration-refresh'),
     tgDisconnect: document.getElementById('tg-integration-disconnect'),
     tgConnect: document.getElementById('tg-integration-connect'),
+    tgNewQr: document.getElementById('tg-integration-new-qr'),
     tgQrContainer: document.getElementById('tg-integration-qr'),
     tgQrImage: document.getElementById('tg-integration-qr-image'),
     tgQrFallback: document.getElementById('tg-integration-qr-fallback'),
@@ -523,6 +524,14 @@ try {
     }
   }
 
+  function setNewQrVisibility(visible) {
+    if (!dom.tgNewQr) return;
+    dom.tgNewQr.style.display = visible ? 'inline-flex' : 'none';
+    if (!visible) {
+      dom.tgNewQr.disabled = false;
+    }
+  }
+
   function showTwoFactorPrompt(message) {
     if (!dom.tgPasswordForm) return;
     dom.tgPasswordForm.style.display = 'flex';
@@ -556,9 +565,15 @@ try {
     const status = data && typeof data.status === 'string' ? data.status.trim() : '';
     const normalized = status.toLowerCase();
     const requiresPassword = normalized === 'needs_2fa' || Boolean(data && data.needs_2fa);
+    const qrId = data && data.qr_id ? String(data.qr_id) : '';
+    const canRestart = Boolean(data && data.can_restart);
+    const shouldShowNewQr = Boolean(accessKey) && (canRestart || normalized === 'waiting_qr' || (normalized === 'needs_2fa' && !qrId));
+    setNewQrVisibility(shouldShowNewQr);
+    if (shouldShowNewQr && dom.tgNewQr) {
+      dom.tgNewQr.disabled = false;
+    }
 
     if (normalized === 'waiting_qr' && !requiresPassword) {
-      const qrId = data && data.qr_id ? String(data.qr_id) : '';
       if (qrId) {
         if (qrId !== currentTelegramQrId) {
           showTelegramQr(qrId);
@@ -1000,6 +1015,7 @@ try {
       hideTelegramQr('');
       hideTwoFactorPrompt();
       stopTelegramPolling();
+      setNewQrVisibility(false);
       return;
     }
     stopTelegramPolling();
@@ -1057,21 +1073,30 @@ try {
     } finally {
       hideTelegramQr('');
       hideTwoFactorPrompt();
+      setNewQrVisibility(false);
       refreshTelegramStatus();
     }
   }
 
-  async function startTelegramSession() {
+  async function startTelegramSession(options = {}) {
     if (!dom.tgConnect || !telegram.startUrl) return;
     if (!accessKey) {
       updateTelegramStatus('Нет ключа доступа', 'alert');
       hideTelegramQr('');
       hideTwoFactorPrompt();
+      setNewQrVisibility(false);
       return;
     }
-    const url = buildTelegramTenantUrl(telegram.startUrl, { t: Date.now() });
+    const params = { t: Date.now() };
+    if (options && options.force) {
+      params.force = 1;
+    }
+    const url = buildTelegramTenantUrl(telegram.startUrl, params);
     if (!url) return;
     dom.tgConnect.disabled = true;
+    if (options && options.force && dom.tgNewQr) {
+      dom.tgNewQr.disabled = true;
+    }
     stopTelegramPolling();
     hideTelegramQr('Готовим QR-код…');
     hideTwoFactorPrompt();
@@ -1094,6 +1119,9 @@ try {
       hideTelegramQr('QR недоступен. Попробуйте ещё раз.');
     } finally {
       dom.tgConnect.disabled = false;
+      if (options && options.force && dom.tgNewQr) {
+        dom.tgNewQr.disabled = false;
+      }
       refreshTelegramStatus();
     }
   }
@@ -1193,6 +1221,14 @@ try {
         event.preventDefault();
       }
       startTelegramSession();
+    });
+  }
+  if (dom.tgNewQr) {
+    dom.tgNewQr.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault();
+      }
+      startTelegramSession({ force: true });
     });
   }
   if (dom.tgRefresh) {

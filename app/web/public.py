@@ -99,6 +99,7 @@ def _log_tg_proxy(
     body: bytes | bytearray | str | None,
     *,
     error: str | None = None,
+    force: bool | None = None,
 ) -> None:
     detail_raw = error if error is not None else _stringify_detail(body)
     detail = _mask_sensitive_detail(detail_raw)
@@ -107,13 +108,22 @@ def _log_tg_proxy(
     if route == "/pub/tg/password":
         log_fn("tg_proxy route=%s tenant=%s tg_code=%s", route, tenant_value, status)
         return
+    force_fragment = " force=%s" % ("1" if force else "0") if force is not None else ""
     log_fn(
-        "tg_proxy route=%s tenant=%s tg_code=%s detail=%s",
+        "tg_proxy route=%s tenant=%s tg_code=%s%s detail=%s",
         route,
         tenant_value,
         status,
+        force_fragment,
         detail or "",
     )
+
+
+def _parse_force_flag(raw_value: str | None) -> bool:
+    if raw_value is None:
+        return False
+    value = raw_value.strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
@@ -716,6 +726,7 @@ async def tg_start(
     k: str | None = None,
     key: str | None = None,
 ):
+    force_flag = _parse_force_flag(request.query_params.get("force"))
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
     validation = require_client_key(tenant_candidate, key_candidate)
     if isinstance(validation, Response):
@@ -724,25 +735,75 @@ async def tg_start(
             tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
         except Exception:
             tenant_for_log = tenant_candidate
-        _log_tg_proxy("/pub/tg/start", tenant_for_log, getattr(validation, "status_code", 401), None, error="invalid_key")
+        _log_tg_proxy(
+            "/pub/tg/start",
+            tenant_for_log,
+            getattr(validation, "status_code", 401),
+            None,
+            error="invalid_key",
+            force=force_flag,
+        )
         return validation
 
     tenant_id, _ = validation
+    attempt_force = force_flag
 
     try:
-        upstream = await C.tg_post(f"{TG_WORKER_BASE}/session/start", {"tenant_id": tenant_id}, timeout=15.0)
-    except Exception as exc:
-        _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error=str(exc))
+        upstream = None
+        status_code = 0
+        body_bytes: bytes | bytearray = b""
+        detail: str | None = None
+        for attempt in range(2):
+            try:
+                payload = {"tenant_id": tenant_id}
+                if attempt_force:
+                    payload["force"] = True
+                upstream = await C.tg_post(
+                    f"{TG_WORKER_BASE}/session/start",
+                    payload,
+                    timeout=15.0,
+                )
+            except Exception as exc:
+                _log_tg_proxy(
+                    "/pub/tg/start",
+                    tenant_id,
+                    0,
+                    None,
+                    error=str(exc),
+                    force=attempt_force,
+                )
+                raise
+
+            status_code = int(getattr(upstream, "status_code", 0) or 0)
+            body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+            if 200 <= status_code < 300:
+                detail = None
+            else:
+                detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
+
+            _log_tg_proxy(
+                "/pub/tg/start",
+                tenant_id,
+                status_code,
+                body_bytes,
+                error=detail,
+                force=attempt_force,
+            )
+
+            if (
+                status_code in {409, 422}
+                and not attempt_force
+            ):
+                attempt_force = True
+                continue
+            break
+    except Exception:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
-
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    if 200 <= status_code < 300:
-        detail = None
     else:
-        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
-
-    _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail)
+        if upstream is None:
+            status_code = 0
+            body_bytes = b""
+            detail = None
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
@@ -813,6 +874,73 @@ async def tg_password(
         detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/password", tenant_id, status_code, body_bytes, error=detail)
+
+    if status_code <= 0:
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+
+    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
+    return Response(content=body_bytes, status_code=status_code, headers=headers)
+
+
+@router.post("/pub/tg/restart")
+async def tg_restart(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+):
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    validation = require_client_key(tenant_candidate, key_candidate)
+    if isinstance(validation, Response):
+        tenant_for_log: int | str | None = tenant_candidate
+        try:
+            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
+        except Exception:
+            tenant_for_log = tenant_candidate
+        _log_tg_proxy(
+            "/pub/tg/restart",
+            tenant_for_log,
+            getattr(validation, "status_code", 401),
+            None,
+            error="invalid_key",
+            force=True,
+        )
+        return validation
+
+    tenant_id, _ = validation
+
+    try:
+        upstream = await C.tg_post(
+            f"{TG_WORKER_BASE}/session/restart",
+            {"tenant_id": tenant_id},
+            timeout=15.0,
+        )
+    except Exception as exc:
+        _log_tg_proxy(
+            "/pub/tg/restart",
+            tenant_id,
+            0,
+            None,
+            error=str(exc),
+            force=True,
+        )
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
+
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    if 200 <= status_code < 300:
+        detail = None
+    else:
+        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
+
+    _log_tg_proxy(
+        "/pub/tg/restart",
+        tenant_id,
+        status_code,
+        body_bytes,
+        error=detail,
+        force=True,
+    )
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
