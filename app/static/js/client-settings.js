@@ -448,11 +448,11 @@ try {
     tgRefresh: document.getElementById('tg-integration-refresh'),
     tgDisconnect: document.getElementById('tg-integration-disconnect'),
     tgConnect: document.getElementById('tg-integration-connect'),
-    tgNewQr: document.getElementById('tg-integration-new-qr'),
     tgQrBlock: document.getElementById('tg-qr-block'),
     tgQrImage: document.getElementById('tg-qr-image'),
     tgQrFallback: document.getElementById('tg-qr-fallback'),
     tgQrLink: document.getElementById('tg-qr-link'),
+    tgQrRefresh: document.getElementById('tg-qr-refresh'),
     tg2faBlock: document.getElementById('tg-2fa-block'),
     tgPasswordForm: document.getElementById('tg-password-form'),
     tgPasswordInput: document.getElementById('tg-password-input'),
@@ -474,6 +474,19 @@ try {
   const fallbackPollInterval = Math.max(500, waitingPollInterval + 500);
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
+  const HIDDEN_CLASS = 'is-hidden';
+
+  function showElement(element) {
+    if (!element) return;
+    element.classList.remove(HIDDEN_CLASS);
+  }
+
+  function hideElement(element) {
+    if (!element) return;
+    if (!element.classList.contains(HIDDEN_CLASS)) {
+      element.classList.add(HIDDEN_CLASS);
+    }
+  }
 
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
@@ -528,12 +541,12 @@ try {
       const href = buildTelegramQrTextUrl(qrId);
       if (href) {
         dom.tgQrLink.href = href;
-        dom.tgQrLink.style.display = 'inline-flex';
+        showElement(dom.tgQrLink);
         return;
       }
     }
-    dom.tgQrLink.href = '#';
-    dom.tgQrLink.style.display = 'none';
+    dom.tgQrLink.removeAttribute('href');
+    hideElement(dom.tgQrLink);
   }
 
   function showTelegramQr(qrId) {
@@ -552,39 +565,49 @@ try {
     if (dom.tgQrBlock.dataset) {
       dom.tgQrBlock.dataset.qrId = safeId;
     }
-    dom.tgQrBlock.style.display = 'flex';
-    dom.tgQrImage.style.display = 'block';
+    showElement(dom.tgQrBlock);
     if (dom.tgQrImage.dataset) {
       dom.tgQrImage.dataset.cachebuster = String(Date.now());
     }
     dom.tgQrImage.src = src;
+    showElement(dom.tgQrImage);
     if (dom.tgQrFallback) {
-      dom.tgQrFallback.style.display = 'none';
       dom.tgQrFallback.textContent = '';
+      hideElement(dom.tgQrFallback);
     }
     updateTelegramQrLink(safeId);
     qrImageReloadPending = false;
   }
 
-  function hideTelegramQr(message = '') {
+  function hideTelegramQr(message = '', options = {}) {
     currentTelegramQrId = '';
     if (dom.tgQrImage) {
       if (dom.tgQrImage.dataset) {
         dom.tgQrImage.dataset.cachebuster = '';
       }
       dom.tgQrImage.removeAttribute('src');
-      dom.tgQrImage.style.display = 'none';
+      hideElement(dom.tgQrImage);
     }
+    const keepContainer = Boolean(options && options.keepContainer);
     if (dom.tgQrBlock) {
       if (dom.tgQrBlock.dataset) {
         dom.tgQrBlock.dataset.qrId = '';
       }
-      dom.tgQrBlock.style.display = 'none';
+      const text = message ? String(message).trim() : '';
+      if (keepContainer || text) {
+        showElement(dom.tgQrBlock);
+      } else {
+        hideElement(dom.tgQrBlock);
+      }
     }
     if (dom.tgQrFallback) {
       const text = message ? String(message) : '';
       dom.tgQrFallback.textContent = text;
-      dom.tgQrFallback.style.display = text ? 'block' : 'none';
+      if (text) {
+        showElement(dom.tgQrFallback);
+      } else {
+        hideElement(dom.tgQrFallback);
+      }
     }
     updateTelegramQrLink('');
     qrImageReloadPending = false;
@@ -597,33 +620,45 @@ try {
     qrImageReloadPending = true;
     if (dom.tgQrFallback) {
       dom.tgQrFallback.textContent = 'Обновляем QR…';
-      dom.tgQrFallback.style.display = 'block';
+      showElement(dom.tgQrFallback);
+    }
+    if (dom.tgQrBlock) {
+      showElement(dom.tgQrBlock);
     }
     stopTelegramPolling();
     refreshTelegramStatus({ fromPoll: true });
   }
 
-  function setNewQrVisibility(visible, label) {
-    if (!dom.tgNewQr) return;
-    if (dom.tgNewQr.dataset && !dom.tgNewQr.dataset.defaultLabel) {
-      dom.tgNewQr.dataset.defaultLabel = dom.tgNewQr.textContent || 'Новый QR';
+  function setQrRefreshVisibility(visible, label) {
+    const button = dom.tgQrRefresh;
+    if (!button) return;
+    if (button.dataset && !button.dataset.defaultLabel) {
+      button.dataset.defaultLabel = button.textContent || 'Обновить QR';
     }
-    dom.tgNewQr.style.display = visible ? 'inline-flex' : 'none';
-    dom.tgNewQr.disabled = false;
-    if (visible) {
-      const defaultLabel = dom.tgNewQr.dataset ? dom.tgNewQr.dataset.defaultLabel : '';
-      dom.tgNewQr.textContent = label || defaultLabel || 'Новый QR';
-    } else if (dom.tgNewQr.dataset && dom.tgNewQr.dataset.defaultLabel) {
-      dom.tgNewQr.textContent = dom.tgNewQr.dataset.defaultLabel;
+    const allow = Boolean(visible) && Boolean(accessKey);
+    const defaultLabel = button.dataset ? button.dataset.defaultLabel : '';
+    button.disabled = false;
+    if (allow) {
+      button.textContent = label || defaultLabel || 'Обновить QR';
+      showElement(button);
+      if (dom.tgQrBlock) {
+        showElement(dom.tgQrBlock);
+      }
+    } else {
+      if (defaultLabel) {
+        button.textContent = defaultLabel;
+      }
+      hideElement(button);
     }
   }
 
   function showTwoFactorPrompt(message) {
     if (dom.tg2faBlock) {
-      dom.tg2faBlock.style.display = 'flex';
+      showElement(dom.tg2faBlock);
     }
-    if (!dom.tgPasswordForm) return;
-    dom.tgPasswordForm.style.display = 'flex';
+    if (dom.tgPasswordForm) {
+      showElement(dom.tgPasswordForm);
+    }
     if (!passwordPromptVisible && dom.tgPasswordInput) {
       dom.tgPasswordInput.value = '';
     }
@@ -642,10 +677,11 @@ try {
 
   function hideTwoFactorPrompt() {
     if (dom.tg2faBlock) {
-      dom.tg2faBlock.style.display = 'none';
+      hideElement(dom.tg2faBlock);
     }
-    if (!dom.tgPasswordForm) return;
-    dom.tgPasswordForm.style.display = 'none';
+    if (dom.tgPasswordForm) {
+      hideElement(dom.tgPasswordForm);
+    }
     passwordPromptVisible = false;
     if (dom.tgPasswordInput) {
       dom.tgPasswordInput.value = '';
@@ -669,7 +705,7 @@ try {
     if (needsTwoFactor) {
       hideTelegramQr();
       showTwoFactorPrompt('Введите пароль двухфакторной аутентификации в Telegram.');
-      setNewQrVisibility(false);
+      setQrRefreshVisibility(false);
       return { status: 'needs_2fa', needsTwoFactor: true, lastError };
     }
 
@@ -679,23 +715,24 @@ try {
       if (qrId) {
         showTelegramQr(qrId);
       } else {
-        hideTelegramQr();
+        hideTelegramQr('', { keepContainer: true });
       }
-      setNewQrVisibility(false);
+      setQrRefreshVisibility(true);
       return { status: 'waiting_qr', needsTwoFactor: false, lastError };
     }
 
-    hideTelegramQr();
-
     if (normalized === 'authorized') {
-      setNewQrVisibility(false);
+      hideTelegramQr();
+      setQrRefreshVisibility(false);
       return { status: 'authorized', needsTwoFactor: false, lastError };
     }
 
     if (showNewQrButton) {
-      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
+      hideTelegramQr('', { keepContainer: true });
+      setQrRefreshVisibility(true, 'Обновить QR');
     } else {
-      setNewQrVisibility(false);
+      hideTelegramQr();
+      setQrRefreshVisibility(false);
     }
 
     return { status: normalized || rawStatus, needsTwoFactor: false, lastError };
@@ -1120,7 +1157,7 @@ try {
       hideTelegramQr();
       hideTwoFactorPrompt();
       stopTelegramPolling();
-      setNewQrVisibility(false);
+      setQrRefreshVisibility(false);
       return;
     }
     stopTelegramPolling();
@@ -1178,6 +1215,7 @@ try {
       console.error('[client-settings] telegram status error', error);
       updateTelegramStatus('Не удалось получить статус Telegram', 'alert');
       hideTelegramQr();
+      setQrRefreshVisibility(false);
       if (!fromPoll) {
         scheduleTelegramPolling(6000);
       } else {
@@ -1198,7 +1236,7 @@ try {
     } finally {
       hideTelegramQr();
       hideTwoFactorPrompt();
-      setNewQrVisibility(false);
+      setQrRefreshVisibility(false);
       refreshTelegramStatus();
     }
   }
@@ -1209,7 +1247,7 @@ try {
       updateTelegramStatus('Нет ключа доступа', 'alert');
       hideTelegramQr();
       hideTwoFactorPrompt();
-      setNewQrVisibility(false);
+      setQrRefreshVisibility(false);
       return;
     }
     const params = { t: Date.now() };
@@ -1219,12 +1257,13 @@ try {
     const url = buildTelegramTenantUrl(telegram.startUrl, params);
     if (!url) return;
     dom.tgConnect.disabled = true;
-    if (options && options.force && dom.tgNewQr) {
-      dom.tgNewQr.disabled = true;
+    if (options && options.force && dom.tgQrRefresh) {
+      dom.tgQrRefresh.disabled = true;
     }
     stopTelegramPolling();
-    hideTelegramQr('Готовим QR-код…');
+    hideTelegramQr('Готовим QR-код…', { keepContainer: true });
     hideTwoFactorPrompt();
+    setQrRefreshVisibility(false);
     updateTelegramStatus('Запрашиваем QR-код…', 'muted');
     try {
       const response = await fetch(url, { method: 'GET', cache: 'no-store' });
@@ -1241,11 +1280,11 @@ try {
     } catch (error) {
       console.error('[client-settings] telegram start error', error);
       updateTelegramStatus('Не удалось запросить QR. Попробуйте позже.', 'alert');
-      hideTelegramQr('QR недоступен. Попробуйте ещё раз.');
+      hideTelegramQr('QR недоступен. Попробуйте ещё раз.', { keepContainer: true });
     } finally {
       dom.tgConnect.disabled = false;
-      if (options && options.force && dom.tgNewQr) {
-        dom.tgNewQr.disabled = false;
+      if (options && options.force && dom.tgQrRefresh) {
+        dom.tgQrRefresh.disabled = false;
       }
     }
     try {
@@ -1330,7 +1369,7 @@ try {
         const normalizedDetail = (detail || '').trim().toLowerCase();
         let message = (detail || `Ошибка подтверждения (HTTP ${response.status})`).trim() || 'Не удалось подтвердить пароль';
         if (response.status === 400 && normalizedDetail === 'invalid_password') {
-          message = 'Неверный пароль 2FA. Попробуйте ещё раз.';
+          message = 'Неверный пароль';
         }
         setStatus(dom.tgPasswordMessage, message, 'alert');
         if (dom.tgPasswordInput) {
@@ -1375,13 +1414,13 @@ try {
     dom.tgQrImage.addEventListener('load', () => {
       qrImageReloadPending = false;
       if (dom.tgQrFallback) {
-        dom.tgQrFallback.style.display = 'none';
         dom.tgQrFallback.textContent = '';
+        hideElement(dom.tgQrFallback);
       }
     });
   }
-  if (dom.tgNewQr) {
-    dom.tgNewQr.addEventListener('click', (event) => {
+  if (dom.tgQrRefresh) {
+    dom.tgQrRefresh.addEventListener('click', (event) => {
       if (event && typeof event.preventDefault === 'function') {
         event.preventDefault();
       }
@@ -1403,7 +1442,7 @@ try {
       initialStatus === 'disconnected'
       && (initialError === 'qr_login_timeout' || initialError === 'twofa_timeout')
     ) {
-      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
+      setQrRefreshVisibility(true, 'Обновить QR');
     }
   }
   if (dom.tgRefresh) {
