@@ -198,7 +198,12 @@ async def tg_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response
         return await client.post(url, json=data, headers=headers)
 
 
-def tg_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
+def tg_http(
+    method: str,
+    path: str,
+    body: bytes | None = None,
+    timeout: float = 8.0,
+) -> tuple[int, bytes, dict[str, str]]:
     url = f"{TG_WORKER_URL}{path}"
     req = urllib.request.Request(url, data=body, method=method)
     if body is not None:
@@ -208,12 +213,14 @@ def tg_http(method: str, path: str, body: bytes | None = None, timeout: float = 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
-            return resp.status, raw
+            headers = {key: value for key, value in resp.headers.items()}
+            return resp.status, raw, headers
     except urllib.error.HTTPError as exc:
         raw = exc.read()
-        return exc.code, raw
+        headers = {key: value for key, value in getattr(exc, "headers", {}).items()} if getattr(exc, "headers", None) else {}
+        return exc.code, raw, headers
     except Exception as exc:  # pragma: no cover
-        return 0, str(exc).encode()
+        return 0, str(exc).encode(), {}
 
 
 # --- keys registry in Redis ---
