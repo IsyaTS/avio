@@ -160,6 +160,10 @@ main.shell {
   gap: 16px;
 }
 
+.is-hidden {
+  display: none !important;
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;
