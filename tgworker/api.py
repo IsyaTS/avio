@@ -19,6 +19,11 @@ logger = logging.getLogger("tgworker.api")
 
 class StartRequest(BaseModel):
     tenant_id: int = Field(..., ge=1)
+    force: bool = False
+
+
+class RestartRequest(BaseModel):
+    tenant_id: int = Field(..., ge=1)
 
 
 class LogoutRequest(BaseModel):
@@ -88,12 +93,25 @@ def create_app() -> FastAPI:
 
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
-        state = await manager.start_session(payload.tenant_id)
+        state = await manager.start_session(payload.tenant_id, force=payload.force)
         return {
             "tenant_id": payload.tenant_id,
             "status": state.status,
             "qr_id": state.qr_id,
             "needs_2fa": state.needs_2fa,
+            "can_restart": state.can_restart,
+        }
+
+    @app.post("/session/restart")
+    async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
+        await manager.hard_reset(payload.tenant_id)
+        state = await manager.start_session(payload.tenant_id, force=True)
+        return {
+            "tenant_id": payload.tenant_id,
+            "status": state.status,
+            "qr_id": state.qr_id,
+            "needs_2fa": state.needs_2fa,
+            "can_restart": state.can_restart,
         }
 
     @app.get("/session/status")
@@ -107,6 +125,7 @@ def create_app() -> FastAPI:
             "needs_2fa": state.needs_2fa,
             "last_error": state.last_error,
             "stats": snapshot,
+            "can_restart": state.can_restart,
         }
 
     @app.get("/session/qr/{qr_id}.png")
@@ -184,3 +203,4 @@ def create_app() -> FastAPI:
 
 
 __all__ = ["create_app"]
+

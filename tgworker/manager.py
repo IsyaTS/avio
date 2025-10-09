@@ -57,6 +57,9 @@ class SessionState:
     awaiting_password: bool = False
     needs_2fa_expires_at: Optional[float] = None
     last_seen: Optional[float] = None
+    can_restart: bool = False
+    last_needs_2fa_at: Optional[float] = None
+    restart_pending: bool = False
 
 
 class TelegramSessionManager:
@@ -115,6 +118,8 @@ class TelegramSessionManager:
             state.waiting_task = None
             state.last_error = "password_timeout"
             state.last_seen = time.time()
+            state.restart_pending = False
+            state.last_needs_2fa_at = None
             LOGGER.warning(
                 "stage=needs_2fa_timeout event=password_timeout tenant_id=%s", tenant
             )
@@ -170,66 +175,138 @@ class TelegramSessionManager:
         except ValueError:
             return None
 
-    async def start_session(self, tenant: int) -> SessionState:
+    def _hard_reset_state_locked(
+        self, tenant: int, state: Optional[SessionState] = None
+    ) -> tuple[SessionState, Optional[TelegramClient], Optional[asyncio.Task[Any]], bool]:
+        state = state or self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+        client = self._clients.pop(tenant, None)
+        task: Optional[asyncio.Task[Any]] = None
+        if state.waiting_task and not state.waiting_task.done():
+            task = state.waiting_task
+        state.waiting_task = None
+        if state.qr_id:
+            self._qr_lookup.pop(state.qr_id, None)
+        removed_session_file = False
+        path = self._sessions_dir / f"{tenant}.session"
+        try:
+            path.unlink()
+            removed_session_file = True
+        except FileNotFoundError:
+            removed_session_file = False
+        state.status = "disconnected"
+        state.qr_id = None
+        state.qr_png = None
+        state.qr_expires_at = None
+        state.last_error = None
+        state.needs_2fa = False
+        if state.needs_2fa_expires_at and state.needs_2fa_expires_at <= time.time():
+            state.awaiting_password = False
+            state.needs_2fa_expires_at = None
+        state.can_restart = False
+        state.restart_pending = False
+        state.last_needs_2fa_at = None
+        state.last_seen = time.time()
+        self._states[tenant] = state
+        self._update_metrics()
+        return state, client, task, removed_session_file
+
+    async def hard_reset(self, tenant: int) -> SessionState:
         client_to_disconnect: Optional[TelegramClient] = None
-        result_state: Optional[SessionState]
-        result_state = None
+        task_to_cancel: Optional[asyncio.Task[Any]] = None
+        removed_file = False
         async with self._lock:
             state = self._states.get(tenant)
-            if state:
-                client_to_disconnect = self._expire_needs_2fa_locked(tenant, state)
-            state = self._states.get(tenant) or state
-
-            if state and state.status == "authorized":
-                result_state = state
-            elif state and state.status == "needs_2fa":
-                self._extend_needs_2fa_ttl(state)
-                result_state = state
-            else:
-                client = self._clients.get(tenant)
-                if client is None:
-                    client = self._build_client(tenant)
-                    await client.connect()
-                    self._clients[tenant] = client
-                elif not client.is_connected():
-                    await client.connect()
-
-                if await client.is_user_authorized():
-                    state = SessionState(
-                        tenant_id=tenant, status="authorized", last_seen=time.time()
-                    )
-                    self._states[tenant] = state
-                    self._register_handlers(tenant, client)
-                    self._update_metrics()
-                    result_state = state
-                elif state and state.waiting_task and not state.waiting_task.done():
-                    # Reuse existing QR if still valid.
-                    result_state = state
-                else:
-                    qr_login = await client.qr_login()
-                    png = self._build_qr_png(qr_login.url)
-                    qr_id = secrets.token_urlsafe(16)
-
-                    state = SessionState(
-                        tenant_id=tenant,
-                        status="waiting_qr",
-                        qr_id=qr_id,
-                        qr_png=png,
-                        qr_expires_at=time.time() + 180,
-                    )
-                    self._states[tenant] = state
-                    self._qr_lookup[qr_id] = tenant
-                    LOGGER.info("stage=qr_start tenant_id=%s", tenant)
-
-                    state.waiting_task = self._loop.create_task(
-                        self._wait_for_authorization(tenant, client, state, qr_login)
-                    )
-                    self._update_metrics()
-                    result_state = state
-
+            state, client_to_disconnect, task_to_cancel, removed_file = self._hard_reset_state_locked(
+                tenant, state
+            )
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_to_cancel
         if client_to_disconnect:
             with contextlib.suppress(Exception):
                 await client_to_disconnect.disconnect()
+        LOGGER.info(
+            "stage=hard_reset tenant_id=%s removed_session_file=%s", tenant, removed_file
+        )
+        return self._states[tenant]
+
+    async def start_session(self, tenant: int, *, force: bool = False) -> SessionState:
+        clients_to_disconnect: list[TelegramClient] = []
+        tasks_to_cancel: list[asyncio.Task[Any]] = []
+        result_state: Optional[SessionState] = None
+        async with self._lock:
+            state = self._states.get(tenant)
+            if state:
+                client = self._expire_needs_2fa_locked(tenant, state)
+                if client:
+                    clients_to_disconnect.append(client)
+            state = self._states.get(tenant) or state or SessionState(tenant_id=tenant)
+            self._states[tenant] = state
+
+            need_new_qr = force
+            if not need_new_qr:
+                if state.status == "authorized":
+                    result_state = state
+                else:
+                    stuck_statuses = {"needs_2fa", "disconnected", "error"}
+                    if state.status in stuck_statuses:
+                        need_new_qr = True
+                    elif state.last_error == "qr_login_timeout":
+                        need_new_qr = True
+                    elif state.status == "waiting_qr":
+                        if not state.qr_id:
+                            need_new_qr = True
+                        elif state.waiting_task and state.waiting_task.done():
+                            need_new_qr = True
+                    else:
+                        need_new_qr = True
+
+            if need_new_qr:
+                state, client, task, _ = self._hard_reset_state_locked(tenant, state)
+                if client:
+                    clients_to_disconnect.append(client)
+                if task:
+                    tasks_to_cancel.append(task)
+
+                client = self._build_client(tenant)
+                await client.connect()
+                self._clients[tenant] = client
+
+                qr_login = await client.qr_login()
+                png = self._build_qr_png(qr_login.url)
+                qr_id = secrets.token_urlsafe(16)
+
+                state.status = "waiting_qr"
+                state.qr_id = qr_id
+                state.qr_png = png
+                state.qr_expires_at = time.time() + 180
+                state.last_error = None
+                state.needs_2fa = False
+                state.awaiting_password = False
+                state.needs_2fa_expires_at = None
+                state.can_restart = False
+                state.restart_pending = False
+                state.last_needs_2fa_at = None
+                state.last_seen = time.time()
+                self._qr_lookup[qr_id] = tenant
+                LOGGER.info("stage=qr_start tenant_id=%s qr_id=%s", tenant, qr_id)
+
+                state.waiting_task = self._loop.create_task(
+                    self._wait_for_authorization(tenant, client, state, qr_login)
+                )
+                self._update_metrics()
+                result_state = state
+            else:
+                result_state = state
+
+        for task in tasks_to_cancel:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for client in clients_to_disconnect:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
 
         if result_state is None:
             result_state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
@@ -261,9 +338,12 @@ class TelegramSessionManager:
             state.last_error = "two_factor_required"
             state.last_seen = time.time()
             self._extend_needs_2fa_ttl(state)
+            state.last_needs_2fa_at = time.time()
             EVENT_ERRORS.labels("needs_2fa").inc()
             LOGGER.warning(
-                "stage=needs_2fa event=needs_2fa tenant_id=%s ttl=%s", tenant, NEEDS_2FA_TTL
+                "stage=needs_2fa state=needs_2fa ttl=%ss tenant_id=%s",
+                int(NEEDS_2FA_TTL),
+                tenant,
             )
         except asyncio.TimeoutError:
             state.status = "disconnected"
@@ -314,7 +394,11 @@ class TelegramSessionManager:
             if not state:
                 raise ValueError("session_not_found")
             client_to_disconnect = self._expire_needs_2fa_locked(tenant, state)
-            if state.status != "needs_2fa" and not state.awaiting_password:
+            awaiting_valid = (
+                state.awaiting_password
+                and (state.needs_2fa_expires_at is None or state.needs_2fa_expires_at > time.time())
+            )
+            if state.status != "needs_2fa" and not awaiting_valid:
                 raise ValueError("password_not_required")
             client = self._clients.get(tenant)
             if client is None:
@@ -331,6 +415,7 @@ class TelegramSessionManager:
             state.qr_expires_at = None
             state.last_seen = time.time()
             self._extend_needs_2fa_ttl(state)
+            state.last_needs_2fa_at = time.time()
 
         if client_to_disconnect:
             with contextlib.suppress(Exception):
@@ -404,6 +489,7 @@ class TelegramSessionManager:
             state.last_error = None
             state.last_seen = time.time()
             state.waiting_task = None
+            state.last_needs_2fa_at = None
             self._register_handlers(tenant, client)
             self._update_metrics()
         LOGGER.info(
@@ -476,11 +562,34 @@ class TelegramSessionManager:
                 self._states[tenant] = state
             else:
                 client_to_disconnect = self._expire_needs_2fa_locked(tenant, state)
+            client = self._clients.get(tenant)
+            is_active = bool(client and client.is_connected())
+            if state.status in {"waiting_qr", "needs_2fa"} and not is_active:
+                state.can_restart = True
+            else:
+                state.can_restart = False
+            schedule_restart = False
+            if (
+                state.status == "needs_2fa"
+                and not state.qr_id
+                and not state.awaiting_password
+            ) or (
+                state.status == "needs_2fa"
+                and not state.qr_id
+                and state.last_needs_2fa_at is not None
+                and (time.time() - state.last_needs_2fa_at) >= 2.0
+            ):
+                if not state.restart_pending:
+                    state.restart_pending = True
+                    schedule_restart = True
             result = state
 
         if client_to_disconnect:
             with contextlib.suppress(Exception):
                 await client_to_disconnect.disconnect()
+
+        if schedule_restart:
+            self._loop.create_task(self.start_session(tenant, force=True))
 
         return result
 
