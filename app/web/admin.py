@@ -162,12 +162,17 @@ def admin_key_generate(tenant: int, request: Request):
 
 
 @router.post("/admin/key/save")
-async def admin_key_save(request: Request, tenant: int | None = None, key: str | None = None):
+async def admin_key_save(
+    request: Request,
+    tenant: int | str | None = None,
+    key: str | None = None,
+    k: str | None = None,
+):
     if not _auth_ok(request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
     raw_tenant: int | str | None = tenant
-    raw_key: str | None = key
+    raw_key: str | None = key or k
 
     payload: dict[str, Any] = {}
     if raw_tenant is None or not raw_key:
@@ -188,8 +193,17 @@ async def admin_key_save(request: Request, tenant: int | None = None, key: str |
                     if form_key not in payload:
                         payload[form_key] = value
 
-        raw_tenant = raw_tenant if raw_tenant is not None else payload.get("tenant")
-        raw_key = raw_key or payload.get("key") or payload.get("k")
+        if raw_tenant is None:
+            raw_tenant = payload.get("tenant")
+        if not raw_key:
+            raw_key = payload.get("key") or payload.get("k")
+
+    if raw_tenant is None:
+        qp = request.query_params
+        raw_tenant = qp.get("tenant")
+    if not raw_key:
+        qp = request.query_params
+        raw_key = qp.get("key") or qp.get("k")
 
     try:
         tenant_id = int(raw_tenant)  # type: ignore[arg-type]
@@ -203,10 +217,7 @@ async def admin_key_save(request: Request, tenant: int | None = None, key: str |
     C.add_key(tenant_id, key_value, "manual")
     C.set_primary(tenant_id, key_value)
     C.ensure_tenant_files(tenant_id)
-    encoded = quote_plus(key_value)
-    link = f"/connect/wa?tenant={tenant_id}&k={encoded}"
-    settings_link = f"/client/{tenant_id}/settings?k={encoded}"
-    return {"ok": True, "tenant": tenant_id, "key": key_value, "link": link, "settings_link": settings_link}
+    return {"ok": True, "tenant": tenant_id, "key": key_value}
 
 
 @router.get("/admin/wa/status")

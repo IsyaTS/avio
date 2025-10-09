@@ -28,9 +28,9 @@
             <div id="tg-integration-qr-fallback" class="status-text" style="display:none;"></div>
         </div>
         <div style="display:flex; gap:12px; flex-wrap:wrap;">
-            <button id="tg-integration-connect" type="button" class="btn">Подключить Telegram</button>
+            <a id="tg-integration-connect" href="{{ urls.tg_start }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn" role="button">Подключить Telegram</a>
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
-            <button id="tg-integration-disconnect" type="button" class="btn btn--secondary">Отключить</button>
+            <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>
     </div>
 </section>
