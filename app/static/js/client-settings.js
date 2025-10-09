@@ -618,13 +618,13 @@ try {
   function setNewQrVisibility(visible, label) {
     if (!dom.tgNewQr) return;
     if (dom.tgNewQr.dataset && !dom.tgNewQr.dataset.defaultLabel) {
-      dom.tgNewQr.dataset.defaultLabel = dom.tgNewQr.textContent || 'Обновить QR';
+      dom.tgNewQr.dataset.defaultLabel = dom.tgNewQr.textContent || 'Новый QR';
     }
     dom.tgNewQr.style.display = visible ? 'inline-flex' : 'none';
     if (visible) {
       dom.tgNewQr.disabled = false;
       const defaultLabel = dom.tgNewQr.dataset ? dom.tgNewQr.dataset.defaultLabel : '';
-      dom.tgNewQr.textContent = label || defaultLabel || 'Обновить QR';
+      dom.tgNewQr.textContent = label || defaultLabel || 'Новый QR';
     } else {
       dom.tgNewQr.disabled = false;
       if (dom.tgNewQr.dataset && dom.tgNewQr.dataset.defaultLabel) {
@@ -685,7 +685,7 @@ try {
         hideTelegramQr('Готовим QR-код…', { preserveBlock: true });
       }
       hideTwoFactorPrompt();
-      setNewQrVisibility(Boolean(accessKey), 'Обновить QR');
+      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
       return { status: normalized, needsTwoFactor: false, lastError };
     }
 
@@ -709,13 +709,13 @@ try {
         : 'QR-код истёк. Получите новый, чтобы продолжить.';
       hideTelegramQr(message, { preserveBlock: true });
       hideTwoFactorPrompt();
-      setNewQrVisibility(Boolean(accessKey), 'Получить новый QR');
+      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
       return { status: normalized, needsTwoFactor: false, lastError };
     }
 
     hideTelegramQr('', { preserveBlock: false });
     hideTwoFactorPrompt();
-    setNewQrVisibility(Boolean(accessKey) && canRestart, 'Обновить QR');
+    setNewQrVisibility(Boolean(accessKey) && canRestart, 'Новый QR');
     return { status: normalized, needsTwoFactor: false, lastError };
   }
 
@@ -1415,7 +1415,7 @@ try {
       initialStatus === 'disconnected'
       && (initialError === 'qr_login_timeout' || initialError === 'twofa_timeout')
     ) {
-      setNewQrVisibility(Boolean(accessKey), 'Получить новый QR');
+      setNewQrVisibility(Boolean(accessKey), 'Новый QR');
     }
   }
   if (dom.tgRefresh) {

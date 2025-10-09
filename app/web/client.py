@@ -273,9 +273,12 @@ def _catalog_csv_path(tenant: int, cfg: dict | None = None) -> tuple[pathlib.Pat
 
 @router.get("/client/{tenant}/settings")
 def client_settings(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
+    provided_key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, provided_key):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
+
+    primary_key = (C.get_tenant_pubkey(int(tenant)) or "").strip()
+    key = primary_key or provided_key or ""
 
     C.ensure_tenant_files(tenant)
     cfg = C.read_tenant_config(tenant)
@@ -374,25 +377,31 @@ def client_settings(tenant: int, request: Request):
         "last_error": raw_state.get("last_error"),
     }
 
+    form_payload = {
+        "brand": passport.get("brand", ""),
+        "agent": passport.get("agent_name", ""),
+        "city": passport.get("city", ""),
+        "currency": passport.get("currency", "₽"),
+        "tone": behavior.get("tone", ""),
+        "cta_primary": cta.get("primary", ""),
+        "cta_fallback": cta.get("fallback", ""),
+        "catalog_file": uploaded_display,
+    }
+
+    state_payload = dict(state)
+    state_payload["form"] = form_payload
+
     context = {
         "request": request,
         "tenant": tenant,
         "key": key,
         "persona": persona,
-        "form": {
-            "brand": passport.get("brand", ""),
-            "agent": passport.get("agent_name", ""),
-            "city": passport.get("city", ""),
-            "currency": passport.get("currency", "₽"),
-            "tone": behavior.get("tone", ""),
-            "cta_primary": cta.get("primary", ""),
-            "cta_fallback": cta.get("fallback", ""),
-            "catalog_file": uploaded_display,
-        },
+        "form": form_payload,
         "title": f"Настройки клиента · Tenant {tenant}",
         "subtitle": passport.get("brand") or "Личный кабинет клиента",
         "urls": urls,
         "state": state,
+        "state_payload": state_payload,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": _client_settings_static_version(),
         "qr_timestamp_ms": cache_bust_ms,
