@@ -318,7 +318,7 @@ def client_settings(tenant: int, request: Request):
 
     tg_start_url = _safe_public_url("tg_start", "/pub/tg/start")
     tg_status_url = _safe_public_url("tg_status", "/pub/tg/status")
-    tg_qr_url = _safe_public_url("tg_qr_png", "/pub/tg/qr.png")
+    tg_qr_png_url = _safe_public_url("tg_qr_png", "/pub/tg/qr.png")
     tg_qr_txt_url = _safe_public_url("tg_qr_txt", "/pub/tg/qr.txt")
     tg_logout_url = _safe_public_url("tg_logout", "/pub/tg/logout")
     tg_password_url = _safe_public_url("tg_password", "/pub/tg/password")
@@ -335,9 +335,9 @@ def client_settings(tenant: int, request: Request):
     initial_qr_txt_href = ""
     if current_qr_id:
         qr_params = urlencode({"qr_id": current_qr_id, "t": cache_bust_ms})
-        qr_separator = "&" if "?" in tg_qr_url else "?"
+        qr_separator = "&" if "?" in tg_qr_png_url else "?"
         txt_separator = "&" if "?" in tg_qr_txt_url else "?"
-        initial_qr_src = f"{tg_qr_url}{qr_separator}{qr_params}"
+        initial_qr_src = f"{tg_qr_png_url}{qr_separator}{qr_params}"
         initial_qr_txt_href = f"{tg_qr_txt_url}{txt_separator}{urlencode({'qr_id': current_qr_id})}"
 
     urls = {
@@ -352,7 +352,8 @@ def client_settings(tenant: int, request: Request):
         "whatsapp_export": whatsapp_export_url,
         "tg_start": tg_start_url,
         "tg_status": tg_status_url,
-        "tg_qr": tg_qr_url,
+        "tg_qr_png": tg_qr_png_url,
+        "tg_qr": tg_qr_png_url,
         "tg_qr_txt": tg_qr_txt_url,
         "tg_logout": tg_logout_url,
         "tg_password": tg_password_url,
@@ -366,6 +367,7 @@ def client_settings(tenant: int, request: Request):
         "status": raw_state.get("status"),
         "qr_id": current_qr_id or "",
         "qr_valid_until": raw_state.get("qr_valid_until"),
+        "needs_2fa": raw_state.get("needs_2fa"),
         "twofa_pending": raw_state.get("twofa_pending"),
         "twofa_since": raw_state.get("twofa_since"),
         "can_restart": raw_state.get("can_restart"),

@@ -102,7 +102,16 @@ def test_tg_status_success(monkeypatch):
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
         called["status"].append((method, path, timeout))
-        payload = {"status": "waiting_qr", "tenant_id": 3, "qr_id": "qr-test"}
+        payload = {
+            "status": "waiting_qr",
+            "tenant_id": 3,
+            "qr_id": "qr-test",
+            "needs_2fa": False,
+            "twofa_pending": False,
+            "twofa_since": None,
+            "qr_valid_until": 1700000000,
+            "last_error": None,
+        }
         return 200, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
 
     monkeypatch.setattr(public_module.C, "tg_post", _unexpected)
@@ -117,9 +126,64 @@ def test_tg_status_success(monkeypatch):
     data = resp.json()
     assert data["status"] == "waiting_qr"
     assert data["qr_id"] == "qr-test"
+    assert data["needs_2fa"] is False
+    assert data["twofa_pending"] is False
+    assert data["twofa_since"] is None
+    assert data["qr_valid_until"] == 1700000000
+    assert data["last_error"] is None
     assert called["status"] == [
         ("GET", "http://tgworker:8085/session/status?tenant=3", 15.0)
     ]
+
+
+def test_tg_password_proxies_json_payload(monkeypatch):
+    app = _base_app(monkeypatch)
+    captured: dict[str, object] = {}
+
+    async def _fake_post(path: str, payload: dict, timeout: float = 8.0):
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(public_module.C, "tg_post", _fake_post)
+
+    client = TestClient(app)
+    response = client.post(
+        "/pub/tg/password",
+        params={"tenant": 5, "k": "secret"},
+        json={"password": "pass123"},
+    )
+
+    assert response.status_code == 200
+    assert captured["path"] == "http://tgworker:8085/session/password"
+    assert captured["payload"] == {"tenant_id": 5, "password": "pass123"}
+    assert captured["timeout"] == 15.0
+
+
+def test_tg_password_accepts_form_payload(monkeypatch):
+    app = _base_app(monkeypatch)
+    captured: dict[str, object] = {}
+
+    async def _fake_post(path: str, payload: dict, timeout: float = 8.0):
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(public_module.C, "tg_post", _fake_post)
+
+    client = TestClient(app)
+    response = client.post(
+        "/pub/tg/password",
+        params={"tenant": 6, "k": "secret"},
+        data={"password": "form-pass"},
+    )
+
+    assert response.status_code == 200
+    assert captured["path"] == "http://tgworker:8085/session/password"
+    assert captured["payload"] == {"tenant_id": 6, "password": "form-pass"}
+    assert captured["timeout"] == 15.0
 
 
 def test_tg_qr_png_proxy(monkeypatch):
