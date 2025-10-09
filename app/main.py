@@ -14,36 +14,33 @@ import logging
 from logging import StreamHandler
 
 if __package__ in (None, ""):
-    core = importlib.import_module("core")  # type: ignore[assignment]
-    ask_llm = core.ask_llm  # type: ignore[attr-defined]
-    build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
-    settings = core.settings  # type: ignore[attr-defined]
-    _common_mod = importlib.import_module("web.common")  # type: ignore[assignment]
-    _admin_mod = importlib.import_module("web.admin")  # type: ignore[assignment]
-    _public_mod = importlib.import_module("web.public")  # type: ignore[assignment]
-    _client_mod = importlib.import_module("web.client")  # type: ignore[assignment]
-    _webhooks_mod = importlib.import_module("web.webhooks")  # type: ignore[assignment]
-else:
-    core = importlib.import_module("app.core")
-    sys.modules.setdefault("core", core)
+    project_root = pathlib.Path(__file__).resolve().parent.parent
+    root_str = str(project_root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
 
-    def _import_with_alias(name: str):
-        if name in sys.modules:
-            return sys.modules[name]
-        module = importlib.import_module(f"app.{name}")
-        sys.modules[name] = module
-        return module
+core = importlib.import_module("app.core")
+sys.modules.setdefault("core", core)
 
-    sys.modules.setdefault("web", importlib.import_module("app.web"))
-    _common_mod = _import_with_alias("web.common")
-    _admin_mod = _import_with_alias("web.admin")
-    _public_mod = _import_with_alias("web.public")
-    _client_mod = _import_with_alias("web.client")
-    _webhooks_mod = _import_with_alias("web.webhooks")
 
-    ask_llm = core.ask_llm  # type: ignore[attr-defined]
-    build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
-    settings = core.settings  # type: ignore[attr-defined]
+def _import_with_alias(name: str):
+    if name in sys.modules:
+        return sys.modules[name]
+    module = importlib.import_module(f"app.{name}")
+    sys.modules[name] = module
+    return module
+
+
+sys.modules.setdefault("web", importlib.import_module("app.web"))
+_common_mod = _import_with_alias("web.common")
+_admin_mod = _import_with_alias("web.admin")
+_public_mod = _import_with_alias("web.public")
+_client_mod = _import_with_alias("web.client")
+_webhooks_mod = _import_with_alias("web.webhooks")
+
+ask_llm = core.ask_llm  # type: ignore[attr-defined]
+build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
+settings = core.settings  # type: ignore[attr-defined]
 
 C = _common_mod  # type: ignore[assignment]
 admin_router = _admin_mod.router  # type: ignore[attr-defined]
