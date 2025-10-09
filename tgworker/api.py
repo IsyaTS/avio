@@ -9,7 +9,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from config import telegram_config
+from app.config import telegram_config
 
 from .manager import TelegramSessionManager
 

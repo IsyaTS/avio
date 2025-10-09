@@ -702,8 +702,11 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
     return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers={"Cache-Control": "no-store"})
 
 
-@router.get("/pub/tg/qr.png")
-def tg_qr_png(qr_id: str | None = None):
+@router.api_route("/pub/tg/qr.png", methods=["GET"])
+def tg_qr_png(request: Request, qr_id: str | None = None):
+    if request.method.upper() != "GET":
+        return Response(status_code=405, headers={"Allow": "GET", "Cache-Control": "no-store"})
+
     qr_value = "" if qr_id is None else str(qr_id).strip()
     if not qr_value:
         _log_tg_proxy("/pub/tg/qr.png", None, 400, None, error="missing_qr_id")
@@ -738,11 +741,6 @@ def tg_qr_png(qr_id: str | None = None):
         status_code=502,
         headers={"Cache-Control": "no-store"},
     )
-
-
-@router.head("/pub/tg/qr.png")
-def tg_qr_png_head():
-    return Response(status_code=405, headers={"Allow": "GET", "Cache-Control": "no-store"})
 
 
 @router.api_route("/pub/tg/logout", methods=["GET", "POST"])

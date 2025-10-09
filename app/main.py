@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import importlib
 import sys
+from types import ModuleType
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, Response
@@ -23,20 +24,20 @@ core = importlib.import_module("app.core")
 sys.modules.setdefault("core", core)
 
 
-def _import_with_alias(name: str):
-    if name in sys.modules:
-        return sys.modules[name]
-    module = importlib.import_module(f"app.{name}")
-    sys.modules[name] = module
+def _import_with_alias(module_name: str, alias: str) -> ModuleType:
+    if alias in sys.modules:
+        return sys.modules[alias]
+    module = importlib.import_module(module_name)
+    sys.modules.setdefault(alias, module)
     return module
 
 
 sys.modules.setdefault("web", importlib.import_module("app.web"))
-_common_mod = _import_with_alias("web.common")
-_admin_mod = _import_with_alias("web.admin")
-_public_mod = _import_with_alias("web.public")
-_client_mod = _import_with_alias("web.client")
-_webhooks_mod = _import_with_alias("web.webhooks")
+_common_mod = _import_with_alias("app.web.common", "web.common")
+_admin_mod = _import_with_alias("app.web.admin", "web.admin")
+_public_mod = _import_with_alias("app.web.public", "web.public")
+_client_mod = _import_with_alias("app.web.client", "web.client")
+_webhooks_mod = _import_with_alias("app.web.webhooks", "web.webhooks")
 
 ask_llm = core.ask_llm  # type: ignore[attr-defined]
 build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
