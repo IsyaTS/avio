@@ -1,11 +1,14 @@
 """Lightweight configuration helpers for cross-app services."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 import os
 from functools import lru_cache
 from pathlib import Path
+
+
+TG_WORKER_URL = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or "http://tgworker:8085"
+TG_WORKER_URL = (TG_WORKER_URL.strip() or "http://tgworker:8085").rstrip("/") or "http://tgworker:8085"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,10 +47,10 @@ def telegram_config() -> TelegramConfig:
 def tg_worker_url() -> str:
     """Return base URL for the Telegram worker service."""
 
-    raw = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or "http://tgworker:8085"
-    cleaned = raw.strip() if isinstance(raw, str) else "http://tgworker:8085"
-    cleaned = cleaned or "http://tgworker:8085"
-    return cleaned.rstrip("/") or "http://tgworker:8085"
+    raw = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or TG_WORKER_URL
+    cleaned = raw.strip() if isinstance(raw, str) else TG_WORKER_URL
+    cleaned = cleaned or TG_WORKER_URL
+    return cleaned.rstrip("/") or TG_WORKER_URL
 
 
 __all__ = ["TelegramConfig", "telegram_config", "tg_worker_url"]

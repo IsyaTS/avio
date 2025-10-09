@@ -41,10 +41,14 @@ RUN sed -i 's/\r$//' /app/scripts/diag.sh \
 
 ######## app ########
 FROM python-base AS app
+WORKDIR /app
+ENV PYTHONPATH=/app
 EXPOSE 8000
 HEALTHCHECK CMD curl -fsS http://localhost:8000/health || exit 1
-CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000","--timeout-keep-alive","5"]
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
 
 ######## worker ########
 FROM python-base AS worker
+WORKDIR /app
+ENV PYTHONPATH=/app
 CMD ["python","worker.py"]
