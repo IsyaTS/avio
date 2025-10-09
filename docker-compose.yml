@@ -26,6 +26,7 @@ services:
     environment:
       - TENANTS_DIR=/app/tenants
       - TG_SESSIONS_DIR=/app/tg_sessions
+      - TG_WORKER_URL=http://tgworker:8085
       - PYTHONPATH=/app
     depends_on: [redis, postgres]
     working_dir: /app
@@ -141,7 +142,8 @@ services:
     depends_on:
       app:
         condition: service_started
-    command: ["python","-m","tgworker.main"]
+    working_dir: /app
+    command: ["python","-m","tgworker"]
     restart: unless-stopped
     expose: ["8085"]
     healthcheck:
