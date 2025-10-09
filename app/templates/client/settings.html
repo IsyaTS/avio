@@ -28,7 +28,7 @@
     {% set qr_txt_href = initial_qr_txt_href if initial_qr_txt_href else '' %}
     <div class="integration-card" style="display:flex; flex-direction:column; gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-poll-interval="2500">
         <div id="tg-integration-status" class="status-text">Статус неизвестен</div>
-        {% set show_new_qr = (initial_status == 'waiting_qr') or (initial_status == 'needs_2fa' and not current_qr_id) or (initial_status == 'disconnected' and initial_last_error == 'qr_login_timeout') %}
+        {% set show_new_qr = (initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout']) %}
         <div id="tg-integration-qr" data-qr-id="{{ current_qr_id or '' }}" style="display:{% if qr_img_src %}flex{% else %}none{% endif %}; flex-direction:column; gap:8px; align-items:flex-start;">
             <img id="tg-integration-qr-image" alt="QR-код Telegram" {% if qr_img_src %}src="{{ qr_img_src }}"{% endif %} style="display:{% if qr_img_src %}block{% else %}none{% endif %}; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" loading="lazy" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
             <div id="tg-integration-qr-fallback" class="status-text" style="display:none;"></div>
@@ -36,7 +36,7 @@
         </div>
         <div style="display:flex; gap:12px; flex-wrap:wrap;">
             <a id="tg-integration-connect" href="{{ urls.tg_start }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn" role="button">Подключить Telegram</a>
-            <button id="tg-integration-new-qr" type="button" class="btn btn--secondary" style="display:{{ 'inline-flex' if show_new_qr else 'none' }};">Обновить QR</button>
+            <button id="tg-integration-new-qr" type="button" class="btn btn--secondary" style="display:{{ 'inline-flex' if show_new_qr else 'none' }};">Получить новый QR</button>
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
             <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>

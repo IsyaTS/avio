@@ -78,7 +78,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="tgworker")
 
     NO_STORE_HEADERS = {
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
         "Expires": "0",
     }
@@ -105,6 +105,7 @@ def create_app() -> FastAPI:
             "status": snapshot.status,
             "qr_id": snapshot.qr_id,
             "qr_valid_until": snapshot.qr_valid_until,
+            "needs_2fa": snapshot.status == "needs_2fa",
             "twofa_pending": snapshot.twofa_pending,
             "twofa_since": snapshot.twofa_since,
         }
@@ -117,6 +118,7 @@ def create_app() -> FastAPI:
             "status": snapshot.status,
             "qr_id": snapshot.qr_id,
             "qr_valid_until": snapshot.qr_valid_until,
+            "needs_2fa": snapshot.status == "needs_2fa",
             "twofa_pending": snapshot.twofa_pending,
             "twofa_since": snapshot.twofa_since,
         }
@@ -130,6 +132,7 @@ def create_app() -> FastAPI:
             "status": session_snapshot.status,
             "qr_id": session_snapshot.qr_id,
             "qr_valid_until": session_snapshot.qr_valid_until,
+            "needs_2fa": session_snapshot.status == "needs_2fa",
             "twofa_pending": session_snapshot.twofa_pending,
             "twofa_since": session_snapshot.twofa_since,
             "last_error": session_snapshot.last_error,

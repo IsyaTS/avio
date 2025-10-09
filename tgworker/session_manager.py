@@ -29,13 +29,19 @@ class SessionSnapshot:
         qr_valid_until = None
         if state.qr_expires_at is not None:
             try:
-                qr_valid_until = int(state.qr_expires_at)
+                value = float(state.qr_expires_at)
+                if value < 10_000_000_000:
+                    value *= 1000.0
+                qr_valid_until = int(value)
             except Exception:
                 qr_valid_until = None
         twofa_since = None
         if state.twofa_since is not None:
             try:
-                twofa_since = int(state.twofa_since)
+                value = float(state.twofa_since)
+                if value < 10_000_000_000:
+                    value *= 1000.0
+                twofa_since = int(value)
             except Exception:
                 twofa_since = None
         return cls(
