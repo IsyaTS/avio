@@ -103,10 +103,14 @@ def _log_tg_proxy(
     detail_raw = error if error is not None else _stringify_detail(body)
     detail = _mask_sensitive_detail(detail_raw)
     log_fn = logger.info if 200 <= int(status or 0) < 300 else logger.warning
+    tenant_value = "-" if tenant is None else tenant
+    if route == "/pub/tg/password":
+        log_fn("tg_proxy route=%s tenant=%s tg_code=%s", route, tenant_value, status)
+        return
     log_fn(
         "tg_proxy route=%s tenant=%s tg_code=%s detail=%s",
         route,
-        "-" if tenant is None else tenant,
+        tenant_value,
         status,
         detail or "",
     )

@@ -227,10 +227,18 @@ class TelegramSessionManager:
             state.waiting_task = None
             self._update_metrics()
 
-    async def submit_password(self, tenant: int, password: str) -> SessionState:
+    @staticmethod
+    def _mask_secret(secret: str) -> str:
+        if not secret:
+            return ""
+        return "*" * min(len(secret), 8)
+
+    async def submit_password(self, tenant: int, password: str) -> bool:
         secret = password or ""
         if not secret:
             raise ValueError("password_required")
+
+        masked = self._mask_secret(secret)
 
         async with self._lock:
             state = self._states.get(tenant)
@@ -247,9 +255,8 @@ class TelegramSessionManager:
                 await client.connect()
 
         try:
-            await client.sign_in(password=secret)
-            authorized = await client.is_user_authorized()
-        except PasswordHashInvalidError as exc:
+            await client.check_password(secret)
+        except PasswordHashInvalidError:
             async with self._lock:
                 state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
                 state.status = "needs_2fa"
@@ -257,8 +264,12 @@ class TelegramSessionManager:
                 state.last_error = "invalid_password"
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
-            LOGGER.warning("stage=password_failed event=password_failed tenant_id=%s error=invalid_password", tenant)
-            raise ValueError("invalid_password") from exc
+            LOGGER.warning(
+                "stage=password_failed event=password_failed tenant_id=%s password=%s error=invalid_password",
+                tenant,
+                masked,
+            )
+            return False
         except RPCError as exc:
             message = str(exc) or "telegram_error"
             async with self._lock:
@@ -268,7 +279,12 @@ class TelegramSessionManager:
                 state.last_error = message
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
-            LOGGER.error("stage=password_failed event=password_failed tenant_id=%s error=%s", tenant, message)
+            LOGGER.error(
+                "stage=password_failed event=password_failed tenant_id=%s password=%s error=%s",
+                tenant,
+                masked,
+                message,
+            )
             raise RuntimeError("telegram_error") from exc
         except Exception as exc:
             async with self._lock:
@@ -278,19 +294,12 @@ class TelegramSessionManager:
                 state.last_error = str(exc)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
-            LOGGER.exception("stage=password_failed event=password_failed tenant_id=%s", tenant)
+            LOGGER.exception(
+                "stage=password_failed event=password_failed tenant_id=%s password=%s",
+                tenant,
+                masked,
+            )
             raise RuntimeError("telegram_error") from exc
-
-        if not authorized:
-            async with self._lock:
-                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
-                state.status = "needs_2fa"
-                state.needs_2fa = True
-                state.last_error = "authorization_pending"
-                self._update_metrics()
-            EVENT_ERRORS.labels("password_failed").inc()
-            LOGGER.warning("stage=password_failed event=password_failed tenant_id=%s error=authorization_pending", tenant)
-            raise RuntimeError("authorization_pending")
 
         async with self._lock:
             state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
@@ -304,8 +313,12 @@ class TelegramSessionManager:
             state.waiting_task = None
             self._register_handlers(tenant, client)
             self._update_metrics()
-        LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)
-        return state
+        LOGGER.info(
+            "stage=password_ok event=password_ok tenant_id=%s password=%s",
+            tenant,
+            masked,
+        )
+        return True
 
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):
