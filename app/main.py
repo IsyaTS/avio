@@ -24,20 +24,18 @@ core = importlib.import_module("app.core")
 sys.modules.setdefault("core", core)
 
 
-def _import_with_alias(module_name: str, alias: str) -> ModuleType:
-    if alias in sys.modules:
-        return sys.modules[alias]
-    module = importlib.import_module(module_name)
-    sys.modules.setdefault(alias, module)
-    return module
+def _import_web_module(module_name: str) -> ModuleType:
+    full_name = f"app.web.{module_name}"
+    return importlib.import_module(full_name)
 
 
-sys.modules.setdefault("web", importlib.import_module("app.web"))
-_common_mod = _import_with_alias("app.web.common", "web.common")
-_admin_mod = _import_with_alias("app.web.admin", "web.admin")
-_public_mod = _import_with_alias("app.web.public", "web.public")
-_client_mod = _import_with_alias("app.web.client", "web.client")
-_webhooks_mod = _import_with_alias("app.web.webhooks", "web.webhooks")
+_common_mod = _import_web_module("common")
+_admin_mod = _import_web_module("admin")
+_public_mod = _import_web_module("public")
+_client_mod = _import_web_module("client")
+_webhooks_mod = importlib.import_module("app.web.webhooks")
+_catalog_sent_cache = getattr(_webhooks_mod, "_catalog_sent_cache", {})
+_r = getattr(_webhooks_mod, "_redis_queue", None)
 
 ask_llm = core.ask_llm  # type: ignore[attr-defined]
 build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
@@ -169,6 +167,12 @@ async def _handle(request: Request):
             body = {}
     else:
         body = {}
+
+    if hasattr(_webhooks_mod, "_redis_queue"):
+        setattr(_webhooks_mod, "_redis_queue", _r)
+    for attr in ("ask_llm", "build_llm_messages", "settings"):
+        if hasattr(_webhooks_mod, attr) and attr in globals():
+            setattr(_webhooks_mod, attr, globals()[attr])
 
     return await process_incoming(body, request)
 
