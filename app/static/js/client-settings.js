@@ -555,9 +555,9 @@ try {
   function applyTelegramStatus(data) {
     const status = data && typeof data.status === 'string' ? data.status.trim() : '';
     const normalized = status.toLowerCase();
-    const needsTwoFactor = Boolean(data && data.needs_2fa);
+    const requiresPassword = normalized === 'needs_2fa' || Boolean(data && data.needs_2fa);
 
-    if (normalized === 'waiting_qr' && !needsTwoFactor) {
+    if (normalized === 'waiting_qr' && !requiresPassword) {
       const qrId = data && data.qr_id ? String(data.qr_id) : '';
       if (qrId) {
         if (qrId !== currentTelegramQrId) {
@@ -567,18 +567,18 @@ try {
         hideTelegramQr('Готовим QR-код…');
       }
       hideTwoFactorPrompt();
-      return { status: normalized, needsTwoFactor };
+      return { status: normalized, needsTwoFactor: requiresPassword };
     }
 
-    if (needsTwoFactor) {
+    if (requiresPassword) {
       hideTelegramQr('Введите пароль двухфакторной аутентификации в Telegram.');
       showTwoFactorPrompt('Введите пароль двухфакторной аутентификации в Telegram.');
-      return { status: normalized, needsTwoFactor };
+      return { status: normalized, needsTwoFactor: requiresPassword };
     }
 
     hideTelegramQr('');
     hideTwoFactorPrompt();
-    return { status: normalized, needsTwoFactor };
+    return { status: normalized, needsTwoFactor: requiresPassword };
   }
 
   function stopTelegramPolling() {
@@ -1022,7 +1022,9 @@ try {
       }
       const status = (data && typeof data.status === 'string') ? data.status.trim() : '';
       const normalized = applied && applied.status ? applied.status : status.toLowerCase();
-      const needsTwoFactor = applied ? applied.needsTwoFactor : Boolean(data && data.needs_2fa);
+      const needsTwoFactor = applied
+        ? applied.needsTwoFactor
+        : normalized === 'needs_2fa' || Boolean(data && data.needs_2fa);
       let variant = 'muted';
       if (status === 'authorized') variant = 'muted';
       else if (status === 'waiting_qr') variant = 'warning';

@@ -342,6 +342,7 @@ def client_settings(tenant: int, request: Request):
         "key": key,
         "urls": urls,
         "max_days": EXPORT_MAX_DAYS,
+        "status": None,
     }
 
     context = {
