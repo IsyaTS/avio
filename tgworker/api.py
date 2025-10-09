@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import Optional
@@ -100,57 +99,42 @@ def create_app() -> FastAPI:
 
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
-        snapshot, qr_login = await manager.start_session(payload.tenant_id, force=payload.force)
-        if qr_login is not None:
-            asyncio.create_task(manager.poll_login(payload.tenant_id, qr_login))
-        needs_twofa = snapshot.needs_2fa or snapshot.twofa_pending
-        valid_until_ms = snapshot.qr_valid_until
-        twofa_since_ms = snapshot.twofa_since
+        snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
         return {
             "tenant_id": payload.tenant_id,
             "status": snapshot.status,
             "qr_id": snapshot.qr_id,
-            "needs_2fa": needs_twofa,
+            "qr_valid_until": snapshot.qr_valid_until,
             "twofa_pending": snapshot.twofa_pending,
-            "twofa_since": twofa_since_ms,
-            "qr_valid_until": valid_until_ms,
+            "twofa_since": snapshot.twofa_since,
         }
 
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
-        snapshot, qr_login = await manager.start_session(payload.tenant_id, force=True)
-        if qr_login is not None:
-            asyncio.create_task(manager.poll_login(payload.tenant_id, qr_login))
-        needs_twofa = snapshot.needs_2fa or snapshot.twofa_pending
-        valid_until_ms = snapshot.qr_valid_until
-        twofa_since_ms = snapshot.twofa_since
+        snapshot = await manager.start_session(payload.tenant_id, force=True)
         return {
             "tenant_id": payload.tenant_id,
             "status": snapshot.status,
             "qr_id": snapshot.qr_id,
-            "needs_2fa": needs_twofa,
+            "qr_valid_until": snapshot.qr_valid_until,
             "twofa_pending": snapshot.twofa_pending,
-            "twofa_since": twofa_since_ms,
-            "qr_valid_until": valid_until_ms,
+            "twofa_since": snapshot.twofa_since,
         }
 
     @app.get("/session/status")
     async def session_status(tenant: int = Query(..., ge=1)):
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
-        valid_until_ms = session_snapshot.qr_valid_until
-        needs_twofa = session_snapshot.needs_2fa or session_snapshot.twofa_pending
-        twofa_since_ms = session_snapshot.twofa_since
         return {
             "tenant_id": tenant,
             "status": session_snapshot.status,
             "qr_id": session_snapshot.qr_id,
-            "needs_2fa": needs_twofa,
+            "qr_valid_until": session_snapshot.qr_valid_until,
             "twofa_pending": session_snapshot.twofa_pending,
-            "twofa_since": twofa_since_ms,
+            "twofa_since": session_snapshot.twofa_since,
             "last_error": session_snapshot.last_error,
+            "can_restart": session_snapshot.can_restart,
             "stats": stats,
-            "qr_valid_until": valid_until_ms,
         }
 
     @app.get("/session/qr/{qr_id}.png")
