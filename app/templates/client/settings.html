@@ -23,8 +23,12 @@
     </div>
     <div class="integration-card" style="display:flex; flex-direction:column; gap:12px;">
         <div id="tg-integration-status" class="status-text">Статус неизвестен</div>
+        <div id="tg-integration-qr" style="display:none; flex-direction:column; gap:8px; align-items:flex-start;">
+            <img id="tg-integration-qr-image" alt="QR-код Telegram" style="display:none; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" loading="lazy">
+            <div id="tg-integration-qr-fallback" class="status-text" style="display:none;"></div>
+        </div>
         <div style="display:flex; gap:12px; flex-wrap:wrap;">
-            <a id="tg-integration-connect" href="{{ urls.tg_connect }}" target="_blank" rel="noopener" class="btn">Открыть QR</a>
+            <button id="tg-integration-connect" type="button" class="btn">Подключить Telegram</button>
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
             <button id="tg-integration-disconnect" type="button" class="btn btn--secondary">Отключить</button>
         </div>

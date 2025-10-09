@@ -70,6 +70,7 @@ def test_tg_start_passthrough(monkeypatch):
     resp = client.post("/pub/tg/start", params={"tenant": 11, "k": "secret"})
 
     assert resp.status_code == 200
+    assert resp.headers.get("cache-control") == "no-store"
     data = resp.json()
     assert data == {
         "status": "waiting_qr",
@@ -86,36 +87,28 @@ def test_tg_start_passthrough(monkeypatch):
 
 def test_tg_status_success(monkeypatch):
     app = _base_app(monkeypatch)
-    called = {"start": 0, "status": []}
-    events: list[tuple[str, str]] = []
+    called = {"status": []}
 
-    async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
-        called["start"] += 1
-        called.setdefault("start_timeouts", []).append(timeout)
-        assert payload["tenant_id"] == 3
-        events.append(("start", path))
-        return httpx.Response(200, json={"status": "waiting_qr", "qr_id": "qr-pre"})
+    def _unexpected(*args, **kwargs):  # pragma: no cover - safeguard
+        raise AssertionError("tg_post should not be called")
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
         called["status"].append((method, path, timeout))
-        events.append(("status", path))
         payload = {"status": "waiting_qr", "tenant_id": 3, "qr_id": "qr-test"}
         return 200, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
 
-    monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
+    monkeypatch.setattr(public_module.C, "tg_post", _unexpected)
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
 
     client = TestClient(app)
     resp = client.get("/pub/tg/status", params={"tenant": 3, "k": "key"})
 
     assert resp.status_code == 200
+    assert resp.headers.get("cache-control") == "no-store"
     data = resp.json()
     assert data["status"] == "waiting_qr"
     assert data["qr_id"] == "qr-test"
-    assert called["start"] == 1
     assert called["status"] == [("GET", "/session/status?tenant=3", 15.0)]
-    assert called["start_timeouts"] == [15.0]
-    assert events == [("start", "/session/start"), ("status", "/session/status?tenant=3")]
 
 
 def test_tg_qr_png_proxy(monkeypatch):
@@ -127,10 +120,11 @@ def test_tg_qr_png_proxy(monkeypatch):
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
 
     client = TestClient(app)
-    resp = client.get("/pub/tg/qr.png", params={"tenant": 5, "k": "secret", "qr_id": "qr-1"})
+    resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
 
     assert resp.status_code == 200
     assert resp.headers.get("cache-control") == "no-store"
+    assert resp.headers.get("content-type") == "image/png"
     assert resp.content == b"png-bytes"
 
 
@@ -143,7 +137,7 @@ def test_tg_qr_png_expired(monkeypatch):
     monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
 
     client = TestClient(app)
-    resp = client.get("/pub/tg/qr.png", params={"tenant": 5, "k": "secret", "qr_id": "qr-1"})
+    resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
 
     assert resp.status_code == 404
     assert resp.json() == {"error": "qr_expired"}

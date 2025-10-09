@@ -14,6 +14,8 @@ import httpx
 import redis  # sync client
 from redis import exceptions as redis_ex
 
+from app.config import tg_worker_url
+
 try:
     from core import (
         settings,
@@ -53,7 +55,7 @@ WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088
 WA_INTERNAL_TOKEN = (
     (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 )
-TG_WORKER_URL = (os.getenv("TG_WORKER_URL", "http://tgworker:8085") or "http://tgworker:8085").rstrip("/")
+TG_WORKER_URL = tg_worker_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
 

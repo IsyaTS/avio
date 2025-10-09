@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Any
 from urllib.parse import quote_plus
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -161,14 +162,51 @@ def admin_key_generate(tenant: int, request: Request):
 
 
 @router.post("/admin/key/save")
-def admin_key_save(tenant: int, key: str, request: Request):
+async def admin_key_save(request: Request, tenant: int | None = None, key: str | None = None):
     if not _auth_ok(request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    key = key.strip()
-    C.add_key(int(tenant), key, "manual")
-    C.set_primary(int(tenant), key)
-    C.ensure_tenant_files(int(tenant))
-    return {"ok": True, "tenant": int(tenant), "key": key}
+
+    raw_tenant: int | str | None = tenant
+    raw_key: str | None = key
+
+    payload: dict[str, Any] = {}
+    if raw_tenant is None or not raw_key:
+        try:
+            data = await request.json()
+            if isinstance(data, dict):
+                payload.update(data)
+        except Exception:
+            payload = {}
+        if not payload:
+            try:
+                form = await request.form()
+            except Exception:
+                form = None
+            if form is not None:
+                payload = {}
+                for form_key, value in form.multi_items():
+                    if form_key not in payload:
+                        payload[form_key] = value
+
+        raw_tenant = raw_tenant if raw_tenant is not None else payload.get("tenant")
+        raw_key = raw_key or payload.get("key") or payload.get("k")
+
+    try:
+        tenant_id = int(raw_tenant)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid_tenant"}
+
+    key_value = "" if raw_key is None else str(raw_key).strip()
+    if not key_value:
+        return {"ok": False, "error": "empty_key"}
+
+    C.add_key(tenant_id, key_value, "manual")
+    C.set_primary(tenant_id, key_value)
+    C.ensure_tenant_files(tenant_id)
+    encoded = quote_plus(key_value)
+    link = f"/connect/wa?tenant={tenant_id}&k={encoded}"
+    settings_link = f"/client/{tenant_id}/settings?k={encoded}"
+    return {"ok": True, "tenant": tenant_id, "key": key_value, "link": link, "settings_link": settings_link}
 
 
 @router.get("/admin/wa/status")

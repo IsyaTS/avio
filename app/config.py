@@ -41,4 +41,13 @@ def telegram_config() -> TelegramConfig:
     return TelegramConfig(api_id=api_id, api_hash=api_hash, sessions_dir=sessions_dir)
 
 
-__all__ = ["TelegramConfig", "telegram_config"]
+@lru_cache(maxsize=1)
+def tg_worker_url() -> str:
+    """Return base URL for the Telegram worker service."""
+
+    raw = (os.getenv("TG_WORKER_URL") or "http://tgworker:8085").strip()
+    cleaned = raw or "http://tgworker:8085"
+    return cleaned.rstrip("/") or "http://tgworker:8085"
+
+
+__all__ = ["TelegramConfig", "telegram_config", "tg_worker_url"]

@@ -407,9 +407,10 @@ try {
   };
 
   const telegram = {
+    startUrl: urls.tg_start || `/pub/tg/start`,
     statusUrl: urls.tg_status || `/pub/tg/status`,
     logoutUrl: urls.tg_logout || `/pub/tg/logout`,
-    connectUrl: urls.tg_connect || `/connect/tg?tenant=${tenant}`,
+    qrUrl: urls.tg_qr || `/pub/tg/qr.png`,
   };
 
   const dom = {
@@ -443,7 +444,103 @@ try {
     tgRefresh: document.getElementById('tg-integration-refresh'),
     tgDisconnect: document.getElementById('tg-integration-disconnect'),
     tgConnect: document.getElementById('tg-integration-connect'),
+    tgQrContainer: document.getElementById('tg-integration-qr'),
+    tgQrImage: document.getElementById('tg-integration-qr-image'),
+    tgQrFallback: document.getElementById('tg-integration-qr-fallback'),
   };
+
+  let currentTelegramQrId = '';
+
+  function buildTelegramTenantUrl(base, extraParams = {}) {
+    if (!base) return '';
+    let url;
+    try {
+      url = new URL(base, window.location.origin);
+    } catch (error) {
+      url = new URL(base, window.location.href);
+    }
+    const tenantId = tenant != null ? String(tenant).trim() : '';
+    if (tenantId) {
+      url.searchParams.set('tenant', tenantId);
+    }
+    if (accessKey) {
+      url.searchParams.set('k', accessKey);
+    }
+    Object.entries(extraParams || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null) return;
+      url.searchParams.set(key, String(value));
+    });
+    return url.toString();
+  }
+
+  function buildTelegramQrUrl(qrId) {
+    if (!telegram.qrUrl || !qrId) return '';
+    let url;
+    try {
+      url = new URL(telegram.qrUrl, window.location.origin);
+    } catch (error) {
+      url = new URL(telegram.qrUrl, window.location.href);
+    }
+    url.searchParams.set('qr_id', qrId);
+    url.searchParams.set('t', Date.now().toString());
+    return url.toString();
+  }
+
+  function showTelegramQr(qrId) {
+    if (!dom.tgQrContainer || !dom.tgQrImage) return;
+    const src = buildTelegramQrUrl(qrId);
+    if (!src) return;
+    currentTelegramQrId = qrId;
+    dom.tgQrContainer.style.display = 'flex';
+    dom.tgQrImage.style.display = 'block';
+    if (dom.tgQrImage.src !== src) {
+      dom.tgQrImage.src = src;
+    }
+    if (dom.tgQrFallback) {
+      dom.tgQrFallback.style.display = 'none';
+      dom.tgQrFallback.textContent = '';
+    }
+  }
+
+  function hideTelegramQr(message) {
+    currentTelegramQrId = '';
+    if (dom.tgQrImage) {
+      dom.tgQrImage.removeAttribute('src');
+      dom.tgQrImage.style.display = 'none';
+    }
+    if (dom.tgQrContainer) {
+      dom.tgQrContainer.style.display = message ? 'flex' : 'none';
+    }
+    if (dom.tgQrFallback) {
+      dom.tgQrFallback.textContent = message || '';
+      dom.tgQrFallback.style.display = message ? 'block' : 'none';
+    }
+  }
+
+  function applyTelegramStatus(data) {
+    const status = data && typeof data.status === 'string' ? data.status.trim() : '';
+    const normalized = status.toLowerCase();
+    const needsTwoFactor = Boolean(data && data.needs_2fa);
+
+    if (normalized === 'waiting_qr' && !needsTwoFactor) {
+      const qrId = data && data.qr_id ? String(data.qr_id) : '';
+      if (qrId) {
+        if (qrId !== currentTelegramQrId) {
+          showTelegramQr(qrId);
+        }
+      } else if (!currentTelegramQrId) {
+        hideTelegramQr('Готовим QR-код…');
+      }
+      return;
+    }
+
+    if (needsTwoFactor) {
+      hideTelegramQr('Введите пароль двухфакторной аутентификации в Telegram.');
+      return;
+    }
+
+    hideTelegramQr('');
+  }
 
   function setStatus(element, message, variant = 'muted') {
     if (!element) return;
@@ -831,40 +928,90 @@ try {
     if (!dom.tgStatus || !telegram.statusUrl) return;
     if (!accessKey) {
       updateTelegramStatus('Нет ключа доступа', 'alert');
+      hideTelegramQr('');
       return;
     }
-    const url = `${telegram.statusUrl}?tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(accessKey)}&t=${Date.now()}`;
+    const url = buildTelegramTenantUrl(telegram.statusUrl, { t: Date.now() });
+    if (!url) return;
     try {
       const response = await fetch(url, { cache: 'no-store' });
-      const data = await response.json();
+      let data = null;
+      try {
+        data = await response.clone().json();
+      } catch (jsonError) {
+        data = null;
+      }
+      if (data) {
+        applyTelegramStatus(data);
+      }
+      if (!data && !response.ok) {
+        throw new Error(`status failed: ${response.status}`);
+      }
       const status = (data && typeof data.status === 'string') ? data.status : '';
       let variant = 'muted';
       if (status === 'authorized') variant = 'muted';
       else if (status === 'waiting_qr') variant = 'warning';
       else if (status) variant = 'alert';
+      else if (!response.ok) variant = 'alert';
       const suffix = data && data.needs_2fa ? ' (требуется пароль 2FA)' : '';
       updateTelegramStatus(status ? `Статус: ${status}${suffix}` : 'Статус неизвестен', variant);
     } catch (error) {
       console.error('[client-settings] telegram status error', error);
       updateTelegramStatus('Не удалось получить статус Telegram', 'alert');
+      hideTelegramQr('');
     }
   }
 
   async function disconnectTelegram() {
     if (!telegram.logoutUrl || !accessKey) return;
-    const url = `${telegram.logoutUrl}?tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(accessKey)}`;
+    const url = buildTelegramTenantUrl(telegram.logoutUrl);
+    if (!url) return;
     try {
-      await fetch(url, { method: 'POST', cache: 'no-store' });
+      await fetch(url, { method: 'GET', cache: 'no-store' });
     } catch (error) {
       console.error('[client-settings] telegram logout error', error);
     } finally {
+      hideTelegramQr('');
       refreshTelegramStatus();
     }
   }
 
-  if (dom.tgConnect && telegram.connectUrl) {
-    dom.tgConnect.href = telegram.connectUrl;
-    dom.tgConnect.target = '_blank';
+  async function startTelegramSession() {
+    if (!dom.tgConnect || !telegram.startUrl) return;
+    if (!accessKey) {
+      updateTelegramStatus('Нет ключа доступа', 'alert');
+      hideTelegramQr('');
+      return;
+    }
+    const url = buildTelegramTenantUrl(telegram.startUrl, { t: Date.now() });
+    if (!url) return;
+    dom.tgConnect.disabled = true;
+    hideTelegramQr('Готовим QR-код…');
+    updateTelegramStatus('Запрашиваем QR-код…', 'muted');
+    try {
+      const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+      if (response.ok) {
+        const data = await response.json().catch(() => null);
+        if (data) {
+          applyTelegramStatus(data);
+        }
+      } else {
+        throw new Error(`start failed: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('[client-settings] telegram start error', error);
+      updateTelegramStatus('Не удалось запросить QR. Попробуйте позже.', 'alert');
+      hideTelegramQr('QR недоступен. Попробуйте ещё раз.');
+    } finally {
+      dom.tgConnect.disabled = false;
+      refreshTelegramStatus();
+    }
+  }
+
+  if (dom.tgConnect) {
+    dom.tgConnect.addEventListener('click', () => {
+      startTelegramSession();
+    });
   }
   if (dom.tgRefresh) {
     dom.tgRefresh.addEventListener('click', refreshTelegramStatus);
