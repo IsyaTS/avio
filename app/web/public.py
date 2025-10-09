@@ -1015,18 +1015,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
-    response_headers = _merge_no_store_headers(headers or {})
-
-    parsed: Any | None = None
-    if body_bytes:
-        try:
-            parsed = json.loads(body_bytes.decode("utf-8"))
-        except Exception:
-            parsed = None
-
-    if isinstance(parsed, dict):
-        return JSONResponse(parsed, status_code=status_code, headers=response_headers)
-
+    response_headers = _proxy_headers(headers or {}, status_code)
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
