@@ -367,6 +367,8 @@ def client_settings(tenant: int, request: Request):
         "qr_id": current_qr_id or "",
         "qr_valid_until": raw_state.get("qr_valid_until"),
         "needs_2fa": raw_state.get("needs_2fa"),
+        "twofa_pending": raw_state.get("twofa_pending"),
+        "twofa_since": raw_state.get("twofa_since"),
         "can_restart": raw_state.get("can_restart"),
     }
 

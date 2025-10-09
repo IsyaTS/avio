@@ -5,6 +5,8 @@ import os, json, re, time, mimetypes
 from urllib.parse import quote
 
 import importlib
+import importlib.machinery
+import importlib.util
 import sys
 from types import ModuleType
 
@@ -14,26 +16,58 @@ from fastapi.staticfiles import StaticFiles
 import logging
 from logging import StreamHandler
 
+project_root = pathlib.Path(__file__).resolve().parent.parent
 if __package__ in (None, ""):
-    project_root = pathlib.Path(__file__).resolve().parent.parent
     root_str = str(project_root)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
 
 core = importlib.import_module("app.core")
 sys.modules.setdefault("core", core)
+_EXPECTED_WEB_ATTRS: dict[str, tuple[str, ...]] = {
+    "common": ("router",),
+    "admin": ("router",),
+    "public": ("router", "templates"),
+    "client": ("router",),
+    "webhooks": ("router", "process_incoming", "_resolve_catalog_attachment"),
+}
+
+
+def _load_web_module_from_source(module_name: str, full_name: str) -> ModuleType:
+    module_path = project_root / "app" / "web" / f"{module_name}.py"
+    loader = importlib.machinery.SourceFileLoader(full_name, str(module_path))
+    spec = importlib.util.spec_from_loader(full_name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    sys.modules[full_name] = module
+    return module
 
 
 def _import_web_module(module_name: str) -> ModuleType:
     full_name = f"app.web.{module_name}"
-    return importlib.import_module(full_name)
+    module = importlib.import_module(full_name)
+    expected = _EXPECTED_WEB_ATTRS.get(module_name, ())
+    if expected and not all(hasattr(module, attr) for attr in expected):
+        if getattr(module, "__avio_fallback_failed__", False):
+            return module
+        try:
+            module = _load_web_module_from_source(module_name, full_name)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "fallback_import_failed module=%s", full_name, exc_info=True
+            )
+            setattr(module, "__avio_fallback_failed__", True)
+            if module_name == "public" and not hasattr(module, "templates"):
+                module.templates = object()  # type: ignore[attr-defined]
+            return module
+    return module
 
 
 _common_mod = _import_web_module("common")
 _admin_mod = _import_web_module("admin")
 _public_mod = _import_web_module("public")
 _client_mod = _import_web_module("client")
-_webhooks_mod = importlib.import_module("app.web.webhooks")
+_webhooks_mod = _import_web_module("webhooks")
 _catalog_sent_cache = getattr(_webhooks_mod, "_catalog_sent_cache", {})
 _r = getattr(_webhooks_mod, "_redis_queue", None)
 
