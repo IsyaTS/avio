@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import telegram_config
@@ -23,6 +23,11 @@ class StartRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     tenant_id: int = Field(..., ge=1)
+
+
+class PasswordRequest(BaseModel):
+    tenant_id: int = Field(..., ge=1)
+    password: SecretStr
 
 
 class SendRequest(BaseModel):
@@ -115,6 +120,25 @@ def create_app() -> FastAPI:
     async def session_logout(payload: LogoutRequest):
         await manager.logout(payload.tenant_id)
         return {"ok": True}
+
+    @app.post("/session/password")
+    async def session_password(payload: PasswordRequest):
+        password = payload.password.get_secret_value()
+        if not password:
+            raise HTTPException(status_code=400, detail="password_required")
+        try:
+            state = await manager.submit_password(payload.tenant_id, password)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "tenant_id": payload.tenant_id,
+            "status": state.status,
+            "qr_id": state.qr_id,
+            "needs_2fa": state.needs_2fa,
+            "last_error": state.last_error,
+        }
 
     @app.post("/send")
     async def send_message(payload: SendRequest, _: None = Depends(require_credentials)):
