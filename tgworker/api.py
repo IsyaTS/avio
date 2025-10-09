@@ -9,10 +9,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-try:
-    from app.config import telegram_config
-except Exception:  # pragma: no cover - running as top-level module
-    from config import telegram_config  # type: ignore
+from config import telegram_config
 
 from .manager import TelegramSessionManager
 
