@@ -29,6 +29,7 @@
     {% set show_2fa = (initial_status == 'needs_2fa') or initial_twofa_pending or initial_needs_twofa %}
     {% set show_qr = (initial_status == 'waiting_qr') and not show_2fa %}
     {% set is_authorized = (initial_status == 'authorized') %}
+    {% set hide_qr_block = show_2fa or is_authorized %}
     {% set initial_status_message = 'Статус неизвестен' %}
     {% set initial_status_variant = 'muted' %}
     {% if show_2fa %}
@@ -55,17 +56,17 @@
     {% set show_qr_refresh = show_qr or show_new_qr %}
     <div class="integration-card stack" style="gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-initial-twofa="{% if show_2fa %}1{% else %}0{% endif %}" data-tg-poll-interval="2500">
         <div id="tg-integration-status" class="status-text {{ initial_status_variant }}">{{ initial_status_message }}</div>
-        <div id="tg-qr-block" class="stack{% if not (show_qr or show_new_qr) %} is-hidden{% endif %}" data-qr-id="{{ current_qr_id }}" style="gap:12px; align-items:flex-start;">
+        <div id="tg-qr-block" class="stack{% if hide_qr_block %} hidden{% endif %}" data-qr-id="{{ current_qr_id }}" style="gap:12px; align-items:flex-start;">
             <div class="stack" style="gap:12px; align-items:flex-start;">
-                <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr and initial_qr_src %}src="{{ initial_qr_src }}"{% endif %} loading="lazy" class="qr-image{% if not (show_qr and current_qr_id) %} is-hidden{% endif %}" style="width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
-                <div id="tg-qr-fallback" class="status-text alert{% if show_qr and current_qr_id %} is-hidden{% endif %}"></div>
+                <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr and initial_qr_src %}src="{{ initial_qr_src }}"{% endif %} loading="lazy" class="qr-image{% if not (show_qr and current_qr_id) %} hidden{% endif %}" style="width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
+                <div id="tg-qr-fallback" class="status-text alert hidden"></div>
             </div>
             <div class="stack" style="gap:10px; flex-direction: row; flex-wrap: wrap;">
-                <button id="tg-qr-refresh" type="button" class="btn btn--secondary{% if not show_qr_refresh %} is-hidden{% endif %}">Обновить QR</button>
-                <a id="tg-qr-link" class="btn btn--secondary{% if not (show_qr and initial_qr_txt_href) %} is-hidden{% endif %}" role="button" target="_blank" rel="noopener noreferrer" href="{% if show_qr and initial_qr_txt_href %}{{ initial_qr_txt_href }}{% else %}#{% endif %}">QR текстом</a>
+                <button id="tg-qr-refresh" type="button" class="btn btn--secondary{% if not show_qr_refresh %} hidden{% endif %}">Обновить QR</button>
+                <a id="tg-qr-link" class="btn btn--secondary{% if not (show_qr and initial_qr_txt_href) %} hidden{% endif %}" role="button" target="_blank" rel="noopener noreferrer" href="{% if show_qr and initial_qr_txt_href %}{{ initial_qr_txt_href }}{% else %}#{% endif %}">QR текстом</a>
             </div>
         </div>
-        <div id="tg-2fa-block" class="stack{% if not show_2fa %} is-hidden{% endif %}" style="gap:12px; max-width:360px;">
+        <div id="tg-2fa-block" class="stack{% if not show_2fa %} hidden{% endif %}" style="gap:12px; max-width:360px;">
             <form id="tg-password-form" class="stack" style="gap:12px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
                 <label class="grid" style="grid-template-columns: 1fr; gap:6px;">
                     <span class="label">Пароль 2FA</span>
@@ -73,7 +74,7 @@
                 </label>
                 <div class="stack" style="gap:12px; align-items:flex-start;">
                     <button id="tg-password-submit" type="submit" class="btn">Подтвердить</button>
-                    <div id="tg-password-error" class="status-text alert is-hidden"></div>
+                    <div id="tg-password-error" class="status-text alert hidden"></div>
                 </div>
             </form>
         </div>

@@ -365,6 +365,7 @@ def client_settings(tenant: int, request: Request):
     state = {
         "tenant": tenant,
         "key": key,
+        "primary_key": primary_key,
         "urls": urls,
         "max_days": EXPORT_MAX_DAYS,
         "status": raw_state.get("status"),
@@ -402,6 +403,7 @@ def client_settings(tenant: int, request: Request):
         "urls": urls,
         "state": state,
         "state_payload": state_payload,
+        "primary_key": primary_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": _client_settings_static_version(),
         "qr_timestamp_ms": cache_bust_ms,
