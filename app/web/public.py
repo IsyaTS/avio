@@ -790,9 +790,13 @@ def tg_qr_png(qr_id: str | None = None):
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
 
     response_headers = _proxy_headers(headers or {}, status_code)
-    if status_code == 200:
-        response_headers.setdefault("Content-Type", "image/png")
-    return Response(content=body_bytes, status_code=status_code, headers=response_headers)
+    response_headers["Cache-Control"] = "no-store"
+    return Response(
+        content=body_bytes,
+        status_code=status_code,
+        headers=response_headers,
+        media_type="image/png",
+    )
 
 
 @router.api_route("/pub/tg/logout", methods=["GET", "POST"])

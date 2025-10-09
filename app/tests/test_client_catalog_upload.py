@@ -22,16 +22,16 @@ def api_client(tmp_path, monkeypatch):
 
     # Reload modules to pick updated TENANTS_DIR
     import core
-    import web.common
-    import web.client
     import app.main
+    import app.web.common as web_common
+    import app.web.client as web_client
 
     importlib.reload(core)
-    importlib.reload(web.common)
-    importlib.reload(web.client)
+    importlib.reload(web_common)
+    importlib.reload(web_client)
     importlib.reload(app.main)
 
-    monkeypatch.setattr(web.client.C, "valid_key", lambda tenant, key: key == "secret")
+    monkeypatch.setattr(web_client.C, "valid_key", lambda tenant, key: key == "secret")
 
     client = TestClient(app.main.app)
     try:

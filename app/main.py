@@ -24,20 +24,18 @@ core = importlib.import_module("app.core")
 sys.modules.setdefault("core", core)
 
 
-def _import_with_alias(module_name: str, alias: str) -> ModuleType:
-    if alias in sys.modules:
-        return sys.modules[alias]
-    module = importlib.import_module(module_name)
-    sys.modules.setdefault(alias, module)
-    return module
+def _import_module(module_name: str) -> ModuleType:
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    return importlib.import_module(module_name)
 
 
-sys.modules.setdefault("web", importlib.import_module("app.web"))
-_common_mod = _import_with_alias("app.web.common", "web.common")
-_admin_mod = _import_with_alias("app.web.admin", "web.admin")
-_public_mod = _import_with_alias("app.web.public", "web.public")
-_client_mod = _import_with_alias("app.web.client", "web.client")
-_webhooks_mod = _import_with_alias("app.web.webhooks", "web.webhooks")
+_common_mod = _import_module("app.web.common")
+_admin_mod = _import_module("app.web.admin")
+_public_mod = _import_module("app.web.public")
+_client_mod = _import_module("app.web.client")
+_webhooks_mod = _import_module("app.web.webhooks")
 
 ask_llm = core.ask_llm  # type: ignore[attr-defined]
 build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
@@ -48,7 +46,33 @@ admin_router = _admin_mod.router  # type: ignore[attr-defined]
 public_router = _public_mod.router  # type: ignore[attr-defined]
 client_router = _client_mod.router  # type: ignore[attr-defined]
 webhooks_router = _webhooks_mod.router  # type: ignore[attr-defined]
-process_incoming = _webhooks_mod.process_incoming  # type: ignore[attr-defined]
+_process_incoming_impl = _webhooks_mod.process_incoming  # type: ignore[attr-defined]
+_catalog_sent_cache = getattr(_webhooks_mod, "_catalog_sent_cache", {})
+_r = getattr(_webhooks_mod, "_redis_queue", None)
+
+
+async def process_incoming(*args, **kwargs):  # type: ignore[override]
+    override_queue = globals().get("_r")
+    original_queue = getattr(_webhooks_mod, "_redis_queue", None)
+    override_ask = globals().get("ask_llm")
+    original_ask = getattr(_webhooks_mod, "ask_llm", None)
+    override_build = globals().get("build_llm_messages")
+    original_build = getattr(_webhooks_mod, "build_llm_messages", None)
+    if override_queue is not None and override_queue is not original_queue:
+        setattr(_webhooks_mod, "_redis_queue", override_queue)
+    if override_ask is not None and override_ask is not original_ask:
+        setattr(_webhooks_mod, "ask_llm", override_ask)
+    if override_build is not None and override_build is not original_build:
+        setattr(_webhooks_mod, "build_llm_messages", override_build)
+    try:
+        return await _process_incoming_impl(*args, **kwargs)
+    finally:
+        if override_queue is not None and override_queue is not original_queue:
+            setattr(_webhooks_mod, "_redis_queue", original_queue)
+        if override_ask is not None and override_ask is not original_ask:
+            setattr(_webhooks_mod, "ask_llm", original_ask)
+        if override_build is not None and override_build is not original_build:
+            setattr(_webhooks_mod, "build_llm_messages", original_build)
 
 import importlib.util as _importlib_util
 

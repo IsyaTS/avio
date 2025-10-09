@@ -94,23 +94,26 @@ def _install_fastapi_stub() -> None:
 
 
 def _install_web_stubs() -> None:
-    if "web" in sys.modules:
+    if "app.web.common" in sys.modules:
         return
 
     try:
         import importlib
 
-        importlib.import_module("web.common")
-        importlib.import_module("web.admin")
-        importlib.import_module("web.public")
-        importlib.import_module("web.client")
+        importlib.import_module("app.web.common")
+        importlib.import_module("app.web.admin")
+        importlib.import_module("app.web.public")
+        importlib.import_module("app.web.client")
+        importlib.import_module("app.web.webhooks")
         return
     except Exception:
         pass
 
-    web_pkg = types.ModuleType("web")
-    web_pkg.__path__ = []  # mark as package so importlib.reload works
-    sys.modules["web"] = web_pkg
+    app_pkg = sys.modules.get("app")
+    if app_pkg is None:
+        app_pkg = types.ModuleType("app")
+        app_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["app"] = app_pkg
 
     class FakeRouter:
         def __init__(self):
@@ -135,21 +138,38 @@ def _install_web_stubs() -> None:
 
     fake_router = FakeRouter()
 
-    common_mod = types.ModuleType("web.common")
+    web_pkg = types.ModuleType("app.web")
+    web_pkg.__path__ = []  # type: ignore[attr-defined]
+    sys.modules["app.web"] = web_pkg
+    setattr(app_pkg, "web", web_pkg)
+
+    common_mod = types.ModuleType("app.web.common")
     common_mod.ensure_tenant_files = core.ensure_tenant_files
     common_mod.tenant_dir = core.tenant_dir
     common_mod.read_tenant_config = core.read_tenant_config
     common_mod.write_tenant_config = core.write_tenant_config
     common_mod.read_persona = core.read_persona
     common_mod.write_persona = core.write_persona
-    sys.modules["web.common"] = common_mod
+    sys.modules["app.web.common"] = common_mod
     setattr(web_pkg, "common", common_mod)
 
     for name in ("admin", "public", "client"):
-        mod = types.ModuleType(f"web.{name}")
+        mod = types.ModuleType(f"app.web.{name}")
         mod.router = FakeRouter()
-        sys.modules[f"web.{name}"] = mod
+        sys.modules[f"app.web.{name}"] = mod
         setattr(web_pkg, name, mod)
+
+    webhooks_mod = types.ModuleType("app.web.webhooks")
+    webhooks_mod.router = FakeRouter()
+    webhooks_mod._redis_queue = None
+    webhooks_mod._catalog_sent_cache = {}
+
+    async def _process_incoming(*_a, **_k):
+        return {}
+
+    webhooks_mod.process_incoming = _process_incoming
+    sys.modules["app.web.webhooks"] = webhooks_mod
+    setattr(web_pkg, "webhooks", webhooks_mod)
 
 
 _install_fastapi_stub()
