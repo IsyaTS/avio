@@ -449,10 +449,11 @@ try {
     tgDisconnect: document.getElementById('tg-integration-disconnect'),
     tgConnect: document.getElementById('tg-integration-connect'),
     tgNewQr: document.getElementById('tg-integration-new-qr'),
-    tgQrContainer: document.getElementById('tg-integration-qr'),
-    tgQrImage: document.getElementById('tg-integration-qr-image'),
-    tgQrFallback: document.getElementById('tg-integration-qr-fallback'),
-    tgQrLink: document.getElementById('tg-integration-qr-link'),
+    tgQrBlock: document.getElementById('tg-qr-block'),
+    tgQrImage: document.getElementById('tg-qr-image'),
+    tgQrFallback: document.getElementById('tg-qr-fallback'),
+    tgQrLink: document.getElementById('tg-qr-link'),
+    tg2faBlock: document.getElementById('tg-2fa-block'),
     tgPasswordForm: document.getElementById('tg-password-form'),
     tgPasswordInput: document.getElementById('tg-password-input'),
     tgPasswordSubmit: document.getElementById('tg-password-submit'),
@@ -553,14 +554,14 @@ try {
   }
 
   function showTelegramQr(qrId) {
-    if (!dom.tgQrContainer || !dom.tgQrImage) return;
+    if (!dom.tgQrBlock || !dom.tgQrImage) return;
     const src = buildTelegramQrUrl(qrId);
     if (!src) return;
     currentTelegramQrId = qrId;
-    if (dom.tgQrContainer.dataset) {
-      dom.tgQrContainer.dataset.qrId = qrId;
+    if (dom.tgQrBlock.dataset) {
+      dom.tgQrBlock.dataset.qrId = qrId;
     }
-    dom.tgQrContainer.style.display = 'flex';
+    dom.tgQrBlock.style.display = 'flex';
     dom.tgQrImage.style.display = 'block';
     if (dom.tgQrImage.dataset) {
       dom.tgQrImage.dataset.cachebuster = String(Date.now());
@@ -574,7 +575,10 @@ try {
     qrImageReloadPending = false;
   }
 
-  function hideTelegramQr(message) {
+  function hideTelegramQr(message, options = {}) {
+    const preserveBlock = options && Object.prototype.hasOwnProperty.call(options, 'preserveBlock')
+      ? Boolean(options.preserveBlock)
+      : Boolean(message);
     currentTelegramQrId = '';
     if (dom.tgQrImage) {
       if (dom.tgQrImage.dataset) {
@@ -583,15 +587,16 @@ try {
       dom.tgQrImage.removeAttribute('src');
       dom.tgQrImage.style.display = 'none';
     }
-    if (dom.tgQrContainer) {
-      if (dom.tgQrContainer.dataset) {
-        dom.tgQrContainer.dataset.qrId = '';
+    if (dom.tgQrBlock) {
+      if (dom.tgQrBlock.dataset) {
+        dom.tgQrBlock.dataset.qrId = '';
       }
-      dom.tgQrContainer.style.display = message ? 'flex' : 'none';
+      dom.tgQrBlock.style.display = preserveBlock ? 'flex' : 'none';
     }
     if (dom.tgQrFallback) {
-      dom.tgQrFallback.textContent = message || '';
-      dom.tgQrFallback.style.display = message ? 'block' : 'none';
+      const text = message && preserveBlock ? String(message) : '';
+      dom.tgQrFallback.textContent = text;
+      dom.tgQrFallback.style.display = text ? 'block' : 'none';
     }
     updateTelegramQrLink('');
     qrImageReloadPending = false;
@@ -629,6 +634,9 @@ try {
   }
 
   function showTwoFactorPrompt(message) {
+    if (dom.tg2faBlock) {
+      dom.tg2faBlock.style.display = 'flex';
+    }
     if (!dom.tgPasswordForm) return;
     dom.tgPasswordForm.style.display = 'flex';
     if (!passwordPromptVisible && dom.tgPasswordInput) {
@@ -648,6 +656,9 @@ try {
   }
 
   function hideTwoFactorPrompt() {
+    if (dom.tg2faBlock) {
+      dom.tg2faBlock.style.display = 'none';
+    }
     if (!dom.tgPasswordForm) return;
     dom.tgPasswordForm.style.display = 'none';
     passwordPromptVisible = false;
@@ -671,7 +682,7 @@ try {
       if (qrId) {
         showTelegramQr(qrId);
       } else {
-        hideTelegramQr('Готовим QR-код…');
+        hideTelegramQr('Готовим QR-код…', { preserveBlock: true });
       }
       hideTwoFactorPrompt();
       setNewQrVisibility(Boolean(accessKey), 'Обновить QR');
@@ -679,14 +690,14 @@ try {
     }
 
     if (requiresPassword) {
-      hideTelegramQr('Введите пароль двухфакторной аутентификации в Telegram.');
+      hideTelegramQr('', { preserveBlock: false });
       showTwoFactorPrompt('Введите пароль двухфакторной аутентификации в Telegram.');
       setNewQrVisibility(false);
       return { status: 'needs_2fa', needsTwoFactor: true, lastError };
     }
 
     if (normalized === 'authorized') {
-      hideTelegramQr('');
+      hideTelegramQr('', { preserveBlock: false });
       hideTwoFactorPrompt();
       setNewQrVisibility(false);
       return { status: normalized, needsTwoFactor: false, lastError };
@@ -696,13 +707,13 @@ try {
       const message = lastError === 'twofa_timeout'
         ? 'Время ожидания пароля истекло. Получите новый QR.'
         : 'QR-код истёк. Получите новый, чтобы продолжить.';
-      hideTelegramQr(message);
+      hideTelegramQr(message, { preserveBlock: true });
       hideTwoFactorPrompt();
       setNewQrVisibility(Boolean(accessKey), 'Получить новый QR');
       return { status: normalized, needsTwoFactor: false, lastError };
     }
 
-    hideTelegramQr('');
+    hideTelegramQr('', { preserveBlock: false });
     hideTwoFactorPrompt();
     setNewQrVisibility(Boolean(accessKey) && canRestart, 'Обновить QR');
     return { status: normalized, needsTwoFactor: false, lastError };
@@ -1300,6 +1311,7 @@ try {
     stopTelegramPolling();
     if (dom.tgPasswordSubmit) dom.tgPasswordSubmit.disabled = true;
     setStatus(dom.tgPasswordMessage, 'Отправляем пароль…', 'muted');
+    let passwordAccepted = false;
 
     try {
       const response = await fetch(url, {
@@ -1313,6 +1325,7 @@ try {
         if (dom.tgPasswordInput) {
           dom.tgPasswordInput.value = '';
         }
+        passwordAccepted = true;
       } else {
         let detail = '';
         try {
@@ -1334,8 +1347,17 @@ try {
             detail = '';
           }
         }
-        const message = (detail || `Ошибка подтверждения (HTTP ${response.status})`).trim() || 'Не удалось подтвердить пароль';
+        const normalizedDetail = (detail || '').trim().toLowerCase();
+        let message = (detail || `Ошибка подтверждения (HTTP ${response.status})`).trim() || 'Не удалось подтвердить пароль';
+        if (response.status === 400 && normalizedDetail === 'invalid_password') {
+          message = 'Неверный пароль 2FA. Попробуйте ещё раз.';
+        }
         setStatus(dom.tgPasswordMessage, message, 'alert');
+        if (dom.tgPasswordInput) {
+          try {
+            dom.tgPasswordInput.focus();
+          } catch (_) {}
+        }
       }
 
       await refreshTelegramStatus({ fromPoll: true });
@@ -1347,7 +1369,7 @@ try {
       scheduleTelegramPolling(6000);
     } finally {
       if (dom.tgPasswordSubmit) dom.tgPasswordSubmit.disabled = false;
-      if (dom.tgPasswordInput) {
+      if (passwordAccepted && dom.tgPasswordInput) {
         dom.tgPasswordInput.value = '';
       }
     }
