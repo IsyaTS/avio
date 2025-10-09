@@ -624,31 +624,22 @@ async def tg_start(tenant: int | str | None = None, k: str | None = None):
     try:
         upstream = await C.tg_post("/session/start", {"tenant_id": tenant_id})
     except Exception as exc:
-        logger.info("stage=tg_start_proxy tenant=%s http=%s body=%s", tenant_id, 0, 0)
+        logger.info("stage=tg_start_proxy tenant=%s http=%s len=%s", tenant_id, 0, 0)
         _log_tg_proxy_error("/session/start", 0, str(exc))
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    logger.info("stage=tg_start_proxy tenant=%s http=%s body=%s", tenant_id, status_code, len(body_bytes))
+    logger.info("stage=tg_start_proxy tenant=%s http=%s len=%s", tenant_id, status_code, len(body_bytes))
 
     if status_code != 200:
         _log_tg_proxy_error("/session/start", status_code, getattr(upstream, "text", ""))
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
-    try:
-        data = upstream.json()
-    except Exception as exc:
-        _log_tg_proxy_error("/session/start", status_code, getattr(upstream, "text", str(exc)))
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
-
-    if not isinstance(data, dict):
-        _log_tg_proxy_error("/session/start", status_code, upstream.text if hasattr(upstream, "text") else data)
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
-
-    allowed_keys = {"status", "qr_id", "needs_2fa"}
-    result = {key: value for key, value in data.items() if key in allowed_keys and value is not None}
-    return JSONResponse(result)
+    media_type = "application/json"
+    if hasattr(upstream, "headers"):
+        media_type = upstream.headers.get("content-type", media_type)
+    return Response(content=body_bytes, media_type=media_type, status_code=200)
 
 
 @router.get("/pub/tg/status")
@@ -679,18 +670,11 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
         _log_tg_proxy_error("/session/status", status_code, body)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
-    text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body or "")
-    try:
-        data = json.loads(text)
-    except Exception as exc:
-        _log_tg_proxy_error("/session/status", status_code, text or str(exc))
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
-
-    if not isinstance(data, dict):
-        _log_tg_proxy_error("/session/status", status_code, text)
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
-
-    return JSONResponse(data)
+    if isinstance(body, str):
+        body_bytes = body.encode("utf-8")
+    else:
+        body_bytes = bytes(body or b"")
+    return Response(content=body_bytes, media_type="application/json", status_code=200)
 
 
 @router.get("/pub/tg/qr.png")

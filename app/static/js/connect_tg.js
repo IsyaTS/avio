@@ -92,7 +92,8 @@
 
   function schedulePoll(delay) {
     if (pollTimer) window.clearTimeout(pollTimer);
-    const timeout = typeof delay === 'number' ? delay : 3500;
+    const baseDelay = 3000 + Math.random() * 2000;
+    const timeout = typeof delay === 'number' ? delay : baseDelay;
     pollTimer = window.setTimeout(pollStatus, timeout);
   }
 
@@ -133,7 +134,9 @@
       setStatus('offline', 'Не удалось запросить QR. Попробуйте позже.');
     } finally {
       loadingQr = false;
-      schedulePoll(2000);
+      if (!authorized) {
+        schedulePoll();
+      }
     }
   }
 
@@ -195,7 +198,7 @@
         setStatus('offline', 'Сервис временно недоступен.');
       }
     } finally {
-      if (!authorized) schedulePoll(3000 + Math.random() * 2000);
+      if (!authorized) schedulePoll();
     }
   }
 

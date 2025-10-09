@@ -49,7 +49,7 @@ def test_connect_tg_renders(monkeypatch):
     assert "Persona" in body
 
 
-def test_tg_start_filters_payload(monkeypatch):
+def test_tg_start_passthrough(monkeypatch):
     app = _base_app(monkeypatch)
     called: dict[str, object] = {}
 
@@ -67,7 +67,12 @@ def test_tg_start_filters_payload(monkeypatch):
     resp = client.post("/pub/tg/start", params={"tenant": 11, "k": "secret"})
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "waiting_qr", "qr_id": "qr-1"}
+    assert resp.json() == {
+        "status": "waiting_qr",
+        "qr_id": "qr-1",
+        "needs_2fa": None,
+        "extra": "ignore",
+    }
     assert called["path"] == "/session/start"
     assert called["payload"] == {"tenant_id": 11}
 
