@@ -5,7 +5,7 @@ import os
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
@@ -123,22 +123,42 @@ def create_app() -> FastAPI:
 
     @app.post("/session/password")
     async def session_password(payload: PasswordRequest):
+        tenant = payload.tenant_id
         password = payload.password.get_secret_value()
+        cache_headers = {"Cache-Control": "no-store"}
         if not password:
-            raise HTTPException(status_code=400, detail="password_required")
+            return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
+
+        state = await manager.get_status(tenant)
+        if state.status != "needs_2fa":
+            logger.warning(
+                "stage=password event=password_not_required tenant_id=%s status=%s",
+                tenant,
+                state.status,
+            )
+            return JSONResponse({"error": "password_not_required"}, status_code=400, headers=cache_headers)
+
         try:
-            state = await manager.submit_password(payload.tenant_id, password)
+            ok = await manager.submit_password(tenant, password)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            message = str(exc)
+            if message == "invalid_password":
+                return JSONResponse({"error": "invalid_password"}, status_code=400, headers=cache_headers)
+            if message == "password_required":
+                return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
+            if message == "session_not_found":
+                raise HTTPException(status_code=404, detail="session_not_found") from exc
+            if message == "password_not_required":
+                return JSONResponse({"error": "password_not_required"}, status_code=400, headers=cache_headers)
+            raise HTTPException(status_code=400, detail=message) from exc
         except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {
-            "tenant_id": payload.tenant_id,
-            "status": state.status,
-            "qr_id": state.qr_id,
-            "needs_2fa": state.needs_2fa,
-            "last_error": state.last_error,
-        }
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if not ok:
+            return JSONResponse({"error": "invalid_password"}, status_code=400, headers=cache_headers)
+
+        logger.info("stage=password_ok event=password_forward tenant_id=%s", tenant)
+        return JSONResponse({"ok": True}, headers=cache_headers)
 
     @app.post("/send")
     async def send_message(payload: SendRequest, _: None = Depends(require_credentials)):

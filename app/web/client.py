@@ -308,6 +308,18 @@ def client_settings(tenant: int, request: Request):
     except Exception:
         whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
 
+    def _safe_public_url(name: str, fallback: str) -> str:
+        try:
+            return str(request.url_for(name))
+        except Exception:
+            return fallback
+
+    tg_start_url = _safe_public_url("tg_start", "/pub/tg/start")
+    tg_status_url = _safe_public_url("tg_status", "/pub/tg/status")
+    tg_qr_url = _safe_public_url("tg_qr_png", "/pub/tg/qr.png")
+    tg_logout_url = _safe_public_url("tg_logout", "/pub/tg/logout")
+    tg_password_url = _safe_public_url("tg_password", "/pub/tg/password")
+
     urls = {
         "settings": str(request.url_for("client_settings", tenant=tenant)),
         "save_settings": str(request.url_for("save_form", tenant=tenant)),
@@ -318,11 +330,11 @@ def client_settings(tenant: int, request: Request):
         "training_upload": str(request.url_for("training_upload", tenant=tenant)),
         "training_status": str(request.url_for("training_status", tenant=tenant)),
         "whatsapp_export": whatsapp_export_url,
-        "tg_start": str(request.url_for("tg_start")),
-        "tg_status": str(request.url_for("tg_status")),
-        "tg_qr": str(request.url_for("tg_qr_png")),
-        "tg_logout": str(request.url_for("tg_logout")),
-        "tg_password": str(request.url_for("tg_password")),
+        "tg_start": tg_start_url,
+        "tg_status": tg_status_url,
+        "tg_qr": tg_qr_url,
+        "tg_logout": tg_logout_url,
+        "tg_password": tg_password_url,
     }
 
     state = {
