@@ -27,6 +27,7 @@ CMD ["node","index.js"]
 ######## shared python base ########
 FROM python:3.11-slim AS python-base
 WORKDIR /app
+ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \

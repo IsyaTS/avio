@@ -26,6 +26,7 @@ services:
     environment:
       - TENANTS_DIR=/app/tenants
       - TG_SESSIONS_DIR=/app/tg_sessions
+      - PYTHONPATH=/app
     depends_on: [redis, postgres]
     working_dir: /app
     command: ["uvicorn","main:app","--host","0.0.0.0","--port","8000","--timeout-keep-alive","5"]
@@ -136,6 +137,7 @@ services:
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - APP_INTERNAL_URL=${APP_INTERNAL_URL:-http://app:8000}
+      - PYTHONPATH=/app
     depends_on:
       app:
         condition: service_started
