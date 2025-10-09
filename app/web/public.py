@@ -802,22 +802,9 @@ async def tg_start(
         headers = getattr(response, "headers", {}) or {}
         return status, body, headers, response
 
-    def _should_retry(st_code: int, body: bytes) -> bool:
-        if st_code != 200:
-            return False
-        if not body:
-            return False
-        try:
-            payload = json.loads(body.decode("utf-8"))
-        except Exception:
-            return False
-        status_value = str(payload.get("status", "")).strip().lower()
-        qr_value = payload.get("qr_id")
-        return status_value == "waiting_qr" and not qr_value
-
     try:
         status_code, body_bytes, upstream_headers, upstream_resp = await _request_start(force_flag)
-        if not force_flag and _should_retry(status_code, body_bytes):
+        if status_code in {409, 422} and not force_flag:
             status_code, body_bytes, upstream_headers, upstream_resp = await _request_start(True)
             force_flag = True
     except Exception as exc:
@@ -1068,6 +1055,7 @@ def tg_qr_png(qr_id: str | None = None):
 
     if status_code != 200:
         headers_out = _proxy_headers(headers or {}, status_code)
+        headers_out.update(_no_store_headers())
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
 
     response_headers = _proxy_headers(headers or {}, status_code)
@@ -1127,6 +1115,7 @@ def tg_qr_txt(qr_id: str | None = None):
 
     if status_code != 200:
         headers_out = _proxy_headers(headers or {}, status_code)
+        headers_out.update(_no_store_headers())
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
 
     response_headers = _proxy_headers(headers or {}, status_code)

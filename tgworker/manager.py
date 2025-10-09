@@ -198,14 +198,15 @@ class TelegramSessionManager:
             state.qr_png = None
             state.qr_expires_at = None
             state.waiting_task = None
-            state.last_error = "password_timeout"
+            state.last_error = "twofa_timeout"
             state.last_seen = time.time()
             state.restart_pending = False
             state.last_needs_2fa_at = None
             state.twofa_pending = False
             state.twofa_since = None
+            state.can_restart = True
             LOGGER.warning(
-                "stage=needs_2fa_timeout event=password_timeout tenant_id=%s", tenant
+                "stage=needs_2fa_timeout event=twofa_timeout tenant_id=%s", tenant
             )
             self._update_metrics()
             return client
@@ -338,11 +339,16 @@ class TelegramSessionManager:
             if not need_new_qr:
                 if state.status == "authorized":
                     result_state = state
+                elif state.status == "needs_2fa" and state.twofa_pending:
+                    state.can_restart = False
+                    result_state = state
                 else:
-                    stuck_statuses = {"needs_2fa", "disconnected", "error"}
-                    if state.status in stuck_statuses:
+                    stuck_statuses = {"disconnected", "error"}
+                    if state.status == "needs_2fa":
                         need_new_qr = True
-                    elif state.last_error == "qr_login_timeout":
+                    elif state.status in stuck_statuses:
+                        need_new_qr = True
+                    elif state.last_error in {"qr_login_timeout", "twofa_timeout"}:
                         need_new_qr = True
                     elif state.status == "waiting_qr":
                         if not state.qr_id:
@@ -351,6 +357,9 @@ class TelegramSessionManager:
                             need_new_qr = True
                     else:
                         need_new_qr = True
+
+            if result_state is None and not need_new_qr:
+                result_state = state
 
             if need_new_qr:
                 state, client, task, _ = self._hard_reset_state_locked(
@@ -406,8 +415,6 @@ class TelegramSessionManager:
 
                 state.waiting_task = None
                 self._update_metrics()
-                result_state = state
-            else:
                 result_state = state
 
         for task in tasks_to_cancel:
@@ -473,6 +480,7 @@ class TelegramSessionManager:
                     continue
                 LOGGER.info("stage=qr_ready tenant_id=%s", tenant)
                 state.status = "authorized"
+                state.last_error = None
                 if qr_id:
                     LOGGER.info(
                         "event=qr_scanned tenant_id=%s qr_id=%s qr_valid_until=%s",
@@ -499,10 +507,11 @@ class TelegramSessionManager:
             state.last_error = "two_factor_required"
             state.last_seen = time.time()
             self._extend_needs_2fa_ttl(state)
-            timestamp = time.time()
-            state.last_needs_2fa_at = timestamp
+            timestamp_sec = time.time()
+            state.last_needs_2fa_at = timestamp_sec
             state.twofa_pending = True
-            state.twofa_since = timestamp
+            state.twofa_since = timestamp_sec * 1000.0
+            state.can_restart = False
             EVENT_ERRORS.labels("needs_2fa").inc()
             LOGGER.warning(
                 "stage=needs_2fa state=needs_2fa ttl=%ss tenant_id=%s",
@@ -590,7 +599,7 @@ class TelegramSessionManager:
             state.awaiting_password = True
             state.twofa_pending = True
             if state.twofa_since is None:
-                state.twofa_since = time.time()
+                state.twofa_since = time.time() * 1000.0
             state.qr_id = None
             state.qr_png = None
             state.qr_expires_at = None
@@ -615,7 +624,7 @@ class TelegramSessionManager:
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time()
+                    state.twofa_since = time.time() * 1000.0
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.warning(
@@ -635,7 +644,7 @@ class TelegramSessionManager:
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time()
+                    state.twofa_since = time.time() * 1000.0
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.error(
@@ -655,7 +664,7 @@ class TelegramSessionManager:
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time()
+                    state.twofa_since = time.time() * 1000.0
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.exception(
@@ -679,6 +688,7 @@ class TelegramSessionManager:
             state.last_needs_2fa_at = None
             state.twofa_pending = False
             state.twofa_since = None
+            state.can_restart = False
             self._register_handlers(tenant, client)
             self._update_metrics()
         LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)

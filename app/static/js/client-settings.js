@@ -674,8 +674,11 @@ try {
       return { status: normalized, needsTwoFactor: false, lastError };
     }
 
-    if (normalized === 'disconnected' && lastError === 'qr_login_timeout') {
-      hideTelegramQr('QR-код истёк. Получите новый, чтобы продолжить.');
+    if (normalized === 'disconnected' && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout')) {
+      const message = lastError === 'twofa_timeout'
+        ? 'Время ожидания пароля истекло. Получите новый QR.'
+        : 'QR-код истёк. Получите новый, чтобы продолжить.';
+      hideTelegramQr(message);
       hideTwoFactorPrompt();
       setNewQrVisibility(Boolean(accessKey), 'Получить новый QR');
       return { status: normalized, needsTwoFactor: false, lastError };
@@ -1145,6 +1148,9 @@ try {
       } else if (normalized === 'disconnected' && lastError === 'qr_login_timeout') {
         message = 'QR-код истёк. Получите новый, чтобы продолжить.';
         variant = 'warning';
+      } else if (normalized === 'disconnected' && lastError === 'twofa_timeout') {
+        message = 'Время ожидания пароля истекло. Получите новый QR.';
+        variant = 'warning';
       } else if (status) {
         message = `Статус: ${status}`;
         variant = 'alert';
@@ -1360,7 +1366,10 @@ try {
   if (dom.tgIntegrationCard && dom.tgIntegrationCard.dataset) {
     const initialStatus = (dom.tgIntegrationCard.dataset.tgInitialStatus || '').toLowerCase();
     const initialError = dom.tgIntegrationCard.dataset.tgInitialError || '';
-    if (initialStatus === 'disconnected' && initialError === 'qr_login_timeout') {
+    if (
+      initialStatus === 'disconnected'
+      && (initialError === 'qr_login_timeout' || initialError === 'twofa_timeout')
+    ) {
       setNewQrVisibility(Boolean(accessKey), 'Получить новый QR');
     }
   }
