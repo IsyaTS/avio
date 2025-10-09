@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 from .manager import (
     QRExpiredError,
@@ -19,23 +19,23 @@ class SessionSnapshot:
     status: str
     qr_id: Optional[str]
     qr_valid_until: Optional[int]
-    needs_2fa: bool
     twofa_pending: bool
     twofa_since: Optional[int]
     last_error: Optional[str]
+    can_restart: bool = False
 
     @classmethod
     def from_state(cls, state: SessionState) -> "SessionSnapshot":
         qr_valid_until = None
         if state.qr_expires_at is not None:
             try:
-                qr_valid_until = int(state.qr_expires_at * 1000)
+                qr_valid_until = int(state.qr_expires_at)
             except Exception:
                 qr_valid_until = None
         twofa_since = None
         if state.twofa_since is not None:
             try:
-                twofa_since = int(state.twofa_since * 1000)
+                twofa_since = int(state.twofa_since)
             except Exception:
                 twofa_since = None
         return cls(
@@ -43,10 +43,10 @@ class SessionSnapshot:
             status=state.status,
             qr_id=state.qr_id,
             qr_valid_until=qr_valid_until,
-            needs_2fa=bool(state.needs_2fa),
             twofa_pending=bool(state.twofa_pending),
             twofa_since=twofa_since,
             last_error=state.last_error,
+            can_restart=bool(getattr(state, "can_restart", False)),
         )
 
 
@@ -80,16 +80,12 @@ class SessionManager:
 
     async def start_session(
         self, tenant_id: int, *, force: bool = False
-    ) -> Tuple[SessionSnapshot, Any]:
+    ) -> SessionSnapshot:
         state = await self._manager.start_session(tenant_id, force=force)
-        snapshot = SessionSnapshot.from_state(state)
-        return snapshot, state.qr_login
+        await self._manager.poll_login(tenant_id)
+        return SessionSnapshot.from_state(state)
 
-    async def poll_login(self, tenant_id: int, qr_login: Any | None = None) -> None:
-        if qr_login is not None:
-            state = self._manager._states.get(tenant_id)
-            if state is not None:
-                state.qr_login = qr_login
+    async def poll_login(self, tenant_id: int) -> None:
         await self._manager.poll_login(tenant_id)
 
     async def get_status(self, tenant_id: int) -> SessionSnapshot:

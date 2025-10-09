@@ -22,12 +22,13 @@
         <p class="section-subtitle">Подключите Telegram через QR-код и управляйте сессией прямо из кабинета.</p>
     </div>
     {% set initial_status = state.get('status') if state is defined and state else '' %}
+    {% set initial_last_error = state.get('last_error') if state is defined and state else '' %}
     {% set current_qr_id = (state.get('qr_id') if state is defined and state else None) %}
     {% set qr_img_src = initial_qr_src if initial_qr_src else '' %}
     {% set qr_txt_href = initial_qr_txt_href if initial_qr_txt_href else '' %}
-    <div class="integration-card" style="display:flex; flex-direction:column; gap:12px;" data-tg-initial-status="{{ initial_status }}" data-tg-poll-interval="2500">
+    <div class="integration-card" style="display:flex; flex-direction:column; gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-poll-interval="2500">
         <div id="tg-integration-status" class="status-text">Статус неизвестен</div>
-        {% set show_new_qr = (initial_status == 'waiting_qr') or (initial_status == 'needs_2fa' and not current_qr_id) %}
+        {% set show_new_qr = (initial_status == 'waiting_qr') or (initial_status == 'needs_2fa' and not current_qr_id) or (initial_status == 'disconnected' and initial_last_error == 'qr_login_timeout') %}
         <div id="tg-integration-qr" data-qr-id="{{ current_qr_id or '' }}" style="display:{% if qr_img_src %}flex{% else %}none{% endif %}; flex-direction:column; gap:8px; align-items:flex-start;">
             <img id="tg-integration-qr-image" alt="QR-код Telegram" {% if qr_img_src %}src="{{ qr_img_src }}"{% endif %} style="display:{% if qr_img_src %}block{% else %}none{% endif %}; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" loading="lazy" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
             <div id="tg-integration-qr-fallback" class="status-text" style="display:none;"></div>

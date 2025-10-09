@@ -34,7 +34,13 @@
   function setStatus(status, message) {
     if (!statusChip) return;
     const normalized = (status || '').toLowerCase();
-    statusChip.textContent = normalized ? `Статус: ${normalized}` : 'Статус: неизвестен';
+    if (normalized === 'authorized') {
+      statusChip.textContent = 'Подключено';
+    } else if (normalized) {
+      statusChip.textContent = `Статус: ${normalized}`;
+    } else {
+      statusChip.textContent = 'Статус: неизвестен';
+    }
     statusChip.classList.remove('waiting', 'authorized', 'offline', 'needs-2fa');
     if (normalized === 'authorized') statusChip.classList.add('authorized');
     else if (normalized === 'waiting_qr') statusChip.classList.add('waiting');
@@ -73,7 +79,7 @@
   function applyStatus(data) {
     const rawStatus = data && data.status ? String(data.status) : '';
     const normalized = rawStatus.toLowerCase();
-    const needs2fa = Boolean(data && data.needs_2fa);
+    const needs2fa = normalized === 'needs_2fa' || Boolean(data && data.twofa_pending);
 
     if (normalized === 'authorized' && !needs2fa) {
       authorized = true;
@@ -99,7 +105,11 @@
       }
       setStatus('waiting_qr', 'Отсканируйте QR в Telegram → Settings → Devices.');
     } else {
-      setStatus(normalized, 'Ожидаем ответ от Telegram…');
+      if (normalized === 'disconnected' && data && data.last_error === 'qr_login_timeout') {
+        setStatus('disconnected', 'QR-код истёк. Получите новый код.');
+      } else {
+        setStatus(normalized, 'Ожидаем ответ от Telegram…');
+      }
     }
   }
 

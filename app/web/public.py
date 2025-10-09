@@ -65,7 +65,7 @@ wa_logger.propagate = False
 
 TG_WORKER_BASE = tg_worker_url()
 
-NO_STORE_CACHE_VALUE = "no-store"
+NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -768,7 +768,7 @@ async def tg_start(
     k: str | None = None,
     key: str | None = None,
 ):
-    force_flag = _parse_force_flag(request.query_params.get("force"))
+    initial_force_flag = _parse_force_flag(request.query_params.get("force"))
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
     validation = require_client_key(tenant_candidate, key_candidate)
     if isinstance(validation, Response):
@@ -783,37 +783,58 @@ async def tg_start(
             getattr(validation, "status_code", 401),
             None,
             error="invalid_key",
-            force=force_flag,
+            force=initial_force_flag,
         )
         return validation
 
     tenant_id, _ = validation
-    payload = {"tenant_id": tenant_id}
-    if force_flag:
-        payload["force"] = True
+    force_flag = initial_force_flag
 
-    try:
-        upstream = await C.tg_post(
+    async def _request_start(force: bool) -> tuple[int, bytes, Mapping[str, str], Any]:
+        payload = {"tenant_id": tenant_id, "force": bool(force)}
+        response = await C.tg_post(
             f"{TG_WORKER_BASE}/session/start",
             payload,
             timeout=15.0,
         )
+        status = int(getattr(response, "status_code", 0) or 0)
+        body = bytes(getattr(response, "content", b"") or b"")
+        headers = getattr(response, "headers", {}) or {}
+        return status, body, headers, response
+
+    def _should_retry(st_code: int, body: bytes) -> bool:
+        if st_code != 200:
+            return False
+        if not body:
+            return False
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            return False
+        status_value = str(payload.get("status", "")).strip().lower()
+        qr_value = payload.get("qr_id")
+        return status_value == "waiting_qr" and not qr_value
+
+    try:
+        status_code, body_bytes, upstream_headers, upstream_resp = await _request_start(force_flag)
+        if not force_flag and _should_retry(status_code, body_bytes):
+            status_code, body_bytes, upstream_headers, upstream_resp = await _request_start(True)
+            force_flag = True
     except Exception as exc:
         _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error=str(exc), force=force_flag)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
     detail = None
     if not (200 <= status_code < 300):
-        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
+        body_text = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream_resp, "text", ""))
+        detail = body_text or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail, force=force_flag)
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
-    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
+    headers = _proxy_headers(upstream_headers, status_code)
     headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
@@ -994,11 +1015,6 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     response_headers = _proxy_headers(headers or {}, status_code)
     response_headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
-
-
-@router.head("/pub/tg/qr.png")
-async def tg_qr_png_head() -> Response:
-    return Response(status_code=405, headers={"Allow": "GET"})
 
 
 @router.get("/pub/tg/qr.png")

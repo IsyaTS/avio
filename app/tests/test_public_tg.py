@@ -61,7 +61,13 @@ def test_tg_start_passthrough(monkeypatch):
         called["timeout"] = timeout
         return httpx.Response(
             200,
-            json={"status": "waiting_qr", "qr_id": "qr-1", "needs_2fa": None, "extra": "ignore"},
+            json={
+                "status": "waiting_qr",
+                "qr_id": "qr-1",
+                "qr_valid_until": 1700000000,
+                "twofa_pending": False,
+                "twofa_since": None,
+            },
         )
 
     monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
@@ -76,13 +82,14 @@ def test_tg_start_passthrough(monkeypatch):
     assert data == {
         "status": "waiting_qr",
         "qr_id": "qr-1",
-        "needs_2fa": None,
-        "extra": "ignore",
+        "qr_valid_until": 1700000000,
+        "twofa_pending": False,
+        "twofa_since": None,
     }
     assert data["status"] is not None
     assert data["qr_id"] is not None
     assert called["path"] == "http://tgworker:8085/session/start"
-    assert called["payload"] == {"tenant_id": 11}
+    assert called["payload"] == {"tenant_id": 11, "force": False}
     assert called["timeout"] == 15.0
 
 
