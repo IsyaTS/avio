@@ -25,20 +25,18 @@
     {% set initial_last_error = state.get('last_error') if state is defined and state else '' %}
     {% set initial_twofa_pending = state.get('twofa_pending') if state is defined and state else False %}
     {% set initial_needs_twofa = state.get('needs_2fa') if state is defined and state else False %}
-    {% set current_qr_id = (state.get('qr_id') if state is defined and state else None) %}
-    {% set qr_img_src = initial_qr_src if initial_qr_src else '' %}
-    {% set qr_txt_href = initial_qr_txt_href if initial_qr_txt_href else '' %}
-    {% set show_password_form = (initial_status == 'needs_2fa') or initial_twofa_pending or initial_needs_twofa %}
-    {% set show_qr_block = (initial_status == 'waiting_qr') and not show_password_form %}
+    {% set current_qr_id = (state.get('qr_id') if state is defined and state else '') or '' %}
+    {% set show_2fa = (initial_status == 'needs_2fa') or initial_twofa_pending or initial_needs_twofa %}
+    {% set show_qr = (initial_status == 'waiting_qr') and not show_2fa %}
+    {% set is_authorized = (initial_status == 'authorized') %}
     {% set initial_status_message = 'Статус неизвестен' %}
     {% set initial_status_variant = 'muted' %}
-    {% if show_password_form %}
+    {% if show_2fa %}
         {% set initial_status_message = 'Введите пароль двухфакторной аутентификации в Telegram.' %}
         {% set initial_status_variant = 'alert' %}
-    {% elif initial_status == 'authorized' %}
+    {% elif is_authorized %}
         {% set initial_status_message = 'Подключено' %}
-        {% set initial_status_variant = 'muted' %}
-    {% elif show_qr_block %}
+    {% elif show_qr %}
         {% set initial_status_message = 'Сканируйте QR в Telegram → Settings → Devices.' %}
         {% set initial_status_variant = 'warning' %}
     {% elif initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout'] %}
@@ -52,23 +50,17 @@
         {% set initial_status_message = 'Статус: ' ~ initial_status %}
         {% set initial_status_variant = 'alert' %}
     {% endif %}
-    {% set initial_qr_fallback = '' %}
-    {% if show_qr_block and not qr_img_src %}
-        {% set initial_qr_fallback = 'Готовим QR-код…' %}
-    {% endif %}
-    <div class="integration-card" style="display:flex; flex-direction:column; gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-poll-interval="2500">
+    {% set show_new_qr = (initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout']) %}
+    <div class="integration-card stack" style="gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-poll-interval="2500">
         <div id="tg-integration-status" class="status-text {{ initial_status_variant }}">{{ initial_status_message }}</div>
-        {% set show_new_qr = (initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout']) %}
-        <div id="tg-qr-block" class="stack" data-qr-id="{{ current_qr_id or '' }}" style="display:{% if show_qr_block %}flex{% else %}none{% endif %}; flex-direction:column; gap:8px; align-items:flex-start;">
-            <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr_block and qr_img_src %}src="{{ qr_img_src }}"{% endif %} style="display:{% if show_qr_block and qr_img_src %}block{% else %}none{% endif %}; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" loading="lazy" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
-            <div id="tg-qr-fallback" class="status-text" style="display:{% if initial_qr_fallback %}block{% else %}none{% endif %};">{{ initial_qr_fallback }}</div>
-            <a id="tg-qr-link" href="{{ qr_txt_href if qr_txt_href else '#' }}" target="_blank" rel="noopener noreferrer" class="btn btn--secondary" style="display:{% if qr_txt_href %}inline-flex{% else %}none{% endif %};">Открыть в Telegram</a>
+        <div id="tg-qr-block" class="stack" data-qr-id="{{ current_qr_id }}" style="display:{% if show_qr %}flex{% else %}none{% endif %}; gap:12px; align-items:flex-start;">
+            <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr and current_qr_id %}src="{{ urls.tg_qr_png }}?qr_id={{ current_qr_id }}&t={{ qr_timestamp_ms }}"{% endif %} loading="lazy" style="display:{% if show_qr and current_qr_id %}block{% else %}none{% endif %}; width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
         </div>
-        <div id="tg-2fa-block" class="stack" style="display:{% if show_password_form %}flex{% else %}none{% endif %}; gap:12px; max-width:360px;">
+        <div id="tg-2fa-block" class="stack" style="display:{% if show_2fa %}flex{% else %}none{% endif %}; gap:12px; max-width:360px;">
             <form id="tg-password-form" class="stack" style="gap:12px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
                 <label class="grid" style="grid-template-columns: 1fr; gap:6px;">
                     <span class="label">Пароль 2FA</span>
-                    <input id="tg-password-input" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="off" inputmode="text" placeholder="Введите пароль" maxlength="128" required>
+                    <input id="tg-password-input" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="off" placeholder="Введите пароль" maxlength="128" required>
                 </label>
                 <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
                     <button id="tg-password-submit" type="submit" class="btn">Подтвердить</button>
@@ -76,9 +68,9 @@
                 </div>
             </form>
         </div>
-        <div style="display:flex; gap:12px; flex-wrap:wrap;">
+        <div class="tg-actions" style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
             <a id="tg-integration-connect" href="{{ urls.tg_start }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn" role="button">Подключить Telegram</a>
-            <button id="tg-integration-new-qr" type="button" class="btn btn--secondary" style="display:{{ 'inline-flex' if show_new_qr else 'none' }};">Получить новый QR</button>
+            <button id="tg-integration-new-qr" type="button" class="btn btn--secondary" style="display:{% if show_new_qr %}inline-flex{% else %}none{% endif %};">Новый QR</button>
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
             <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>
@@ -235,12 +227,6 @@
     </div>
 </section>
 
-<script id="client-settings-state" type="application/json">{{ {
-    "tenant": tenant,
-    "key": key,
-    "form": form,
-    "catalog": form.catalog_file,
-    "urls": urls
-} | tojson }}</script>
+<script id="client-settings-state" type="application/json">{{ state_payload | tojson }}</script>
 <script src="{{ static_url(request, 'js/client-settings.js') }}" defer></script>
 {% endblock %}

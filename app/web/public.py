@@ -965,6 +965,17 @@ async def tg_restart(
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
+def _merge_no_store_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+    merged = _no_store_headers()
+    if headers:
+        for name, value in headers.items():
+            if not value:
+                continue
+            if name.lower() == "content-type":
+                merged["Content-Type"] = value
+    return merged
+
+
 @router.get("/pub/tg/status")
 async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
     try:
@@ -988,7 +999,12 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
         timeout=15.0,
     )
-    body_bytes = body if isinstance(body, (bytes, bytearray)) else ("" if body is None else str(body)).encode("utf-8")
+    if isinstance(body, (bytes, bytearray)):
+        body_bytes = bytes(body)
+    elif isinstance(body, str):
+        body_bytes = body.encode("utf-8")
+    else:
+        body_bytes = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
     if 200 <= status_code < 300:
         detail = None
     else:
@@ -999,8 +1015,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
-    response_headers = _proxy_headers(headers or {}, status_code)
-    response_headers.update(_no_store_headers())
+    response_headers = _merge_no_store_headers(headers or {})
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
@@ -1041,8 +1056,7 @@ def tg_qr_png(qr_id: str | None = None):
 
     if status_code == 404:
         detail_value = detail_from_json or "qr_not_found"
-        headers_out = _proxy_headers(headers or {}, status_code)
-        headers_out.update(_no_store_headers())
+        headers_out = _merge_no_store_headers(headers or {})
         if not body_bytes:
             body_bytes = json.dumps({"detail": detail_value}).encode("utf-8")
         media_type = headers_out.get("Content-Type") or "application/json"
@@ -1054,12 +1068,10 @@ def tg_qr_png(qr_id: str | None = None):
         )
 
     if status_code != 200:
-        headers_out = _proxy_headers(headers or {}, status_code)
-        headers_out.update(_no_store_headers())
+        headers_out = _merge_no_store_headers(headers or {})
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
 
-    response_headers = _proxy_headers(headers or {}, status_code)
-    response_headers.update(_no_store_headers())
+    response_headers = _merge_no_store_headers(headers or {})
     response_headers["Content-Type"] = "image/png"
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
