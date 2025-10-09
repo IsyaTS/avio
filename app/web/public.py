@@ -62,22 +62,6 @@ wa_logger = logging.getLogger("wa")
 wa_logger.propagate = False
 
 
-def _warn_tg_failure(route: str, tenant_id: int, status: int, body: bytes | bytearray | str | None) -> None:
-    if isinstance(body, (bytes, bytearray)):
-        length = len(body)
-    elif isinstance(body, str):
-        length = len(body.encode("utf-8", errors="ignore"))
-    else:
-        length = 0
-    logger.warning(
-        "tg_proxy_warning route=%s tenant=%s tg_code=%s tg_body_len=%s",
-        route,
-        tenant_id,
-        status,
-        length,
-    )
-
-
 def _tg_body_length(body: bytes | bytearray | str | None) -> int:
     if isinstance(body, (bytes, bytearray)):
         return len(body)
@@ -612,7 +596,7 @@ def require_client_key(
     try:
         tenant_id = _coerce_tenant(raw_tenant)
     except ValueError:
-        return JSONResponse({"error": "invalid_tenant"}, status_code=400)
+        return JSONResponse({"error": "invalid_key"}, status_code=401)
 
     key = "" if raw_key is None else str(raw_key).strip()
     if not key or not C.valid_key(tenant_id, key):
@@ -634,42 +618,51 @@ def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
 async def tg_start(tenant: int | str | None = None, k: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/start", tenant, 0, None, error="invalid_key")
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+        _log_tg_proxy("/pub/tg/start", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
+        return validation
 
     tenant_id, _ = validation
 
     try:
         upstream = await C.tg_post("/session/start", {"tenant_id": tenant_id})
-    except Exception:
-        logger.info("stage=tg_start_proxy tenant=%s tg_status=%s body_len=%s", tenant_id, 0, 0)
-        _warn_tg_failure("/session/start", tenant_id, 0, None)
+    except Exception as exc:
+        logger.warning(
+            "stage=tg_start_proxy tenant=%s tg_code=%s tg_bytes=%s error=%s",
+            tenant_id,
+            0,
+            0,
+            exc,
+        )
         _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
     logger.info(
-        "stage=tg_start_proxy tenant=%s tg_status=%s body_len=%s",
+        "stage=tg_start_proxy tenant=%s tg_code=%s tg_bytes=%s",
         tenant_id,
         status_code,
         len(body_bytes),
     )
 
     if status_code != 200:
-        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
         _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     try:
         payload = upstream.json()
-    except Exception:
-        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
+    except Exception as exc:
+        logger.warning(
+            "stage=tg_start_proxy tenant=%s tg_code=%s tg_bytes=%s error=%s",
+            tenant_id,
+            status_code,
+            len(body_bytes),
+            exc,
+        )
         _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     if not isinstance(payload, dict):
-        _warn_tg_failure("/session/start", tenant_id, status_code, body_bytes)
         _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
@@ -681,22 +674,33 @@ async def tg_start(tenant: int | str | None = None, k: str | None = None):
 async def tg_status(tenant: int | str | None = None, k: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/status", tenant, 0, None, error="invalid_key")
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+        _log_tg_proxy("/pub/tg/status", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
+        return validation
 
     tenant_id, _ = validation
 
     try:
         preflight = await C.tg_post("/session/start", {"tenant_id": tenant_id}, timeout=6.0)
-    except Exception:
-        _warn_tg_failure("/session/start", tenant_id, 0, None)
+    except Exception as exc:
+        logger.warning(
+            "stage=tg_start_proxy tenant=%s tg_code=%s tg_bytes=%s error=%s",
+            tenant_id,
+            0,
+            0,
+            exc,
+        )
         _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     preflight_status = int(getattr(preflight, "status_code", 0) or 0)
     preflight_body = bytes(getattr(preflight, "content", b"") or b"")
+    logger.info(
+        "stage=tg_start_proxy tenant=%s tg_code=%s tg_bytes=%s",
+        tenant_id,
+        preflight_status,
+        len(preflight_body),
+    )
     if preflight_status != 200:
-        _warn_tg_failure("/session/start", tenant_id, preflight_status, preflight_body)
         _log_tg_proxy(
             "/pub/tg/status",
             tenant_id,
@@ -708,24 +712,36 @@ async def tg_status(tenant: int | str | None = None, k: str | None = None):
 
     status_code, body = C.tg_http("GET", f"/session/status?tenant={tenant_id}")
     if isinstance(body, str):
-        body_bytes = body.encode("utf-8")
+        body_bytes = body.encode("utf-8", errors="ignore")
     else:
         body_bytes = bytes(body or b"")
     if status_code != 200:
-        _warn_tg_failure("/session/status", tenant_id, status_code, body)
+        _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error="tg_unavailable")
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502)
+
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except Exception as exc:
+        logger.warning(
+            "stage=tg_status_proxy tenant=%s tg_code=%s tg_bytes=%s error=%s",
+            tenant_id,
+            status_code,
+            len(body_bytes),
+            exc,
+        )
         _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error="")
-    return Response(content=body_bytes, media_type="application/json", status_code=200)
+    return JSONResponse(payload)
 
 
 @router.get("/pub/tg/qr.png")
 def tg_qr_png(tenant: int | str | None = None, k: str | None = None, qr_id: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/qr.png", tenant, 0, None, error="invalid_key")
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+        _log_tg_proxy("/pub/tg/qr.png", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
+        return validation
 
     tenant_id, _ = validation
 
@@ -742,7 +758,6 @@ def tg_qr_png(tenant: int | str | None = None, k: str | None = None, qr_id: str 
         success_headers = {"Cache-Control": "no-store", "Content-Type": "image/png"}
         return Response(content=bytes(body), media_type="image/png", headers=success_headers)
 
-    _warn_tg_failure(path, tenant_id, status_code, body)
     if status_code in (404, 410):
         _log_tg_proxy("/pub/tg/qr.png", tenant_id, status_code, body, error="qr_expired")
         return JSONResponse({"error": "qr_expired"}, status_code=404, headers=headers)
@@ -755,34 +770,50 @@ def tg_qr_png(tenant: int | str | None = None, k: str | None = None, qr_id: str 
 async def tg_logout(tenant: int | str | None = None, k: str | None = None):
     validation = require_client_key(tenant, k)
     if isinstance(validation, Response):
-        _log_tg_proxy("/pub/tg/logout", tenant, 0, None, error="invalid_key")
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+        _log_tg_proxy("/pub/tg/logout", tenant, getattr(validation, "status_code", 401), None, error="invalid_key")
+        return validation
 
     tenant_id, _ = validation
 
     try:
         upstream = await C.tg_post("/session/logout", {"tenant_id": tenant_id})
-    except Exception:
-        _warn_tg_failure("/session/logout", tenant_id, 0, None)
+    except Exception as exc:
+        logger.warning(
+            "stage=tg_logout_proxy tenant=%s tg_code=%s tg_bytes=%s error=%s",
+            tenant_id,
+            0,
+            0,
+            exc,
+        )
         _log_tg_proxy("/pub/tg/logout", tenant_id, 0, None, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    logger.info(
+        "stage=tg_logout_proxy tenant=%s tg_code=%s tg_bytes=%s",
+        tenant_id,
+        status_code,
+        len(body_bytes),
+    )
     if status_code != 200:
-        _warn_tg_failure("/session/logout", tenant_id, status_code, body_bytes)
         _log_tg_proxy("/pub/tg/logout", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     try:
         payload = upstream.json()
-    except Exception:
-        _warn_tg_failure("/session/logout", tenant_id, status_code, body_bytes)
+    except Exception as exc:
+        logger.warning(
+            "stage=tg_logout_proxy tenant=%s tg_code=%s tg_bytes=%s error=%s",
+            tenant_id,
+            status_code,
+            len(body_bytes),
+            exc,
+        )
         _log_tg_proxy("/pub/tg/logout", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 
     if not isinstance(payload, dict):
-        _warn_tg_failure("/session/logout", tenant_id, status_code, body_bytes)
         _log_tg_proxy("/pub/tg/logout", tenant_id, status_code, body_bytes, error="tg_unavailable")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502)
 

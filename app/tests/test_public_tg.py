@@ -44,9 +44,9 @@ def test_connect_tg_renders(monkeypatch):
     assert response.status_code == 200
     body = response.text
     assert "Подключение Telegram" in body
-    assert 'id="tg-connect-bootstrap"' in body
-    assert 'data-tenant="7"' in body
-    assert 'data-key="abc123"' in body
+    assert "window.__tgConnectConfig" in body
+    assert '"tenant": "7"' in body
+    assert '"key": "abc123"' in body
     assert "Test Brand" in body
     assert "Persona" in body
 
