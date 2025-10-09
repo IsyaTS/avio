@@ -129,15 +129,6 @@ def create_app() -> FastAPI:
         if not password:
             return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
 
-        state = await manager.get_status(tenant)
-        if state.status != "needs_2fa":
-            logger.warning(
-                "stage=password event=password_not_required tenant_id=%s status=%s",
-                tenant,
-                state.status,
-            )
-            return JSONResponse({"error": "password_not_required"}, status_code=400, headers=cache_headers)
-
         try:
             ok = await manager.submit_password(tenant, password)
         except ValueError as exc:
@@ -149,6 +140,9 @@ def create_app() -> FastAPI:
             if message == "session_not_found":
                 raise HTTPException(status_code=404, detail="session_not_found") from exc
             if message == "password_not_required":
+                logger.warning(
+                    "stage=password event=password_not_required tenant_id=%s", tenant
+                )
                 return JSONResponse({"error": "password_not_required"}, status_code=400, headers=cache_headers)
             raise HTTPException(status_code=400, detail=message) from exc
         except RuntimeError as exc:

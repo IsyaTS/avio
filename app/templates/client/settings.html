@@ -32,7 +32,9 @@
             <button id="tg-integration-refresh" type="button" class="btn btn--secondary">Обновить статус</button>
             <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>
-        <form id="tg-password-form" class="stack" style="display:none; gap:12px; max-width:360px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
+        {% set initial_status = state.get('status') if state is defined and state else '' %}
+        {% set show_password_form = initial_status == 'needs_2fa' %}
+        <form id="tg-password-form" class="stack" style="display:{{ 'flex' if show_password_form else 'none' }}; gap:12px; max-width:360px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
             <label class="grid" style="grid-template-columns: 1fr; gap:6px;">
                 <span class="label">Пароль 2FA</span>
                 <input id="tg-password-input" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="off" inputmode="text" placeholder="Введите пароль" maxlength="128" required>
