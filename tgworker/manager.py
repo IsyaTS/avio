@@ -192,7 +192,7 @@ class TelegramSessionManager:
             client = self._clients.pop(tenant, None)
             if state.qr_id:
                 self._qr_lookup.pop(state.qr_id, None)
-            state.status = "twofa_timeout"
+            state.status = "disconnected"
             state.needs_2fa = False
             state.awaiting_password = False
             state.needs_2fa_expires_at = None
@@ -351,8 +351,13 @@ class TelegramSessionManager:
                 else:
                     stuck_statuses = {"disconnected", "error", "twofa_timeout"}
                     if state.status in stuck_statuses:
-                        need_new_qr = True
-                    elif state.last_error in {"qr_login_timeout", "twofa_timeout"}:
+                        if state.last_error == "twofa_timeout" and not force:
+                            result_state = state
+                        else:
+                            need_new_qr = True
+                    elif state.last_error == "twofa_timeout" and not force:
+                        result_state = state
+                    elif state.last_error == "qr_login_timeout":
                         need_new_qr = True
                     elif state.status == "waiting_qr":
                         if not state.qr_id:
@@ -364,6 +369,11 @@ class TelegramSessionManager:
 
             if result_state is None and not need_new_qr:
                 result_state = state
+
+            if state.twofa_pending:
+                state.can_restart = False
+                result_state = state
+                need_new_qr = False
 
             if need_new_qr:
                 state, client, task, _ = self._hard_reset_state_locked(
@@ -596,7 +606,7 @@ class TelegramSessionManager:
                     state.status == "needs_2fa" or state.twofa_pending or awaiting_valid
                 )
                 if not accepts_password:
-                    raise ValueError("password_not_required")
+                    raise ValueError("two_factor_not_pending")
                 client = self._clients.get(tenant)
                 if client is None:
                     client = self._build_client(tenant)
@@ -628,7 +638,7 @@ class TelegramSessionManager:
             raise RuntimeError("client_unavailable")
 
         try:
-            await client.check_password(secret)
+            await client.sign_in(password=secret)
         except PasswordHashInvalidError:
             async with self._lock:
                 state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
@@ -639,8 +649,7 @@ class TelegramSessionManager:
                 state.last_seen = time.time()
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
-                if state.twofa_since is None:
-                    state.twofa_since = int(time.time() * 1000.0)
+                state.twofa_since = int(time.time() * 1000.0)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.warning(
@@ -648,6 +657,11 @@ class TelegramSessionManager:
                 tenant,
             )
             return False
+        except SessionPasswordNeededError:
+            LOGGER.info(
+                "stage=password_pending event=twofa_pending tenant_id=%s", tenant
+            )
+            raise ValueError("two_factor_pending")
         except RPCError as exc:
             message = str(exc) or "telegram_error"
             async with self._lock:
@@ -659,8 +673,7 @@ class TelegramSessionManager:
                 state.last_seen = time.time()
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
-                if state.twofa_since is None:
-                    state.twofa_since = int(time.time() * 1000.0)
+                state.twofa_since = int(time.time() * 1000.0)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.error(
@@ -679,8 +692,7 @@ class TelegramSessionManager:
                 state.last_seen = time.time()
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
-                if state.twofa_since is None:
-                    state.twofa_since = int(time.time() * 1000.0)
+                state.twofa_since = int(time.time() * 1000.0)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.exception(
@@ -707,6 +719,10 @@ class TelegramSessionManager:
             state.can_restart = False
             self._register_handlers(tenant, client)
             self._update_metrics()
+        with contextlib.suppress(Exception):
+            session_obj = getattr(client, "session", None)
+            if session_obj is not None:
+                session_obj.save()
         LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)
         return True
 
