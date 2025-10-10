@@ -119,6 +119,9 @@ def create_app() -> FastAPI:
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
+        if payload.get("twofa_pending"):
+            payload["qr_id"] = None
+            payload["qr_valid_until"] = None
         payload["stats"] = stats
         return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
 
@@ -161,8 +164,8 @@ def create_app() -> FastAPI:
             ok = await manager.submit_password(tenant, password)
         except ValueError as exc:
             message = str(exc)
-            if message == "invalid_password":
-                return JSONResponse({"error": "invalid_password"}, status_code=400, headers=cache_headers)
+            if message == "invalid_2fa_password":
+                return JSONResponse({"error": "invalid_2fa_password"}, status_code=400, headers=cache_headers)
             if message == "password_required":
                 return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
             if message == "twofa_timeout":
@@ -179,7 +182,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         if not ok:
-            return JSONResponse({"error": "invalid_password"}, status_code=400, headers=cache_headers)
+            return JSONResponse({"error": "invalid_2fa_password"}, status_code=400, headers=cache_headers)
 
         logger.info("stage=password_ok event=password_forward tenant_id=%s", tenant)
         return JSONResponse({"ok": True}, headers=cache_headers)

@@ -232,8 +232,9 @@
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
       const qrIdValue = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
       const normalizedQrId = qrIdValue.trim();
+      const twofaPending = data.twofa_pending === true;
       const needsTwofa =
-        statusValue === 'needs_2fa' || data.needs_2fa === true || data.twofa_pending === true;
+        statusValue === 'needs_2fa' || data.needs_2fa === true || twofaPending === true;
       const twofaTimeout = statusValue === 'twofa_timeout' || lastError === 'twofa_timeout';
       const errorCode = typeof data.error === 'string' ? data.error : '';
       let nextDelay = POLL_INTERVAL;
@@ -260,9 +261,10 @@
         hideQrBlock();
         lastQrId = '';
         clearQrImage();
-        const message = lastError === 'invalid_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
+        const message =
+          lastError === 'invalid_2fa_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
         showTwofa(message);
-        setStatus('NEED_2FA', 'alert');
+        setStatus('Нужен пароль 2FA', 'alert');
         return Math.max(POLL_INTERVAL, 4000);
       }
 
@@ -503,7 +505,7 @@
           }
           const errorData = payload && typeof payload === 'object' ? payload : null;
           const errorCode = errorData && typeof errorData.error === 'string' ? errorData.error : '';
-          if (errorCode === 'invalid_password') {
+          if (errorCode === 'invalid_2fa_password') {
             showTwofa('Неверный пароль. Попробуйте ещё раз.');
             setStatus('Неверный пароль. Попробуйте ещё раз.', 'alert');
             if (!authorized) {

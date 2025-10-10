@@ -1404,7 +1404,10 @@ try {
         }
         const normalizedDetail = (detail || '').trim().toLowerCase();
         let message = (detail || `Ошибка подтверждения (HTTP ${response.status})`).trim() || 'Не удалось подтвердить пароль';
-        if ((response.status === 400 || response.status === 401) && normalizedDetail === 'invalid_password') {
+        if (
+          (response.status === 400 || response.status === 401) &&
+          (normalizedDetail === 'invalid_password' || normalizedDetail === 'invalid_2fa_password')
+        ) {
           message = 'Неверный пароль';
         }
         updatePasswordStatus(message, 'alert');
