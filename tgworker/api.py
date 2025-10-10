@@ -102,9 +102,7 @@ def create_app() -> FastAPI:
         if not payload.force:
             current = await manager.get_status(payload.tenant_id)
             if current.twofa_pending:
-                body = current.to_payload()
-                body["error"] = "two_factor_pending"
-                return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
+                return JSONResponse(current.to_payload(), headers=dict(NO_STORE_HEADERS))
 
         snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
         return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
@@ -119,9 +117,6 @@ def create_app() -> FastAPI:
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
-        if payload.get("twofa_pending"):
-            payload["qr_id"] = None
-            payload["qr_valid_until"] = None
         payload["stats"] = stats
         return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
 
@@ -178,7 +173,7 @@ def create_app() -> FastAPI:
             return JSONResponse(body, status_code=409, headers=cache_headers)
 
         try:
-            ok = await manager.submit_password(tenant, password)
+            await manager.submit_password(tenant, password)
         except ValueError as exc:
             message = str(exc)
             if message == "invalid_2fa_password":
@@ -205,9 +200,6 @@ def create_app() -> FastAPI:
                 exc,
             )
             return JSONResponse({"error": "telegram_error"}, status_code=502, headers=cache_headers)
-
-        if not ok:
-            return JSONResponse({"error": "invalid_2fa_password"}, status_code=400, headers=cache_headers)
 
         logger.info("stage=password_ok event=password_forward tenant_id=%s", tenant)
         return JSONResponse({"ok": True}, headers=cache_headers)

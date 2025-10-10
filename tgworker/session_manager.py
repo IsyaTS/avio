@@ -108,7 +108,8 @@ class SessionManager:
         self, tenant_id: int, *, force: bool = False
     ) -> SessionSnapshot:
         state = await self._manager.start_session(tenant_id, force=force)
-        await self._manager.poll_login(tenant_id)
+        if not state.twofa_pending and state.status == "waiting_qr":
+            await self._manager.poll_login(tenant_id)
         return SessionSnapshot.from_state(state)
 
     async def poll_login(self, tenant_id: int) -> None:

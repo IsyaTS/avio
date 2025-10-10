@@ -62,6 +62,7 @@
     let authorized = false;
     let inTwoFA = false;
     let lastQrId = '';
+    let lastStatusValue = '';
 
     function buildUrl(basePath, extraParams) {
       let target;
@@ -128,7 +129,7 @@
 
     function updateControls() {
       if (refreshButton) {
-        refreshButton.disabled = startInFlight;
+        refreshButton.disabled = startInFlight || inTwoFA;
       }
     }
 
@@ -218,6 +219,7 @@
 
     function handleTwofaTimeout() {
       inTwoFA = false;
+      updateControls();
       hideTwofa();
       lastQrId = '';
       clearQrImage();
@@ -229,6 +231,7 @@
     function processStatus(payload) {
       const data = payload && typeof payload === 'object' ? payload : {};
       const statusValue = typeof data.status === 'string' ? data.status : '';
+      lastStatusValue = statusValue;
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
       const qrIdValue = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
       const normalizedQrId = qrIdValue.trim();
@@ -253,12 +256,14 @@
 
       if (needsTwofa) {
         inTwoFA = true;
+        updateControls();
         hideQrBlock();
         lastQrId = '';
         clearQrImage();
         const message =
           lastError === 'invalid_2fa_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
         showTwofa(message);
+        setPlaceholder('Введите пароль 2FA.');
         setStatus('Нужен пароль 2FA', 'alert');
         return Math.max(POLL_INTERVAL, 4000);
       }
@@ -269,6 +274,7 @@
       }
 
       inTwoFA = false;
+      updateControls();
       hideTwofa();
       showQrBlock();
 
@@ -446,6 +452,7 @@
           twofaPassword.value = '';
         }
         hideTwofa();
+        updateControls();
         lastQrId = '';
         clearQrImage();
         showQrBlock();
@@ -497,6 +504,7 @@
           if (response.ok) {
             twofaPassword.value = '';
             inTwoFA = true;
+            updateControls();
             showTwofa('');
             setStatus('Пароль принят. Ждём подтверждения…', 'muted');
             setPlaceholder('Ждём подтверждение 2FA…');
@@ -508,6 +516,8 @@
           const errorData = payload && typeof payload === 'object' ? payload : null;
           const errorCode = errorData && typeof errorData.error === 'string' ? errorData.error : '';
           if (errorCode === 'invalid_2fa_password') {
+            inTwoFA = true;
+            updateControls();
             showTwofa('Неверный пароль. Попробуйте ещё раз.');
             setStatus('Неверный пароль. Попробуйте ещё раз.', 'alert');
             if (!authorized) {
@@ -521,6 +531,7 @@
           }
           if (errorCode === 'two_factor_pending') {
             inTwoFA = true;
+            updateControls();
             showTwofa('Введите пароль 2FA.');
             setStatus('Нужен пароль 2FA', 'alert');
             if (!authorized) {
@@ -566,8 +577,19 @@
 
     updateControls();
     showQrBlock();
-    setPlaceholder('Готовим QR-код…');
-    startSession(false);
+    setPlaceholder('Проверяем статус…');
+
+    (async () => {
+      try {
+        await pollStatus();
+      } catch (err) {
+        console.error('[tg-connect] initial status error', err);
+      } finally {
+        if (!authorized && !inTwoFA && !lastQrId && lastStatusValue !== 'waiting_qr') {
+          startSession(false);
+        }
+      }
+    })();
   }
 
   function bootstrapOnce() {

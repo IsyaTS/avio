@@ -846,15 +846,10 @@ async def tg_start(
                 parsed_status = json.loads(decoded or "{}")
             except Exception:
                 parsed_status = None
-            needs_twofa_now = False
+            twofa_pending_now = False
             if isinstance(parsed_status, dict):
-                status_value = str(parsed_status.get("status") or "")
-                needs_twofa_now = (
-                    status_value == "needs_2fa"
-                    or _truthy_flag(parsed_status.get("needs_2fa"))
-                    or _truthy_flag(parsed_status.get("twofa_pending"))
-                )
-            if needs_twofa_now:
+                twofa_pending_now = _truthy_flag(parsed_status.get("twofa_pending"))
+            if twofa_pending_now and not force_flag:
                 _log_tg_proxy(
                     "/pub/tg/start",
                     tenant_id,
@@ -865,7 +860,11 @@ async def tg_start(
                 )
                 headers = _proxy_headers(status_headers, status_code)
                 headers.update(_no_store_headers())
-                return Response(content=status_body_bytes, status_code=status_code, headers=headers)
+                return Response(
+                    content=status_body_bytes,
+                    status_code=status_code,
+                    headers=headers,
+                )
 
     payload = {"tenant_id": tenant_id, "force": force_flag}
 
