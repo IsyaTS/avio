@@ -49,6 +49,8 @@ def test_connect_tg_renders(monkeypatch):
     assert '"key": "abc123"' in body
     assert "Test Brand" in body
     assert "Persona" in body
+    assert 'id="tg-qr-image"' in body
+    assert 'id="tg-2fa-block"' in body
 
 
 def test_tg_start_passthrough(monkeypatch):
@@ -79,15 +81,11 @@ def test_tg_start_passthrough(monkeypatch):
     cache_header = resp.headers.get("cache-control", "")
     assert "no-store" in cache_header
     data = resp.json()
-    assert data == {
-        "status": "waiting_qr",
-        "qr_id": "qr-1",
-        "qr_valid_until": 1700000000,
-        "twofa_pending": False,
-        "twofa_since": None,
-    }
-    assert data["status"] is not None
-    assert data["qr_id"] is not None
+    assert data["status"] == "waiting_qr"
+    assert data["qr_id"] == "qr-1"
+    assert data["qr_valid_until"] == 1700000000
+    assert data.get("twofa_pending") is False
+    assert data.get("twofa_since") is None
     assert called["path"] == "http://tgworker:8085/session/start"
     assert called["payload"] == {"tenant_id": 11, "force": False}
     assert called["timeout"] == 15.0
@@ -111,6 +109,7 @@ def test_tg_status_success(monkeypatch):
             "twofa_since": None,
             "qr_valid_until": 1700000000,
             "last_error": None,
+            "stats": {"authorized": 0, "waiting": 1, "needs_2fa": 0},
         }
         return 200, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
 
@@ -131,6 +130,7 @@ def test_tg_status_success(monkeypatch):
     assert data["twofa_since"] is None
     assert data["qr_valid_until"] == 1700000000
     assert data["last_error"] is None
+    assert "stats" in data
     assert called["status"] == [
         ("GET", "http://tgworker:8085/session/status?tenant=3", 15.0)
     ]
