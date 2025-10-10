@@ -890,10 +890,11 @@ async def tg_password(
     _log_tg_proxy("/pub/tg/password", tenant_id, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
+        fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=fail_headers)
 
-    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
-    headers.update(_no_store_headers())
+    headers = _merge_no_store_headers(getattr(upstream, "headers", {}) or {})
+    headers["X-Telegram-Upstream-Status"] = str(status_code)
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
@@ -1013,9 +1014,11 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
+        fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=fail_headers)
 
-    response_headers = _proxy_headers(headers or {}, status_code)
+    response_headers = _merge_no_store_headers(headers or {})
+    response_headers["X-Telegram-Upstream-Status"] = str(status_code)
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
