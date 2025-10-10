@@ -18,55 +18,44 @@
 
 <section class="surface stack" data-testid="client-telegram">
     <div class="stack" style="gap:6px;">
-        <h2 class="section-title" style="font-size:1.35rem;">Telegram</h2>
+        <h2 class="section-title" style="font-size:1.35rem;">Подключение Telegram</h2>
         <p class="section-subtitle">Подключите Telegram через QR-код и управляйте сессией прямо из кабинета.</p>
     </div>
-    {% set initial_status = state.get('status') if state is defined and state else '' %}
-    {% set initial_last_error = state.get('last_error') if state is defined and state else '' %}
-    {% set initial_twofa_pending = state.get('twofa_pending') if state is defined and state else False %}
-    {% set initial_needs_twofa = state.get('needs_2fa') if state is defined and state else False %}
+    {% set initial_status = (state.get('status') if state is defined and state else '') or '' %}
+    {% set initial_last_error = (state.get('last_error') if state is defined and state else '') or '' %}
+    {% set initial_twofa_pending = (state.get('twofa_pending') if state is defined and state else False) or False %}
+    {% set initial_needs_twofa = (state.get('needs_2fa') if state is defined and state else False) or False %}
     {% set current_qr_id = (state.get('qr_id') if state is defined and state else '') or '' %}
-    {% set show_2fa = (initial_status == 'needs_2fa') or initial_twofa_pending or initial_needs_twofa %}
-    {% set show_qr = (initial_status == 'waiting_qr') and not show_2fa %}
-    {% set is_authorized = (initial_status == 'authorized') %}
-    {% set hide_qr_block = show_2fa or is_authorized %}
-    {% set initial_status_message = 'Статус неизвестен' %}
-    {% set initial_status_variant = 'muted' %}
-    {% if show_2fa %}
-        {% set initial_status_message = 'Введите пароль двухфакторной аутентификации в Telegram.' %}
-        {% set initial_status_variant = 'alert' %}
-    {% elif is_authorized %}
-        {% set initial_status_message = 'Подключено' %}
-        {% set initial_status_variant = 'success' %}
-    {% elif show_qr %}
-        {% set initial_status_message = 'Сканируйте QR в Telegram → Settings → Devices.' %}
-        {% set initial_status_variant = 'warning' %}
-    {% elif initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout'] %}
-        {% if initial_last_error == 'twofa_timeout' %}
-            {% set initial_status_message = 'Время ожидания пароля истекло. Получите новый QR.' %}
-        {% else %}
-            {% set initial_status_message = 'QR-код истёк. Получите новый, чтобы продолжить.' %}
-        {% endif %}
-        {% set initial_status_variant = 'warning' %}
-    {% elif initial_status %}
-        {% set initial_status_message = 'Статус: ' ~ initial_status %}
-        {% set initial_status_variant = 'alert' %}
-    {% endif %}
-    {% set show_new_qr = (initial_status == 'disconnected' and initial_last_error in ['qr_login_timeout', 'twofa_timeout']) %}
-    {% set show_qr_refresh = show_qr or show_new_qr %}
-    <div class="integration-card stack" style="gap:12px;" data-tg-initial-status="{{ initial_status|default('', true) }}" data-tg-initial-error="{{ initial_last_error|default('', true) }}" data-tg-initial-twofa="{% if show_2fa %}1{% else %}0{% endif %}" data-tg-poll-interval="2500">
-        <div id="tg-integration-status" class="status-text {{ initial_status_variant }}">{{ initial_status_message }}</div>
-        <div id="tg-qr-block" class="stack{% if hide_qr_block %} hidden{% endif %}" data-qr-id="{{ current_qr_id }}" style="gap:12px; align-items:flex-start;">
+    {% set initial_twofa_flag = '1' if initial_status == 'needs_2fa' or initial_needs_twofa or initial_twofa_pending else '0' %}
+    <div
+        class="integration-card stack"
+        style="gap:12px;"
+        data-tg-initial-status="{{ initial_status|default('', true) }}"
+        data-tg-initial-error="{{ initial_last_error|default('', true) }}"
+        data-tg-initial-twofa="{{ initial_twofa_flag }}"
+        data-tg-initial-twofa-pending="{% if initial_twofa_pending %}1{% else %}0{% endif %}"
+        data-tg-initial-qr-id="{{ current_qr_id }}"
+        data-tg-poll-interval="2500"
+    >
+        <div id="tg-integration-status" class="status-text muted">Статус неизвестен</div>
+        <div id="tg-qr-block" class="stack" data-qr-id="{{ current_qr_id }}" style="gap:12px; align-items:flex-start;">
             <div class="stack" style="gap:12px; align-items:flex-start;">
-                <img id="tg-qr-image" alt="QR-код Telegram" {% if show_qr and initial_qr_src %}src="{{ initial_qr_src }}"{% endif %} loading="lazy" class="qr-image{% if not (show_qr and current_qr_id) %} hidden{% endif %}" style="width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);" data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}">
+                <img
+                    id="tg-qr-image"
+                    alt="QR-код Telegram"
+                    loading="lazy"
+                    class="qr-image hidden"
+                    style="width:220px; max-width:100%; background:#fff; border-radius:12px; border:1px solid rgba(0,0,0,0.08); padding:12px; box-shadow:0 6px 18px rgba(15,23,42,0.12);"
+                    data-cachebuster="{{ '%d' % (qr_timestamp_ms if qr_timestamp_ms is defined else 0) }}"
+                >
                 <div id="tg-qr-fallback" class="status-text alert hidden"></div>
             </div>
             <div class="stack" style="gap:10px; flex-direction: row; flex-wrap: wrap;">
-                <button id="tg-qr-refresh" type="button" class="btn btn--secondary{% if not show_qr_refresh %} hidden{% endif %}">Обновить QR</button>
-                <a id="tg-qr-link" class="btn btn--secondary{% if not (show_qr and initial_qr_txt_href) %} hidden{% endif %}" role="button" target="_blank" rel="noopener noreferrer" href="{% if show_qr and initial_qr_txt_href %}{{ initial_qr_txt_href }}{% else %}#{% endif %}">QR текстом</a>
+                <button id="tg-qr-refresh" type="button" class="btn btn--secondary">Обновить QR</button>
+                <a id="tg-qr-link" class="btn btn--secondary hidden" role="button" target="_blank" rel="noopener noreferrer" href="#">QR текстом</a>
             </div>
         </div>
-        <div id="tg-2fa-block" class="stack{% if not show_2fa %} hidden{% endif %}" style="gap:12px; max-width:360px;">
+        <div id="tg-2fa-block" class="stack hidden" style="gap:12px; max-width:360px;">
             <form id="tg-password-form" class="stack" style="gap:12px;" autocomplete="off" method="post" action="{{ urls.tg_password }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}">
                 <label class="grid" style="grid-template-columns: 1fr; gap:6px;">
                     <span class="label">Пароль 2FA</span>
@@ -84,6 +73,162 @@
             <a id="tg-integration-disconnect" href="{{ urls.tg_logout }}?tenant={{ tenant }}&k={{ key|default('', true)|urlencode }}" class="btn btn--secondary" role="button">Отключить</a>
         </div>
     </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            var card = document.querySelector('.integration-card[data-tg-initial-status]');
+            if (!card) {
+                return;
+            }
+
+            var statusEl = document.getElementById('tg-integration-status');
+            var qrBlock = document.getElementById('tg-qr-block');
+            var twofaBlock = document.getElementById('tg-2fa-block');
+            var qrImage = document.getElementById('tg-qr-image');
+            var qrFallback = document.getElementById('tg-qr-fallback');
+            var qrLink = document.getElementById('tg-qr-link');
+            var passwordInput = document.getElementById('tg-password-input');
+            var qrBase = {{ urls.tg_qr_png|tojson }};
+            var qrTxtBase = {{ urls.tg_qr_txt|tojson }};
+
+            var rawStatus = (card.dataset.tgInitialStatus || '').trim();
+            var status = rawStatus.toLowerCase();
+            var lastError = (card.dataset.tgInitialError || '').trim();
+            var qrId = (card.dataset.tgInitialQrId || '').trim();
+            var needsTwofa = card.dataset.tgInitialTwofa === '1';
+            var twofaPending = card.dataset.tgInitialTwofaPending === '1';
+            var shouldShowTwofa = status === 'needs_2fa' || needsTwofa || twofaPending;
+
+            function hide(element) {
+                if (!element) {
+                    return;
+                }
+                if (!element.classList.contains('hidden')) {
+                    element.classList.add('hidden');
+                }
+            }
+
+            function show(element) {
+                if (!element) {
+                    return;
+                }
+                element.classList.remove('hidden');
+            }
+
+            function buildUrl(base, params) {
+                if (!base) {
+                    return null;
+                }
+                var url;
+                try {
+                    url = new URL(base, window.location.origin);
+                } catch (error) {
+                    try {
+                        url = new URL(base, window.location.href);
+                    } catch (fallbackError) {
+                        return null;
+                    }
+                }
+                Object.keys(params || {}).forEach(function (key) {
+                    var value = params[key];
+                    if (value === undefined || value === null) {
+                        return;
+                    }
+                    url.searchParams.set(key, String(value));
+                });
+                return url.toString();
+            }
+
+            function updateQr(id) {
+                if (!id) {
+                    if (qrImage) {
+                        qrImage.removeAttribute('src');
+                        hide(qrImage);
+                    }
+                    hide(qrLink);
+                    return;
+                }
+                var qrUrl = buildUrl(qrBase, { qr_id: id, t: Date.now() });
+                if (qrUrl && qrImage) {
+                    qrImage.src = qrUrl;
+                    show(qrImage);
+                }
+                var txtUrl = buildUrl(qrTxtBase, { qr_id: id });
+                if (txtUrl && qrLink) {
+                    qrLink.href = txtUrl;
+                    show(qrLink);
+                } else {
+                    hide(qrLink);
+                }
+                if (qrBlock && qrBlock.dataset) {
+                    qrBlock.dataset.qrId = id;
+                }
+                if (qrFallback) {
+                    qrFallback.textContent = '';
+                }
+            }
+
+            function setStatus(message, variant) {
+                if (!statusEl) {
+                    return;
+                }
+                var safeVariant = (variant || 'muted').trim();
+                statusEl.className = ('status-text ' + safeVariant).trim();
+                statusEl.textContent = message || '';
+            }
+
+            if (status === 'authorized') {
+                setStatus('Подключено', 'success');
+                hide(qrBlock);
+                hide(twofaBlock);
+                return;
+            }
+
+            if (shouldShowTwofa) {
+                setStatus('Введите пароль двухфакторной аутентификации в Telegram.', 'alert');
+                hide(qrBlock);
+                show(twofaBlock);
+                if (passwordInput) {
+                    try {
+                        passwordInput.focus();
+                    } catch (focusError) {
+                        /* ignore */
+                    }
+                }
+                return;
+            }
+
+            if (status === 'waiting_qr') {
+                setStatus('Сканируйте QR в Telegram → Settings → Devices.', 'warning');
+                show(qrBlock);
+                hide(twofaBlock);
+                updateQr(qrId);
+                return;
+            }
+
+            if (status === 'disconnected' && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout')) {
+                var message = lastError === 'twofa_timeout'
+                    ? 'Время ожидания пароля истекло. Получите новый QR.'
+                    : 'QR-код истёк. Получите новый, чтобы продолжить.';
+                setStatus(message, 'warning');
+                show(qrBlock);
+                hide(twofaBlock);
+                if (qrId) {
+                    updateQr(qrId);
+                }
+                return;
+            }
+
+            if (rawStatus) {
+                setStatus('Статус: ' + rawStatus, 'alert');
+            } else {
+                setStatus('Статус неизвестен', 'muted');
+            }
+            hide(twofaBlock);
+            if (qrId) {
+                updateQr(qrId);
+            }
+        });
+    </script>
 </section>
 
 <section class="surface stack" data-testid="client-passport">
