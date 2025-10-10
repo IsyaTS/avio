@@ -129,7 +129,7 @@
 
     function updateControls() {
       if (refreshButton) {
-        refreshButton.disabled = startInFlight || inTwoFA;
+        refreshButton.disabled = startInFlight;
       }
     }
 
