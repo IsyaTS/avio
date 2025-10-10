@@ -1,0 +1,478 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Подключение Telegram' %}
+{% block content %}
+<section class="surface stack" style="gap: 20px;">
+    <div class="stack" style="gap: 8px;">
+        <h1 class="section-title">Подключение Telegram</h1>
+        <p class="section-subtitle">Сканируйте QR-код в приложении Telegram (Settings → Devices). После входа статус изменится на «Подключено».</p>
+    </div>
+
+    <div class="stack" style="gap: 8px;">
+        <div id="tg-status" class="status-text muted">Проверяем статус…</div>
+        <div id="tg-connected" class="status-text success" style="display:none;">Подключено</div>
+        <div id="tg-error" class="status-text alert" style="display:none;"></div>
+    </div>
+
+    <div id="tg-qr-block" class="surface surface--muted stack" style="gap: 12px; align-items: flex-start;">
+        <img id="tg-qr-image" alt="QR-код Telegram" style="width: 260px; max-width: 100%; display: none; background: #fff; border-radius: 12px; border: 1px solid rgba(0,0,0,0.08); padding: 12px; box-shadow: 0 8px 24px rgba(15,23,42,0.12);">
+        <div id="tg-qr-placeholder" class="muted" style="font-size: 0.9rem;">QR генерируется…</div>
+        <button id="tg-qr-refresh" type="button" class="btn btn--secondary">Обновить QR</button>
+    </div>
+
+    <div id="tg-2fa-block" class="surface stack" style="gap: 12px; max-width: 360px; display:none;">
+        <form id="tg-2fa-form" class="stack" style="gap: 12px;" autocomplete="off">
+            <label class="grid" style="grid-template-columns: 1fr; gap: 6px;">
+                <span class="label">Пароль 2FA</span>
+                <input id="tg-2fa-password" type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <div class="stack" style="gap: 12px; align-items: flex-start;">
+                <button id="tg-2fa-submit" type="submit" class="btn">Подтвердить</button>
+                <div id="tg-2fa-error" class="status-text alert" style="display:none;"></div>
+            </div>
+        </form>
+    </div>
+
+    <div id="tg-new-qr" class="stack" style="gap: 12px; display:none;">
+        <button id="tg-new-qr-button" type="button" class="btn btn--secondary">Новый QR</button>
+    </div>
+
+    <div class="surface surface--muted">
+        <ul class="muted" style="margin: 0; padding-left: 18px; line-height: 1.6;">
+            <li>Если QR исчезает после сканирования, дождитесь запроса пароля и введите его ниже.</li>
+            <li>Статус «needs_2fa» или «twofa_pending» означает ожидание пароля — форма появится автоматически.</li>
+            <li>При истечении QR или тайм-ауте двухфактора нажмите «Новый QR» и повторите подключение.</li>
+        </ul>
+    </div>
+    {% if persona_preview %}
+    <!-- Persona preview: {{ persona_preview }} -->
+    {% endif %}
+</section>
+{% endblock %}
+
+{% set extra_scripts %}
+<script>
+window.__tgConnectConfig = {{ tg_connect_config | tojson }};
+</script>
+<script>
+(function () {
+    const tenant = String({{ tenant | tojson }} ?? '').trim();
+    const key = String({{ key | tojson }} ?? '').trim();
+    const urls = {{ urls | tojson }} || {};
+
+    const statusEl = document.getElementById('tg-status');
+    const connectedEl = document.getElementById('tg-connected');
+    const errorEl = document.getElementById('tg-error');
+    const qrBlock = document.getElementById('tg-qr-block');
+    const qrImage = document.getElementById('tg-qr-image');
+    const qrPlaceholder = document.getElementById('tg-qr-placeholder');
+    const qrRefresh = document.getElementById('tg-qr-refresh');
+    const twofaBlock = document.getElementById('tg-2fa-block');
+    const twofaForm = document.getElementById('tg-2fa-form');
+    const twofaInput = document.getElementById('tg-2fa-password');
+    const twofaSubmit = document.getElementById('tg-2fa-submit');
+    const twofaError = document.getElementById('tg-2fa-error');
+    const newQrContainer = document.getElementById('tg-new-qr');
+    const newQrButton = document.getElementById('tg-new-qr-button');
+
+    const pollInterval = 2500;
+    let pollTimer = null;
+    let pollInFlight = false;
+    let pollingActive = true;
+    let startInFlight = false;
+    let lastQrId = '';
+
+    const statusUrl = urls.tg_status || '/pub/tg/status';
+    const startUrl = urls.tg_start || '/pub/tg/start';
+    const qrUrlBase = urls.tg_qr_png || '/pub/tg/qr.png';
+    const passwordUrl = urls.tg_password || '/pub/tg/password';
+
+    function hide(element) {
+        if (!element) return;
+        element.style.display = 'none';
+    }
+
+    function show(element) {
+        if (!element) return;
+        element.style.display = '';
+    }
+
+    function setStatus(message, variant = 'muted') {
+        if (!statusEl) return;
+        statusEl.className = `status-text ${variant}`.trim();
+        statusEl.textContent = message || '';
+    }
+
+    function showConnected() {
+        setStatus('Подключено', 'success');
+        hide(errorEl);
+        hide(qrBlock);
+        hide(twofaBlock);
+        hide(newQrContainer);
+        show(connectedEl);
+        pollingActive = false;
+        stopPolling();
+    }
+
+    function showError(message) {
+        if (!errorEl) return;
+        errorEl.textContent = message || '';
+        if (message) {
+            show(errorEl);
+        } else {
+            hide(errorEl);
+        }
+    }
+
+    function normalizeUrl(base) {
+        try {
+            return new URL(base, window.location.origin);
+        } catch (error) {
+            return new URL(base, window.location.href);
+        }
+    }
+
+    function buildTenantUrl(base, extra = {}) {
+        const url = normalizeUrl(base);
+        if (tenant) {
+            url.searchParams.set('tenant', tenant);
+        }
+        if (key) {
+            url.searchParams.set('k', key);
+        }
+        Object.entries(extra || {}).forEach(([name, value]) => {
+            if (value === undefined || value === null || value === '') return;
+            url.searchParams.set(name, String(value));
+        });
+        return url.toString();
+    }
+
+    function buildQrUrl(qrId) {
+        const url = normalizeUrl(qrUrlBase);
+        url.searchParams.set('qr_id', qrId);
+        url.searchParams.set('t', String(Date.now()));
+        return url.toString();
+    }
+
+    function stopPolling() {
+        if (pollTimer) {
+            window.clearTimeout(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+    function schedulePoll(delay = pollInterval) {
+        stopPolling();
+        if (!pollingActive) {
+            return;
+        }
+        const jitter = Math.floor(Math.random() * 400);
+        pollTimer = window.setTimeout(fetchStatus, Math.max(800, delay + jitter));
+    }
+
+    function updateQr(qrId) {
+        if (!qrImage) return;
+        const trimmed = qrId ? String(qrId).trim() : '';
+        if (!trimmed) {
+            qrImage.removeAttribute('src');
+            hide(qrImage);
+            if (qrPlaceholder) {
+                qrPlaceholder.textContent = 'QR генерируется…';
+                show(qrPlaceholder);
+            }
+            lastQrId = '';
+            return;
+        }
+        lastQrId = trimmed;
+        qrImage.src = buildQrUrl(trimmed);
+        show(qrImage);
+        if (qrPlaceholder) {
+            qrPlaceholder.textContent = '';
+            hide(qrPlaceholder);
+        }
+    }
+
+    function showTwofa(message) {
+        show(twofaBlock);
+        if (twofaError) {
+            twofaError.textContent = '';
+            hide(twofaError);
+        }
+        hide(qrBlock);
+        hide(newQrContainer);
+        if (message) {
+            setStatus(message, 'alert');
+        }
+        if (twofaInput) {
+            try {
+                twofaInput.focus();
+            } catch (error) {
+                /* ignore focus errors */
+            }
+        }
+    }
+
+    function hideTwofa() {
+        hide(twofaBlock);
+        if (twofaError) {
+            twofaError.textContent = '';
+            hide(twofaError);
+        }
+    }
+
+    function applyStatus(data) {
+        const rawStatus = (data && typeof data.status === 'string') ? data.status.trim() : '';
+        const status = rawStatus.toLowerCase();
+        const lastError = (data && typeof data.last_error === 'string') ? data.last_error.trim() : '';
+        const needsTwofa = status === 'needs_2fa' || Boolean(data && data.needs_2fa) || Boolean(data && data.twofa_pending);
+        const qrId = (data && data.qr_id != null) ? String(data.qr_id).trim() : '';
+
+        if (status === 'authorized' && !needsTwofa) {
+            showConnected();
+            return;
+        }
+
+        pollingActive = true;
+        hide(connectedEl);
+
+        if (needsTwofa) {
+            showTwofa('Введите пароль двухфакторной аутентификации в Telegram.');
+        } else {
+            hideTwofa();
+        }
+
+        if (status === 'waiting_qr') {
+            show(qrBlock);
+            hide(newQrContainer);
+            setStatus('Сканируйте QR в Telegram → Settings → Devices.', 'warning');
+            if (qrId) {
+                updateQr(qrId);
+            } else if (!startInFlight) {
+                requestStart(false);
+            }
+            return;
+        }
+
+        if (status === 'disconnected' && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout')) {
+            const message = lastError === 'twofa_timeout'
+                ? 'Время ожидания пароля истекло. Получите новый QR.'
+                : 'QR-код истёк. Получите новый, чтобы продолжить.';
+            setStatus(message, 'warning');
+            show(qrBlock);
+            if (!qrId) {
+                updateQr('');
+            }
+            show(newQrContainer);
+            if (qrRefresh) {
+                qrRefresh.textContent = 'Новый QR';
+            }
+            return;
+        }
+
+        if (needsTwofa) {
+            return;
+        }
+
+        if (rawStatus) {
+            setStatus(`Статус: ${rawStatus}`, 'alert');
+        } else {
+            setStatus('Статус неизвестен', 'muted');
+        }
+        hide(newQrContainer);
+        if (status !== 'waiting_qr') {
+            updateQr('');
+            hide(qrBlock);
+        }
+    }
+
+    async function fetchStatus() {
+        if (pollInFlight || !pollingActive) {
+            return;
+        }
+        if (!tenant || !key) {
+            setStatus('Нет ключа доступа для подключения Telegram.', 'alert');
+            showError('Добавьте первичный ключ клиента, чтобы подключить Telegram.');
+            hide(qrBlock);
+            hideTwofa();
+            stopPolling();
+            return;
+        }
+        pollInFlight = true;
+        const url = buildTenantUrl(statusUrl, { t: Date.now() });
+        try {
+            const response = await fetch(url, { cache: 'no-store' });
+            let data = null;
+            try {
+                data = await response.clone().json();
+            } catch (error) {
+                data = null;
+            }
+            if (!response.ok && !data) {
+                throw new Error(`status ${response.status}`);
+            }
+            showError('');
+            if (data) {
+                applyStatus(data);
+            }
+        } catch (error) {
+            console.error('[tg-connect] status error', error);
+            setStatus('Не удалось получить статус Telegram.', 'alert');
+            showError('Сервис временно недоступен. Повторяем попытку…');
+        } finally {
+            pollInFlight = false;
+            if (pollingActive) {
+                schedulePoll();
+            }
+        }
+    }
+
+    async function requestStart(force) {
+        if (startInFlight || !tenant || !key) {
+            return;
+        }
+        startInFlight = true;
+        showError('');
+        show(qrBlock);
+        if (qrPlaceholder) {
+            qrPlaceholder.textContent = 'Готовим QR-код…';
+            show(qrPlaceholder);
+        }
+        if (qrRefresh) {
+            qrRefresh.disabled = true;
+            qrRefresh.textContent = 'Обновляем…';
+        }
+        const params = { t: Date.now() };
+        if (force) {
+            params.force = 1;
+        }
+        const url = buildTenantUrl(startUrl, params);
+        try {
+            const response = await fetch(url, { method: 'POST', cache: 'no-store' });
+            let data = null;
+            try {
+                data = await response.clone().json();
+            } catch (error) {
+                data = null;
+            }
+            if (!response.ok) {
+                throw new Error(`start ${response.status}`);
+            }
+            showError('');
+            if (data) {
+                applyStatus(data);
+            }
+            schedulePoll(1000);
+        } catch (error) {
+            console.error('[tg-connect] start error', error);
+            setStatus('Не удалось запросить QR. Попробуйте позже.', 'alert');
+            showError('Сервис Telegram недоступен. Попробуйте обновить QR позже.');
+        } finally {
+            startInFlight = false;
+            if (qrRefresh) {
+                qrRefresh.disabled = false;
+                qrRefresh.textContent = 'Обновить QR';
+            }
+        }
+    }
+
+    async function submitTwofa(event) {
+        if (event) {
+            event.preventDefault();
+        }
+        if (!tenant || !key || !twofaInput) {
+            return;
+        }
+        const password = twofaInput.value;
+        if (!password) {
+            if (twofaError) {
+                twofaError.textContent = 'Введите пароль двухфакторной аутентификации.';
+                show(twofaError);
+            }
+            return;
+        }
+        hide(twofaError);
+        if (twofaSubmit) {
+            twofaSubmit.disabled = true;
+        }
+        const url = buildTenantUrl(passwordUrl);
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                cache: 'no-store',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password }),
+            });
+            if (response.status === 400) {
+                const payload = await response.json().catch(() => null);
+                const code = payload && typeof payload.error === 'string' ? payload.error : '';
+                if (code === 'invalid_password') {
+                    if (twofaError) {
+                        twofaError.textContent = 'Неверный пароль. Попробуйте ещё раз.';
+                        show(twofaError);
+                    }
+                    return;
+                }
+            }
+            if (!response.ok) {
+                throw new Error(`password ${response.status}`);
+            }
+            if (twofaInput) {
+                twofaInput.value = '';
+            }
+            if (twofaError) {
+                twofaError.textContent = '';
+                hide(twofaError);
+            }
+            setStatus('Пароль принят, ждём подтверждение…', 'warning');
+            pollingActive = true;
+            fetchStatus();
+        } catch (error) {
+            console.error('[tg-connect] password error', error);
+            if (twofaError) {
+                twofaError.textContent = 'Не удалось отправить пароль. Попробуйте ещё раз.';
+                show(twofaError);
+            }
+        } finally {
+            if (twofaSubmit) {
+                twofaSubmit.disabled = false;
+            }
+        }
+    }
+
+    if (qrImage) {
+        qrImage.addEventListener('error', () => {
+            if (!lastQrId) {
+                return;
+            }
+            updateQr(lastQrId);
+        });
+    }
+
+    if (qrRefresh) {
+        qrRefresh.addEventListener('click', () => {
+            requestStart(true);
+        });
+    }
+
+    if (newQrButton) {
+        newQrButton.addEventListener('click', () => {
+            requestStart(true);
+        });
+    }
+
+    if (twofaForm) {
+        twofaForm.addEventListener('submit', submitTwofa);
+    }
+
+    if (!tenant || !key) {
+        setStatus('Нет ключа доступа для подключения Telegram.', 'alert');
+        showError('Добавьте первичный ключ клиента, чтобы подключить Telegram.');
+        hide(qrBlock);
+        hideTwofa();
+        return;
+    }
+
+    schedulePoll(100);
+    fetchStatus();
+})();
+</script>
+{% endset %}

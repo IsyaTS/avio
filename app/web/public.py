@@ -464,9 +464,6 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
     if access_key:
         raw_settings = request.url_for('client_settings', tenant=str(tenant))
         settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
-        tg_link = C.public_url(request, f"/connect/tg?tenant={tenant}&k={quote_plus(access_key)}")
-    else:
-        tg_link = C.public_url(request, f"/connect/tg?tenant={tenant}")
 
     context = {
         "request": request,
@@ -480,7 +477,6 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
         "subtitle": subtitle,
         "settings_link": settings_link,
         "public_base": C.public_base_url(request),
-        "tg_link": tg_link,
     }
     return templates.TemplateResponse(request, "public/connect_wa.html", context)
 
@@ -495,30 +491,48 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
     C.ensure_tenant_files(tenant)
     cfg = C.read_tenant_config(tenant)
     passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
-    persona = C.read_persona(tenant)
-    persona_preview = "\n".join((persona or "").splitlines()[:6])
+    brand = ""
+    if isinstance(passport, dict):
+        brand = str(passport.get("brand") or "").strip()
 
-    settings_link = ""
-    if access_key:
-        raw_settings = request.url_for("client_settings", tenant=str(tenant))
-        settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
+    persona_text = C.read_persona(tenant)
+    persona_preview = ""
+    if persona_text:
+        lines = str(persona_text).splitlines()
+        persona_preview = "\n".join(lines[:6]).strip()
 
-    query_params = {"tenant": str(tenant), "k": access_key}
+    primary_key = (C.get_tenant_pubkey(tenant) or "").strip()
+    resolved_key = primary_key or access_key
+
+    def _resolve(name: str, fallback: str) -> str:
+        try:
+            return str(request.url_for(name))
+        except Exception:
+            return fallback
+
+    urls = {
+        "tg_status": _resolve("tg_status", "/pub/tg/status"),
+        "tg_start": _resolve("tg_start", "/pub/tg/start"),
+        "tg_qr_png": _resolve("tg_qr_png", "/pub/tg/qr.png"),
+        "tg_password": _resolve("tg_password", "/pub/tg/password"),
+    }
+
+    tg_connect_config = {
+        "tenant": str(tenant),
+        "key": resolved_key,
+        "urls": urls,
+    }
 
     context = {
         "request": request,
         "tenant": tenant,
-        "key": access_key,
-        "timestamp": int(time.time()),
-        "passport": passport,
+        "key": resolved_key,
+        "urls": urls,
+        "subtitle": brand,
         "persona_preview": persona_preview,
-        "title": "Подключение Telegram",
-        "subtitle": passport.get("brand") or "Подключение Telegram",
-        "settings_link": settings_link,
-        "public_base": C.public_base_url(request),
-        "query": query_params,
+        "tg_connect_config": tg_connect_config,
     }
-    return templates.TemplateResponse(request, "public/connect_tg.html", context)
+    return templates.TemplateResponse(request, "connect/tg.html", context)
 
 
 @router.get("/pub/wa/status")
