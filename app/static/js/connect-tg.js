@@ -1,11 +1,17 @@
 ;(function () {
   const POLL_INTERVAL = 1800;
 
+  let autoBootstrapped = false;
+
   function init(rawConfig) {
-    const config = rawConfig || {};
+    const config = rawConfig || window.__tgConnectConfig || {};
     const tenantValue = config.tenant;
     const keyValue = config.key;
     const urls = config.urls || {};
+    const startUrlBase = urls.tg_start || urls.start || '/pub/tg/start';
+    const statusUrlBase = urls.tg_status || urls.status || '/pub/tg/status';
+    const qrUrlBase = urls.tg_qr_png || urls.qr || '/pub/tg/qr.png';
+    const passwordUrlBase = urls.tg_password || urls.password || '/pub/tg/password';
 
     const tenant = tenantValue === undefined || tenantValue === null ? '' : String(tenantValue).trim();
     const key = keyValue === undefined || keyValue === null ? '' : String(keyValue).trim();
@@ -74,10 +80,9 @@
     }
 
     function buildQrSrc(qrId) {
-      const base = urls.qr || '/pub/tg/qr.png';
       let target;
       try {
-        target = new URL(base, window.location.origin);
+        target = new URL(qrUrlBase, window.location.origin);
       } catch (err) {
         target = new URL('/pub/tg/qr.png', window.location.origin);
       }
@@ -262,7 +267,7 @@
       }
 
       if (status === 'waiting_qr') {
-        setStatus('Ждём сканирования', 'muted');
+        setStatus('ждём сканирования', 'muted');
       } else if (status === 'disconnected') {
         showPlaceholder('Сессия отключена. Нажмите «Обновить QR».', true);
         setStatus(lastError || 'Сессия отключена. Нажмите «Обновить QR».', 'alert');
@@ -331,7 +336,7 @@
       let errorOccurred = false;
 
       try {
-        const response = await fetch(buildUrl(urls.start || '/pub/tg/start', extra), {
+        const response = await fetch(buildUrl(startUrlBase, extra), {
           method: 'GET',
           cache: 'no-store',
         });
@@ -380,7 +385,7 @@
       let errorOccurred = false;
 
       try {
-        const response = await fetch(buildUrl(urls.status || '/pub/tg/status', { t: Date.now() }), {
+        const response = await fetch(buildUrl(statusUrlBase, { t: Date.now() }), {
           method: 'GET',
           cache: 'no-store',
         });
@@ -446,7 +451,7 @@
           twofaSubmit.disabled = true;
         }
         try {
-          const response = await fetch(buildUrl(urls.password || '/pub/tg/password', { t: Date.now() }), {
+          const response = await fetch(buildUrl(passwordUrlBase, { t: Date.now() }), {
             method: 'POST',
             cache: 'no-store',
             headers: { 'Content-Type': 'application/json' },
@@ -489,6 +494,20 @@
 
     showPlaceholder('Готовим QR-код…', true);
     startSession(false, 'initial');
+  }
+
+  function bootstrapOnce() {
+    if (autoBootstrapped) {
+      return;
+    }
+    autoBootstrapped = true;
+    init(window.__tgConnectConfig || {});
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrapOnce, { once: true });
+  } else {
+    bootstrapOnce();
   }
 
   window.tgConnect = window.tgConnect || {};

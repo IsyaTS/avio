@@ -38,21 +38,6 @@
 {% endblock %}
 
 {% set extra_scripts %}
+<script>window.__tgConnectConfig = {{ tg_connect_config | tojson }};</script>
 <script src="{{ static_url(request, 'js/connect-tg.js') }}" defer></script>
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-    if (window.tgConnect && typeof window.tgConnect.init === 'function') {
-        window.tgConnect.init({
-            tenant: {{ tenant | tojson }},
-            key: {{ key | tojson }},
-            urls: {
-                start: '/pub/tg/start',
-                status: '/pub/tg/status',
-                qr: '/pub/tg/qr.png',
-                password: '/pub/tg/password'
-            }
-        });
-    }
-});
-</script>
 {% endset %}
