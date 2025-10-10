@@ -9,16 +9,15 @@
 
     <div id="tg-status" class="status-text muted">Готовим QR-код…</div>
 
-    <div class="surface surface--muted stack" style="gap: 12px; align-items: flex-start;">
+    <div id="tg-qr-block" class="surface surface--muted stack" style="gap: 12px; align-items: flex-start;">
         <img
             id="tg-qr-image"
             alt="QR-код Telegram"
             style="display:none; width: 260px; max-width: 100%; background:#fff; border-radius:12px; border:1px solid rgba(15,23,42,0.1); padding:12px; box-shadow:0 8px 24px rgba(15,23,42,0.1);"
         >
         <div id="tg-qr-placeholder" class="muted">QR генерируется…</div>
+        <button id="tg-qr-refresh" type="button" class="btn btn--secondary">Обновить QR</button>
     </div>
-
-    <button id="tg-qr-refresh" type="button" class="btn btn--secondary" style="align-self: flex-start;">Обновить QR</button>
 
     <div id="tg-2fa-block" class="surface stack" style="gap: 12px; max-width: 360px; display:none;">
         <form id="tg-2fa-form" class="stack" style="gap: 12px;" autocomplete="off">
@@ -39,8 +38,21 @@
 {% endblock %}
 
 {% set extra_scripts %}
+<script src="{{ static_url(request, 'js/connect-tg.js') }}" defer></script>
 <script>
-window.__tgConnectConfig = {{ tg_connect_config | tojson }};
+document.addEventListener('DOMContentLoaded', function () {
+    if (window.tgConnect && typeof window.tgConnect.init === 'function') {
+        window.tgConnect.init({
+            tenant: {{ tenant | tojson }},
+            key: {{ key | tojson }},
+            urls: {
+                start: '/pub/tg/start',
+                status: '/pub/tg/status',
+                qr: '/pub/tg/qr.png',
+                password: '/pub/tg/password'
+            }
+        });
+    }
+});
 </script>
-<script src="{{ static_url(request, 'js/connect-tg.js') }}"></script>
 {% endset %}
