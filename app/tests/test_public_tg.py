@@ -73,7 +73,7 @@ def test_tg_start_passthrough(monkeypatch):
     monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
 
     client = TestClient(app)
-    resp = client.post("/pub/tg/start", params={"tenant": 11, "k": "secret"})
+    resp = client.get("/pub/tg/start", params={"tenant": 11, "k": "secret"})
 
     assert resp.status_code == 200
     cache_header = resp.headers.get("cache-control", "")
@@ -200,9 +200,8 @@ def test_tg_qr_png_proxy(monkeypatch):
 
     assert resp.status_code == 200
     cache_header = resp.headers.get("cache-control", "")
-    assert "no-store" in cache_header
-    assert resp.headers.get("pragma") == "no-cache"
-    assert resp.headers.get("expires") == "0"
+    assert cache_header == "no-store"
+    assert resp.headers.get("x-telegram-upstream-status") == "200"
     assert resp.headers.get("content-type") == "image/png"
     assert resp.content == b"png-bytes"
 
@@ -223,9 +222,7 @@ def test_tg_qr_png_expired(monkeypatch):
     assert resp.status_code == 404
     assert resp.json() == {"detail": "qr_expired"}
     cache_header = resp.headers.get("cache-control", "")
-    assert "no-store" in cache_header
-    assert resp.headers.get("pragma") == "no-cache"
-    assert resp.headers.get("expires") == "0"
+    assert cache_header == "no-store"
     assert resp.headers.get("x-telegram-upstream-status") == "404"
 
 

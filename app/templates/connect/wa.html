@@ -53,10 +53,13 @@
                 {% if settings_link %}
                 <a id="open-settings" href="{{ settings_link }}" target="_blank" rel="noopener" class="secondary">Открыть настройки</a>
                 {% endif %}
-                {% if tg_link %}
-                <a href="{{ tg_link }}" class="secondary">Подключить Telegram</a>
-                {% endif %}
             </div>
+            <a
+                id="link-tg-connect"
+                href="/connect/tg?tenant={{ tenant }}&k={{ key }}"
+                class="secondary"
+                style="display: inline-flex; margin-top: 12px;"
+            >Подключить Telegram</a>
         </div>
         <div>
             <h3>Информация о бренде</h3>
