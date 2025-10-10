@@ -516,19 +516,15 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
     primary_key = (C.get_tenant_pubkey(tenant) or "").strip()
     resolved_key = primary_key or access_key
 
-    urls = {
-        "tg_status": "/pub/tg/status",
-        "tg_start": "/pub/tg/start",
-        "tg_qr_png": "/pub/tg/qr.png",
-        "tg_password": "/pub/tg/password",
-    }
-
-    config_key = primary_key or resolved_key
-
     tg_connect_config = {
         "tenant": tenant,
-        "key": config_key,
-        "urls": urls,
+        "key": access_key,
+        "urls": {
+            "tg_status": "/pub/tg/status",
+            "tg_start": "/pub/tg/start",
+            "tg_qr_png": "/pub/tg/qr.png",
+            "tg_password": "/pub/tg/password",
+        },
     }
 
     context = {
