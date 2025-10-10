@@ -1047,12 +1047,6 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
-@router.head("/pub/tg/qr.png")
-def tg_qr_png_head() -> Response:
-    headers = _no_store_headers({"Allow": "GET"})
-    return Response(status_code=405, headers=headers)
-
-
 @router.get("/pub/tg/qr.png")
 def tg_qr_png(qr_id: str | None = None):
     qr_value = "" if qr_id is None else str(qr_id).strip()
