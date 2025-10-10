@@ -251,11 +251,6 @@
 
       authorized = false;
 
-      if (twofaTimeout) {
-        handleTwofaTimeout();
-        return Math.max(POLL_INTERVAL, 5000);
-      }
-
       if (needsTwofa) {
         inTwoFA = true;
         hideQrBlock();
@@ -266,6 +261,11 @@
         showTwofa(message);
         setStatus('Нужен пароль 2FA', 'alert');
         return Math.max(POLL_INTERVAL, 4000);
+      }
+
+      if (twofaTimeout) {
+        handleTwofaTimeout();
+        return Math.max(POLL_INTERVAL, 5000);
       }
 
       inTwoFA = false;
@@ -496,8 +496,10 @@
           }
           if (response.ok) {
             twofaPassword.value = '';
-            showTwofa('');
-            setStatus('Проверяем пароль…', 'muted');
+            hideTwofa();
+            inTwoFA = true;
+            setStatus('Пароль принят. Ждём подтверждения…', 'muted');
+            setPlaceholder('Ждём подтверждение 2FA…');
             if (!authorized) {
               scheduleNext(1200);
             }
@@ -515,6 +517,27 @@
           }
           if (errorCode === 'twofa_timeout') {
             handleTwofaTimeout();
+            return;
+          }
+          if (errorCode === 'two_factor_pending') {
+            inTwoFA = true;
+            showTwofa('Введите пароль 2FA.');
+            setStatus('Нужен пароль 2FA', 'alert');
+            if (!authorized) {
+              scheduleNext(Math.max(4000, POLL_INTERVAL));
+            }
+            return;
+          }
+          if (errorCode === 'two_factor_not_pending') {
+            if (errorData && typeof errorData === 'object') {
+              const processedDelay = processStatus(errorData);
+              if (!authorized && typeof processedDelay === 'number' && Number.isFinite(processedDelay)) {
+                scheduleNext(processedDelay);
+              }
+            }
+            if (!authorized) {
+              handleTwofaTimeout();
+            }
             return;
           }
           if (errorCode === 'password_required') {

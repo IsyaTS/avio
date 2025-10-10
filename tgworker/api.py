@@ -101,7 +101,7 @@ def create_app() -> FastAPI:
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
         if not payload.force:
             current = await manager.get_status(payload.tenant_id)
-            if current.needs_2fa or current.twofa_pending or current.status == "needs_2fa":
+            if current.twofa_pending:
                 body = current.to_payload()
                 body["error"] = "two_factor_pending"
                 return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
@@ -160,6 +160,23 @@ def create_app() -> FastAPI:
         if not password:
             return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
 
+        snapshot = await manager.get_status(tenant)
+        if not snapshot.twofa_pending:
+            body = snapshot.to_payload()
+            body["stats"] = manager.stats_snapshot()
+            status_value = str(body.get("status") or "")
+            last_error = body.get("last_error") or ""
+            if status_value == "authorized":
+                logger.info(
+                    "stage=password_skip event=already_authorized tenant_id=%s", tenant
+                )
+                return JSONResponse({"ok": True}, headers=cache_headers)
+            if last_error == "twofa_timeout":
+                body["error"] = "twofa_timeout"
+                return JSONResponse(body, status_code=409, headers=cache_headers)
+            body["error"] = "two_factor_not_pending"
+            return JSONResponse(body, status_code=409, headers=cache_headers)
+
         try:
             ok = await manager.submit_password(tenant, password)
         except ValueError as exc:
@@ -170,16 +187,24 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
             if message == "twofa_timeout":
                 return JSONResponse({"error": "twofa_timeout"}, status_code=409, headers=cache_headers)
-            if message == "session_not_found":
-                raise HTTPException(status_code=404, detail="session_not_found") from exc
-            if message == "password_not_required":
-                logger.warning(
-                    "stage=password event=password_not_required tenant_id=%s", tenant
+            if message == "two_factor_pending":
+                return JSONResponse({"error": "two_factor_pending"}, status_code=409, headers=cache_headers)
+            if message == "two_factor_not_pending":
+                logger.info(
+                    "stage=password event=password_not_pending tenant_id=%s", tenant
                 )
-                return JSONResponse({"error": "password_not_required"}, status_code=400, headers=cache_headers)
-            raise HTTPException(status_code=400, detail=message) from exc
+                return JSONResponse({"error": "two_factor_not_pending"}, status_code=409, headers=cache_headers)
+            logger.error(
+                "stage=password event=password_unhandled tenant_id=%s error=%s", tenant, message
+            )
+            return JSONResponse({"error": "telegram_error"}, status_code=502, headers=cache_headers)
         except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            logger.error(
+                "stage=password event=password_runtime_error tenant_id=%s error=%s",
+                tenant,
+                exc,
+            )
+            return JSONResponse({"error": "telegram_error"}, status_code=502, headers=cache_headers)
 
         if not ok:
             return JSONResponse({"error": "invalid_2fa_password"}, status_code=400, headers=cache_headers)
