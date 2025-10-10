@@ -4,10 +4,15 @@
   let autoBootstrapped = false;
 
   function init(rawConfig) {
-    const config = rawConfig || window.__tgConnectConfig || {};
-    const tenantValue = config.tenant;
-    const keyValue = config.key;
-    const urls = config.urls || {};
+    const providedConfig = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const globalConfig =
+      window.__tgConnectConfig && typeof window.__tgConnectConfig === 'object'
+        ? window.__tgConnectConfig
+        : {};
+    const config = { ...providedConfig, ...globalConfig };
+    const tenantValue = globalConfig.tenant !== undefined ? globalConfig.tenant : config.tenant;
+    const keyValue = globalConfig.key !== undefined ? globalConfig.key : config.key;
+    const urls = config.urls && typeof config.urls === 'object' ? config.urls : {};
     const startUrlBase = urls.tg_start || urls.start || '/pub/tg/start';
     const statusUrlBase = urls.tg_status || urls.status || '/pub/tg/status';
     const qrUrlBase = urls.tg_qr_png || urls.qr || '/pub/tg/qr.png';
@@ -48,6 +53,9 @@
     baseParams.set('tenant', tenant);
     baseParams.set('k', key);
 
+    const tenantNumber = Number(tenant);
+    const tenantIdPayload = Number.isFinite(tenantNumber) && !Number.isNaN(tenantNumber) ? tenantNumber : tenant;
+
     let pollTimer = null;
     let pollInFlight = false;
     let startInFlight = false;
@@ -80,15 +88,7 @@
     }
 
     function buildQrSrc(qrId) {
-      let target;
-      try {
-        target = new URL(qrUrlBase, window.location.origin);
-      } catch (err) {
-        target = new URL('/pub/tg/qr.png', window.location.origin);
-      }
-      target.searchParams.set('qr_id', String(qrId));
-      target.searchParams.set('t', String(Date.now()));
-      return target.toString();
+      return buildUrl(qrUrlBase, { qr_id: qrId, t: Date.now() });
     }
 
     function stopPolling() {
@@ -484,7 +484,7 @@
             method: 'POST',
             cache: 'no-store',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: rawPassword }),
+            body: JSON.stringify({ tenant_id: tenantIdPayload, password: rawPassword }),
           });
           let payload = null;
           if (response.status !== 204) {
@@ -496,8 +496,8 @@
           }
           if (response.ok) {
             twofaPassword.value = '';
-            hideTwofa();
             inTwoFA = true;
+            showTwofa('');
             setStatus('Пароль принят. Ждём подтверждения…', 'muted');
             setPlaceholder('Ждём подтверждение 2FA…');
             if (!authorized) {
