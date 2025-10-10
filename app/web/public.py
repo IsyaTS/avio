@@ -489,6 +489,18 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
     C.ensure_tenant_files(tenant)
+    cfg = C.read_tenant_config(tenant)
+    passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
+    brand = ""
+    if isinstance(passport, dict):
+        brand = str(passport.get("brand") or "").strip()
+
+    persona_text = C.read_persona(tenant)
+    persona_preview = ""
+    if persona_text:
+        lines = str(persona_text).splitlines()
+        persona_preview = "\n".join(lines[:6]).strip()
+
     primary_key = (C.get_tenant_pubkey(tenant) or "").strip()
     resolved_key = primary_key or access_key
 
@@ -505,11 +517,20 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         "tg_password": _resolve("tg_password", "/pub/tg/password"),
     }
 
+    tg_connect_config = {
+        "tenant": str(tenant),
+        "key": resolved_key,
+        "urls": urls,
+    }
+
     context = {
         "request": request,
         "tenant": tenant,
         "key": resolved_key,
         "urls": urls,
+        "subtitle": brand,
+        "persona_preview": persona_preview,
+        "tg_connect_config": tg_connect_config,
     }
     return templates.TemplateResponse(request, "connect/tg.html", context)
 

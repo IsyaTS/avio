@@ -43,10 +43,16 @@
             <li>При истечении QR или тайм-ауте двухфактора нажмите «Новый QR» и повторите подключение.</li>
         </ul>
     </div>
+    {% if persona_preview %}
+    <!-- Persona preview: {{ persona_preview }} -->
+    {% endif %}
 </section>
 {% endblock %}
 
-{% block extra_scripts %}
+{% set extra_scripts %}
+<script>
+window.__tgConnectConfig = {{ tg_connect_config | tojson }};
+</script>
 <script>
 (function () {
     const tenant = String({{ tenant | tojson }} ?? '').trim();
@@ -469,4 +475,4 @@
     fetchStatus();
 })();
 </script>
-{% endblock %}
+{% endset %}
