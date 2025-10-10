@@ -656,7 +656,7 @@ class TelegramSessionManager:
                 "stage=password_failed event=password_failed tenant_id=%s error=invalid_2fa_password",
                 tenant,
             )
-            return False
+            raise ValueError("invalid_2fa_password")
         except SessionPasswordNeededError:
             LOGGER.info(
                 "stage=password_pending event=twofa_pending tenant_id=%s", tenant
@@ -836,7 +836,7 @@ class TelegramSessionManager:
             client = self._clients.pop(tenant, None)
             if client is not None:
                 with contextlib.suppress(Exception):
-                    await client.log_out()
+                    await client.log_out(revoke=False)
                 with contextlib.suppress(Exception):
                     await client.disconnect()
             state = SessionState(tenant_id=tenant, status="disconnected")
