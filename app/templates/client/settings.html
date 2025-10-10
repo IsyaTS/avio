@@ -91,12 +91,12 @@
             var qrTxtBase = {{ urls.tg_qr_txt|tojson }};
 
             var rawStatus = (card.dataset.tgInitialStatus || '').trim();
-            var status = rawStatus.toLowerCase();
+            var statusLower = rawStatus.toLowerCase();
             var lastError = (card.dataset.tgInitialError || '').trim();
             var qrId = (card.dataset.tgInitialQrId || '').trim();
             var needsTwofa = card.dataset.tgInitialTwofa === '1';
             var twofaPending = card.dataset.tgInitialTwofaPending === '1';
-            var shouldShowTwofa = status === 'needs_2fa' || needsTwofa || twofaPending;
+            var shouldShowTwofa = rawStatus === 'needs_2fa' || needsTwofa || twofaPending;
 
             function hide(element) {
                 if (!element) {
@@ -176,7 +176,7 @@
                 statusEl.textContent = message || '';
             }
 
-            if (status === 'authorized') {
+            if (statusLower === 'authorized') {
                 setStatus('Подключено', 'success');
                 hide(qrBlock);
                 hide(twofaBlock);
@@ -197,7 +197,7 @@
                 return;
             }
 
-            if (status === 'waiting_qr') {
+            if (statusLower === 'waiting_qr') {
                 setStatus('Сканируйте QR в Telegram → Settings → Devices.', 'warning');
                 show(qrBlock);
                 hide(twofaBlock);
@@ -205,7 +205,7 @@
                 return;
             }
 
-            if (status === 'disconnected' && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout')) {
+            if (statusLower === 'disconnected' && (lastError === 'qr_login_timeout' || lastError === 'twofa_timeout')) {
                 var message = lastError === 'twofa_timeout'
                     ? 'Время ожидания пароля истекло. Получите новый QR.'
                     : 'QR-код истёк. Получите новый, чтобы продолжить.';
