@@ -22,6 +22,7 @@ class SessionSnapshot:
     twofa_pending: bool
     twofa_since: Optional[int]
     last_error: Optional[str]
+    needs_2fa: bool = False
     can_restart: bool = False
 
     @classmethod
@@ -53,7 +54,21 @@ class SessionSnapshot:
             twofa_since=twofa_since,
             last_error=state.last_error,
             can_restart=bool(getattr(state, "can_restart", False)),
+            needs_2fa=bool(getattr(state, "needs_2fa", False) or state.twofa_pending),
         )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "tenant_id": self.tenant_id,
+            "status": self.status,
+            "qr_id": self.qr_id,
+            "qr_valid_until": self.qr_valid_until,
+            "needs_2fa": bool(self.needs_2fa),
+            "twofa_pending": bool(self.twofa_pending),
+            "twofa_since": self.twofa_since,
+            "last_error": self.last_error,
+            "can_restart": bool(self.can_restart),
+        }
 
 
 class SessionManager:
