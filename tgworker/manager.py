@@ -796,7 +796,9 @@ class TelegramSessionManager:
                     self._extend_needs_2fa_ttl(state)
             client = self._clients.get(tenant)
             is_active = bool(client and client.is_connected())
-            if state.status in {"waiting_qr", "needs_2fa"} and not is_active:
+            if state.twofa_pending:
+                state.can_restart = False
+            elif state.status in {"waiting_qr", "needs_2fa"} and not is_active:
                 state.can_restart = True
             else:
                 state.can_restart = False
