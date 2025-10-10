@@ -1212,6 +1212,7 @@ try {
         variant = 'alert';
       } else if (normalized === 'authorized') {
         message = 'Подключено';
+        variant = 'success';
       } else if (normalized === 'waiting_qr') {
         message = 'Сканируйте QR в Telegram → Settings → Devices.';
         variant = 'warning';
