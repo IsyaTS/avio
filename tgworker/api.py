@@ -99,46 +99,28 @@ def create_app() -> FastAPI:
 
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
+        if not payload.force:
+            current = await manager.get_status(payload.tenant_id)
+            if current.needs_2fa or current.twofa_pending or current.status == "needs_2fa":
+                body = current.to_payload()
+                body["error"] = "two_factor_pending"
+                return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
+
         snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
-        return {
-            "tenant_id": payload.tenant_id,
-            "status": snapshot.status,
-            "qr_id": snapshot.qr_id,
-            "qr_valid_until": snapshot.qr_valid_until,
-            "needs_2fa": snapshot.status == "needs_2fa",
-            "twofa_pending": snapshot.twofa_pending,
-            "twofa_since": snapshot.twofa_since,
-        }
+        return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
         snapshot = await manager.start_session(payload.tenant_id, force=True)
-        return {
-            "tenant_id": payload.tenant_id,
-            "status": snapshot.status,
-            "qr_id": snapshot.qr_id,
-            "qr_valid_until": snapshot.qr_valid_until,
-            "needs_2fa": snapshot.status == "needs_2fa",
-            "twofa_pending": snapshot.twofa_pending,
-            "twofa_since": snapshot.twofa_since,
-        }
+        return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
     @app.get("/session/status")
     async def session_status(tenant: int = Query(..., ge=1)):
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
-        return {
-            "tenant_id": tenant,
-            "status": session_snapshot.status,
-            "qr_id": session_snapshot.qr_id,
-            "qr_valid_until": session_snapshot.qr_valid_until,
-            "needs_2fa": session_snapshot.status == "needs_2fa",
-            "twofa_pending": session_snapshot.twofa_pending,
-            "twofa_since": session_snapshot.twofa_since,
-            "last_error": session_snapshot.last_error,
-            "can_restart": session_snapshot.can_restart,
-            "stats": stats,
-        }
+        payload = session_snapshot.to_payload()
+        payload["stats"] = stats
+        return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
 
     @app.get("/session/qr/{qr_id}.png")
     async def session_qr(qr_id: str):

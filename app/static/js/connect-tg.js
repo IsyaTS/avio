@@ -26,9 +26,6 @@
     const twofaPassword = document.getElementById('tg-2fa-password');
     const twofaError = document.getElementById('tg-2fa-error');
     const twofaSubmit = document.getElementById('tg-2fa-submit');
-    const newQrBlock = document.getElementById('tg-new-qr-block');
-    const newQrMessage = document.getElementById('tg-new-qr-message');
-    const newQrButton = document.getElementById('tg-new-qr-button');
 
     if (!tenant || !key) {
       if (statusEl) {
@@ -54,11 +51,9 @@
     let pollTimer = null;
     let pollInFlight = false;
     let startInFlight = false;
-    let qrValidUntilMs = 0;
     let authorized = false;
-    let lastQrId = '';
     let inTwoFA = false;
-    let manualRestartAllowed = true;
+    let lastQrId = '';
 
     function buildUrl(basePath, extraParams) {
       let target;
@@ -109,7 +104,7 @@
         return;
       }
       stopPolling();
-      const ms = typeof delay === 'number' && Number.isFinite(delay) ? Math.max(500, delay) : POLL_INTERVAL;
+      const ms = typeof delay === 'number' && Number.isFinite(delay) ? Math.max(600, delay) : POLL_INTERVAL;
       pollTimer = window.setTimeout(() => {
         pollStatus();
       }, ms);
@@ -133,17 +128,7 @@
 
     function updateControls() {
       if (refreshButton) {
-        refreshButton.disabled = startInFlight || inTwoFA;
-      }
-      if (newQrButton) {
-        newQrButton.disabled = startInFlight || !manualRestartAllowed;
-      }
-    }
-
-    function clearQrImage() {
-      if (qrImage) {
-        qrImage.removeAttribute('src');
-        qrImage.style.display = 'none';
+        refreshButton.disabled = startInFlight;
       }
     }
 
@@ -159,39 +144,42 @@
       }
     }
 
-    function showPlaceholder(text, resetId) {
-      if (resetId) {
-        lastQrId = '';
+    function clearQrImage() {
+      if (qrImage) {
+        qrImage.removeAttribute('src');
+        qrImage.style.display = 'none';
       }
-      clearQrImage();
-      if (qrPlaceholder) {
-        qrPlaceholder.textContent = text || '';
-        qrPlaceholder.style.display = text ? '' : 'none';
-      }
-      hideNewQr();
-      showQrBlock();
     }
 
-    function updateQrImage(qrId) {
-      const normalized = typeof qrId === 'string' ? qrId.trim() : String(qrId || '').trim();
-      if (!normalized) {
-        showPlaceholder('QR генерируется…', true);
+    function setPlaceholder(text) {
+      if (!qrPlaceholder) {
         return;
       }
-      if (normalized !== lastQrId) {
+      if (text) {
+        qrPlaceholder.textContent = text;
+        qrPlaceholder.style.display = '';
+      } else {
+        qrPlaceholder.textContent = '';
+        qrPlaceholder.style.display = 'none';
+      }
+    }
+
+    function showQrImage(qrId) {
+      const normalized = typeof qrId === 'string' ? qrId.trim() : String(qrId || '').trim();
+      if (!normalized) {
+        lastQrId = '';
+        clearQrImage();
+        setPlaceholder('QR генерируется…');
+        return;
+      }
+      if (normalized !== lastQrId && qrImage) {
         lastQrId = normalized;
-        if (qrImage) {
-          qrImage.src = buildQrSrc(normalized);
-        }
+        qrImage.src = buildQrSrc(normalized);
       }
       if (qrImage) {
         qrImage.style.display = '';
       }
-      if (qrPlaceholder) {
-        qrPlaceholder.style.display = 'none';
-      }
-      hideNewQr();
-      showQrBlock();
+      setPlaceholder('');
     }
 
     function showTwofa(message) {
@@ -207,7 +195,6 @@
           twofaError.style.display = 'none';
         }
       }
-      hideNewQr();
       if (twofaPassword) {
         window.setTimeout(() => {
           try {
@@ -229,231 +216,100 @@
       }
     }
 
-    function showNewQr(message) {
-      if (newQrMessage) {
-        if (message) {
-          newQrMessage.textContent = message;
-          newQrMessage.style.display = '';
-        } else {
-          newQrMessage.textContent = '';
-          newQrMessage.style.display = 'none';
-        }
-      }
-      if (newQrBlock) {
-        newQrBlock.style.display = '';
-      }
+    function handleTwofaTimeout() {
+      inTwoFA = false;
+      hideTwofa();
+      lastQrId = '';
+      clearQrImage();
+      showQrBlock();
+      setPlaceholder('Срок ожидания 2FA истёк. Нажмите «Обновить QR».');
+      setStatus('Срок ожидания 2FA истёк. Нажмите «Обновить QR».', 'alert');
     }
 
-    function hideNewQr() {
-      if (newQrBlock) {
-        newQrBlock.style.display = 'none';
-      }
-      if (newQrMessage) {
-        newQrMessage.textContent = '';
-        newQrMessage.style.display = 'none';
-      }
-    }
-
-    function parseValidUntil(value) {
-      const num = Number(value);
-      if (!Number.isFinite(num) || num <= 0) {
-        return 0;
-      }
-      return num > 1e12 ? Math.round(num) : Math.round(num * 1000);
-    }
-
-    function handleStatus(payload) {
-      const outcome = { continuePolling: true, forceRefresh: false, forceReason: '', pollDelay: POLL_INTERVAL };
+    function processStatus(payload) {
       const data = payload && typeof payload === 'object' ? payload : {};
-      const status = typeof data.status === 'string' ? data.status : '';
+      const statusValue = typeof data.status === 'string' ? data.status : '';
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
-      const qrId = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
-      const needsTwofa = status === 'needs_2fa' || data.needs_2fa === true || data.twofa_pending === true;
-      const waitingQr = status === 'waiting_qr';
-      const canRestart = data.can_restart === true;
-      const twofaTimeout = status === 'twofa_timeout' || lastError === 'twofa_timeout';
+      const qrIdValue = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
+      const normalizedQrId = qrIdValue.trim();
+      const needsTwofa =
+        statusValue === 'needs_2fa' || data.needs_2fa === true || data.twofa_pending === true;
+      const twofaTimeout = statusValue === 'twofa_timeout' || lastError === 'twofa_timeout';
+      const errorCode = typeof data.error === 'string' ? data.error : '';
+      let nextDelay = POLL_INTERVAL;
 
-      if ('qr_valid_until' in data) {
-        const parsed = parseValidUntil(data.qr_valid_until);
-        if (parsed > 0) {
-          qrValidUntilMs = parsed;
-        }
-      }
-
-      if (status === 'authorized') {
+      if (statusValue === 'authorized') {
         authorized = true;
         inTwoFA = false;
-        manualRestartAllowed = true;
-        updateControls();
-        hideNewQr();
-        setStatus('Подключено', 'success');
-        hideQrBlock();
         hideTwofa();
-        return { continuePolling: false, forceRefresh: false, forceReason: '', pollDelay: POLL_INTERVAL };
+        hideQrBlock();
+        setStatus('Подключено', 'success');
+        stopPolling();
+        return null;
       }
 
       authorized = false;
 
+      if (twofaTimeout) {
+        handleTwofaTimeout();
+        return Math.max(POLL_INTERVAL, 5000);
+      }
+
       if (needsTwofa) {
-        manualRestartAllowed = false;
         inTwoFA = true;
-        updateControls();
+        hideQrBlock();
         lastQrId = '';
         clearQrImage();
-        if (qrPlaceholder) {
-          qrPlaceholder.textContent = '';
-          qrPlaceholder.style.display = 'none';
-        }
-        hideQrBlock();
-        const twofaMessage = lastError === 'invalid_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
-        showTwofa(twofaMessage);
-        setStatus('Требуется пароль 2FA', 'alert');
-        outcome.pollDelay = Math.max(4000, POLL_INTERVAL);
-        return outcome;
+        const message = lastError === 'invalid_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
+        showTwofa(message);
+        setStatus('NEED_2FA', 'alert');
+        return Math.max(POLL_INTERVAL, 4000);
       }
 
-      const twofaWindowExpired = twofaTimeout || (waitingQr && inTwoFA);
-      if (twofaWindowExpired) {
-        manualRestartAllowed = !!canRestart;
-        inTwoFA = true;
-        updateControls();
-        lastQrId = '';
-        clearQrImage();
-        if (qrPlaceholder) {
-          qrPlaceholder.textContent = '';
-          qrPlaceholder.style.display = 'none';
-        }
-        hideQrBlock();
-        hideTwofa();
-        if (twofaPassword) {
-          twofaPassword.value = '';
-        }
-        const message = canRestart
-          ? 'Срок ожидания 2FA истёк. Получите новый QR-код.'
-          : 'Срок ожидания 2FA истёк. Обратитесь к администратору для перезапуска.';
-        showNewQr(message);
-        setStatus('Срок ожидания пароля 2FA истёк. Нажмите «Новый QR».', 'alert');
-        outcome.pollDelay = Math.max(6000, POLL_INTERVAL);
-        return outcome;
-      }
-
-      manualRestartAllowed = true;
       inTwoFA = false;
-      updateControls();
       hideTwofa();
-      hideNewQr();
+      showQrBlock();
 
-      if (qrId) {
-        updateQrImage(qrId);
-      } else {
-        showPlaceholder('QR генерируется…', true);
+      if (statusValue === 'waiting_qr') {
+        if (normalizedQrId) {
+          showQrImage(normalizedQrId);
+          setPlaceholder('');
+        } else {
+          lastQrId = '';
+          clearQrImage();
+          setPlaceholder('QR генерируется…');
+        }
+        setStatus('Ждём сканирования', 'muted');
+        return nextDelay;
       }
 
-      if (status === 'waiting_qr') {
-        setStatus('ждём сканирования', 'muted');
-      } else if (status === 'disconnected') {
-        showPlaceholder('Сессия отключена. Нажмите «Обновить QR».', true);
-        setStatus(lastError || 'Сессия отключена. Нажмите «Обновить QR».', 'alert');
-      } else if (status === 'qr_expired' || status === 'qr_login_timeout') {
-        showPlaceholder('QR истёк. Обновляем…', true);
-        setStatus('QR истёк. Получаем новый…', 'alert');
-      } else if (status) {
-        setStatus(`Статус: ${status}`, 'muted');
+      if (normalizedQrId) {
+        showQrImage(normalizedQrId);
+      } else {
+        lastQrId = '';
+        clearQrImage();
+        setPlaceholder('QR генерируется…');
+      }
+
+      if (statusValue === 'qr_expired' || statusValue === 'qr_login_timeout') {
+        lastQrId = '';
+        clearQrImage();
+        setPlaceholder('QR истёк. Нажмите «Обновить QR».');
+        setStatus('QR истёк. Нажмите «Обновить QR».', 'alert');
+      } else if (statusValue === 'disconnected') {
+        setPlaceholder('Сессия отключена. Нажмите «Обновить QR».');
+        setStatus('Сессия отключена. Нажмите «Обновить QR».', 'alert');
+      } else if (statusValue) {
+        setStatus(`Статус: ${statusValue}`, 'muted');
+      } else if (lastError) {
+        setStatus(`Ошибка: ${lastError}`, 'alert');
+      } else if (errorCode) {
+        setStatus(`Ошибка: ${errorCode}`, 'alert');
       } else {
         setStatus('Ожидаем статус…', 'muted');
       }
 
-      const now = Date.now();
-      const expiredByTime = qrValidUntilMs > 0 && now >= qrValidUntilMs;
-      const expiredByStatus = status === 'qr_expired' || status === 'qr_login_timeout';
-      const expiredByError = lastError === 'qr_expired' || lastError === 'qr_login_timeout';
-
-      if (expiredByTime || expiredByStatus || expiredByError) {
-        outcome.forceRefresh = true;
-        outcome.forceReason = expiredByTime ? 'qr_valid_until' : 'status';
-      }
-
-      return outcome;
-    }
-
-    function applyOutcome(outcome) {
-      if (!outcome) {
-        if (!authorized) {
-          scheduleNext(POLL_INTERVAL);
-        } else {
-          stopPolling();
-        }
-        return;
-      }
-      if (outcome.forceRefresh && !startInFlight && !inTwoFA) {
-        startSession(true, outcome.forceReason || 'status');
-        return;
-      }
-      if (outcome.continuePolling && !authorized) {
-        scheduleNext(outcome.pollDelay);
-      } else {
-        stopPolling();
-      }
-    }
-
-    async function startSession(force, origin) {
-      if (startInFlight) {
-        return;
-      }
-      if (inTwoFA && !force) {
-        return;
-      }
-      startInFlight = true;
-      updateControls();
-      stopPolling();
-      if (!authorized) {
-        showPlaceholder(force ? 'Готовим новый QR…' : 'Готовим QR-код…', true);
-        setStatus('Запрашиваем QR…', 'muted');
-      }
-
-      const extra = { t: Date.now() };
-      if (force) {
-        extra.force = '1';
-      }
-
-      let outcome = null;
-      let errorOccurred = false;
-
-      try {
-        const response = await fetch(buildUrl(startUrlBase, extra), {
-          method: 'GET',
-          cache: 'no-store',
-        });
-        let payload = null;
-        if (response.status !== 204) {
-          try {
-            payload = await response.json();
-          } catch (err) {
-            payload = null;
-          }
-        }
-        if (!response.ok) {
-          throw new Error(`tg_start_${response.status}`);
-        }
-        outcome = handleStatus(payload || {});
-      } catch (error) {
-        errorOccurred = true;
-        console.error('[tg-connect] start error', error);
-        setStatus('Не удалось запросить QR. Попробуйте позже.', 'alert');
-        showPlaceholder('Не удалось запросить QR. Попробуйте позже.', true);
-      } finally {
-        startInFlight = false;
-        updateControls();
-      }
-
-      if (errorOccurred) {
-        if (!authorized) {
-          scheduleNext(4000);
-        }
-        return;
-      }
-
-      applyOutcome(outcome);
+      return nextDelay;
     }
 
     async function pollStatus() {
@@ -462,10 +318,7 @@
       }
       pollInFlight = true;
       stopPolling();
-
-      let outcome = null;
-      let errorOccurred = false;
-
+      let scheduled = false;
       try {
         const response = await fetch(buildUrl(statusUrlBase, { t: Date.now() }), {
           method: 'GET',
@@ -482,55 +335,129 @@
         if (!response.ok) {
           throw new Error(`tg_status_${response.status}`);
         }
-        outcome = handleStatus(payload || {});
+        let nextDelay = POLL_INTERVAL;
+        if (payload && typeof payload === 'object') {
+          const processedDelay = processStatus(payload);
+          if (processedDelay === null) {
+            nextDelay = null;
+          } else if (typeof processedDelay === 'number' && Number.isFinite(processedDelay)) {
+            nextDelay = processedDelay;
+          }
+        }
+        if (!authorized && nextDelay !== null) {
+          scheduleNext(nextDelay);
+          scheduled = true;
+        }
       } catch (error) {
-        errorOccurred = true;
         console.error('[tg-connect] status error', error);
         if (!authorized) {
+          setPlaceholder('Сервис Telegram временно недоступен.');
           setStatus('Сервис Telegram временно недоступен.', 'alert');
-          showPlaceholder('Сервис Telegram временно недоступен.', false);
+          scheduleNext(Math.max(POLL_INTERVAL, 5000));
+          scheduled = true;
         }
       } finally {
         pollInFlight = false;
-      }
-
-      if (errorOccurred) {
-        if (!authorized) {
-          scheduleNext(4000);
+        if (!authorized && !scheduled) {
+          scheduleNext(POLL_INTERVAL);
         }
+      }
+    }
+
+    async function startSession(force) {
+      if (startInFlight) {
         return;
       }
+      if (inTwoFA && !force) {
+        return;
+      }
+      startInFlight = true;
+      updateControls();
+      stopPolling();
+      if (!authorized) {
+        if (force) {
+          lastQrId = '';
+        }
+        clearQrImage();
+        showQrBlock();
+        setPlaceholder(force ? 'Запрашиваем новый QR…' : 'Готовим QR-код…');
+        setStatus('Запрашиваем QR…', 'muted');
+      }
 
-      applyOutcome(outcome);
+      const extra = { t: Date.now() };
+      if (force) {
+        extra.force = '1';
+      }
+
+      let scheduled = false;
+      try {
+        const response = await fetch(buildUrl(startUrlBase, extra), {
+          method: 'GET',
+          cache: 'no-store',
+        });
+        let payload = null;
+        if (response.status !== 204) {
+          try {
+            payload = await response.json();
+          } catch (err) {
+            payload = null;
+          }
+        }
+        const isConflict = response.status === 409;
+        if (!response.ok && !isConflict) {
+          throw new Error(`tg_start_${response.status}`);
+        }
+        let nextDelay = POLL_INTERVAL;
+        if (payload && typeof payload === 'object') {
+          const processedDelay = processStatus(payload);
+          if (processedDelay === null) {
+            nextDelay = null;
+          } else if (typeof processedDelay === 'number' && Number.isFinite(processedDelay)) {
+            nextDelay = processedDelay;
+          }
+        }
+        if (!authorized && nextDelay !== null) {
+          scheduleNext(nextDelay);
+          scheduled = true;
+        }
+      } catch (error) {
+        console.error('[tg-connect] start error', error);
+        if (!authorized) {
+          setPlaceholder('Не удалось запросить QR. Попробуйте позже.');
+          setStatus('Не удалось запросить QR. Попробуйте позже.', 'alert');
+          scheduleNext(Math.max(POLL_INTERVAL, 5000));
+          scheduled = true;
+        }
+      } finally {
+        startInFlight = false;
+        updateControls();
+        if (!authorized && !scheduled) {
+          scheduleNext(POLL_INTERVAL);
+        }
+      }
     }
 
     if (refreshButton) {
       refreshButton.addEventListener('click', () => {
-        startSession(true, 'manual');
-      });
-    }
-
-    if (newQrButton) {
-      newQrButton.addEventListener('click', () => {
-        if (startInFlight) {
-          return;
-        }
         inTwoFA = false;
         if (twofaPassword) {
           twofaPassword.value = '';
         }
         hideTwofa();
-        hideNewQr();
-        updateControls();
-        showPlaceholder('Готовим новый QR…', true);
-        startSession(true, 'twofa-reset');
+        lastQrId = '';
+        clearQrImage();
+        showQrBlock();
+        setPlaceholder('Запрашиваем новый QR…');
+        startSession(true);
       });
     }
 
     if (qrImage) {
       qrImage.addEventListener('error', () => {
         if (!authorized) {
-          showPlaceholder('Не удалось загрузить QR. Нажмите «Обновить QR».', true);
+          lastQrId = '';
+          clearQrImage();
+          setPlaceholder('Не удалось загрузить QR. Нажмите «Обновить QR».');
         }
       });
     }
@@ -543,10 +470,8 @@
         }
         const rawPassword = twofaPassword.value || '';
         if (!rawPassword.trim()) {
-          manualRestartAllowed = false;
-          inTwoFA = true;
-          updateControls();
           showTwofa('Введите пароль.');
+          setStatus('Введите пароль 2FA.', 'alert');
           return;
         }
         if (twofaSubmit) {
@@ -560,68 +485,52 @@
             body: JSON.stringify({ password: rawPassword }),
           });
           let payload = null;
-          try {
-            payload = await response.json();
-          } catch (err) {
-            payload = null;
+          if (response.status !== 204) {
+            try {
+              payload = await response.json();
+            } catch (err) {
+              payload = null;
+            }
           }
           if (response.ok) {
-            manualRestartAllowed = true;
-            inTwoFA = false;
-            updateControls();
-            hideTwofa();
-            hideNewQr();
-            clearQrImage();
-            hideQrBlock();
             twofaPassword.value = '';
-            setStatus('Подключено', 'success');
-            pollStatus();
+            showTwofa('');
+            setStatus('Проверяем пароль…', 'muted');
+            if (!authorized) {
+              scheduleNext(1200);
+            }
             return;
           }
           const errorData = payload && typeof payload === 'object' ? payload : null;
           const errorCode = errorData && typeof errorData.error === 'string' ? errorData.error : '';
           if (errorCode === 'invalid_password') {
-            manualRestartAllowed = false;
-            inTwoFA = true;
-            updateControls();
             showTwofa('Неверный пароль. Попробуйте ещё раз.');
             setStatus('Неверный пароль. Попробуйте ещё раз.', 'alert');
+            if (!authorized) {
+              scheduleNext(Math.max(4000, POLL_INTERVAL));
+            }
             return;
           }
           if (errorCode === 'twofa_timeout') {
-            manualRestartAllowed = true;
-            inTwoFA = true;
-            updateControls();
-            hideTwofa();
-            twofaPassword.value = '';
-            showNewQr('Срок ожидания 2FA истёк. Получите новый QR-код.');
-            setStatus('Срок ожидания пароля 2FA истёк. Нажмите «Новый QR».', 'alert');
+            handleTwofaTimeout();
             return;
           }
           if (errorCode === 'password_required') {
-            manualRestartAllowed = false;
-            inTwoFA = true;
-            updateControls();
             showTwofa('Введите пароль.');
+            setStatus('Введите пароль 2FA.', 'alert');
             return;
           }
           if (errorData && typeof errorData.detail === 'string') {
-            manualRestartAllowed = false;
-            inTwoFA = true;
-            updateControls();
             showTwofa(errorData.detail);
+            setStatus(errorData.detail, 'alert');
             return;
           }
-          manualRestartAllowed = false;
-          inTwoFA = true;
-          updateControls();
           showTwofa('Не удалось отправить пароль. Попробуйте ещё раз.');
+          setStatus('Не удалось отправить пароль. Попробуйте ещё раз.', 'alert');
         } catch (error) {
           console.error('[tg-connect] password error', error);
-          manualRestartAllowed = false;
-          inTwoFA = true;
-          updateControls();
           showTwofa('Не удалось отправить пароль. Попробуйте ещё раз.');
+          setStatus('Не удалось отправить пароль. Попробуйте ещё раз.', 'alert');
         } finally {
           if (twofaSubmit) {
             twofaSubmit.disabled = false;
@@ -631,8 +540,9 @@
     }
 
     updateControls();
-    showPlaceholder('Готовим QR-код…', true);
-    startSession(false, 'initial');
+    showQrBlock();
+    setPlaceholder('Готовим QR-код…');
+    startSession(false);
   }
 
   function bootstrapOnce() {

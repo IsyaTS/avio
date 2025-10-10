@@ -658,6 +658,7 @@ def _proxy_qr_with_fallbacks(tenant: int) -> Response:
             return StreamingResponse(io.BytesIO(body), media_type=ctype, headers=headers)
 
     headers = _no_store_headers()
+    headers["Cache-Control"] = "no-store"
     if int(last_status or 0) in (204, 404) or (
         int(last_status or 0) == 200 and (not last_body_present or not last_content_type.startswith("image/"))
     ):
@@ -829,7 +830,7 @@ async def tg_start(
         return validation
 
     tenant_id, _ = validation
-    force_flag = initial_force_flag
+    force_flag = bool(initial_force_flag)
 
     if not force_flag:
         status_code, status_body, status_headers = C.tg_http(
@@ -860,43 +861,37 @@ async def tg_start(
                     status_code,
                     status_body_bytes,
                     error=None,
-                    force=force_flag,
+                    force=False,
                 )
                 headers = _proxy_headers(status_headers, status_code)
+                headers.update(_no_store_headers())
                 return Response(content=status_body_bytes, status_code=status_code, headers=headers)
 
-    async def _request_start(force: bool) -> tuple[int, bytes, Mapping[str, str], Any]:
-        payload = {"tenant_id": tenant_id, "force": bool(force)}
-        response = await C.tg_post(
+    payload = {"tenant_id": tenant_id, "force": force_flag}
+
+    try:
+        upstream = await C.tg_post(
             f"{TG_WORKER_BASE}/session/start",
             payload,
             timeout=15.0,
         )
-        status = int(getattr(response, "status_code", 0) or 0)
-        body = bytes(getattr(response, "content", b"") or b"")
-        headers = getattr(response, "headers", {}) or {}
-        return status, body, headers, response
-
-    try:
-        status_code, body_bytes, upstream_headers, upstream_resp = await _request_start(force_flag)
-        if status_code in {409, 422} and not force_flag:
-            status_code, body_bytes, upstream_headers, upstream_resp = await _request_start(True)
-            force_flag = True
     except Exception as exc:
         _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error=str(exc), force=force_flag)
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
-    detail = None
-    if not (200 <= status_code < 300):
-        body_text = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream_resp, "text", ""))
-        detail = body_text or f"status_{status_code}"
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    if 200 <= status_code < 300:
+        detail = None
+    else:
+        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
 
     _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail, force=force_flag)
 
     if status_code <= 0:
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
 
-    headers = _proxy_headers(upstream_headers, status_code)
+    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
     headers.update(_no_store_headers())
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
@@ -1077,12 +1072,11 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
+        fail_headers = _tg_cache_headers(status_code or "-", {"Content-Type": "application/json"})
         fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
-        fail_headers.setdefault("Content-Type", "application/json")
         return Response(content=fail_body, status_code=502, headers=fail_headers)
 
-    response_headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
+    response_headers = _tg_cache_headers(status_code)
     upstream_content_type = None
     for name, value in (headers or {}).items():
         if name and value and name.lower() == "content-type":
@@ -1101,18 +1095,9 @@ def tg_qr_png(qr_id: str | None = None):
     qr_value = "" if qr_id is None else str(qr_id).strip()
     if not qr_value:
         _log_tg_proxy("/pub/tg/qr.png", None, 404, None, error="missing_qr_id")
-        headers = {
-            "Cache-Control": "no-store",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "X-Telegram-Upstream-Status": "404",
-            "Content-Type": "application/json",
-        }
-        return Response(
-            content=json.dumps({"error": "missing_qr_id"}, ensure_ascii=False).encode("utf-8"),
-            status_code=404,
-            headers=headers,
-        )
+        headers = _tg_cache_headers(404, {"Content-Type": "application/json"})
+        body = json.dumps({"error": "missing_qr_id"}, ensure_ascii=False).encode("utf-8")
+        return Response(content=body, status_code=404, headers=headers)
 
     safe_qr = quote(qr_value, safe="")
     status_code, body, headers = C.tg_http(
@@ -1125,30 +1110,35 @@ def tg_qr_png(qr_id: str | None = None):
     detail = None if status_code == 200 else _extract_json_detail(body_bytes) or _stringify_detail(body_bytes)
     _log_tg_proxy("/pub/tg/qr.png", None, status_code, body_bytes, error=detail)
 
+    upstream_status = str(status_code or "-")
+
     if status_code <= 0:
-        fail_headers = {"Cache-Control": "no-store", "X-Telegram-Upstream-Status": str(status_code or "-"), "Content-Type": "application/json"}
+        fail_headers = _tg_cache_headers(upstream_status, {"Content-Type": "application/json"})
         fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
         return Response(content=fail_body, status_code=502, headers=fail_headers)
 
-    response_headers: dict[str, str] = {
-        "Cache-Control": "no-store",
-        "Pragma": "no-cache",
-        "Expires": "0",
-        "X-Telegram-Upstream-Status": str(status_code),
-    }
+    if status_code == 404:
+        error_payload = body_bytes
+        if not error_payload:
+            message = detail or "qr_expired"
+            error_payload = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+        headers_out = _tg_cache_headers(404, {"Content-Type": "application/json"})
+        return Response(content=error_payload, status_code=404, headers=headers_out)
+
+    headers_out = _tg_cache_headers(status_code)
     upstream_content_type = None
     for name, value in (headers or {}).items():
         if name and value and name.lower() == "content-type":
             upstream_content_type = value
             break
     if upstream_content_type:
-        response_headers["Content-Type"] = upstream_content_type
+        headers_out["Content-Type"] = upstream_content_type
     elif status_code == 200:
-        response_headers["Content-Type"] = "image/png"
+        headers_out["Content-Type"] = "image/png"
     else:
-        response_headers["Content-Type"] = "application/json"
+        headers_out["Content-Type"] = "application/json"
 
-    return Response(content=body_bytes, status_code=status_code, headers=response_headers)
+    return Response(content=body_bytes, status_code=status_code, headers=headers_out)
 
 
 @router.get("/pub/tg/qr.txt")

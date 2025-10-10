@@ -513,7 +513,7 @@ class TelegramSessionManager:
             timestamp_sec = time.time()
             state.last_needs_2fa_at = timestamp_sec
             state.twofa_pending = True
-            state.twofa_since = timestamp_sec * 1000.0
+            state.twofa_since = int(timestamp_sec * 1000.0)
             state.can_restart = False
             EVENT_ERRORS.labels("needs_2fa").inc()
             LOGGER.warning(
@@ -605,7 +605,7 @@ class TelegramSessionManager:
                 state.awaiting_password = True
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time() * 1000.0
+                    state.twofa_since = int(time.time() * 1000.0)
                 state.qr_id = None
                 state.qr_png = None
                 state.qr_expires_at = None
@@ -636,7 +636,7 @@ class TelegramSessionManager:
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time() * 1000.0
+                    state.twofa_since = int(time.time() * 1000.0)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.warning(
@@ -656,7 +656,7 @@ class TelegramSessionManager:
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time() * 1000.0
+                    state.twofa_since = int(time.time() * 1000.0)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.error(
@@ -676,7 +676,7 @@ class TelegramSessionManager:
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 if state.twofa_since is None:
-                    state.twofa_since = time.time() * 1000.0
+                    state.twofa_since = int(time.time() * 1000.0)
                 self._update_metrics()
             EVENT_ERRORS.labels("password_failed").inc()
             LOGGER.exception(
