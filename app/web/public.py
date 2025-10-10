@@ -769,6 +769,30 @@ def _proxy_headers(headers: Mapping[str, str] | None, status_code: int) -> dict[
     return result
 
 
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"1", "true", "yes", "on"}
+    return False
+
+
+def _coerce_body_bytes(body: Any) -> bytes:
+    if isinstance(body, (bytes, bytearray)):
+        return bytes(body)
+    if isinstance(body, str):
+        return body.encode("utf-8")
+    if body is None:
+        return b""
+    try:
+        return json.dumps(body, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        return b""
+
+
 @router.get("/pub/wa/qr.svg")
 def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
     ok = _ensure_valid_qr_request(tenant, k)
@@ -806,6 +830,40 @@ async def tg_start(
 
     tenant_id, _ = validation
     force_flag = initial_force_flag
+
+    if not force_flag:
+        status_code, status_body, status_headers = C.tg_http(
+            "GET",
+            f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
+            timeout=15.0,
+        )
+        if status_code > 0:
+            status_body_bytes = _coerce_body_bytes(status_body)
+            parsed_status: Any
+            try:
+                decoded = status_body_bytes.decode("utf-8", errors="ignore")
+                parsed_status = json.loads(decoded or "{}")
+            except Exception:
+                parsed_status = None
+            needs_twofa_now = False
+            if isinstance(parsed_status, dict):
+                status_value = str(parsed_status.get("status") or "")
+                needs_twofa_now = (
+                    status_value == "needs_2fa"
+                    or _truthy_flag(parsed_status.get("needs_2fa"))
+                    or _truthy_flag(parsed_status.get("twofa_pending"))
+                )
+            if needs_twofa_now:
+                _log_tg_proxy(
+                    "/pub/tg/start",
+                    tenant_id,
+                    status_code,
+                    status_body_bytes,
+                    error=None,
+                    force=force_flag,
+                )
+                headers = _proxy_headers(status_headers, status_code)
+                return Response(content=status_body_bytes, status_code=status_code, headers=headers)
 
     async def _request_start(force: bool) -> tuple[int, bytes, Mapping[str, str], Any]:
         payload = {"tenant_id": tenant_id, "force": bool(force)}
@@ -1013,12 +1071,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
         timeout=15.0,
     )
-    if isinstance(body, (bytes, bytearray)):
-        body_bytes = bytes(body)
-    elif isinstance(body, str):
-        body_bytes = body.encode("utf-8")
-    else:
-        body_bytes = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    body_bytes = _coerce_body_bytes(body)
 
     detail = None if 200 <= status_code < 300 else _stringify_detail(body_bytes) or f"status_{status_code}"
     _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error=detail)
@@ -1047,9 +1100,19 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
 def tg_qr_png(qr_id: str | None = None):
     qr_value = "" if qr_id is None else str(qr_id).strip()
     if not qr_value:
-        _log_tg_proxy("/pub/tg/qr.png", None, 400, None, error="missing_qr_id")
-        headers = {"Cache-Control": "no-store", "X-Telegram-Upstream-Status": "-", "Content-Type": "application/json"}
-        return Response(content=json.dumps({"error": "missing_qr_id"}, ensure_ascii=False).encode("utf-8"), status_code=400, headers=headers)
+        _log_tg_proxy("/pub/tg/qr.png", None, 404, None, error="missing_qr_id")
+        headers = {
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Telegram-Upstream-Status": "404",
+            "Content-Type": "application/json",
+        }
+        return Response(
+            content=json.dumps({"error": "missing_qr_id"}, ensure_ascii=False).encode("utf-8"),
+            status_code=404,
+            headers=headers,
+        )
 
     safe_qr = quote(qr_value, safe="")
     status_code, body, headers = C.tg_http(
@@ -1057,12 +1120,7 @@ def tg_qr_png(qr_id: str | None = None):
         f"{TG_WORKER_BASE}/session/qr/{safe_qr}.png",
         timeout=15.0,
     )
-    if isinstance(body, (bytes, bytearray)):
-        body_bytes = bytes(body)
-    elif isinstance(body, str):
-        body_bytes = body.encode("utf-8")
-    else:
-        body_bytes = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    body_bytes = _coerce_body_bytes(body)
 
     detail = None if status_code == 200 else _extract_json_detail(body_bytes) or _stringify_detail(body_bytes)
     _log_tg_proxy("/pub/tg/qr.png", None, status_code, body_bytes, error=detail)
@@ -1072,7 +1130,12 @@ def tg_qr_png(qr_id: str | None = None):
         fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
         return Response(content=fail_body, status_code=502, headers=fail_headers)
 
-    response_headers: dict[str, str] = {"Cache-Control": "no-store", "X-Telegram-Upstream-Status": str(status_code)}
+    response_headers: dict[str, str] = {
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Telegram-Upstream-Status": str(status_code),
+    }
     upstream_content_type = None
     for name, value in (headers or {}).items():
         if name and value and name.lower() == "content-type":

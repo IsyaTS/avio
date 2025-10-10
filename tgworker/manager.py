@@ -181,7 +181,9 @@ class TelegramSessionManager:
 
     def _expire_needs_2fa_locked(
         self, tenant: int, state: SessionState
-    ) -> Optional[TelegramClient]:
+    ) -> tuple[Optional[TelegramClient], bool]:
+        client: Optional[TelegramClient] = None
+        expired = False
         if (
             state.status == "needs_2fa"
             and state.needs_2fa_expires_at is not None
@@ -190,7 +192,7 @@ class TelegramSessionManager:
             client = self._clients.pop(tenant, None)
             if state.qr_id:
                 self._qr_lookup.pop(state.qr_id, None)
-            state.status = "disconnected"
+            state.status = "twofa_timeout"
             state.needs_2fa = False
             state.awaiting_password = False
             state.needs_2fa_expires_at = None
@@ -198,6 +200,7 @@ class TelegramSessionManager:
             state.qr_png = None
             state.qr_expires_at = None
             state.waiting_task = None
+            state.qr_login = None
             state.last_error = "twofa_timeout"
             state.last_seen = time.time()
             state.restart_pending = False
@@ -205,12 +208,12 @@ class TelegramSessionManager:
             state.twofa_pending = False
             state.twofa_since = None
             state.can_restart = True
+            expired = True
             LOGGER.warning(
                 "stage=needs_2fa_timeout event=twofa_timeout tenant_id=%s", tenant
             )
             self._update_metrics()
-            return client
-        return None
+        return client, expired
 
     async def shutdown(self) -> None:
         for state in list(self._states.values()):
@@ -328,7 +331,7 @@ class TelegramSessionManager:
         async with self._lock:
             state = self._states.get(tenant)
             if state:
-                client = self._expire_needs_2fa_locked(tenant, state)
+                client, _ = self._expire_needs_2fa_locked(tenant, state)
                 if client:
                     clients_to_disconnect.append(client)
             state = self._states.get(tenant) or state or SessionState(tenant_id=tenant)
@@ -343,7 +346,7 @@ class TelegramSessionManager:
                     state.can_restart = False
                     result_state = state
                 else:
-                    stuck_statuses = {"disconnected", "error"}
+                    stuck_statuses = {"disconnected", "error", "twofa_timeout"}
                     if state.status == "needs_2fa":
                         need_new_qr = True
                     elif state.status in stuck_statuses:
@@ -570,46 +573,55 @@ class TelegramSessionManager:
             raise ValueError("password_required")
 
         client_to_disconnect: Optional[TelegramClient] = None
+        expired_twofa = False
+        client: Optional[TelegramClient] = None
         async with self._lock:
             state = self._states.get(tenant)
             if not state:
                 raise ValueError("session_not_found")
-            client_to_disconnect = self._expire_needs_2fa_locked(tenant, state)
-            awaiting_valid = (
-                state.awaiting_password
-                and (
-                    state.needs_2fa_expires_at is None
-                    or state.needs_2fa_expires_at > time.time()
+            client_to_disconnect, expired_twofa = self._expire_needs_2fa_locked(tenant, state)
+            if not expired_twofa:
+                awaiting_valid = (
+                    state.awaiting_password
+                    and (
+                        state.needs_2fa_expires_at is None
+                        or state.needs_2fa_expires_at > time.time()
+                    )
                 )
-            )
-            accepts_password = (
-                state.status == "needs_2fa" or state.twofa_pending or awaiting_valid
-            )
-            if not accepts_password:
-                raise ValueError("password_not_required")
-            client = self._clients.get(tenant)
-            if client is None:
-                client = self._build_client(tenant)
-                await client.connect()
-                self._clients[tenant] = client
-            elif not client.is_connected():
-                await client.connect()
-            state.status = "needs_2fa"
-            state.needs_2fa = True
-            state.awaiting_password = True
-            state.twofa_pending = True
-            if state.twofa_since is None:
-                state.twofa_since = time.time() * 1000.0
-            state.qr_id = None
-            state.qr_png = None
-            state.qr_expires_at = None
-            state.last_seen = time.time()
-            self._extend_needs_2fa_ttl(state)
-            state.last_needs_2fa_at = time.time()
+                accepts_password = (
+                    state.status == "needs_2fa" or state.twofa_pending or awaiting_valid
+                )
+                if not accepts_password:
+                    raise ValueError("password_not_required")
+                client = self._clients.get(tenant)
+                if client is None:
+                    client = self._build_client(tenant)
+                    await client.connect()
+                    self._clients[tenant] = client
+                elif not client.is_connected():
+                    await client.connect()
+                state.status = "needs_2fa"
+                state.needs_2fa = True
+                state.awaiting_password = True
+                state.twofa_pending = True
+                if state.twofa_since is None:
+                    state.twofa_since = time.time() * 1000.0
+                state.qr_id = None
+                state.qr_png = None
+                state.qr_expires_at = None
+                state.last_seen = time.time()
+                self._extend_needs_2fa_ttl(state)
+                state.last_needs_2fa_at = time.time()
 
         if client_to_disconnect:
             with contextlib.suppress(Exception):
                 await client_to_disconnect.disconnect()
+
+        if expired_twofa:
+            raise ValueError("twofa_timeout")
+
+        if client is None:
+            raise RuntimeError("client_unavailable")
 
         try:
             await client.check_password(secret)
@@ -756,7 +768,7 @@ class TelegramSessionManager:
                 state = SessionState(tenant_id=tenant, status="disconnected")
                 self._states[tenant] = state
             else:
-                client_to_disconnect = self._expire_needs_2fa_locked(tenant, state)
+                client_to_disconnect, _ = self._expire_needs_2fa_locked(tenant, state)
             client = self._clients.get(tenant)
             is_active = bool(client and client.is_connected())
             if state.status in {"waiting_qr", "needs_2fa"} and not is_active:
@@ -852,7 +864,7 @@ class TelegramSessionManager:
         async with self._lock:
             state = self._states.get(tenant)
             if state:
-                client_to_disconnect = self._expire_needs_2fa_locked(tenant, state)
+                client_to_disconnect, _ = self._expire_needs_2fa_locked(tenant, state)
             client = self._clients.get(tenant)
             if client is None:
                 client = self._build_client(tenant)
