@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from typing import Any, Dict, Optional
-from urllib.parse import quote, quote_plus, urlencode
+from urllib.parse import quote, quote_plus
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -298,8 +298,6 @@ def client_settings(tenant: int, request: Request):
 
     integrations_raw = cfg.get("integrations", {})
     integrations = integrations_raw if isinstance(integrations_raw, dict) else {}
-    telegram_state_raw = integrations.get("telegram") if isinstance(integrations, dict) else {}
-    raw_state = telegram_state_raw if isinstance(telegram_state_raw, dict) else {}
     uploaded_meta = integrations.get("uploaded_catalog", {})
     if isinstance(uploaded_meta, str):
         uploaded_display = uploaded_meta
@@ -313,36 +311,6 @@ def client_settings(tenant: int, request: Request):
     except Exception:
         whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
 
-    def _safe_public_url(name: str, fallback: str) -> str:
-        try:
-            return str(request.url_for(name))
-        except Exception:
-            return fallback
-
-    tg_start_url = _safe_public_url("tg_start", "/pub/tg/start")
-    tg_status_url = _safe_public_url("tg_status", "/pub/tg/status")
-    tg_qr_png_url = _safe_public_url("tg_qr_png", "/pub/tg/qr.png")
-    tg_qr_txt_url = _safe_public_url("tg_qr_txt", "/pub/tg/qr.txt")
-    tg_logout_url = _safe_public_url("tg_logout", "/pub/tg/logout")
-    tg_password_url = _safe_public_url("tg_password", "/pub/tg/password")
-
-    qr_id_raw = raw_state.get("qr_id")
-    if isinstance(qr_id_raw, str):
-        current_qr_id = qr_id_raw.strip()
-    elif qr_id_raw is None:
-        current_qr_id = ""
-    else:
-        current_qr_id = str(qr_id_raw).strip()
-    cache_bust_ms = int(time.time() * 1000)
-    initial_qr_src = ""
-    initial_qr_txt_href = ""
-    if current_qr_id:
-        qr_params = urlencode({"qr_id": current_qr_id, "t": cache_bust_ms})
-        qr_separator = "&" if "?" in tg_qr_png_url else "?"
-        txt_separator = "&" if "?" in tg_qr_txt_url else "?"
-        initial_qr_src = f"{tg_qr_png_url}{qr_separator}{qr_params}"
-        initial_qr_txt_href = f"{tg_qr_txt_url}{txt_separator}{urlencode({'qr_id': current_qr_id})}"
-
     urls = {
         "settings": str(request.url_for("client_settings", tenant=tenant)),
         "save_settings": str(request.url_for("save_form", tenant=tenant)),
@@ -353,13 +321,6 @@ def client_settings(tenant: int, request: Request):
         "training_upload": str(request.url_for("training_upload", tenant=tenant)),
         "training_status": str(request.url_for("training_status", tenant=tenant)),
         "whatsapp_export": whatsapp_export_url,
-        "tg_start": tg_start_url,
-        "tg_status": tg_status_url,
-        "tg_qr_png": tg_qr_png_url,
-        "tg_qr": tg_qr_png_url,
-        "tg_qr_txt": tg_qr_txt_url,
-        "tg_logout": tg_logout_url,
-        "tg_password": tg_password_url,
     }
 
     state = {
@@ -368,14 +329,6 @@ def client_settings(tenant: int, request: Request):
         "primary_key": primary_key,
         "urls": urls,
         "max_days": EXPORT_MAX_DAYS,
-        "status": raw_state.get("status"),
-        "qr_id": current_qr_id or "",
-        "qr_valid_until": raw_state.get("qr_valid_until"),
-        "needs_2fa": raw_state.get("needs_2fa"),
-        "twofa_pending": raw_state.get("twofa_pending"),
-        "twofa_since": raw_state.get("twofa_since"),
-        "can_restart": raw_state.get("can_restart"),
-        "last_error": raw_state.get("last_error"),
     }
 
     form_payload = {
@@ -406,9 +359,6 @@ def client_settings(tenant: int, request: Request):
         "primary_key": primary_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": _client_settings_static_version(),
-        "qr_timestamp_ms": cache_bust_ms,
-        "initial_qr_src": initial_qr_src,
-        "initial_qr_txt_href": initial_qr_txt_href,
     }
     return templates.TemplateResponse("client/settings.html", context)
 
