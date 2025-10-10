@@ -79,6 +79,18 @@ def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     return headers
 
 
+def _tg_cache_headers(status_code: int | str, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    headers: dict[str, str] = {
+        "Cache-Control": "no-store",
+        "X-Telegram-Upstream-Status": str(status_code),
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
 def _stringify_detail(value: bytes | bytearray | str | None) -> str:
     if value is None:
         return ""
@@ -517,9 +529,11 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         "tg_password": _resolve("tg_password", "/pub/tg/password"),
     }
 
+    config_key = primary_key or resolved_key
+
     tg_connect_config = {
-        "tenant": str(tenant),
-        "key": resolved_key,
+        "tenant": tenant,
+        "key": config_key,
         "urls": urls,
     }
 
@@ -998,16 +1012,12 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         tenant_id = _coerce_tenant(tenant_candidate)
     except ValueError:
         _log_tg_proxy("/pub/tg/status", tenant, 400, None, error="invalid_tenant")
-        return JSONResponse(
-            {"error": "invalid_tenant"},
-            status_code=400,
-            headers=_no_store_headers(),
-        )
+        return JSONResponse({"error": "invalid_tenant"}, status_code=400, headers=_tg_cache_headers("-"))
 
     key_value = "" if key_candidate is None else str(key_candidate).strip()
     if not key_value or not C.valid_key(tenant_id, key_value):
         _log_tg_proxy("/pub/tg/status", tenant_id, 401, None, error="invalid_key")
-        return JSONResponse({"error": "invalid_key"}, status_code=401, headers=_no_store_headers())
+        return JSONResponse({"error": "invalid_key"}, status_code=401, headers=_tg_cache_headers(401))
 
     status_code, body, headers = C.tg_http(
         "GET",
@@ -1020,6 +1030,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         body_bytes = body.encode("utf-8")
     else:
         body_bytes = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+
     if 200 <= status_code < 300:
         detail = None
     else:
@@ -1028,12 +1039,23 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
+        fail_headers = _tg_cache_headers(status_code or "-")
         return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=fail_headers)
 
-    response_headers = _merge_no_store_headers(headers or {})
-    response_headers["X-Telegram-Upstream-Status"] = str(status_code)
-    return Response(content=body_bytes, status_code=status_code, headers=response_headers)
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except Exception:
+        payload = None
+
+    response_headers = _tg_cache_headers(status_code)
+    if payload is not None:
+        return JSONResponse(payload, status_code=status_code, headers=response_headers)
+
+    merged_headers = dict(response_headers)
+    for name, value in (headers or {}).items():
+        if name.lower() == "content-type" and value:
+            merged_headers.setdefault("Content-Type", value)
+    return Response(content=body_bytes, status_code=status_code, headers=merged_headers)
 
 
 @router.head("/pub/tg/qr.png")
@@ -1050,7 +1072,7 @@ def tg_qr_png(qr_id: str | None = None):
         return JSONResponse(
             {"error": "missing_qr_id"},
             status_code=400,
-            headers=_no_store_headers({"X-Telegram-Upstream-Status": "-"}),
+            headers=_tg_cache_headers("-"),
         )
 
     safe_qr = quote(qr_value, safe="")
@@ -1071,20 +1093,18 @@ def tg_qr_png(qr_id: str | None = None):
     _log_tg_proxy("/pub/tg/qr.png", None, status_code, body_bytes, error=detail)
 
     if status_code <= 0:
-        fail_headers = _no_store_headers({
-            "Content-Type": "application/json",
-            "X-Telegram-Upstream-Status": str(status_code),
-        })
+        fail_headers = _tg_cache_headers(status_code, {"Content-Type": "application/json"})
         fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
         return Response(content=fail_body, status_code=502, headers=fail_headers)
 
     if status_code == 200:
-        response_headers = _no_store_headers({"X-Telegram-Upstream-Status": "200"})
-        response_headers["Content-Type"] = "image/png"
+        response_headers = _tg_cache_headers(200, {"Content-Type": "image/png"})
         return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
-    headers_out = _merge_no_store_headers(headers or {})
-    headers_out["X-Telegram-Upstream-Status"] = str(status_code)
+    headers_out = _tg_cache_headers(status_code)
+    for name, value in (headers or {}).items():
+        if name.lower() == "content-type" and value:
+            headers_out.setdefault("Content-Type", value)
     if not body_bytes:
         if detail_from_json:
             body_bytes = json.dumps({"detail": detail_from_json}, ensure_ascii=False).encode("utf-8")

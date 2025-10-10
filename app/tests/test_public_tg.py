@@ -45,7 +45,7 @@ def test_connect_tg_renders(monkeypatch):
     body = response.text
     assert "Подключение Telegram" in body
     assert "window.__tgConnectConfig" in body
-    assert '"tenant": "7"' in body
+    assert '"tenant": 7' in body
     assert '"key": "abc123"' in body
     assert "Test Brand" in body
     assert "Persona" in body
