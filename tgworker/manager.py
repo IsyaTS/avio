@@ -15,7 +15,7 @@ import qrcode
 from prometheus_client import Counter, Gauge
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, RPCError
-from telethon.errors.rpcerrorlist import PasswordHashInvalidError
+from telethon.errors.rpcerrorlist import PasswordHashInvalidError, AuthKeyUnregisteredError
 
 
 LOGGER = logging.getLogger("tgworker")
@@ -370,7 +370,7 @@ class TelegramSessionManager:
             if result_state is None and not need_new_qr:
                 result_state = state
 
-            if state.twofa_pending:
+            if state.twofa_pending and not force:
                 state.can_restart = False
                 result_state = state
                 need_new_qr = False
@@ -385,51 +385,63 @@ class TelegramSessionManager:
                     tasks_to_cancel.append(task)
 
                 client = self._build_client(tenant)
-                await client.connect()
-                self._clients[tenant] = client
-
-                qr_login = await client.qr_login()
-                png = self._build_qr_png(qr_login.url)
-                qr_id = secrets.token_urlsafe(16)
-
-                qr_expires_at = time.time() + 180.0
-                expires_raw = getattr(qr_login, "expires", None)
-                if isinstance(expires_raw, (int, float)):
-                    qr_expires_at = float(expires_raw)
+                phase = "connect"
+                try:
+                    await client.connect()
+                    self._clients[tenant] = client
+                    phase = "qr_login"
+                    qr_login = await client.qr_login()
+                except AuthKeyUnregisteredError:
+                    await self._handle_authkey_unregistered(
+                        tenant, client, source=f"start_session_{phase}"
+                    )
+                    state = self._states.setdefault(
+                        tenant, SessionState(tenant_id=tenant)
+                    )
+                    result_state = state
+                    need_new_qr = False
                 else:
-                    try:
-                        qr_expires_at = float(expires_raw.timestamp())  # type: ignore[arg-type]
-                    except Exception:
-                        pass
+                    png = self._build_qr_png(qr_login.url)
+                    qr_id = secrets.token_urlsafe(16)
 
-                state.status = "waiting_qr"
-                state.qr_id = qr_id
-                state.qr_png = png
-                state.qr_url = qr_login.url
-                state.qr_expires_at = qr_expires_at
-                state.qr_login = qr_login
-                state.last_error = None
-                state.needs_2fa = False
-                state.awaiting_password = False
-                state.needs_2fa_expires_at = None
-                state.can_restart = False
-                state.restart_pending = False
-                state.last_needs_2fa_at = None
-                state.last_seen = time.time()
-                state.twofa_pending = False
-                state.twofa_since = None
-                self._qr_lookup[qr_id] = tenant
-                LOGGER.info("stage=qr_start tenant_id=%s qr_id=%s", tenant, qr_id)
-                LOGGER.info(
-                    "event=qr_new tenant_id=%s qr_id=%s qr_valid_until=%s",
-                    tenant,
-                    qr_id,
-                    self._qr_valid_until_ms(state.qr_expires_at),
-                )
+                    qr_expires_at = time.time() + 180.0
+                    expires_raw = getattr(qr_login, "expires", None)
+                    if isinstance(expires_raw, (int, float)):
+                        qr_expires_at = float(expires_raw)
+                    else:
+                        try:
+                            qr_expires_at = float(expires_raw.timestamp())  # type: ignore[arg-type]
+                        except Exception:
+                            pass
 
-                state.waiting_task = None
-                self._update_metrics()
-                result_state = state
+                    state.status = "waiting_qr"
+                    state.qr_id = qr_id
+                    state.qr_png = png
+                    state.qr_url = qr_login.url
+                    state.qr_expires_at = qr_expires_at
+                    state.qr_login = qr_login
+                    state.last_error = None
+                    state.needs_2fa = False
+                    state.awaiting_password = False
+                    state.needs_2fa_expires_at = None
+                    state.can_restart = False
+                    state.restart_pending = False
+                    state.last_needs_2fa_at = None
+                    state.last_seen = time.time()
+                    state.twofa_pending = False
+                    state.twofa_since = None
+                    self._qr_lookup[qr_id] = tenant
+                    LOGGER.info("stage=qr_start tenant_id=%s qr_id=%s", tenant, qr_id)
+                    LOGGER.info(
+                        "event=qr_new tenant_id=%s qr_id=%s qr_valid_until=%s",
+                        tenant,
+                        qr_id,
+                        self._qr_valid_until_ms(state.qr_expires_at),
+                    )
+
+                    state.waiting_task = None
+                    self._update_metrics()
+                    result_state = state
 
         for task in tasks_to_cancel:
             task.cancel()
@@ -534,6 +546,10 @@ class TelegramSessionManager:
                 "stage=needs_2fa state=needs_2fa ttl=%ss tenant_id=%s",
                 int(NEEDS_2FA_TTL),
                 tenant,
+            )
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant, client, source="poll_login_loop"
             )
         except asyncio.TimeoutError:
             state.status = "disconnected"
@@ -732,7 +748,40 @@ class TelegramSessionManager:
 
         @client.on(events.NewMessage)
         async def _on_message(event):
-            await self._handle_new_message(tenant, client, event)
+            try:
+                await self._handle_new_message(tenant, client, event)
+            except asyncio.CancelledError:
+                raise
+            except AuthKeyUnregisteredError:
+                await self._handle_authkey_unregistered(
+                    tenant, client, source="on_message_wrapper"
+                )
+            except RPCError as exc:
+                error = str(exc) or "telegram_error"
+                EVENT_ERRORS.labels("event_rpc_error").inc()
+                LOGGER.error(
+                    "stage=event_handler_error tenant_id=%s source=on_message_wrapper error=%s",
+                    tenant,
+                    error,
+                )
+                await self._handle_event_disconnect(
+                    tenant,
+                    client,
+                    error=error,
+                    source="on_message_wrapper",
+                )
+            except Exception as exc:
+                EVENT_ERRORS.labels("event_exception").inc()
+                LOGGER.exception(
+                    "stage=event_handler_error tenant_id=%s source=on_message_wrapper",
+                    tenant,
+                )
+                await self._handle_event_disconnect(
+                    tenant,
+                    client,
+                    error=str(exc) or "event_handler_error",
+                    source="on_message_wrapper",
+                )
 
         client._avio_handlers_registered = True  # type: ignore[attr-defined]
 
@@ -744,31 +793,64 @@ class TelegramSessionManager:
         state.last_seen = time.time()
         self._update_metrics()
 
-        message = event.message
-        sender = await event.get_sender()
-        username = getattr(sender, "username", None) or getattr(event.chat, "username", None)
-        peer_id = None
         try:
-            if message.peer_id is not None:
-                peer_id = getattr(message.peer_id, "user_id", None) or getattr(message.peer_id, "channel_id", None)
-        except AttributeError:
-            peer_id = getattr(message, "sender_id", None)
+            message = event.message
+            sender = await event.get_sender()
+            username = getattr(sender, "username", None) or getattr(event.chat, "username", None)
+            peer_id = None
+            try:
+                if message.peer_id is not None:
+                    peer_id = getattr(message.peer_id, "user_id", None) or getattr(message.peer_id, "channel_id", None)
+            except AttributeError:
+                peer_id = getattr(message, "sender_id", None)
 
-        media_payload: Any = None
-        if message.media:
-            media_payload = {
-                "class": message.media.__class__.__name__,
+            media_payload: Any = None
+            if message.media:
+                media_payload = {
+                    "class": message.media.__class__.__name__,
+                }
+
+            payload = {
+                "tenant_id": tenant,
+                "user_id": peer_id,
+                "username": username,
+                "text": message.message or "",
+                "media": media_payload,
             }
-
-        payload = {
-            "tenant_id": tenant,
-            "user_id": peer_id,
-            "username": username,
-            "text": message.message or "",
-            "media": media_payload,
-        }
-        await self._send_webhook(payload)
-        LOGGER.info("stage=incoming tenant_id=%s peer_id=%s", tenant, peer_id)
+            await self._send_webhook(payload)
+            LOGGER.info("stage=incoming tenant_id=%s peer_id=%s", tenant, peer_id)
+        except asyncio.CancelledError:
+            raise
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant, client, source="handle_new_message"
+            )
+        except RPCError as exc:
+            error = str(exc) or "telegram_error"
+            EVENT_ERRORS.labels("event_rpc_error").inc()
+            LOGGER.error(
+                "stage=event_handler_error tenant_id=%s source=handle_new_message error=%s",
+                tenant,
+                error,
+            )
+            await self._handle_event_disconnect(
+                tenant,
+                client,
+                error=error,
+                source="handle_new_message",
+            )
+        except Exception as exc:
+            EVENT_ERRORS.labels("event_exception").inc()
+            LOGGER.exception(
+                "stage=event_handler_error tenant_id=%s source=handle_new_message",
+                tenant,
+            )
+            await self._handle_event_disconnect(
+                tenant,
+                client,
+                error=str(exc) or "event_handler_error",
+                source="handle_new_message",
+            )
 
     async def _send_webhook(self, payload: Dict[str, Any]) -> None:
         headers = {"Content-Type": "application/json"}
@@ -794,6 +876,9 @@ class TelegramSessionManager:
                     if state.twofa_since is None:
                         state.twofa_since = int(time.time() * 1000.0)
                     self._extend_needs_2fa_ttl(state)
+                if state.twofa_pending and state.qr_id:
+                    self._qr_lookup.pop(state.qr_id, None)
+                    self._clear_qr_state_locked(state)
             client = self._clients.get(tenant)
             is_active = bool(client and client.is_connected())
             if state.twofa_pending:
@@ -828,24 +913,122 @@ class TelegramSessionManager:
 
         return result
 
-    async def logout(self, tenant: int) -> None:
+    async def _soft_disconnect(
+        self,
+        tenant: int,
+        *,
+        client: Optional[TelegramClient] = None,
+        error: Optional[str] = None,
+        allow_restart: bool = True,
+        remove_session: bool = False,
+    ) -> bool:
+        task_to_cancel: Optional[asyncio.Task[Any]] = None
+        client_to_disconnect = client
+        extra_client: Optional[TelegramClient] = None
+        session_path: Optional[Path] = None
         async with self._lock:
-            state = self._states.get(tenant)
-            if state and state.waiting_task and not state.waiting_task.done():
-                state.waiting_task.cancel()
-            client = self._clients.pop(tenant, None)
-            if client is not None:
-                with contextlib.suppress(Exception):
-                    await client.log_out(revoke=False)
-                with contextlib.suppress(Exception):
-                    await client.disconnect()
-            state = SessionState(tenant_id=tenant, status="disconnected")
+            state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+            if state.waiting_task and not state.waiting_task.done():
+                task_to_cancel = state.waiting_task
+            state.waiting_task = None
+            if state.qr_id:
+                self._qr_lookup.pop(state.qr_id, None)
+            self._clear_qr_state_locked(state)
+            state.status = "disconnected"
+            state.last_error = error
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.needs_2fa_expires_at = None
+            state.restart_pending = False
+            state.last_needs_2fa_at = None
+            state.last_seen = time.time()
+            state.twofa_pending = False
+            state.twofa_since = None
+            state.qr_login = None
+            state.can_restart = allow_restart
+            stored_client = self._clients.pop(tenant, None)
+            if client_to_disconnect is None:
+                client_to_disconnect = stored_client
+            elif stored_client and stored_client is not client_to_disconnect:
+                extra_client = stored_client
             self._states[tenant] = state
-            path = self._sessions_dir / f"{tenant}.session"
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-            LOGGER.info("stage=logout tenant_id=%s", tenant)
             self._update_metrics()
+            if remove_session:
+                session_path = self._sessions_dir / f"{tenant}.session"
+
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_to_cancel
+
+        for instance in (client_to_disconnect, extra_client):
+            if instance is None:
+                continue
+            with contextlib.suppress(Exception):
+                await instance.disconnect()
+
+        removed_file = False
+        if session_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                session_path.unlink()
+                removed_file = True
+
+        return removed_file
+
+    async def _handle_event_disconnect(
+        self,
+        tenant: int,
+        client: TelegramClient,
+        *,
+        error: str,
+        source: str,
+        remove_session: bool = False,
+    ) -> None:
+        removed = await self._soft_disconnect(
+            tenant,
+            client=client,
+            error=error,
+            allow_restart=True,
+            remove_session=remove_session,
+        )
+        LOGGER.warning(
+            "stage=event_disconnect tenant_id=%s source=%s error=%s removed_session_file=%s",
+            tenant,
+            source,
+            error,
+            removed,
+        )
+
+    async def _handle_authkey_unregistered(
+        self, tenant: int, client: TelegramClient, *, source: str
+    ) -> None:
+        EVENT_ERRORS.labels("authkey_unregistered").inc()
+        removed = await self._soft_disconnect(
+            tenant,
+            client=client,
+            error="authkey_unregistered",
+            allow_restart=True,
+            remove_session=True,
+        )
+        LOGGER.warning(
+            "stage=authkey_unregistered tenant_id=%s source=%s removed_session_file=%s",
+            tenant,
+            source,
+            removed,
+        )
+
+    async def logout(self, tenant: int) -> None:
+        removed = await self._soft_disconnect(
+            tenant,
+            error=None,
+            allow_restart=True,
+            remove_session=True,
+        )
+        LOGGER.info(
+            "stage=logout tenant_id=%s removed_session_file=%s",
+            tenant,
+            removed,
+        )
 
     async def send_message(
         self,
