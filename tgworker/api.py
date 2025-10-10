@@ -183,6 +183,8 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "invalid_password"}, status_code=400, headers=cache_headers)
             if message == "password_required":
                 return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
+            if message == "twofa_timeout":
+                return JSONResponse({"error": "twofa_timeout"}, status_code=409, headers=cache_headers)
             if message == "session_not_found":
                 raise HTTPException(status_code=404, detail="session_not_found") from exc
             if message == "password_not_required":

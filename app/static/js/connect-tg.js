@@ -26,6 +26,9 @@
     const twofaPassword = document.getElementById('tg-2fa-password');
     const twofaError = document.getElementById('tg-2fa-error');
     const twofaSubmit = document.getElementById('tg-2fa-submit');
+    const newQrBlock = document.getElementById('tg-new-qr-block');
+    const newQrMessage = document.getElementById('tg-new-qr-message');
+    const newQrButton = document.getElementById('tg-new-qr-button');
 
     if (!tenant || !key) {
       if (statusEl) {
@@ -54,6 +57,8 @@
     let qrValidUntilMs = 0;
     let authorized = false;
     let lastQrId = '';
+    let inTwoFA = false;
+    let manualRestartAllowed = true;
 
     function buildUrl(basePath, extraParams) {
       let target;
@@ -126,6 +131,22 @@
       statusEl.textContent = text || '';
     }
 
+    function updateControls() {
+      if (refreshButton) {
+        refreshButton.disabled = startInFlight || inTwoFA;
+      }
+      if (newQrButton) {
+        newQrButton.disabled = startInFlight || !manualRestartAllowed;
+      }
+    }
+
+    function clearQrImage() {
+      if (qrImage) {
+        qrImage.removeAttribute('src');
+        qrImage.style.display = 'none';
+      }
+    }
+
     function showQrBlock() {
       if (qrBlock) {
         qrBlock.style.display = '';
@@ -142,16 +163,12 @@
       if (resetId) {
         lastQrId = '';
       }
-      if (qrImage) {
-        if (resetId) {
-          qrImage.removeAttribute('src');
-        }
-        qrImage.style.display = 'none';
-      }
+      clearQrImage();
       if (qrPlaceholder) {
         qrPlaceholder.textContent = text || '';
         qrPlaceholder.style.display = text ? '' : 'none';
       }
+      hideNewQr();
       showQrBlock();
     }
 
@@ -173,6 +190,7 @@
       if (qrPlaceholder) {
         qrPlaceholder.style.display = 'none';
       }
+      hideNewQr();
       showQrBlock();
     }
 
@@ -189,6 +207,7 @@
           twofaError.style.display = 'none';
         }
       }
+      hideNewQr();
       if (twofaPassword) {
         window.setTimeout(() => {
           try {
@@ -210,6 +229,31 @@
       }
     }
 
+    function showNewQr(message) {
+      if (newQrMessage) {
+        if (message) {
+          newQrMessage.textContent = message;
+          newQrMessage.style.display = '';
+        } else {
+          newQrMessage.textContent = '';
+          newQrMessage.style.display = 'none';
+        }
+      }
+      if (newQrBlock) {
+        newQrBlock.style.display = '';
+      }
+    }
+
+    function hideNewQr() {
+      if (newQrBlock) {
+        newQrBlock.style.display = 'none';
+      }
+      if (newQrMessage) {
+        newQrMessage.textContent = '';
+        newQrMessage.style.display = 'none';
+      }
+    }
+
     function parseValidUntil(value) {
       const num = Number(value);
       if (!Number.isFinite(num) || num <= 0) {
@@ -225,6 +269,9 @@
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
       const qrId = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
       const needsTwofa = status === 'needs_2fa' || data.needs_2fa === true || data.twofa_pending === true;
+      const waitingQr = status === 'waiting_qr';
+      const canRestart = data.can_restart === true;
+      const twofaTimeout = status === 'twofa_timeout' || lastError === 'twofa_timeout';
 
       if ('qr_valid_until' in data) {
         const parsed = parseValidUntil(data.qr_valid_until);
@@ -235,6 +282,10 @@
 
       if (status === 'authorized') {
         authorized = true;
+        inTwoFA = false;
+        manualRestartAllowed = true;
+        updateControls();
+        hideNewQr();
         setStatus('Подключено', 'success');
         hideQrBlock();
         hideTwofa();
@@ -244,22 +295,54 @@
       authorized = false;
 
       if (needsTwofa) {
+        manualRestartAllowed = false;
+        inTwoFA = true;
+        updateControls();
         lastQrId = '';
-        if (qrImage) {
-          qrImage.removeAttribute('src');
-          qrImage.style.display = 'none';
-        }
+        clearQrImage();
         if (qrPlaceholder) {
           qrPlaceholder.textContent = '';
           qrPlaceholder.style.display = 'none';
         }
         hideQrBlock();
-        showTwofa('');
-        setStatus('NEED_2FA', 'alert');
+        const twofaMessage = lastError === 'invalid_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
+        showTwofa(twofaMessage);
+        setStatus('Требуется пароль 2FA', 'alert');
+        outcome.pollDelay = Math.max(4000, POLL_INTERVAL);
         return outcome;
       }
 
+      const twofaWindowExpired = twofaTimeout || (waitingQr && inTwoFA);
+      if (twofaWindowExpired) {
+        manualRestartAllowed = !!canRestart;
+        inTwoFA = true;
+        updateControls();
+        lastQrId = '';
+        clearQrImage();
+        if (qrPlaceholder) {
+          qrPlaceholder.textContent = '';
+          qrPlaceholder.style.display = 'none';
+        }
+        hideQrBlock();
+        hideTwofa();
+        if (twofaPassword) {
+          twofaPassword.value = '';
+        }
+        const message = canRestart
+          ? 'Срок ожидания 2FA истёк. Получите новый QR-код.'
+          : 'Срок ожидания 2FA истёк. Обратитесь к администратору для перезапуска.';
+        showNewQr(message);
+        setStatus('Срок ожидания пароля 2FA истёк. Нажмите «Новый QR».', 'alert');
+        outcome.pollDelay = Math.max(6000, POLL_INTERVAL);
+        return outcome;
+      }
+
+      manualRestartAllowed = true;
+      inTwoFA = false;
+      updateControls();
       hideTwofa();
+      hideNewQr();
+
       if (qrId) {
         updateQrImage(qrId);
       } else {
@@ -302,7 +385,7 @@
         }
         return;
       }
-      if (outcome.forceRefresh && !startInFlight) {
+      if (outcome.forceRefresh && !startInFlight && !inTwoFA) {
         startSession(true, outcome.forceReason || 'status');
         return;
       }
@@ -317,11 +400,12 @@
       if (startInFlight) {
         return;
       }
-      startInFlight = true;
-      stopPolling();
-      if (refreshButton) {
-        refreshButton.disabled = true;
+      if (inTwoFA && !force) {
+        return;
       }
+      startInFlight = true;
+      updateControls();
+      stopPolling();
       if (!authorized) {
         showPlaceholder(force ? 'Готовим новый QR…' : 'Готовим QR-код…', true);
         setStatus('Запрашиваем QR…', 'muted');
@@ -359,9 +443,7 @@
         showPlaceholder('Не удалось запросить QR. Попробуйте позже.', true);
       } finally {
         startInFlight = false;
-        if (refreshButton) {
-          refreshButton.disabled = false;
-        }
+        updateControls();
       }
 
       if (errorOccurred) {
@@ -428,6 +510,23 @@
       });
     }
 
+    if (newQrButton) {
+      newQrButton.addEventListener('click', () => {
+        if (startInFlight) {
+          return;
+        }
+        inTwoFA = false;
+        if (twofaPassword) {
+          twofaPassword.value = '';
+        }
+        hideTwofa();
+        hideNewQr();
+        updateControls();
+        showPlaceholder('Готовим новый QR…', true);
+        startSession(true, 'twofa-reset');
+      });
+    }
+
     if (qrImage) {
       qrImage.addEventListener('error', () => {
         if (!authorized) {
@@ -442,8 +541,11 @@
         if (!twofaPassword) {
           return;
         }
-        const password = twofaPassword.value.trim();
-        if (!password) {
+        const rawPassword = twofaPassword.value || '';
+        if (!rawPassword.trim()) {
+          manualRestartAllowed = false;
+          inTwoFA = true;
+          updateControls();
           showTwofa('Введите пароль.');
           return;
         }
@@ -455,34 +557,70 @@
             method: 'POST',
             cache: 'no-store',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password }),
+            body: JSON.stringify({ password: rawPassword }),
           });
-          if (response.status === 400) {
-            let message = 'Неверный пароль. Попробуйте ещё раз.';
-            try {
-              const errorBody = await response.json();
-              if (errorBody && typeof errorBody === 'object') {
-                if (errorBody.error === 'invalid_password') {
-                  message = 'Неверный пароль. Попробуйте ещё раз.';
-                } else if (errorBody.detail) {
-                  message = String(errorBody.detail);
-                }
-              }
-            } catch (err) {
-              /* noop */
-            }
-            showTwofa(message);
+          let payload = null;
+          try {
+            payload = await response.json();
+          } catch (err) {
+            payload = null;
+          }
+          if (response.ok) {
+            manualRestartAllowed = true;
+            inTwoFA = false;
+            updateControls();
+            hideTwofa();
+            hideNewQr();
+            clearQrImage();
+            hideQrBlock();
+            twofaPassword.value = '';
+            setStatus('Подключено', 'success');
+            pollStatus();
             return;
           }
-          if (!response.ok) {
-            throw new Error(`tg_password_${response.status}`);
+          const errorData = payload && typeof payload === 'object' ? payload : null;
+          const errorCode = errorData && typeof errorData.error === 'string' ? errorData.error : '';
+          if (errorCode === 'invalid_password') {
+            manualRestartAllowed = false;
+            inTwoFA = true;
+            updateControls();
+            showTwofa('Неверный пароль. Попробуйте ещё раз.');
+            setStatus('Неверный пароль. Попробуйте ещё раз.', 'alert');
+            return;
           }
-          showTwofa('');
-          twofaPassword.value = '';
-          setStatus('Пароль отправлен. Проверяем статус…', 'muted');
-          pollStatus();
+          if (errorCode === 'twofa_timeout') {
+            manualRestartAllowed = true;
+            inTwoFA = true;
+            updateControls();
+            hideTwofa();
+            twofaPassword.value = '';
+            showNewQr('Срок ожидания 2FA истёк. Получите новый QR-код.');
+            setStatus('Срок ожидания пароля 2FA истёк. Нажмите «Новый QR».', 'alert');
+            return;
+          }
+          if (errorCode === 'password_required') {
+            manualRestartAllowed = false;
+            inTwoFA = true;
+            updateControls();
+            showTwofa('Введите пароль.');
+            return;
+          }
+          if (errorData && typeof errorData.detail === 'string') {
+            manualRestartAllowed = false;
+            inTwoFA = true;
+            updateControls();
+            showTwofa(errorData.detail);
+            return;
+          }
+          manualRestartAllowed = false;
+          inTwoFA = true;
+          updateControls();
+          showTwofa('Не удалось отправить пароль. Попробуйте ещё раз.');
         } catch (error) {
           console.error('[tg-connect] password error', error);
+          manualRestartAllowed = false;
+          inTwoFA = true;
+          updateControls();
           showTwofa('Не удалось отправить пароль. Попробуйте ещё раз.');
         } finally {
           if (twofaSubmit) {
@@ -492,6 +630,7 @@
       });
     }
 
+    updateControls();
     showPlaceholder('Готовим QR-код…', true);
     startSession(false, 'initial');
   }
