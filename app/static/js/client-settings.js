@@ -476,6 +476,21 @@ try {
   let qrImageReloadPending = false;
   const HIDDEN_CLASS = 'hidden';
 
+  function toBoolean(value) {
+    if (value === true) return true;
+    if (value === false || value == null) return false;
+    if (typeof value === 'number') {
+      if (Number.isNaN(value)) return false;
+      return value !== 0;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (!normalized) return false;
+      return ['1', 'true', 'yes', 'on'].includes(normalized);
+    }
+    return false;
+  }
+
   function showElement(element) {
     if (!element) return;
     element.classList.remove(HIDDEN_CLASS);
@@ -706,9 +721,9 @@ try {
     const normalized = rawStatus.toLowerCase();
     const qrId = data && data.qr_id ? String(data.qr_id) : '';
     const needsTwoFactor = Boolean(
-      (data && data.needs_2fa === true)
-      || (data && data.twofa_pending === true)
-      || rawStatus === 'needs_2fa',
+      rawStatus === 'needs_2fa'
+      || toBoolean(data && data.needs_2fa)
+      || toBoolean(data && data.twofa_pending),
     );
     const lastError = data && typeof data.last_error === 'string' ? data.last_error : '';
     const showNewQrButton = normalized === 'disconnected'
@@ -1389,7 +1404,7 @@ try {
         }
         const normalizedDetail = (detail || '').trim().toLowerCase();
         let message = (detail || `Ошибка подтверждения (HTTP ${response.status})`).trim() || 'Не удалось подтвердить пароль';
-        if (response.status === 400 && normalizedDetail === 'invalid_password') {
+        if ((response.status === 400 || response.status === 401) && normalizedDetail === 'invalid_password') {
           message = 'Неверный пароль';
         }
         updatePasswordStatus(message, 'alert');
