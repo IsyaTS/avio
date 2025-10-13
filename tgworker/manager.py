@@ -70,6 +70,13 @@ class QRExpiredError(Exception):
 
 
 @dataclass(slots=True)
+class CachedQR:
+    tenant_id: int
+    png: bytes
+    expires_at: Optional[float] = None
+
+
+@dataclass(slots=True)
 class SessionState:
     tenant_id: int
     status: str = "disconnected"
@@ -135,6 +142,7 @@ class TelegramSessionManager:
         self._clients: Dict[int, TelegramClient] = {}
         self._states: Dict[int, SessionState] = {}
         self._qr_lookup: Dict[str, int] = {}
+        self._qr_cache: Dict[str, CachedQR] = {}
         self._expired_qr: Dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._loop = asyncio.get_event_loop()
@@ -185,6 +193,15 @@ class TelegramSessionManager:
         ]
         for qr_id in stale_keys:
             self._expired_qr.pop(qr_id, None)
+        now = time.time()
+        expired_cached = [
+            qr_id
+            for qr_id, cached in list(self._qr_cache.items())
+            if cached.expires_at and cached.expires_at <= now
+        ]
+        for qr_id in expired_cached:
+            self._qr_cache.pop(qr_id, None)
+            self._qr_lookup.pop(qr_id, None)
 
     def _ensure_session_permissions(self, path: Path) -> None:
         try:
@@ -255,6 +272,9 @@ class TelegramSessionManager:
             self._qr_valid_until_ms(valid_until),
             reason,
         )
+        if reason in {"needs_2fa", "timeout", "expired"}:
+            self._qr_cache.pop(qr_id, None)
+            self._qr_lookup.pop(qr_id, None)
 
     @staticmethod
     def _clear_qr_state_locked(state: SessionState) -> None:
@@ -298,6 +318,7 @@ class TelegramSessionManager:
         ):
             client = self._clients.pop(tenant, None)
             if state.qr_id:
+                self._qr_cache.pop(state.qr_id, None)
                 self._qr_lookup.pop(state.qr_id, None)
             self._set_status(tenant, state, "disconnected", reason="twofa_timeout")
             state.needs_2fa = False
@@ -701,6 +722,11 @@ class TelegramSessionManager:
 
                     state.waiting_task = None
                     self._update_metrics()
+                    self._qr_cache[qr_id] = CachedQR(
+                        tenant_id=tenant,
+                        png=png,
+                        expires_at=state.qr_expires_at,
+                    )
                     result_state = state
             else:
                 self._update_metrics()
@@ -1565,18 +1591,42 @@ class TelegramSessionManager:
             raise QRNotFoundError(qr_id)
         return tenant, state
 
-    def get_qr_png(self, qr_id: str) -> bytes:
-        tenant, state = self._resolve_qr_state(qr_id)
+    def get_qr_png(self, qr_id: str, tenant: int | None = None) -> bytes:
+        cached = self._qr_cache.get(qr_id)
+        if cached is not None:
+            if tenant is not None and cached.tenant_id != tenant:
+                raise QRNotFoundError(qr_id)
+            expires_at = cached.expires_at
+            if expires_at and expires_at <= time.time():
+                self._qr_cache.pop(qr_id, None)
+                state = self._states.get(cached.tenant_id)
+                if state is not None and state.qr_id == qr_id:
+                    self._expire_qr_locked(cached.tenant_id, state, reason="timeout")
+                else:
+                    self._record_qr_expired(
+                        cached.tenant_id, qr_id, expires_at, reason="expired"
+                    )
+                raise QRExpiredError(expires_at)
+            return cached.png
+
+        tenant_id, state = self._resolve_qr_state(qr_id)
+        if tenant is not None and tenant_id != tenant:
+            raise QRNotFoundError(qr_id)
         if state.qr_expires_at and state.qr_expires_at <= time.time():
             valid_until = state.qr_expires_at
-            self._expire_qr_locked(tenant, state, reason="timeout")
+            self._expire_qr_locked(tenant_id, state, reason="timeout")
             if not state.restart_pending:
                 state.restart_pending = True
             state.can_restart = True
-            LOGGER.info("stage=qr_expired tenant_id=%s reason=qr_fetch", tenant)
+            LOGGER.info("stage=qr_expired tenant_id=%s reason=qr_fetch", tenant_id)
             raise QRExpiredError(valid_until)
         if not state.qr_png:
             raise QRNotFoundError(qr_id)
+        self._qr_cache[qr_id] = CachedQR(
+            tenant_id=tenant_id,
+            png=state.qr_png,
+            expires_at=state.qr_expires_at,
+        )
         return state.qr_png
 
     def get_qr_url(self, qr_id: str) -> str:

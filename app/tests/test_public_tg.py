@@ -102,7 +102,9 @@ def test_tg_status_success(monkeypatch):
     app = _base_app(monkeypatch)
     called = {"status": []}
 
-    async def _fake_get(path: str, payload: dict | None = None, timeout: float = 8.0):
+    async def _fake_get(
+        path: str, payload: dict | None = None, timeout: float = 8.0, stream: bool = False
+    ):
         called["status"].append((path, payload, timeout))
         body = {
             "status": "waiting_qr",
@@ -227,19 +229,31 @@ def test_tg_password_error_passthrough(monkeypatch, tenant_id, status_code, body
         assert response.headers.get("retry-after") == headers.get("Retry-After")
 
 
-def test_tg_qr_png_proxy(monkeypatch):
+def test_tg_qr_passthrough_png(monkeypatch):
     app = _base_app(monkeypatch)
 
-    async def _fake_get(path: str, payload: dict | None = None, timeout: float = 8.0):
-        assert path == "/session/qr/qr-1.png"
-        assert payload is None
-        assert timeout == 5.0
+    captured: dict[str, object] = {}
+
+    async def _fake_get(
+        path: str,
+        payload: dict | None = None,
+        timeout: float = 8.0,
+        stream: bool = False,
+    ):
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        captured["stream"] = stream
         return httpx.Response(200, content=b"png-bytes", headers={"Content-Type": "image/png"})
 
     monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
 
     client = TestClient(app)
-    resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
+    resp = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 11, "qr_id": "qr-1"},
+        headers={"X-Admin-Token": "admin-token"},
+    )
 
     assert resp.status_code == 200
     cache_header = resp.headers.get("cache-control", "")
@@ -247,28 +261,73 @@ def test_tg_qr_png_proxy(monkeypatch):
     assert resp.headers.get("x-telegram-upstream-status") == "200"
     assert resp.headers.get("content-type") == "image/png"
     assert resp.content == b"png-bytes"
+    assert captured["path"] == "/rpc/qr.png"
+    assert captured["payload"] == {"tenant": 11, "qr_id": "qr-1"}
+    assert captured["timeout"] == 5.0
+    assert captured["stream"] is True
 
 
 def test_tg_qr_png_expired(monkeypatch):
     app = _base_app(monkeypatch)
 
-    async def _fake_get(path: str, payload: dict | None = None, timeout: float = 8.0):
-        assert path == "/session/qr/qr-1.png"
-        assert payload is None
+    async def _fake_get(
+        path: str,
+        payload: dict | None = None,
+        timeout: float = 8.0,
+        stream: bool = False,
+    ):
+        assert path == "/rpc/qr.png"
+        assert payload == {"tenant": 11, "qr_id": "qr-1"}
         assert timeout == 5.0
+        assert stream is True
         payload_bytes = json.dumps({"error": "qr_expired"}).encode("utf-8")
         return httpx.Response(404, content=payload_bytes, headers={"Content-Type": "application/json"})
 
     monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
 
     client = TestClient(app)
-    resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
+    resp = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 11, "qr_id": "qr-1"},
+        headers={"X-Admin-Token": "admin-token"},
+    )
 
     assert resp.status_code == 404
     assert resp.json() == {"error": "qr_expired"}
     cache_header = resp.headers.get("cache-control", "")
     assert cache_header.startswith("no-store")
     assert resp.headers.get("x-telegram-upstream-status") == "404"
+
+
+def test_tg_qr_png_gone(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    async def _fake_get(
+        path: str,
+        payload: dict | None = None,
+        timeout: float = 8.0,
+        stream: bool = False,
+    ):
+        assert path == "/rpc/qr.png"
+        assert payload == {"tenant": 12, "qr_id": "qr-expired"}
+        assert timeout == 5.0
+        assert stream is True
+        body = json.dumps({"error": "qr_expired"}).encode("utf-8")
+        return httpx.Response(410, content=body, headers={"Content-Type": "application/json"})
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
+
+    client = TestClient(app)
+    resp = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 12, "qr_id": "qr-expired"},
+        headers={"X-Admin-Token": "admin-token"},
+    )
+
+    assert resp.status_code == 410
+    assert resp.json() == {"error": "qr_expired"}
+    assert resp.headers.get("x-telegram-upstream-status") == "410"
+    assert resp.headers.get("content-type") == "application/json"
 
 
 def test_tg_qr_txt_proxy(monkeypatch):

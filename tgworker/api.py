@@ -149,6 +149,27 @@ def create_app() -> FastAPI:
         payload["stats"] = stats
         return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
 
+    @app.get("/rpc/qr.png")
+    async def rpc_qr_png(
+        tenant: int = Query(..., ge=1), qr_id: str = Query(..., min_length=1)
+    ):
+        try:
+            blob = manager.get_qr_png(qr_id, tenant=tenant)
+        except QRExpiredError:
+            return JSONResponse(
+                {"error": "qr_expired"},
+                status_code=410,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        except QRNotFoundError:
+            return JSONResponse(
+                {"error": "qr_not_found"},
+                status_code=404,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        headers = dict(NO_STORE_HEADERS)
+        return Response(content=blob, media_type="image/png", headers=headers)
+
     @app.get("/session/qr/{qr_id}.png")
     async def session_qr(qr_id: str):
         try:
