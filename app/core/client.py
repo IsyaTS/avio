@@ -5,7 +5,9 @@ from typing import Any, Mapping
 
 import httpx
 
-_DEFAULT_BASE = "http://tgworker:8085"
+from config import tg_worker_url
+
+_MAX_TIMEOUT = 5.0
 
 
 class TGWorkerError(Exception):
@@ -18,8 +20,11 @@ class TGWorkerConnectionError(TGWorkerError):
 
 def _base_url() -> str:
     raw = os.getenv("TGWORKER_URL") or os.getenv("TG_WORKER_URL")
-    candidate = (raw or _DEFAULT_BASE).strip()
-    return candidate.rstrip("/") or _DEFAULT_BASE
+    if raw:
+        candidate = raw.strip()
+        if candidate:
+            return candidate.rstrip("/")
+    return tg_worker_url()
 
 
 def _resolve_url(path: str) -> str:
@@ -33,10 +38,31 @@ def _resolve_url(path: str) -> str:
     return f"{_base_url()}{path}"
 
 
+def _clamp_timeout(value: float | None) -> float:
+    try:
+        numeric = float(value) if value is not None else _MAX_TIMEOUT
+    except (TypeError, ValueError):
+        numeric = _MAX_TIMEOUT
+    if numeric <= 0:
+        return _MAX_TIMEOUT
+    return min(numeric, _MAX_TIMEOUT)
+
+
 def _http_timeout(value: float | httpx.Timeout | None) -> httpx.Timeout:
     if isinstance(value, httpx.Timeout):
-        return value
-    total = float(value) if value is not None else 5.0
+        total = _clamp_timeout(getattr(value, "total", None))
+        connect = _clamp_timeout(getattr(value, "connect", None))
+        read = _clamp_timeout(getattr(value, "read", None))
+        write = _clamp_timeout(getattr(value, "write", None))
+        pool = getattr(value, "pool", None)
+        return httpx.Timeout(
+            total=total,
+            connect=min(connect, total),
+            read=min(read, total),
+            write=min(write, total),
+            pool=pool,
+        )
+    total = _clamp_timeout(value if isinstance(value, (int, float)) else None)
     connect = min(3.0, total)
     return httpx.Timeout(total=total, connect=connect, read=total)
 

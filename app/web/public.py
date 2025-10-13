@@ -89,20 +89,6 @@ def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     if extra:
         headers.update(extra)
     return headers
-
-
-def _tg_cache_headers(status_code: int | str, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    headers: dict[str, str] = {
-        "Cache-Control": "no-store",
-        "X-Telegram-Upstream-Status": str(status_code),
-        "Pragma": "no-cache",
-        "Expires": "0",
-    }
-    if extra:
-        headers.update(extra)
-    return headers
-
-
 def _stringify_detail(value: bytes | bytearray | str | None) -> str:
     if value is None:
         return ""
@@ -828,6 +814,115 @@ def require_client_key(
     return tenant_id, key
 
 
+def _normalize_public_token(value: str | None) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _admin_token_valid(request: Request) -> bool:
+    token = request.headers.get("X-Admin-Token")
+    return bool(token) and token == settings.ADMIN_TOKEN
+
+
+def _has_public_tg_access(request: Request, key_candidate: str | None) -> bool:
+    if _admin_token_valid(request):
+        return True
+    expected = _normalize_public_token(getattr(settings, "PUBLIC_KEY", ""))
+    if not expected:
+        return False
+    provided = _normalize_public_token(key_candidate)
+    return provided == expected
+
+
+def _invalid_tenant_response(
+    route: str,
+    tenant_candidate: int | str | None,
+    *,
+    force: bool | None = None,
+) -> JSONResponse:
+    _log_tg_proxy(route, tenant_candidate, 400, None, error="invalid_tenant", force=force)
+    return JSONResponse({"error": "invalid_tenant"}, status_code=400, headers=_no_store_headers())
+
+
+def _unauthorized_response(
+    route: str,
+    tenant_id: int | str | None,
+    *,
+    force: bool | None = None,
+) -> JSONResponse:
+    _log_tg_proxy(route, tenant_id, 401, None, error="unauthorized", force=force)
+    return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_no_store_headers())
+
+
+def _tg_unavailable_response(
+    route: str,
+    tenant_id: int | str | None,
+    detail: str | Exception | None,
+    *,
+    force: bool | None = None,
+) -> JSONResponse:
+    detail_text = _stringify_detail(str(detail)) if detail not in (None, "") else "tg_unavailable"
+    if not detail_text:
+        detail_text = "tg_unavailable"
+    _log_tg_proxy(route, tenant_id, 0, None, error=detail_text, force=force)
+    headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
+    body: dict[str, Any] = {"error": "tg_unavailable"}
+    if detail_text and detail_text != "tg_unavailable":
+        body["detail"] = detail_text
+    return JSONResponse(body, status_code=502, headers=headers)
+
+
+_UPSTREAM_HEADER_MAP = {"content-type": "Content-Type", "retry-after": "Retry-After"}
+
+
+def _passthrough_upstream_response(
+    route: str,
+    tenant_id: int | str | None,
+    upstream: Any,
+    *,
+    success_content_type: str | None = "application/json",
+    error_content_type: str | None = "application/json",
+    include_no_store: bool = True,
+    force: bool | None = None,
+) -> Response:
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    if 200 <= status_code < 300:
+        detail = None
+    else:
+        detail = (
+            _stringify_detail(body_bytes)
+            or _stringify_detail(getattr(upstream, "text", ""))
+            or f"status_{status_code}"
+        )
+    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail, force=force)
+
+    if status_code <= 0:
+        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
+
+    headers: dict[str, str] = {}
+    if include_no_store:
+        headers.update(_no_store_headers())
+    headers["X-Telegram-Upstream-Status"] = str(status_code)
+
+    upstream_headers = getattr(upstream, "headers", {}) or {}
+    for name, value in upstream_headers.items():
+        if not value:
+            continue
+        lowered = name.lower()
+        mapped = _UPSTREAM_HEADER_MAP.get(lowered)
+        if mapped:
+            headers[mapped] = value
+
+    default_content_type = success_content_type if 200 <= status_code < 300 else error_content_type
+    if default_content_type and "Content-Type" not in headers:
+        headers["Content-Type"] = default_content_type
+
+    return Response(content=body_bytes, status_code=status_code, headers=headers)
+
+
 def _proxy_headers(headers: Mapping[str, str] | None, status_code: int) -> dict[str, str]:
     allowed = {"content-type", "cache-control"}
     result: dict[str, str] = {}
@@ -883,170 +978,33 @@ async def tg_start(
     k: str | None = None,
     key: str | None = None,
 ):
-    initial_force_flag = _parse_force_flag(request.query_params.get("force"))
+    route = "/pub/tg/start"
+    force_flag = bool(_parse_force_flag(request.query_params.get("force")))
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-    validation = require_client_key(tenant_candidate, key_candidate)
-    if isinstance(validation, Response):
-        tenant_for_log: int | str | None = tenant_candidate
-        try:
-            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
-        except Exception:
-            tenant_for_log = tenant_candidate
-        _log_tg_proxy(
-            "/pub/tg/start",
-            tenant_for_log,
-            getattr(validation, "status_code", 401),
-            None,
-            error="invalid_key",
-            force=initial_force_flag,
-        )
-        return validation
+    try:
+        tenant_id = _coerce_tenant(tenant_candidate)
+    except ValueError:
+        return _invalid_tenant_response(route, tenant_candidate, force=force_flag)
 
-    tenant_id, _ = validation
-    force_flag = bool(initial_force_flag)
-
-    if not force_flag:
-        try:
-            status_response = await C.tg_get(
-                "/session/status",
-                {"tenant": tenant_id},
-                timeout=5.0,
-            )
-        except C.TGWorkerConnectionError as exc:
-            detail_text = str(exc) or "tg_unavailable"
-            _log_tg_proxy(
-                "/pub/tg/start",
-                tenant_id,
-                0,
-                None,
-                error=detail_text,
-                force=force_flag,
-            )
-            fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-            return JSONResponse(
-                {"error": "tg_unavailable", "detail": detail_text},
-                status_code=502,
-                headers=fail_headers,
-            )
-        except Exception as exc:
-            detail_text = str(exc) or "tg_unavailable"
-            _log_tg_proxy(
-                "/pub/tg/start",
-                tenant_id,
-                0,
-                None,
-                error=detail_text,
-                force=force_flag,
-            )
-            fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-            return JSONResponse(
-                {"error": "tg_unavailable", "detail": detail_text},
-                status_code=502,
-                headers=fail_headers,
-            )
-
-        status_code = int(getattr(status_response, "status_code", 0) or 0)
-        status_body_bytes = bytes(getattr(status_response, "content", b"") or b"")
-        status_headers = getattr(status_response, "headers", {}) or {}
-
-        if status_code <= 0:
-            detail = _stringify_detail(status_body_bytes) or "tg_unavailable"
-            _log_tg_proxy(
-                "/pub/tg/start",
-                tenant_id,
-                status_code,
-                status_body_bytes,
-                error=detail,
-                force=force_flag,
-            )
-            headers = _no_store_headers(
-                {"X-Telegram-Upstream-Status": str(status_code or "-")}
-            )
-            return JSONResponse(
-                {"error": "tg_unavailable"},
-                status_code=502,
-                headers=headers,
-            )
-
-        parsed_status: Any
-        try:
-            parsed_status = status_response.json()
-        except Exception:
-            parsed_status = None
-        twofa_pending_now = False
-        if isinstance(parsed_status, dict):
-            twofa_pending_now = _truthy_flag(parsed_status.get("twofa_pending"))
-        if twofa_pending_now and not force_flag:
-            _log_tg_proxy(
-                "/pub/tg/start",
-                tenant_id,
-                status_code,
-                status_body_bytes,
-                error=None,
-                force=False,
-            )
-            headers = _proxy_headers(status_headers, status_code)
-            headers.update(_no_store_headers())
-            return Response(
-                content=status_body_bytes,
-                status_code=status_code,
-                headers=headers,
-            )
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response(route, tenant_id, force=force_flag)
 
     payload = {"tenant_id": tenant_id, "force": force_flag}
-
     try:
-        upstream = await C.tg_post(
-            "/session/start",
-            payload,
-            timeout=5.0,
-        )
+        upstream = await C.tg_post("/rpc/start", payload, timeout=5.0)
     except C.TGWorkerConnectionError as exc:
-        detail_text = str(exc) or "tg_unavailable"
-        _log_tg_proxy(
-            "/pub/tg/start",
-            tenant_id,
-            0,
-            None,
-            error=detail_text,
-            force=force_flag,
-        )
-        return JSONResponse(
-            {"error": "tg_unavailable", "detail": detail_text},
-            status_code=502,
-            headers=_no_store_headers(),
-        )
+        return _tg_unavailable_response(route, tenant_id, exc, force=force_flag)
     except Exception as exc:
-        detail_text = str(exc) or "tg_unavailable"
-        _log_tg_proxy(
-            "/pub/tg/start",
-            tenant_id,
-            0,
-            None,
-            error=detail_text,
-            force=force_flag,
-        )
-        return JSONResponse(
-            {"error": "tg_unavailable", "detail": detail_text},
-            status_code=502,
-            headers=_no_store_headers(),
-        )
+        return _tg_unavailable_response(route, tenant_id, exc, force=force_flag)
 
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    if 200 <= status_code < 300:
-        detail = None
-    else:
-        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
-
-    _log_tg_proxy("/pub/tg/start", tenant_id, status_code, body_bytes, error=detail, force=force_flag)
-
-    if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
-
-    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
-    headers.update(_no_store_headers())
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
+    return _passthrough_upstream_response(
+        route,
+        tenant_id,
+        upstream,
+        success_content_type="application/json",
+        error_content_type="application/json",
+        force=force_flag,
+    )
 
 
 @router.post("/pub/tg/password")
@@ -1056,18 +1014,16 @@ async def tg_password(
     k: str | None = None,
     key: str | None = None,
 ):
+    route = "/pub/tg/password"
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-    validation = require_client_key(tenant_candidate, key_candidate)
-    if isinstance(validation, Response):
-        tenant_for_log: int | str | None = tenant_candidate
-        try:
-            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
-        except Exception:
-            tenant_for_log = tenant_candidate
-        _log_tg_proxy("/pub/tg/password", tenant_for_log, getattr(validation, "status_code", 401), None, error="invalid_key")
-        return validation
+    try:
+        tenant_id = _coerce_tenant(tenant_candidate)
+    except ValueError:
+        return _invalid_tenant_response(route, tenant_candidate)
 
-    tenant_id, _ = validation
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response(route, tenant_id)
+
     client_token = _client_identifier(request)
 
     password_value: str | None = None
@@ -1091,7 +1047,7 @@ async def tg_password(
 
     password_text = password_value or ""
     if not password_text.strip():
-        _log_tg_proxy("/pub/tg/password", tenant_id, 400, None, error="password_required")
+        _log_tg_proxy(route, tenant_id, 400, None, error="password_required")
         return JSONResponse({"error": "password_required"}, status_code=400, headers=_no_store_headers())
 
     allowed, retry_after = _register_password_attempt(tenant_id, client_token)
@@ -1099,7 +1055,7 @@ async def tg_password(
         headers = _no_store_headers()
         if retry_after and retry_after > 0:
             headers["Retry-After"] = str(int(retry_after))
-        _log_tg_proxy("/pub/tg/password", tenant_id, 429, None, error="flood_wait")
+        _log_tg_proxy(route, tenant_id, 429, None, error="flood_wait")
         body = {"error": "flood_wait"}
         if retry_after and retry_after > 0:
             body["retry_after"] = int(retry_after)
@@ -1112,38 +1068,11 @@ async def tg_password(
             timeout=5.0,
         )
     except C.TGWorkerConnectionError as exc:
-        detail_text = str(exc) or "tg_unavailable"
-        _log_tg_proxy("/pub/tg/password", tenant_id, 0, None, error=detail_text)
-        return JSONResponse(
-            {"error": "tg_unavailable", "detail": detail_text},
-            status_code=502,
-            headers=_no_store_headers(),
-        )
+        return _tg_unavailable_response(route, tenant_id, exc)
     except Exception as exc:
-        detail_text = str(exc) or "tg_unavailable"
-        _log_tg_proxy("/pub/tg/password", tenant_id, 0, None, error=detail_text)
-        return JSONResponse(
-            {"error": "tg_unavailable", "detail": detail_text},
-            status_code=502,
-            headers=_no_store_headers(),
-        )
+        return _tg_unavailable_response(route, tenant_id, exc)
 
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    if 200 <= status_code < 300:
-        detail = None
-    else:
-        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
-
-    _log_tg_proxy("/pub/tg/password", tenant_id, status_code, body_bytes, error=detail)
-
-    if status_code <= 0:
-        fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=fail_headers)
-
-    headers = _merge_no_store_headers(getattr(upstream, "headers", {}) or {})
-    headers["X-Telegram-Upstream-Status"] = str(status_code)
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
+    return _passthrough_upstream_response(route, tenant_id, upstream)
 
 
 @router.post("/pub/tg/restart")
@@ -1153,193 +1082,79 @@ async def tg_restart(
     k: str | None = None,
     key: str | None = None,
 ):
+    route = "/pub/tg/restart"
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-    validation = require_client_key(tenant_candidate, key_candidate)
-    if isinstance(validation, Response):
-        tenant_for_log: int | str | None = tenant_candidate
-        try:
-            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
-        except Exception:
-            tenant_for_log = tenant_candidate
-        _log_tg_proxy(
-            "/pub/tg/restart",
-            tenant_for_log,
-            getattr(validation, "status_code", 401),
-            None,
-            error="invalid_key",
-            force=True,
-        )
-        return validation
+    try:
+        tenant_id = _coerce_tenant(tenant_candidate)
+    except ValueError:
+        return _invalid_tenant_response(route, tenant_candidate, force=True)
 
-    tenant_id, _ = validation
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response(route, tenant_id, force=True)
 
     try:
         upstream = await C.tg_post(
-            f"{TG_WORKER_BASE}/session/restart",
+            "/session/restart",
             {"tenant_id": tenant_id},
-            timeout=15.0,
-        )
-    except Exception as exc:
-        _log_tg_proxy(
-            "/pub/tg/restart",
-            tenant_id,
-            0,
-            None,
-            error=str(exc),
-            force=True,
-        )
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
-
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    if 200 <= status_code < 300:
-        detail = None
-    else:
-        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
-
-    _log_tg_proxy(
-        "/pub/tg/restart",
-        tenant_id,
-        status_code,
-        body_bytes,
-        error=detail,
-        force=True,
-    )
-
-    if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
-
-    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
-    headers.update(_no_store_headers())
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
-
-
-def _merge_no_store_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
-    merged = _no_store_headers()
-    if headers:
-        for name, value in headers.items():
-            if not value:
-                continue
-            lowered = name.lower()
-            if lowered == "content-type":
-                merged["Content-Type"] = value
-            elif lowered == "retry-after":
-                merged["Retry-After"] = value
-    return merged
-
-
-@router.get("/pub/tg/status")
-async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
-    try:
-        tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        _log_tg_proxy("/pub/tg/status", tenant, 400, None, error="invalid_tenant")
-        return JSONResponse({"error": "invalid_tenant"}, status_code=400, headers=_tg_cache_headers("-"))
-
-    key_value = "" if key_candidate is None else str(key_candidate).strip()
-    if not key_value or not common.valid_key(tenant_id, key_value):
-        _log_tg_proxy("/pub/tg/status", tenant_id, 401, None, error="invalid_key")
-        return JSONResponse({"error": "invalid_key"}, status_code=401, headers=_tg_cache_headers(401))
-
-    try:
-        upstream = await C.tg_get(
-            "/session/status",
-            {"tenant": tenant_id},
             timeout=5.0,
         )
     except C.TGWorkerConnectionError as exc:
-        detail_text = str(exc) or "tg_unavailable"
-        _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error=detail_text)
-        fail_headers = _tg_cache_headers("-", {"Content-Type": "application/json"})
-        fail_body = json.dumps(
-            {"error": "tg_unavailable", "detail": detail_text}, ensure_ascii=False
-        ).encode("utf-8")
-        return Response(content=fail_body, status_code=502, headers=fail_headers)
+        return _tg_unavailable_response(route, tenant_id, exc, force=True)
     except Exception as exc:
-        detail_text = str(exc) or "tg_unavailable"
-        _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error=detail_text)
-        fail_headers = _tg_cache_headers("-", {"Content-Type": "application/json"})
-        fail_body = json.dumps(
-            {"error": "tg_unavailable", "detail": detail_text}, ensure_ascii=False
-        ).encode("utf-8")
-        return Response(content=fail_body, status_code=502, headers=fail_headers)
+        return _tg_unavailable_response(route, tenant_id, exc, force=True)
 
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    headers = getattr(upstream, "headers", {}) or {}
+    return _passthrough_upstream_response(route, tenant_id, upstream, force=True)
 
-    detail = None if 200 <= status_code < 300 else _stringify_detail(body_bytes) or f"status_{status_code}"
-    _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error=detail)
+@router.get("/pub/tg/status")
+async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
+    route = "/pub/tg/status"
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    try:
+        tenant_id = _coerce_tenant(tenant_candidate)
+    except ValueError:
+        return _invalid_tenant_response(route, tenant_candidate)
 
-    if status_code <= 0:
-        fail_headers = _tg_cache_headers(status_code or "-", {"Content-Type": "application/json"})
-        fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
-        return Response(content=fail_body, status_code=502, headers=fail_headers)
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response(route, tenant_id)
 
-    response_headers = _tg_cache_headers(status_code)
-    upstream_content_type = None
-    for name, value in headers.items():
-        if name and value and name.lower() == "content-type":
-            upstream_content_type = value
-            break
-    if upstream_content_type:
-        response_headers["Content-Type"] = upstream_content_type
-    else:
-        response_headers.setdefault("Content-Type", "application/json")
+    try:
+        upstream = await C.tg_get(
+            "/rpc/status",
+            {"tenant_id": tenant_id},
+            timeout=5.0,
+        )
+    except C.TGWorkerConnectionError as exc:
+        return _tg_unavailable_response(route, tenant_id, exc)
+    except Exception as exc:
+        return _tg_unavailable_response(route, tenant_id, exc)
 
-    return Response(content=body_bytes, status_code=status_code, headers=response_headers)
+    return _passthrough_upstream_response(route, tenant_id, upstream)
 
 
 @router.get("/pub/tg/qr.png")
-def tg_qr_png(qr_id: str | None = None):
+async def tg_qr_png(qr_id: str | None = None):
+    route = "/pub/tg/qr.png"
     qr_value = "" if qr_id is None else str(qr_id).strip()
     if not qr_value:
-        _log_tg_proxy("/pub/tg/qr.png", None, 404, None, error="missing_qr_id")
-        headers = _tg_cache_headers(404, {"Content-Type": "application/json"})
-        body = json.dumps({"error": "missing_qr_id"}, ensure_ascii=False).encode("utf-8")
-        return Response(content=body, status_code=404, headers=headers)
+        _log_tg_proxy(route, None, 404, None, error="missing_qr_id")
+        headers = _no_store_headers({"X-Telegram-Upstream-Status": "404"})
+        return JSONResponse({"error": "missing_qr_id"}, status_code=404, headers=headers)
 
     safe_qr = quote(qr_value, safe="")
-    status_code, body, headers = common.tg_http(
-        "GET",
-        f"{TG_WORKER_BASE}/session/qr/{safe_qr}.png",
-        timeout=15.0,
+    try:
+        upstream = await C.tg_get(f"/session/qr/{safe_qr}.png", timeout=5.0)
+    except C.TGWorkerConnectionError as exc:
+        return _tg_unavailable_response(route, None, exc)
+    except Exception as exc:
+        return _tg_unavailable_response(route, None, exc)
+
+    return _passthrough_upstream_response(
+        route,
+        None,
+        upstream,
+        success_content_type="image/png",
+        error_content_type="application/json",
     )
-    body_bytes = _coerce_body_bytes(body)
-
-    detail = None if status_code == 200 else _extract_json_detail(body_bytes) or _stringify_detail(body_bytes)
-    _log_tg_proxy("/pub/tg/qr.png", None, status_code, body_bytes, error=detail)
-
-    upstream_status = str(status_code or "-")
-
-    if status_code <= 0:
-        fail_headers = _tg_cache_headers(upstream_status, {"Content-Type": "application/json"})
-        fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
-        return Response(content=fail_body, status_code=502, headers=fail_headers)
-
-    if status_code == 404:
-        error_payload = body_bytes
-        if not error_payload:
-            message = detail or "qr_expired"
-            error_payload = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
-        headers_out = _tg_cache_headers(404, {"Content-Type": "application/json"})
-        return Response(content=error_payload, status_code=404, headers=headers_out)
-
-    headers_out = _tg_cache_headers(status_code)
-    upstream_content_type = None
-    for name, value in (headers or {}).items():
-        if name and value and name.lower() == "content-type":
-            upstream_content_type = value
-            break
-    if upstream_content_type:
-        headers_out["Content-Type"] = upstream_content_type
-    elif status_code == 200:
-        headers_out["Content-Type"] = "image/png"
-    else:
-        headers_out["Content-Type"] = "application/json"
-
-    return Response(content=body_bytes, status_code=status_code, headers=headers_out)
 
 
 @router.get("/pub/tg/qr.txt")
@@ -1409,43 +1224,28 @@ async def tg_logout(
     k: str | None = None,
     key: str | None = None,
 ):
+    route = "/pub/tg/logout"
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-    validation = require_client_key(tenant_candidate, key_candidate)
-    if isinstance(validation, Response):
-        tenant_for_log: int | str | None = tenant_candidate
-        try:
-            tenant_for_log = _coerce_tenant(tenant_candidate)  # type: ignore[arg-type]
-        except Exception:
-            tenant_for_log = tenant_candidate
-        _log_tg_proxy("/pub/tg/logout", tenant_for_log, getattr(validation, "status_code", 401), None, error="invalid_key")
-        return validation
+    try:
+        tenant_id = _coerce_tenant(tenant_candidate)
+    except ValueError:
+        return _invalid_tenant_response(route, tenant_candidate)
 
-    tenant_id, _ = validation
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response(route, tenant_id)
 
     try:
         upstream = await C.tg_post(
-            f"{TG_WORKER_BASE}/session/logout",
+            "/session/logout",
             {"tenant_id": tenant_id},
-            timeout=15.0,
+            timeout=5.0,
         )
+    except C.TGWorkerConnectionError as exc:
+        return _tg_unavailable_response(route, tenant_id, exc)
     except Exception as exc:
-        _log_tg_proxy("/pub/tg/logout", tenant_id, 0, None, error=str(exc))
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
+        return _tg_unavailable_response(route, tenant_id, exc)
 
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    if 200 <= status_code < 300:
-        detail = None
-    else:
-        detail = _stringify_detail(body_bytes) or _stringify_detail(getattr(upstream, "text", "")) or f"status_{status_code}"
-
-    _log_tg_proxy("/pub/tg/logout", tenant_id, status_code, body_bytes, error=detail)
-
-    if status_code <= 0:
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
-
-    headers = _proxy_headers(getattr(upstream, "headers", {}) or {}, status_code)
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
+    return _passthrough_upstream_response(route, tenant_id, upstream)
 
 
 @router.get("/pub/wa/qr.png")
