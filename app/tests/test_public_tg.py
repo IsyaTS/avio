@@ -156,7 +156,7 @@ def test_tg_password_proxies_json_payload(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["path"] == "http://tgworker:8085/session/password"
+    assert captured["path"] == "http://tgworker:8085/rpc/twofa.submit"
     assert captured["payload"] == {"tenant_id": 5, "password": "pass123"}
     assert captured["timeout"] == 15.0
 
@@ -181,7 +181,7 @@ def test_tg_password_accepts_form_payload(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["path"] == "http://tgworker:8085/session/password"
+    assert captured["path"] == "http://tgworker:8085/rpc/twofa.submit"
     assert captured["payload"] == {"tenant_id": 6, "password": "form-pass"}
     assert captured["timeout"] == 15.0
 

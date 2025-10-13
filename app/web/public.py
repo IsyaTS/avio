@@ -5,6 +5,7 @@ import importlib
 import io
 import json
 import logging
+import math
 import mimetypes
 import pathlib
 import re
@@ -53,6 +54,8 @@ except ImportError:  # pragma: no cover - fallback for isolated imports
 
 from urllib.parse import quote, quote_plus
 
+from redis import exceptions as redis_ex
+
 from config import tg_worker_url
 
 from . import common as C
@@ -66,6 +69,10 @@ wa_logger.propagate = False
 TG_WORKER_BASE = tg_worker_url()
 
 NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
+
+PASSWORD_ATTEMPT_LIMIT = 2
+PASSWORD_ATTEMPT_WINDOW = 60.0
+_LOCAL_PASSWORD_ATTEMPTS: dict[int, list[float]] = {}
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -176,6 +183,47 @@ def _parse_force_flag(raw_value: str | None) -> bool:
         return False
     value = raw_value.strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _register_password_attempt(tenant_id: int) -> tuple[bool, int | None]:
+    key = f"tenant:{int(tenant_id)}:twofa_attempts"
+    try:
+        client = C.redis_client()
+    except Exception:
+        client = None
+
+    if client is not None:
+        try:
+            pipe = client.pipeline()
+            pipe.incr(key)
+            pipe.ttl(key)
+            attempts, ttl = pipe.execute()
+            if attempts == 1 or ttl is None or ttl < 0:
+                client.expire(key, int(PASSWORD_ATTEMPT_WINDOW))
+                ttl = client.ttl(key)
+            if attempts > PASSWORD_ATTEMPT_LIMIT:
+                retry_after = int(ttl) if ttl and ttl > 0 else int(PASSWORD_ATTEMPT_WINDOW)
+                return False, retry_after
+            return True, None
+        except redis_ex.RedisError:
+            client = None
+
+    now = time.monotonic()
+    entries = _LOCAL_PASSWORD_ATTEMPTS.setdefault(int(tenant_id), [])
+    cutoff = now - PASSWORD_ATTEMPT_WINDOW
+    filtered = [stamp for stamp in entries if stamp > cutoff]
+    allowed = len(filtered) < PASSWORD_ATTEMPT_LIMIT
+    retry_after: int | None = None
+    if allowed:
+        filtered.append(now)
+    else:
+        if filtered:
+            remaining = PASSWORD_ATTEMPT_WINDOW - (now - filtered[0])
+            retry_after = max(1, int(math.ceil(remaining))) if remaining > 0 else 1
+        else:
+            retry_after = int(PASSWORD_ATTEMPT_WINDOW)
+    _LOCAL_PASSWORD_ATTEMPTS[int(tenant_id)] = filtered
+    return allowed, retry_after
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
@@ -939,9 +987,20 @@ async def tg_password(
         _log_tg_proxy("/pub/tg/password", tenant_id, 400, None, error="password_required")
         return JSONResponse({"error": "password_required"}, status_code=400, headers=_no_store_headers())
 
+    allowed, retry_after = _register_password_attempt(tenant_id)
+    if not allowed:
+        headers = _no_store_headers()
+        if retry_after and retry_after > 0:
+            headers["Retry-After"] = str(int(retry_after))
+        _log_tg_proxy("/pub/tg/password", tenant_id, 429, None, error="PASSWORD_FLOOD")
+        body = {"error": "PASSWORD_FLOOD"}
+        if retry_after and retry_after > 0:
+            body["retry_after"] = int(retry_after)
+        return JSONResponse(body, status_code=429, headers=headers)
+
     try:
         upstream = await C.tg_post(
-            f"{TG_WORKER_BASE}/session/password",
+            f"{TG_WORKER_BASE}/rpc/twofa.submit",
             {"tenant_id": tenant_id, "password": password_text},
             timeout=15.0,
         )
@@ -1041,8 +1100,11 @@ def _merge_no_store_headers(headers: Mapping[str, str] | None) -> dict[str, str]
         for name, value in headers.items():
             if not value:
                 continue
-            if name.lower() == "content-type":
+            lowered = name.lower()
+            if lowered == "content-type":
                 merged["Content-Type"] = value
+            elif lowered == "retry-after":
+                merged["Retry-After"] = value
     return merged
 
 

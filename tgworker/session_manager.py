@@ -8,6 +8,7 @@ from .manager import (
     QRNotFoundError,
     SessionState,
     TelegramSessionManager,
+    TwoFASubmitResult,
 )
 
 
@@ -22,6 +23,7 @@ class SessionSnapshot:
     twofa_pending: bool
     twofa_since: Optional[int]
     last_error: Optional[str]
+    twofa_backoff_until: Optional[int] = None
     needs_2fa: bool = False
     can_restart: bool = False
 
@@ -51,6 +53,13 @@ class SessionSnapshot:
             except Exception:
                 twofa_since = None
         twofa_pending = bool(state.twofa_pending or state.status == "needs_2fa" or needs_twofa)
+        backoff_ms = None
+        if state.twofa_backoff_until is not None:
+            try:
+                backoff_ms = int(float(state.twofa_backoff_until) * 1000)
+            except Exception:
+                backoff_ms = None
+
         return cls(
             tenant_id=state.tenant_id,
             status=state.status,
@@ -61,6 +70,7 @@ class SessionSnapshot:
             last_error=state.last_error,
             can_restart=bool(getattr(state, "can_restart", False)),
             needs_2fa=bool(needs_twofa or twofa_pending),
+            twofa_backoff_until=backoff_ms,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -74,6 +84,7 @@ class SessionSnapshot:
             "twofa_since": self.twofa_since,
             "last_error": self.last_error,
             "can_restart": bool(self.can_restart),
+            "twofa_backoff_until": self.twofa_backoff_until,
         }
 
 
@@ -138,7 +149,7 @@ class SessionManager:
     async def logout(self, tenant_id: int) -> None:
         await self._manager.logout(tenant_id)
 
-    async def submit_password(self, tenant_id: int, password: str) -> bool:
+    async def submit_password(self, tenant_id: int, password: str) -> TwoFASubmitResult:
         return await self._manager.submit_password(tenant_id, password)
 
     def get_qr_png(self, qr_id: str) -> bytes:
@@ -170,4 +181,5 @@ __all__ = [
     "SessionSnapshot",
     "QRExpiredError",
     "QRNotFoundError",
+    "TwoFASubmitResult",
 ]
