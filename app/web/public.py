@@ -81,6 +81,9 @@ PASSWORD_ATTEMPT_WINDOW = 60.0
 _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 
 
+_public_key_fallback_warned = False
+
+
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     headers = {
         "Cache-Control": NO_STORE_CACHE_VALUE,
@@ -844,15 +847,28 @@ def _admin_token_valid(request: Request) -> bool:
 
 
 def _has_public_tg_access(request: Request, key_candidate: str | None) -> bool:
+    global _public_key_fallback_warned
+
     if _admin_token_valid(request):
         return True
     expected = _normalize_public_token(getattr(settings, "PUBLIC_KEY", ""))
-    if not expected:
-        return False
     provided = _normalize_public_token(key_candidate)
     if not provided and request is not None:
         provided = _normalize_public_token(request.query_params.get("k"))
-    return provided == expected
+
+    if expected:
+        return provided == expected
+
+    fallback = _normalize_public_token(getattr(settings, "ADMIN_TOKEN", ""))
+    if provided and provided == fallback:
+        if not _public_key_fallback_warned:
+            logger.warning(
+                "PUBLIC_KEY is empty; allowing ADMIN_TOKEN fallback for /pub/tg endpoints"
+            )
+            _public_key_fallback_warned = True
+        return True
+
+    return False
 
 
 def _invalid_tenant_response(

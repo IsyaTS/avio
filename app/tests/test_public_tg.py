@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -34,6 +35,7 @@ def _base_app(monkeypatch):
     monkeypatch.setattr(public_module.common, "public_url", lambda request, url: str(url))
     monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
     monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", "public-key")
+    monkeypatch.setattr(public_module, "_public_key_fallback_warned", False)
     public_module._LOCAL_PASSWORD_ATTEMPTS.clear()
 
     return app
@@ -225,6 +227,43 @@ def test_tg_status_rejects_invalid_key(monkeypatch):
     assert called is False
 
 
+def test_public_tg_status_and_qr_require_public_key(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    async def _fake_get(
+        path: str,
+        payload: dict | None = None,
+        timeout: float = 5.0,
+        stream: bool = False,
+    ) -> httpx.Response:
+        if path == "/rpc/status":
+            return httpx.Response(200, json={"status": "authorized"})
+        if path == "/rpc/qr.png":
+            return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"img")
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
+
+    client = TestClient(app)
+
+    status_without_key = client.get("/pub/tg/status", params={"tenant": 1})
+    assert status_without_key.status_code == 401
+
+    status_with_key = client.get("/pub/tg/status", params={"tenant": 1, "k": "public-key"})
+    assert status_with_key.status_code == 200
+    assert status_with_key.json()["status"] == "authorized"
+
+    qr_without_key = client.get("/pub/tg/qr.png", params={"tenant": 1, "qr_id": "qr"})
+    assert qr_without_key.status_code == 401
+
+    qr_with_key = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 1, "qr_id": "qr", "k": "public-key"},
+    )
+    assert qr_with_key.status_code == 200
+    assert qr_with_key.content == b"img"
+
+
 def test_tg_password_proxies_json_payload(monkeypatch):
     app = _base_app(monkeypatch)
     captured: dict[str, object] = {}
@@ -280,9 +319,14 @@ def test_tg_password_accepts_form_payload(monkeypatch):
 @pytest.mark.parametrize(
     ("tenant_id", "status_code", "body", "headers"),
     [
-        (41, 401, {"error": "password_invalid"}, {}),
+        (41, 400, {"error": "password_invalid"}, {}),
         (42, 409, {"error": "srp_invalid"}, {}),
-        (43, 429, {"error": "flood_wait", "retry_after": 17}, {"Retry-After": "17"}),
+        (
+            43,
+            429,
+            {"error": "password_flood", "retry_after": 17, "backoff_until": 1700},
+            {"Retry-After": "17"},
+        ),
     ],
 )
 def test_tg_password_error_passthrough(monkeypatch, tenant_id, status_code, body, headers):
@@ -308,6 +352,36 @@ def test_tg_password_error_passthrough(monkeypatch, tenant_id, status_code, body
     assert response.headers.get("x-telegram-upstream-status") == str(status_code)
     if status_code == 429:
         assert response.headers.get("retry-after") == headers.get("Retry-After")
+
+
+def test_public_tg_allows_admin_token_fallback(monkeypatch, caplog):
+    app = _base_app(monkeypatch)
+    monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", "")
+    monkeypatch.setattr(public_module, "_public_key_fallback_warned", False)
+
+    async def _fake_status(
+        path: str,
+        payload: dict | None = None,
+        timeout: float = 5.0,
+        stream: bool = False,
+    ) -> httpx.Response:
+        assert path == "/rpc/status"
+        return httpx.Response(200, json={"status": "waiting_qr"})
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_status)
+
+    client = TestClient(app)
+    with caplog.at_level(logging.WARNING, logger=public_module.logger.name):
+        response = client.get(
+            "/pub/tg/status",
+            params={"tenant": 5, "k": "admin-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "waiting_qr"
+    assert any(
+        "allowing ADMIN_TOKEN fallback" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_tg_qr_png_expired(monkeypatch):
