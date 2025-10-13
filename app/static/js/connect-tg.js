@@ -129,7 +129,7 @@
 
     function updateControls() {
       if (refreshButton) {
-        refreshButton.disabled = startInFlight;
+        refreshButton.disabled = startInFlight || inTwoFA;
       }
     }
 
@@ -376,7 +376,7 @@
       if (startInFlight) {
         return;
       }
-      if (inTwoFA && !force) {
+      if (inTwoFA) {
         return;
       }
       startInFlight = true;
@@ -447,7 +447,11 @@
 
     if (refreshButton) {
       refreshButton.addEventListener('click', () => {
-        inTwoFA = false;
+        if (inTwoFA) {
+          showTwofa('Введите пароль 2FA.');
+          setStatus('Введите пароль 2FA.', 'alert');
+          return;
+        }
         if (twofaPassword) {
           twofaPassword.value = '';
         }

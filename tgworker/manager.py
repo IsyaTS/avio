@@ -263,12 +263,39 @@ class TelegramSessionManager:
         except ValueError:
             return None
 
+    def _mark_authkey_unregistered_locked(
+        self, tenant: int, state: SessionState
+    ) -> Optional[asyncio.Task[Any]]:
+        task: Optional[asyncio.Task[Any]] = None
+        if state.waiting_task and not state.waiting_task.done():
+            task = state.waiting_task
+        state.waiting_task = None
+        if state.qr_id:
+            self._qr_lookup.pop(state.qr_id, None)
+        self._clear_qr_state_locked(state)
+        state.status = "disconnected"
+        state.last_error = "authkey_unregistered"
+        state.needs_2fa = False
+        state.awaiting_password = False
+        state.needs_2fa_expires_at = None
+        state.restart_pending = False
+        state.last_needs_2fa_at = None
+        state.last_seen = time.time()
+        state.twofa_pending = False
+        state.twofa_since = None
+        state.qr_login = None
+        state.can_restart = True
+        self._states[tenant] = state
+        self._update_metrics()
+        return task
+
     def _hard_reset_state_locked(
         self,
         tenant: int,
         state: Optional[SessionState] = None,
         *,
         reason: str = "reset",
+        remove_session_file: bool = False,
     ) -> tuple[SessionState, Optional[TelegramClient], Optional[asyncio.Task[Any]], bool]:
         state = state or self._states.setdefault(tenant, SessionState(tenant_id=tenant))
         client = self._clients.pop(tenant, None)
@@ -279,12 +306,13 @@ class TelegramSessionManager:
         if state.qr_id:
             self._expire_qr_locked(tenant, state, reason=reason, set_error=False)
         removed_session_file = False
-        path = self._sessions_dir / f"{tenant}.session"
-        try:
-            path.unlink()
-            removed_session_file = True
-        except FileNotFoundError:
-            removed_session_file = False
+        if remove_session_file:
+            path = self._sessions_dir / f"{tenant}.session"
+            try:
+                path.unlink()
+                removed_session_file = True
+            except FileNotFoundError:
+                removed_session_file = False
         state.status = "disconnected"
         self._clear_qr_state_locked(state)
         state.last_error = None
@@ -310,7 +338,7 @@ class TelegramSessionManager:
         async with self._lock:
             state = self._states.get(tenant)
             state, client_to_disconnect, task_to_cancel, removed_file = self._hard_reset_state_locked(
-                tenant, state, reason="hard_reset"
+                tenant, state, reason="hard_reset", remove_session_file=True
             )
         if task_to_cancel:
             task_to_cancel.cancel()
@@ -328,6 +356,10 @@ class TelegramSessionManager:
         clients_to_disconnect: list[TelegramClient] = []
         tasks_to_cancel: list[asyncio.Task[Any]] = []
         result_state: Optional[SessionState] = None
+        resume_client: Optional[TelegramClient] = None
+        should_resume = False
+        need_new_qr = force
+
         async with self._lock:
             state = self._states.get(tenant)
             if state:
@@ -338,46 +370,140 @@ class TelegramSessionManager:
             self._states[tenant] = state
             state.restart_pending = False
 
-            need_new_qr = force
-            if not need_new_qr:
-                if state.status == "authorized":
-                    result_state = state
-                elif state.status == "needs_2fa":
-                    if state.twofa_pending:
-                        state.can_restart = False
-                        result_state = state
-                    else:
-                        need_new_qr = True
-                else:
-                    stuck_statuses = {"disconnected", "error", "twofa_timeout"}
-                    if state.status in stuck_statuses:
-                        if state.last_error == "twofa_timeout" and not force:
-                            result_state = state
-                        else:
-                            need_new_qr = True
-                    elif state.last_error == "twofa_timeout" and not force:
-                        result_state = state
-                    elif state.last_error == "qr_login_timeout":
-                        need_new_qr = True
-                    elif state.status == "waiting_qr":
-                        if not state.qr_id:
-                            need_new_qr = True
-                        elif state.waiting_task and state.waiting_task.done():
-                            need_new_qr = True
-                    else:
-                        need_new_qr = True
-
-            if result_state is None and not need_new_qr:
-                result_state = state
-
-            if state.twofa_pending and not force:
+            if state.twofa_pending:
                 state.can_restart = False
                 result_state = state
                 need_new_qr = False
+            else:
+                session_path = self._sessions_dir / f"{tenant}.session"
+                if not force and session_path.exists():
+                    client = self._clients.get(tenant)
+                    if client is None:
+                        client = self._build_client(tenant)
+                        self._clients[tenant] = client
+                    resume_client = client
+                    should_resume = True
 
-            if need_new_qr:
+                if not need_new_qr:
+                    if state.status == "authorized":
+                        result_state = state
+                    elif state.status == "needs_2fa":
+                        if state.twofa_pending:
+                            state.can_restart = False
+                            result_state = state
+                            should_resume = False
+                        else:
+                            need_new_qr = True
+                    else:
+                        stuck_statuses = {"disconnected", "error", "twofa_timeout"}
+                        if state.status in stuck_statuses:
+                            if state.last_error == "twofa_timeout" and not force:
+                                result_state = state
+                            else:
+                                need_new_qr = True
+                        elif state.last_error == "twofa_timeout" and not force:
+                            result_state = state
+                        elif state.last_error == "qr_login_timeout":
+                            need_new_qr = True
+                        elif state.status == "waiting_qr":
+                            if not state.qr_id or (
+                                state.waiting_task and state.waiting_task.done()
+                            ):
+                                need_new_qr = True
+                            else:
+                                should_resume = False
+                        else:
+                            need_new_qr = True
+
+                if result_state is None and not need_new_qr:
+                    result_state = state
+
+                if (
+                    not force
+                    and result_state is state
+                    and state.last_error == "twofa_timeout"
+                ):
+                    should_resume = False
+
+        need_new_qr_after_resume = need_new_qr
+        if (
+            should_resume
+            and resume_client is not None
+            and (result_state is None or result_state.status != "authorized")
+        ):
+            try:
+                if not resume_client.is_connected():
+                    await resume_client.connect()
+                if await resume_client.is_user_authorized():
+                    async with self._lock:
+                        state = self._states.setdefault(
+                            tenant, SessionState(tenant_id=tenant)
+                        )
+                        state.status = "authorized"
+                        state.last_error = None
+                        state.needs_2fa = False
+                        state.awaiting_password = False
+                        state.needs_2fa_expires_at = None
+                        state.last_seen = time.time()
+                        state.waiting_task = None
+                        state.qr_login = None
+                        state.can_restart = False
+                        state.twofa_pending = False
+                        state.twofa_since = None
+                        self._states[tenant] = state
+                        self._update_metrics()
+                        result_state = state
+                    self._register_handlers(tenant, resume_client)
+                    LOGGER.info("stage=authorized tenant_id=%s event=session_resume", tenant)
+                    need_new_qr_after_resume = False
+                else:
+                    need_new_qr_after_resume = True
+            except AuthKeyUnregisteredError:
+                EVENT_ERRORS.labels("authkey_unregistered").inc()
+                async with self._lock:
+                    state = self._states.setdefault(
+                        tenant, SessionState(tenant_id=tenant)
+                    )
+                    task = self._mark_authkey_unregistered_locked(tenant, state)
+                    if task:
+                        tasks_to_cancel.append(task)
+                    stored = self._clients.pop(tenant, None)
+                    if stored and stored is not resume_client:
+                        clients_to_disconnect.append(stored)
+                    result_state = state
+                clients_to_disconnect.append(resume_client)
+                LOGGER.warning(
+                    "stage=authkey_unregistered tenant_id=%s source=start_session_resume",
+                    tenant,
+                )
+                need_new_qr_after_resume = False
+            except Exception as exc:
+                LOGGER.exception(
+                    "stage=session_resume_failed tenant_id=%s error=%s", tenant, exc
+                )
+                async with self._lock:
+                    state = self._states.setdefault(
+                        tenant, SessionState(tenant_id=tenant)
+                    )
+                    state.last_error = str(exc)
+                    state.last_seen = time.time()
+                    self._states[tenant] = state
+                stored = self._clients.pop(tenant, None)
+                if stored and stored is not resume_client:
+                    clients_to_disconnect.append(stored)
+                clients_to_disconnect.append(resume_client)
+                need_new_qr_after_resume = True
+
+        async with self._lock:
+            state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+            if state.twofa_pending:
+                state.can_restart = False
+                result_state = state
+                need_new_qr_after_resume = False
+
+            if need_new_qr_after_resume:
                 state, client, task, _ = self._hard_reset_state_locked(
-                    tenant, state, reason="regen"
+                    tenant, state, reason="regen", remove_session_file=False
                 )
                 if client:
                     clients_to_disconnect.append(client)
@@ -392,14 +518,21 @@ class TelegramSessionManager:
                     phase = "qr_login"
                     qr_login = await client.qr_login()
                 except AuthKeyUnregisteredError:
-                    await self._handle_authkey_unregistered(
-                        tenant, client, source=f"start_session_{phase}"
-                    )
+                    EVENT_ERRORS.labels("authkey_unregistered").inc()
                     state = self._states.setdefault(
                         tenant, SessionState(tenant_id=tenant)
                     )
+                    task = self._mark_authkey_unregistered_locked(tenant, state)
+                    if task:
+                        tasks_to_cancel.append(task)
+                    self._clients.pop(tenant, None)
+                    clients_to_disconnect.append(client)
+                    LOGGER.warning(
+                        "stage=authkey_unregistered tenant_id=%s source=start_session_%s",
+                        tenant,
+                        phase,
+                    )
                     result_state = state
-                    need_new_qr = False
                 else:
                     png = self._build_qr_png(qr_login.url)
                     qr_id = secrets.token_urlsafe(16)
@@ -441,6 +574,10 @@ class TelegramSessionManager:
 
                     state.waiting_task = None
                     self._update_metrics()
+                    result_state = state
+            else:
+                self._update_metrics()
+                if result_state is None:
                     result_state = state
 
         for task in tasks_to_cancel:
@@ -1008,7 +1145,7 @@ class TelegramSessionManager:
             client=client,
             error="authkey_unregistered",
             allow_restart=True,
-            remove_session=True,
+            remove_session=False,
         )
         LOGGER.warning(
             "stage=authkey_unregistered tenant_id=%s source=%s removed_session_file=%s",
@@ -1070,11 +1207,14 @@ class TelegramSessionManager:
             raise
 
     async def _ensure_authorized_client(self, tenant: int) -> Optional[TelegramClient]:
-        client_to_disconnect: Optional[TelegramClient] = None
+        clients_to_disconnect: list[TelegramClient] = []
+        task_to_cancel: Optional[asyncio.Task[Any]] = None
         async with self._lock:
             state = self._states.get(tenant)
             if state:
                 client_to_disconnect, _ = self._expire_needs_2fa_locked(tenant, state)
+                if client_to_disconnect:
+                    clients_to_disconnect.append(client_to_disconnect)
             client = self._clients.get(tenant)
             if client is None:
                 client = self._build_client(tenant)
@@ -1083,19 +1223,40 @@ class TelegramSessionManager:
             elif not client.is_connected():
                 await client.connect()
 
-            if await client.is_user_authorized():
+            try:
+                authorized = await client.is_user_authorized()
+            except AuthKeyUnregisteredError:
+                EVENT_ERRORS.labels("authkey_unregistered").inc()
                 state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
-                state.status = "authorized"
-                state.last_seen = time.time()
-                self._register_handlers(tenant, client)
-                self._update_metrics()
-                result = client
-            else:
+                task = self._mark_authkey_unregistered_locked(tenant, state)
+                if task:
+                    task_to_cancel = task
+                self._clients.pop(tenant, None)
+                clients_to_disconnect.append(client)
+                LOGGER.warning(
+                    "stage=authkey_unregistered tenant_id=%s source=ensure_authorized_client",
+                    tenant,
+                )
                 result = None
+            else:
+                if authorized:
+                    state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                    state.status = "authorized"
+                    state.last_seen = time.time()
+                    self._register_handlers(tenant, client)
+                    self._update_metrics()
+                    result = client
+                else:
+                    result = None
 
-        if client_to_disconnect:
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_to_cancel
+
+        for instance in clients_to_disconnect:
             with contextlib.suppress(Exception):
-                await client_to_disconnect.disconnect()
+                await instance.disconnect()
 
         return result
 
