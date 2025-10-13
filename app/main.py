@@ -40,6 +40,9 @@ def _load_web_module_from_source(module_name: str, full_name: str) -> ModuleType
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     sys.modules[full_name] = module
+    parent_pkg = sys.modules.get("app.web")
+    if parent_pkg is not None:
+        setattr(parent_pkg, module_name, module)
     return module
 
 

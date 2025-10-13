@@ -45,24 +45,16 @@ ROOT_DIR = BASE_DIR.parent
 DATA_DIR = pathlib.Path(os.getenv("APP_DATA_DIR") or (BASE_DIR / "data"))
 
 
-_public_key_warning_logged = False
-
-
 def _resolve_public_key(admin_token: str) -> str:
-    """Return PUBLIC_KEY with ADMIN_TOKEN fallback and warn once."""
+    """Return PUBLIC_KEY keeping ADMIN_TOKEN intact when empty."""
 
-    global _public_key_warning_logged
-
+    _ = admin_token  # kept for backward compatibility with older imports
     raw_value = os.getenv("PUBLIC_KEY")
-    normalized = "" if raw_value is None else str(raw_value).strip()
-    if normalized:
-        return normalized
+    if raw_value is None:
+        return ""
 
-    if not _public_key_warning_logged:
-        logger.warning("PUBLIC_KEY is empty; falling back to ADMIN_TOKEN")
-        _public_key_warning_logged = True
-
-    return admin_token
+    normalized = str(raw_value).strip()
+    return normalized
 
 
 def _resolve_tenants_dir() -> pathlib.Path:

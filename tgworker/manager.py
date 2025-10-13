@@ -936,9 +936,19 @@ class TelegramSessionManager:
                         retry_after = max(
                             1, int(math.ceil(state.twofa_backoff_until - now))
                         )
+                        detail = f"flood_wait {retry_after}"
+                        LOGGER.warning(
+                            "stage=password_failed event=backoff_active tenant_id=%s detail=%s",
+                            tenant,
+                            detail,
+                        )
                         early_result = TwoFASubmitResult(
                             status_code=429,
-                            body={"error": "flood_wait", "retry_after": retry_after},
+                            body={
+                                "error": "flood_wait",
+                                "retry_after": retry_after,
+                                "detail": detail,
+                            },
                             headers={"Retry-After": str(retry_after)},
                         )
                     else:
@@ -1019,10 +1029,11 @@ class TelegramSessionManager:
             EVENT_ERRORS.labels("password_failed").inc()
             await _mark_failure(event, error, backoff=backoff)
             parts = [f"stage=password_failed event={event} tenant_id={tenant}"]
+            detail_value = detail or error
             if retry_after is not None:
                 parts.append(f"retry_after={retry_after}")
-            if detail:
-                parts.append(f"detail={detail}")
+            if detail_value:
+                parts.append(f"detail={detail_value}")
             message = " ".join(parts)
             if event == "password_exception":
                 if exc is not None:
@@ -1033,8 +1044,8 @@ class TelegramSessionManager:
                 LOGGER.warning(message)
             headers = None
             body: Dict[str, Any] = {"error": error}
-            if detail:
-                body["detail"] = detail
+            if detail_value:
+                body["detail"] = detail_value
             if retry_after is not None:
                 body["retry_after"] = int(retry_after)
                 if status == 429:
@@ -1081,6 +1092,7 @@ class TelegramSessionManager:
                     status=400,
                     error="password_invalid",
                     event="password_invalid",
+                    detail="password_invalid",
                 )
             except PhonePasswordFloodError as exc_flood:
                 wait_seconds = getattr(exc_flood, "seconds", None)
@@ -1089,11 +1101,11 @@ class TelegramSessionManager:
                 wait_seconds = max(1, int(wait_seconds))
                 return await _failure_response(
                     status=429,
-                    error="password_flood",
-                    event="password_flood",
+                    error="phone_password_flood",
+                    event="phone_password_flood",
                     retry_after=wait_seconds,
                     backoff=float(wait_seconds),
-                    detail="phone_password",
+                    detail=f"phone_password_flood {wait_seconds}",
                     extra={"ttl": int(wait_seconds)},
                 )
             except FloodWaitError as exc_wait:
@@ -1106,7 +1118,7 @@ class TelegramSessionManager:
                     event="flood_wait",
                     retry_after=wait_seconds,
                     backoff=float(wait_seconds),
-                    detail="flood_wait",
+                    detail=f"flood_wait {wait_seconds}",
                     extra={"ttl": int(wait_seconds)},
                 )
             except BadRequestError as exc_bad:
@@ -1123,9 +1135,10 @@ class TelegramSessionManager:
                             status=409,
                             error="srp_invalid",
                             event="srp_invalid",
+                            detail="srp_invalid",
                         )
                     LOGGER.warning(
-                        "stage=password_failed event=srp_invalid tenant_id=%s attempt=%s",
+                        "stage=password_failed event=srp_invalid tenant_id=%s attempt=%s detail=srp_invalid",
                         tenant,
                         attempt + 1,
                     )
@@ -1205,7 +1218,10 @@ class TelegramSessionManager:
                 session_obj.save()
 
         self._ensure_session_permissions(self._sessions_dir / f"{tenant}.session")
-        LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)
+        LOGGER.info(
+            "stage=password_ok event=password_ok tenant_id=%s detail=password_ok",
+            tenant,
+        )
         return TwoFASubmitResult(status_code=200, body={"ok": True})
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):
