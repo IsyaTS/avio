@@ -98,6 +98,45 @@ def test_tg_start_passthrough(monkeypatch):
     assert called["timeout"] == 5.0
 
 
+def test_tg_qr_passthrough_png(monkeypatch):
+    app = _base_app(monkeypatch)
+    captured: dict[str, object] = {}
+
+    async def _fake_qr(
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout: float = 5.0,
+        stream: bool = False,
+    ) -> httpx.Response:
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        captured["stream"] = stream
+        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"png-bytes")
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
+
+    client = TestClient(app)
+    response = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 9, "qr_id": "qr-42"},
+        headers={"X-Admin-Token": "admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"png-bytes"
+    assert response.headers.get("content-type") == "image/png"
+    assert response.headers.get("cache-control") == "no-store"
+    assert response.headers.get("x-telegram-upstream-status") == "200"
+    assert captured == {
+        "path": "/rpc/qr.png",
+        "payload": {"tenant": 9, "qr_id": "qr-42"},
+        "timeout": 5.0,
+        "stream": True,
+    }
+
+
 def test_tg_status_success(monkeypatch):
     app = _base_app(monkeypatch)
     called = {"status": []}
@@ -229,51 +268,14 @@ def test_tg_password_error_passthrough(monkeypatch, tenant_id, status_code, body
         assert response.headers.get("retry-after") == headers.get("Retry-After")
 
 
-def test_tg_qr_passthrough_png(monkeypatch):
-    app = _base_app(monkeypatch)
-
-    captured: dict[str, object] = {}
-
-    async def _fake_get(
-        path: str,
-        payload: dict | None = None,
-        timeout: float = 8.0,
-        stream: bool = False,
-    ):
-        captured["path"] = path
-        captured["payload"] = payload
-        captured["timeout"] = timeout
-        captured["stream"] = stream
-        return httpx.Response(200, content=b"png-bytes", headers={"Content-Type": "image/png"})
-
-    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
-
-    client = TestClient(app)
-    resp = client.get(
-        "/pub/tg/qr.png",
-        params={"tenant": 11, "qr_id": "qr-1"},
-        headers={"X-Admin-Token": "admin-token"},
-    )
-
-    assert resp.status_code == 200
-    cache_header = resp.headers.get("cache-control", "")
-    assert cache_header.startswith("no-store")
-    assert resp.headers.get("x-telegram-upstream-status") == "200"
-    assert resp.headers.get("content-type") == "image/png"
-    assert resp.content == b"png-bytes"
-    assert captured["path"] == "/rpc/qr.png"
-    assert captured["payload"] == {"tenant": 11, "qr_id": "qr-1"}
-    assert captured["timeout"] == 5.0
-    assert captured["stream"] is True
-
-
 def test_tg_qr_png_expired(monkeypatch):
     app = _base_app(monkeypatch)
 
     async def _fake_get(
         path: str,
         payload: dict | None = None,
-        timeout: float = 8.0,
+        *,
+        timeout: float = 5.0,
         stream: bool = False,
     ):
         assert path == "/rpc/qr.png"
@@ -294,8 +296,7 @@ def test_tg_qr_png_expired(monkeypatch):
 
     assert resp.status_code == 404
     assert resp.json() == {"error": "qr_expired"}
-    cache_header = resp.headers.get("cache-control", "")
-    assert cache_header.startswith("no-store")
+    assert resp.headers.get("cache-control") == "no-store"
     assert resp.headers.get("x-telegram-upstream-status") == "404"
 
 
@@ -305,7 +306,8 @@ def test_tg_qr_png_gone(monkeypatch):
     async def _fake_get(
         path: str,
         payload: dict | None = None,
-        timeout: float = 8.0,
+        *,
+        timeout: float = 5.0,
         stream: bool = False,
     ):
         assert path == "/rpc/qr.png"
@@ -326,6 +328,7 @@ def test_tg_qr_png_gone(monkeypatch):
 
     assert resp.status_code == 410
     assert resp.json() == {"error": "qr_expired"}
+    assert resp.headers.get("cache-control") == "no-store"
     assert resp.headers.get("x-telegram-upstream-status") == "410"
     assert resp.headers.get("content-type") == "application/json"
 
