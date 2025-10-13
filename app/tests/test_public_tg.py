@@ -50,7 +50,11 @@ def test_connect_tg_renders(monkeypatch):
     assert "Подключение Telegram" in body
     assert "window.__tgConnectConfig" in body
     assert '"tenant": 7' in body
-    assert '"key": "abc123"' in body
+    assert '"key": "public-key"' in body
+    assert '"public_key": "public-key"' in body
+    assert '"tg_qr_png": "/pub/tg/qr.png?k=public-key"' in body
+    assert '"tg_status_url": "/pub/tg/status?k=public-key"' in body
+    assert '"tg_start_url": "/pub/tg/start?k=public-key"' in body
     assert "Test Brand" in body
     assert "Persona" in body
     assert 'id="tg-qr-image"' in body
@@ -120,8 +124,7 @@ def test_tg_qr_passthrough_png(monkeypatch):
     client = TestClient(app)
     response = client.get(
         "/pub/tg/qr.png",
-        params={"tenant": 9, "qr_id": "qr-42"},
-        headers={"X-Admin-Token": "admin-token"},
+        params={"tenant": 9, "qr_id": "qr-42", "k": "public-key"},
     )
 
     assert response.status_code == 200
@@ -343,7 +346,7 @@ def test_tg_qr_txt_proxy(monkeypatch):
     monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
 
     client = TestClient(app)
-    resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1"})
+    resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1", "k": "public-key"})
 
     assert resp.status_code == 200
     assert resp.text == "tg://login?token=abc"
@@ -364,7 +367,7 @@ def test_tg_qr_txt_expired(monkeypatch):
     monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
 
     client = TestClient(app)
-    resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1"})
+    resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1", "k": "public-key"})
 
     assert resp.status_code == 404
     assert resp.json() == {"detail": "qr_expired"}

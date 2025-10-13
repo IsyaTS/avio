@@ -576,13 +576,22 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
     primary_key = (common.get_tenant_pubkey(tenant) or "").strip()
     resolved_key = primary_key or access_key
 
+    public_key = getattr(settings, "PUBLIC_KEY", "")
+    encoded_public_key = quote_plus(public_key)
+    tg_qr_url = f"/pub/tg/qr.png?k={encoded_public_key}" if public_key else "/pub/tg/qr.png"
+    tg_status_url = f"/pub/tg/status?k={encoded_public_key}" if public_key else "/pub/tg/status"
+    tg_start_url = f"/pub/tg/start?k={encoded_public_key}" if public_key else "/pub/tg/start"
+
     tg_connect_config = {
         "tenant": tenant,
-        "key": access_key,
+        "key": public_key or resolved_key,
         "urls": {
+            "public_key": public_key,
             "tg_status": "/pub/tg/status",
+            "tg_status_url": tg_status_url,
             "tg_start": "/pub/tg/start",
-            "tg_qr_png": "/pub/tg/qr.png",
+            "tg_start_url": tg_start_url,
+            "tg_qr_png": tg_qr_url,
             "tg_password": "/pub/tg/password",
         },
     }
@@ -590,7 +599,8 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
     context = {
         "request": request,
         "tenant": tenant,
-        "key": resolved_key,
+        "key": public_key or resolved_key,
+        "tenant_key": access_key,
         "subtitle": brand,
         "persona_preview": persona_preview,
         "tg_connect_config": tg_connect_config,
@@ -1221,7 +1231,10 @@ async def tg_qr_png(
 
 
 @router.get("/pub/tg/qr.txt")
-def tg_qr_txt(request: Request, qr_id: str | None = None):
+def tg_qr_txt(request: Request, qr_id: str | None = None, k: str | None = None, key: str | None = None):
+    key_candidate = k or key or request.query_params.get("k") or request.query_params.get("key")
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response("/pub/tg/qr.txt", None)
     qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
     if not qr_value:
         _log_tg_proxy("/pub/tg/qr.txt", None, 400, None, error="missing_qr_id")

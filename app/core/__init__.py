@@ -107,7 +107,12 @@ class Settings:
 
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "sueta").strip()
-    PUBLIC_KEY    = (os.getenv("PUBLIC_KEY") or "").strip()
+    _public_key_raw = os.getenv("PUBLIC_KEY")
+    if _public_key_raw is None:
+        raise RuntimeError("PUBLIC_KEY environment variable is required")
+    PUBLIC_KEY = str(_public_key_raw).strip()
+    if not PUBLIC_KEY:
+        raise RuntimeError("PUBLIC_KEY environment variable must be a non-empty string")
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
 
     # LLM
