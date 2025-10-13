@@ -9,6 +9,13 @@ const path = require('path');
 
 const PORT = process.env.PORT || 8088;
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(__dirname, '.wwebjs_auth'));
+const APP_WEBHOOK = (process.env.APP_WEBHOOK || '').trim();
+const TENANT_DEFAULT = Number(process.env.TENANT_DEFAULT || '0') || 0;
+
+let messageInTotal = 0;
+let messageOutTotal = 0;
+const sendFailTotal = Object.create(null);
+const deprecatedNoticeTs = Object.create(null);
 function buildSyncBaseList() {
   const raw = [
     process.env.APP_INTERNAL_URLS || '',
@@ -41,6 +48,42 @@ function buildSyncBaseList() {
 }
 const TENANT_SYNC_BASES = buildSyncBaseList();
 const INTERNAL_SYNC_TOKEN = process.env.WA_WEB_TOKEN || process.env.WEBHOOK_SECRET || '';
+
+function incSendFail(reason) {
+  const key = String(reason || 'unknown');
+  sendFailTotal[key] = (sendFailTotal[key] || 0) + 1;
+}
+
+function recordDeprecated(route) {
+  const nowTs = Date.now();
+  if ((deprecatedNoticeTs[route] || 0) + 3600 * 1000 <= nowTs) {
+    deprecatedNoticeTs[route] = nowTs;
+    console.warn('[waweb]', `deprecated_route=${route}`);
+  }
+}
+
+function sanitizeReason(reason) {
+  return String(reason || 'unknown').replace(/[^a-z0-9_]/gi, '_');
+}
+
+function renderMetrics() {
+  const lines = [];
+  lines.push('# TYPE message_in_total counter');
+  lines.push(`message_in_total{channel="whatsapp"} ${messageInTotal}`);
+  lines.push('# TYPE message_out_total counter');
+  lines.push(`message_out_total{channel="whatsapp"} ${messageOutTotal}`);
+  lines.push('# TYPE send_fail_total counter');
+  const reasons = Object.keys(sendFailTotal);
+  if (!reasons.length) {
+    lines.push('send_fail_total{channel="whatsapp",reason="unknown"} 0');
+  } else {
+    for (const reason of reasons) {
+      const value = sendFailTotal[reason] || 0;
+      lines.push(`send_fail_total{channel="whatsapp",reason="${sanitizeReason(reason)}"} ${value}`);
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}
 
 /* ---------- helpers ---------- */
 function postJson(url, payload) {
@@ -129,6 +172,97 @@ function triggerTenantSync(tenant, attempt = 1){
     }
   });
 }
+
+function normalizeIncomingMessage(tenant, msg, client){
+  const attachments = [];
+  if (msg && msg.hasMedia) {
+    const mediaId = msg.id && msg.id._serialized ? msg.id._serialized : `media-${Date.now()}`;
+    const raw = msg._data || {};
+    attachments.push({
+      type: (msg.type || 'media').toLowerCase(),
+      url: `whatsapp://${tenant}/${mediaId}`,
+      name: raw.filename || null,
+      mime: raw.mimetype || null,
+      size: raw.size || null,
+    });
+  }
+  const ts = Number(msg.timestamp || Math.floor(Date.now() / 1000));
+  const providerRaw = typeof msg.toJSON === 'function' ? msg.toJSON() : (msg._data || {});
+  const selfId = client && client.info && client.info.wid ? client.info.wid._serialized : '';
+  return {
+    tenant: Number(tenant),
+    channel: 'whatsapp',
+    from_id: msg.from || '',
+    to: msg.to || selfId || '',
+    text: typeof msg.body === 'string' ? msg.body : '',
+    attachments,
+    ts,
+    provider_raw: providerRaw,
+  };
+}
+
+function normalizeAttachment(raw){
+  if (!raw || typeof raw !== 'object') return null;
+  const url = raw.url || raw.href;
+  if (!url) return null;
+  return {
+    type: (raw.type || 'file').toString(),
+    url: String(url),
+    name: raw.name || raw.filename || null,
+    mime: raw.mime || raw.mime_type || null,
+    size: raw.size || raw.length || null,
+  };
+}
+
+async function sendTransportMessage(tenant, transport){
+  tenant = String(tenant);
+  const s = tenants[tenant];
+  if (!s || !s.client) throw new Error('no_session');
+
+  let target = transport.to;
+  if (typeof target === 'string' && target.trim().toLowerCase() === 'me') {
+    const me = s.client.info && s.client.info.wid ? s.client.info.wid._serialized : '';
+    target = me || '';
+  }
+  if (typeof target === 'number') target = String(target);
+  if (typeof target !== 'string') throw new Error('invalid_to');
+
+  let jid;
+  if (target.includes('@')) {
+    jid = target;
+  } else {
+    const digits = target.replace(/\D/g, '');
+    if (!digits) throw new Error('invalid_to');
+    jid = `${digits}@c.us`;
+  }
+
+  const text = typeof transport.text === 'string' ? transport.text : '';
+  const attachments = Array.isArray(transport.attachments) ? transport.attachments : [];
+  let textSent = false;
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== 'object') continue;
+    if (!attachment.url) continue;
+    try {
+      const media = await MessageMedia.fromUrl(String(attachment.url), { unsafeMime: true });
+      if (attachment.mime) media.mimetype = attachment.mime;
+      if (attachment.name) media.filename = attachment.name;
+      const opts = {};
+      if (text && !textSent) {
+        opts.caption = text;
+        textSent = true;
+      }
+      await s.client.sendMessage(jid, media, opts);
+    } catch (err) {
+      throw new Error('media_fetch');
+    }
+  }
+  if (text && !textSent) {
+    await s.client.sendMessage(jid, text);
+  }
+  messageOutTotal += 1;
+  try { console.log('[waweb]', `event=message_out channel=whatsapp tenant=${tenant} to=${jid}`); } catch(_){}
+  return true;
+}
 function pickChromePath(){
   const cand = [process.env.CHROME_PATH, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome']
     .filter(Boolean);
@@ -199,13 +333,11 @@ function buildClient(tenant) {
   });
   c.on('message', (msg) => {
     tenants[tenant].lastTs = now();
-    const payload = {
-      source: { type: 'whatsapp', tenant: Number(tenant) },
-      message: { id: msg.id? msg.id._serialized:undefined, from: msg.from, author: msg.author, body: msg.body, text: msg.body },
-      ts: Date.now(), leadId: Date.now()
-    };
-    const hook = tenants[tenant].webhook;
-    if (hook) postJson(hook, payload);
+    const normalized = normalizeIncomingMessage(tenant, msg, c);
+    messageInTotal += 1;
+    try { console.log('[waweb]', `event=message_in channel=whatsapp tenant=${tenant} from=${normalized.from_id}`); } catch(_){}
+    const hook = APP_WEBHOOK || tenants[tenant].webhook || '';
+    if (hook) postJson(hook, normalized);
   });
   return c;
 }
@@ -277,6 +409,11 @@ const app = express();
 app.use(bodyParser.json({ limit: '1mb' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'waweb' }));
+
+app.get('/metrics', (_req, res) => {
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  return res.send(renderMetrics());
+});
 
 function authorized(req){
   if (!INTERNAL_SYNC_TOKEN) return true;
@@ -352,30 +489,69 @@ app.get('/session/:tenant/qr.png', async (req, res) => {
 
 app.post('/session/:tenant/send', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
+  recordDeprecated('/session/:tenant/send');
   const t = String(req.params.tenant||'');
-  const s = tenants[t];
-  if (!s) return res.status(404).json({ ok:false, error:'no_session' });
-  const to = (req.body?.to||'').replace(/\D/g,'');
-  const text = (req.body?.text||'').toString();
-  const attachment = req.body?.attachment && typeof req.body.attachment === 'object' ? req.body.attachment : null;
-  if (!to || (!text && !attachment)) return res.status(400).json({ ok:false, error:'bad_params' });
+  const tenantNum = Number(t || TENANT_DEFAULT);
+  const payload = req.body || {};
+  const attachmentsRaw = [];
+  if (payload.attachment) attachmentsRaw.push(payload.attachment);
+  if (Array.isArray(payload.attachments)) attachmentsRaw.push(...payload.attachments);
+  const attachments = attachmentsRaw.map(normalizeAttachment).filter(Boolean);
+  const transport = {
+    tenant: tenantNum,
+    channel: 'whatsapp',
+    to: payload.to || payload.phone || '',
+    text: typeof payload.text === 'string' ? payload.text : '',
+    attachments,
+  };
+  if (!transport.text.trim() && !attachments.length) {
+    return res.status(400).json({ ok:false, error:'empty_message' });
+  }
   try {
-    const jid = to.endsWith('@c.us') ? to : `${to}@c.us`;
-    if (attachment && attachment.url) {
-      const opts = {};
-      if (attachment.filename) opts.filename = attachment.filename;
-      if (text) opts.caption = text;
-      const media = await MessageMedia.fromUrl(String(attachment.url), { unsafeMime: true });
-      if (attachment.mime_type && typeof attachment.mime_type === 'string') {
-        media.mimetype = attachment.mime_type;
-      }
-      await s.client.sendMessage(jid, media, opts);
-    } else {
-      await s.client.sendMessage(jid, text);
-    }
+    await sendTransportMessage(tenantNum, transport);
     return res.json({ ok:true });
-  } catch(e) {
-    return res.status(500).json({ ok:false, error:String(e) });
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    if (message === 'invalid_to') {
+      return res.status(400).json({ ok:false, error:'invalid_to' });
+    }
+    if (message === 'no_session') {
+      return res.status(404).json({ ok:false, error:'no_session' });
+    }
+    incSendFail(message);
+    return res.status(500).json({ ok:false, error:message });
+  }
+});
+
+app.post('/send', async (req, res) => {
+  if (!authorized(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
+  const payload = req.body || {};
+  const channel = (payload.channel || '').toString().toLowerCase();
+  if (channel && channel !== 'whatsapp') {
+    return res.status(400).json({ ok:false, error:'channel_mismatch' });
+  }
+  const tenantNum = Number(payload.tenant || payload.tenant_id || TENANT_DEFAULT);
+  if (!tenantNum) return res.status(400).json({ ok:false, error:'no_tenant' });
+  const attachments = Array.isArray(payload.attachments)
+    ? payload.attachments.map(normalizeAttachment).filter(Boolean)
+    : [];
+  const text = typeof payload.text === 'string' ? payload.text : '';
+  if (!text.trim() && !attachments.length) {
+    return res.status(400).json({ ok:false, error:'empty_message' });
+  }
+  try {
+    await sendTransportMessage(tenantNum, { to: payload.to, text, attachments });
+    return res.json({ ok:true });
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    if (message === 'invalid_to') {
+      return res.status(400).json({ ok:false, error:'invalid_to' });
+    }
+    if (message === 'no_session') {
+      return res.status(404).json({ ok:false, error:'no_session' });
+    }
+    incSendFail(message);
+    return res.status(500).json({ ok:false, error:message });
   }
 });
 

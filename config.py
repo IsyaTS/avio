@@ -61,6 +61,11 @@ def _normalize_worker_url(raw: str | None) -> str:
 
 TG_WORKER_URL = _normalize_worker_url(os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL"))
 
+CHANNEL_ENDPOINTS = {
+    "telegram": "http://tgworker:9000/send",
+    "whatsapp": "http://waweb:9001/send",
+}
+
 
 TELEGRAM_API_ID = _coerce_int(os.getenv("TELEGRAM_API_ID"))
 TELEGRAM_API_HASH = (os.getenv("TELEGRAM_API_HASH") or "").strip()
@@ -128,6 +133,7 @@ __all__ = [
     "TELEGRAM_API_ID",
     "TELEGRAM_API_HASH",
     "PUBLIC_KEY",
+    "CHANNEL_ENDPOINTS",
     "telegram_config",
     "tg_worker_url",
     "settings",

@@ -43,3 +43,62 @@ curl -G "https://api.avio.website/pub/tg/qr.png" \
 2. Забрать `qr_id` из ответа и запросить `GET /pub/tg/qr.png?k=${PUBLIC_KEY}&tenant=<TENANT_ID>&qr_id=<QR_ID>` для отображения кода.
 3. Параллельно опрашивать `GET /pub/tg/status?k=${PUBLIC_KEY}&tenant=<TENANT_ID>` до тех пор, пока поле `authorized` не станет `true`.
 4. После успешной авторизации статус будет возвращать `authorized=true`, а QR перестанет быть активным.
+
+## Единый контракт
+
+Единый транспортный контракт использует две структуры:
+
+- **TransportMessage** — исходящее сообщение, которое отправляется в `POST /send` на приложении.
+- **MessageIn** — входящее событие, которое провайдеры (Telegram/WhatsApp) публикуют в `POST /webhook/provider`.
+
+### Пример TransportMessage
+
+```json
+{
+  "tenant": 1,
+  "channel": "telegram",
+  "to": "me",
+  "text": "Привет!",
+  "attachments": [
+    {
+      "type": "file",
+      "url": "https://example.org/file.pdf",
+      "name": "file.pdf",
+      "mime": "application/pdf"
+    }
+  ],
+  "meta": {
+    "reply_to": "12345"
+  }
+}
+```
+
+`channel` выбирает воркер: `telegram` → `tgworker:/send`, `whatsapp` → `waweb:/send`. Алиас `to="me"` отправляет сообщение в сохранённые сообщения аккаунта. Ответы воркеров приводятся к формату `{"ok": true}` либо `{ "ok": false, "error": "..." }`.
+
+### Пример MessageIn
+
+```json
+{
+  "tenant": 1,
+  "channel": "whatsapp",
+  "from_id": "79001234567@c.us",
+  "to": "my-biz@c.us",
+  "text": "Добрый день",
+  "attachments": [],
+  "ts": 1714650000,
+  "provider_raw": {
+    "id": "ABCD",
+    "type": "chat"
+  }
+}
+```
+
+Каждое валидное входящее событие складывается в Redis по ключу `inbox:message_in` (LPUSH), что позволяет независимо подтверждать доставку.
+
+### Ключи доступа
+
+- `PUBLIC_KEY` используется только на публичных маршрутах (`/pub/tg/*`) и сверяется строго через параметр `?k=`.
+- `ADMIN_TOKEN` остаётся приватным и не должен совпадать с `PUBLIC_KEY`.
+- Если `PUBLIC_KEY` не задан, фронт временно может использовать `ADMIN_TOKEN`, но это режим совместимости — рекомендуем задать отдельный публичный ключ как можно раньше.
+
+Исторические маршруты `/pub/tg/*` сохранены для обратной совместимости, но считаются **deprecated** — в логах выводится предупреждение не чаще одного раза в час.

@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, Iterable, Mapping
 
-from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks
+from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response
 import httpx
 import urllib.request
@@ -64,15 +64,22 @@ from redis import exceptions as redis_ex
 from config import tg_worker_url
 
 from app.core import client as C
+from app.metrics import MESSAGE_IN_COUNTER
+from app.lib.transport_utils import dump_message_in
+from app.schemas import MessageIn
 from . import common as common
 from .ui import templates
 
 logger = logging.getLogger(__name__)
 wa_logger = logging.getLogger("wa")
+# Unified incoming transport log channel
+message_in_logger = logging.getLogger("app.web.message_in")
+_deprecated_hits: dict[str, float] = {}
 # Avoid duplicate logging of WA messages via root logger handlers
 wa_logger.propagate = False
 
 TG_WORKER_BASE = tg_worker_url()
+INBOX_MESSAGE_KEY = "inbox:message_in"
 
 if not hasattr(C, "valid_key"):
     setattr(C, "valid_key", common.valid_key)
@@ -93,6 +100,14 @@ def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     if extra:
         headers.update(extra)
     return headers
+
+
+def _log_deprecated(route: str) -> None:
+    now = time.time()
+    last = _deprecated_hits.get(route)
+    if last is None or now - last >= 3600:
+        _deprecated_hits[route] = now
+        logger.warning("deprecated_endpoint route=%s", route)
 def _stringify_detail(value: bytes | bytearray | str | None) -> str:
     if value is None:
         return ""
@@ -519,6 +534,33 @@ def _process_pdf(
     return normalized, meta, manifest_rel
 
 router = APIRouter()
+
+
+@router.post("/webhook/provider")
+async def provider_webhook(message: MessageIn) -> JSONResponse:
+    try:
+        client = common.redis_client()
+    except Exception as exc:
+        logger.error("stage=redis_connect_fail event=message_in error=%s", exc)
+        raise HTTPException(status_code=503, detail="redis_unavailable") from exc
+
+    payload_json = dump_message_in(message)
+    try:
+        client.lpush(INBOX_MESSAGE_KEY, payload_json)
+    except redis_ex.RedisError as exc:
+        logger.error("stage=redis_write_fail event=message_in error=%s", exc)
+        raise HTTPException(status_code=503, detail="redis_write_failed") from exc
+
+    MESSAGE_IN_COUNTER.labels(message.channel).inc()
+    message_in_logger.info(
+        "event=message_in channel=%s tenant=%s from=%s to=%s attachments=%s",
+        message.channel,
+        message.tenant,
+        message.from_id,
+        message.to,
+        len(message.attachments),
+    )
+    return JSONResponse({"ok": True})
 
 
 @router.get("/connect/wa")
@@ -1025,6 +1067,7 @@ async def tg_start(
     k: str | None = None,
 ):
     route = "/pub/tg/start"
+    _log_deprecated(route)
     force_flag = bool(_parse_force_flag(request.query_params.get("force")))
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
         request,
@@ -1072,6 +1115,7 @@ async def tg_password(
     key: str | None = None,
 ):
     route = "/pub/tg/password"
+    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
     try:
         tenant_id = _coerce_tenant(tenant_candidate)
@@ -1193,6 +1237,7 @@ async def tg_restart(
     key: str | None = None,
 ):
     route = "/pub/tg/restart"
+    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
     try:
         tenant_id = _coerce_tenant(tenant_candidate)
@@ -1218,6 +1263,7 @@ async def tg_restart(
 @router.get("/pub/tg/status")
 async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None):
     route = "/pub/tg/status"
+    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
         request,
         tenant,
@@ -1260,6 +1306,7 @@ async def tg_qr_png(
     k: str | None = None,
 ):
     route = "/pub/tg/qr.png"
+    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
         request,
         tenant,
