@@ -16,14 +16,10 @@ import httpx
 import qrcode
 from prometheus_client import Counter, Gauge
 from telethon import TelegramClient, events, functions
-from telethon.errors import (
-    BadRequestError,
-    FloodWaitError,
-    RPCError,
-    SessionPasswordNeededError,
-)
+from telethon.errors import BadRequestError, RPCError, SessionPasswordNeededError
 from telethon.errors.rpcerrorlist import (
     AuthKeyUnregisteredError,
+    FloodWaitError,
     PasswordHashInvalidError,
     PhonePasswordFloodError,
 )

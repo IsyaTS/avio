@@ -118,6 +118,11 @@ def create_app() -> FastAPI:
         snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
         return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
+    @app.post("/rpc/start")
+    async def rpc_start(payload: StartRequest):
+        snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
+        return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
+
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
         snapshot = await manager.start_session(payload.tenant_id, force=True)
@@ -126,6 +131,14 @@ def create_app() -> FastAPI:
     @app.get("/session/status")
     async def session_status(tenant: int = Query(..., ge=1)):
         session_snapshot = await manager.get_status(tenant)
+        stats = manager.stats_snapshot()
+        payload = session_snapshot.to_payload()
+        payload["stats"] = stats
+        return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
+
+    @app.get("/rpc/status")
+    async def rpc_status(tenant_id: int = Query(..., ge=1)):
+        session_snapshot = await manager.get_status(tenant_id)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
         payload["stats"] = stats

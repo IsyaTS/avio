@@ -107,6 +107,7 @@ class Settings:
 
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "sueta").strip()
+    PUBLIC_KEY    = (os.getenv("PUBLIC_KEY") or "").strip()
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
 
     # LLM
