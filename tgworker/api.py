@@ -101,7 +101,7 @@ def create_app() -> FastAPI:
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
         if not payload.force:
             current = await manager.get_status(payload.tenant_id)
-            if current.twofa_pending:
+            if current.twofa_pending or current.needs_2fa:
                 return JSONResponse(current.to_payload(), headers=dict(NO_STORE_HEADERS))
 
         snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
@@ -145,7 +145,7 @@ def create_app() -> FastAPI:
     @app.post("/session/logout")
     async def session_logout(payload: LogoutRequest):
         await manager.logout(payload.tenant_id)
-        return {"ok": True}
+        return JSONResponse({"ok": True}, headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/password")
     async def session_password(payload: PasswordRequest):
