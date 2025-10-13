@@ -119,7 +119,7 @@ class SessionManager:
         )
 
     async def start(self) -> None:
-        await self._manager.start()
+        await self._manager.start(background=True)
 
     async def shutdown(self) -> None:
         await self._manager.shutdown()

@@ -886,33 +886,51 @@ async def tg_start(
             f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
             timeout=15.0,
         )
-        if status_code > 0:
-            status_body_bytes = _coerce_body_bytes(status_body)
-            parsed_status: Any
-            try:
-                decoded = status_body_bytes.decode("utf-8", errors="ignore")
-                parsed_status = json.loads(decoded or "{}")
-            except Exception:
-                parsed_status = None
-            twofa_pending_now = False
-            if isinstance(parsed_status, dict):
-                twofa_pending_now = _truthy_flag(parsed_status.get("twofa_pending"))
-            if twofa_pending_now and not force_flag:
-                _log_tg_proxy(
-                    "/pub/tg/start",
-                    tenant_id,
-                    status_code,
-                    status_body_bytes,
-                    error=None,
-                    force=False,
-                )
-                headers = _proxy_headers(status_headers, status_code)
-                headers.update(_no_store_headers())
-                return Response(
-                    content=status_body_bytes,
-                    status_code=status_code,
-                    headers=headers,
-                )
+        status_body_bytes = _coerce_body_bytes(status_body)
+        if status_code <= 0:
+            detail = _stringify_detail(status_body_bytes) or "tg_unavailable"
+            _log_tg_proxy(
+                "/pub/tg/start",
+                tenant_id,
+                status_code,
+                status_body_bytes,
+                error=detail,
+                force=force_flag,
+            )
+            headers = _no_store_headers(
+                {"X-Telegram-Upstream-Status": str(status_code or "-")}
+            )
+            return JSONResponse(
+                {"error": "tg_unavailable"},
+                status_code=502,
+                headers=headers,
+            )
+
+        parsed_status: Any
+        try:
+            decoded = status_body_bytes.decode("utf-8", errors="ignore")
+            parsed_status = json.loads(decoded or "{}")
+        except Exception:
+            parsed_status = None
+        twofa_pending_now = False
+        if isinstance(parsed_status, dict):
+            twofa_pending_now = _truthy_flag(parsed_status.get("twofa_pending"))
+        if twofa_pending_now and not force_flag:
+            _log_tg_proxy(
+                "/pub/tg/start",
+                tenant_id,
+                status_code,
+                status_body_bytes,
+                error=None,
+                force=False,
+            )
+            headers = _proxy_headers(status_headers, status_code)
+            headers.update(_no_store_headers())
+            return Response(
+                content=status_body_bytes,
+                status_code=status_code,
+                headers=headers,
+            )
 
     payload = {"tenant_id": tenant_id, "force": force_flag}
 
