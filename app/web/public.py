@@ -46,11 +46,14 @@ except Exception:  # pragma: no cover - openpyxl is optional in some environment
     load_workbook = None  # type: ignore[assignment]
 
 try:
-    from core import _normalize_catalog_items, settings  # type: ignore[attr-defined]
-except ImportError:  # pragma: no cover - fallback for isolated imports
-    core_module = _import_alias("core")
-    _normalize_catalog_items = core_module._normalize_catalog_items
-    settings = core_module.settings
+    from app.core import _normalize_catalog_items, settings  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - fallback for legacy layout
+    try:
+        from core import _normalize_catalog_items, settings  # type: ignore[attr-defined]
+    except ImportError:
+        core_module = _import_alias("core")
+        _normalize_catalog_items = core_module._normalize_catalog_items
+        settings = core_module.settings
 
 from urllib.parse import quote, quote_plus
 
@@ -58,7 +61,8 @@ from redis import exceptions as redis_ex
 
 from config import tg_worker_url
 
-from . import common as C
+from app.core import client as C
+from . import common as common
 from .ui import templates
 
 logger = logging.getLogger(__name__)
@@ -188,7 +192,7 @@ def _parse_force_flag(raw_value: str | None) -> bool:
 def _register_password_attempt(tenant_id: int) -> tuple[bool, int | None]:
     key = f"tenant:{int(tenant_id)}:twofa_attempts"
     try:
-        client = C.redis_client()
+        client = common.redis_client()
     except Exception:
         client = None
 
@@ -477,7 +481,7 @@ def _process_pdf(
     items = index_to_catalog_items(index)
     # Optional: collapse to exactly one item per page if enabled in tenant behavior
     try:
-        cfg = C.read_tenant_config(tenant)
+        cfg = common.read_tenant_config(tenant)
         one_per_page = bool((cfg.get("behavior") or {}).get("pdf_one_item_per_page"))
     except Exception:
         one_per_page = False
@@ -510,12 +514,12 @@ router = APIRouter()
 def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | None = None):
     tenant = int(tenant)
     access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
-    if not C.valid_key(tenant, access_key):
+    if not common.valid_key(tenant, access_key):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
-    C.ensure_tenant_files(tenant)
-    cfg = C.read_tenant_config(tenant)
-    persona = C.read_persona(tenant)
+    common.ensure_tenant_files(tenant)
+    cfg = common.read_tenant_config(tenant)
+    persona = common.read_persona(tenant)
     passport = cfg.get("passport", {})
     subtitle = passport.get("brand") or "Подключение WhatsApp" if passport else "Подключение WhatsApp"
     persona_preview = "\n".join((persona or "").splitlines()[:6])
@@ -523,7 +527,7 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
     settings_link = ""
     if access_key:
         raw_settings = request.url_for('client_settings', tenant=str(tenant))
-        settings_link = C.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
+        settings_link = common.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
 
     context = {
         "request": request,
@@ -536,7 +540,7 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
         "title": "Подключение WhatsApp",
         "subtitle": subtitle,
         "settings_link": settings_link,
-        "public_base": C.public_base_url(request),
+        "public_base": common.public_base_url(request),
     }
     return templates.TemplateResponse(request, "connect/wa.html", context)
 
@@ -545,23 +549,23 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
 def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | None = None):
     tenant = int(tenant)
     access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
-    if not C.valid_key(tenant, access_key):
+    if not common.valid_key(tenant, access_key):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
-    C.ensure_tenant_files(tenant)
-    cfg = C.read_tenant_config(tenant)
+    common.ensure_tenant_files(tenant)
+    cfg = common.read_tenant_config(tenant)
     passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
     brand = ""
     if isinstance(passport, dict):
         brand = str(passport.get("brand") or "").strip()
 
-    persona_text = C.read_persona(tenant)
+    persona_text = common.read_persona(tenant)
     persona_preview = ""
     if persona_text:
         lines = str(persona_text).splitlines()
         persona_preview = "\n".join(lines[:6]).strip()
 
-    primary_key = (C.get_tenant_pubkey(tenant) or "").strip()
+    primary_key = (common.get_tenant_pubkey(tenant) or "").strip()
     resolved_key = primary_key or access_key
 
     tg_connect_config = {
@@ -589,15 +593,15 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
 @router.get("/pub/wa/status")
 async def wa_status(tenant: int, k: str):
     tenant = int(tenant)
-    if not C.valid_key(tenant, k):
+    if not common.valid_key(tenant, k):
         return JSONResponse({"ok": False, "error": "invalid_key"}, status_code=401)
     try:
-        webhook = C.webhook_url()
+        webhook = common.webhook_url()
         payload = {"tenant_id": int(tenant), "webhook_url": webhook}
-        resp = await C.wa_post("/session/start", payload)
+        resp = await common.wa_post("/session/start", payload)
         status = int(getattr(resp, "status_code", 0) or 0)
         if status == 404:
-            await C.wa_post(f"/session/{int(tenant)}/start", payload)
+            await common.wa_post(f"/session/{int(tenant)}/start", payload)
     except Exception:
         pass
     result = await _wa_status_impl(tenant)
@@ -606,9 +610,9 @@ async def wa_status(tenant: int, k: str):
 
 async def _wa_status_impl(tenant: int) -> dict:
     # Read status from tenant-scoped endpoint with fallback to legacy global endpoint
-    code, raw = C.http("GET", f"{C.WA_WEB_URL}/session/{int(tenant)}/status")
+    code, raw = common.http("GET", f"{common.WA_WEB_URL}/session/{int(tenant)}/status")
     if int(code or 0) == 404:
-        code, raw = C.http("GET", f"{C.WA_WEB_URL}/session/status")
+        code, raw = common.http("GET", f"{common.WA_WEB_URL}/session/status")
     try:
         data = json.loads(raw)
     except Exception:
@@ -659,7 +663,7 @@ def _fetch_qr_bytes(url: str, timeout: float = 6.0):
 
 
 def _build_qr_candidates(tenant: int, cache_bust: int) -> list[tuple[str, str]]:
-    base = C.WA_WEB_URL.rstrip("/")
+    base = common.WA_WEB_URL.rstrip("/")
     ts_param = f"ts={cache_bust}"
     return [
         (f"{base}/session/{tenant}/qr?format=svg&{ts_param}", "tenant_query_svg"),
@@ -676,9 +680,9 @@ def _proxy_qr_with_fallbacks(tenant: int) -> Response:
     wa_logger.info("qr_fetch start tenant=%s", tenant)
     if getattr(settings, "WA_PREFETCH_START", True):
         try:
-            hook = C.webhook_url()
+            hook = common.webhook_url()
             payload = json.dumps({"tenant_id": int(tenant), "webhook_url": hook}, ensure_ascii=False).encode("utf-8")
-            code, _ = C.http("POST", f"{C.WA_WEB_URL}/session/{int(tenant)}/start", body=payload, timeout=4.0)
+            code, _ = common.http("POST", f"{common.WA_WEB_URL}/session/{int(tenant)}/start", body=payload, timeout=4.0)
             wa_logger.info("qr_prefetch_start code=%s", code)
         except Exception:
             wa_logger.info("qr_prefetch_start_failed")
@@ -728,7 +732,7 @@ def _ensure_valid_qr_request(raw_tenant: int | str | None, raw_key: str | None) 
     if not raw_key:
         return None
     key = str(raw_key)
-    if not C.valid_key(tenant_id, key):
+    if not common.valid_key(tenant_id, key):
         return None
     return tenant_id, key
 
@@ -797,7 +801,7 @@ def require_client_key(
         return JSONResponse({"error": "invalid_key"}, status_code=401, headers=_no_store_headers())
 
     key = "" if raw_key is None else str(raw_key).strip()
-    if not key or not C.valid_key(tenant_id, key):
+    if not key or not common.valid_key(tenant_id, key):
         return JSONResponse({"error": "invalid_key"}, status_code=401, headers=_no_store_headers())
 
     return tenant_id, key
@@ -881,12 +885,28 @@ async def tg_start(
     force_flag = bool(initial_force_flag)
 
     if not force_flag:
-        status_code, status_body, status_headers = C.tg_http(
-            "GET",
-            f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
-            timeout=15.0,
-        )
-        status_body_bytes = _coerce_body_bytes(status_body)
+        try:
+            status_response = await C.tg_get(
+                f"{TG_WORKER_BASE}/session/status",
+                {"tenant": tenant_id},
+                timeout=15.0,
+            )
+        except Exception as exc:
+            _log_tg_proxy(
+                "/pub/tg/start",
+                tenant_id,
+                0,
+                None,
+                error=str(exc),
+                force=force_flag,
+            )
+            fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
+            return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=fail_headers)
+
+        status_code = int(getattr(status_response, "status_code", 0) or 0)
+        status_body_bytes = bytes(getattr(status_response, "content", b"") or b"")
+        status_headers = getattr(status_response, "headers", {}) or {}
+
         if status_code <= 0:
             detail = _stringify_detail(status_body_bytes) or "tg_unavailable"
             _log_tg_proxy(
@@ -908,8 +928,7 @@ async def tg_start(
 
         parsed_status: Any
         try:
-            decoded = status_body_bytes.decode("utf-8", errors="ignore")
-            parsed_status = json.loads(decoded or "{}")
+            parsed_status = status_response.json()
         except Exception:
             parsed_status = None
         twofa_pending_now = False
@@ -1136,16 +1155,25 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         return JSONResponse({"error": "invalid_tenant"}, status_code=400, headers=_tg_cache_headers("-"))
 
     key_value = "" if key_candidate is None else str(key_candidate).strip()
-    if not key_value or not C.valid_key(tenant_id, key_value):
+    if not key_value or not common.valid_key(tenant_id, key_value):
         _log_tg_proxy("/pub/tg/status", tenant_id, 401, None, error="invalid_key")
         return JSONResponse({"error": "invalid_key"}, status_code=401, headers=_tg_cache_headers(401))
 
-    status_code, body, headers = C.tg_http(
-        "GET",
-        f"{TG_WORKER_BASE}/session/status?tenant={tenant_id}",
-        timeout=15.0,
-    )
-    body_bytes = _coerce_body_bytes(body)
+    try:
+        upstream = await C.tg_get(
+            f"{TG_WORKER_BASE}/session/status",
+            {"tenant": tenant_id},
+            timeout=15.0,
+        )
+    except Exception as exc:
+        _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error=str(exc))
+        fail_headers = _tg_cache_headers("-", {"Content-Type": "application/json"})
+        fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
+        return Response(content=fail_body, status_code=502, headers=fail_headers)
+
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    headers = getattr(upstream, "headers", {}) or {}
 
     detail = None if 200 <= status_code < 300 else _stringify_detail(body_bytes) or f"status_{status_code}"
     _log_tg_proxy("/pub/tg/status", tenant_id, status_code, body_bytes, error=detail)
@@ -1157,7 +1185,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
 
     response_headers = _tg_cache_headers(status_code)
     upstream_content_type = None
-    for name, value in (headers or {}).items():
+    for name, value in headers.items():
         if name and value and name.lower() == "content-type":
             upstream_content_type = value
             break
@@ -1179,7 +1207,7 @@ def tg_qr_png(qr_id: str | None = None):
         return Response(content=body, status_code=404, headers=headers)
 
     safe_qr = quote(qr_value, safe="")
-    status_code, body, headers = C.tg_http(
+    status_code, body, headers = common.tg_http(
         "GET",
         f"{TG_WORKER_BASE}/session/qr/{safe_qr}.png",
         timeout=15.0,
@@ -1232,7 +1260,7 @@ def tg_qr_txt(qr_id: str | None = None):
         )
 
     safe_qr = quote(qr_value, safe="")
-    status_code, body, headers = C.tg_http(
+    status_code, body, headers = common.tg_http(
         "GET",
         f"{TG_WORKER_BASE}/session/qr/{safe_qr}.txt",
         timeout=15.0,
@@ -1360,33 +1388,33 @@ async def wa_restart(request: Request, tenant: int | None = None, k: str | None 
     tenant_id = int(raw_tenant)
     key = str(raw_key)
 
-    if not C.valid_key(tenant_id, key):
+    if not common.valid_key(tenant_id, key):
         return JSONResponse({"error": "invalid_key"}, status_code=401)
 
     wa_logger.info("wa_restart click tenant=%s", tenant_id)
 
     try:
-        webhook = C.webhook_url()
+        webhook = common.webhook_url()
         start_payload = json.dumps({"tenant_id": tenant_id, "webhook_url": webhook}, ensure_ascii=False).encode("utf-8")
         empty_payload = json.dumps({}, ensure_ascii=False).encode("utf-8")
 
-        code_restart, _ = C.http(
+        code_restart, _ = common.http(
             "POST",
-            f"{C.WA_WEB_URL}/session/{tenant_id}/restart",
+            f"{common.WA_WEB_URL}/session/{tenant_id}/restart",
             body=start_payload,
         )
         if 200 <= int(code_restart or 0) < 300:
             wa_logger.info("wa_restart success tenant=%s stage=tenant_restart code=%s", tenant_id, code_restart)
             return JSONResponse({"ok": True})
 
-        code_logout, _ = C.http(
+        code_logout, _ = common.http(
             "POST",
-            f"{C.WA_WEB_URL}/session/{tenant_id}/logout",
+            f"{common.WA_WEB_URL}/session/{tenant_id}/logout",
             body=empty_payload,
         )
-        code_start, _ = C.http(
+        code_start, _ = common.http(
             "POST",
-            f"{C.WA_WEB_URL}/session/{tenant_id}/start",
+            f"{common.WA_WEB_URL}/session/{tenant_id}/start",
             body=start_payload,
         )
         if 200 <= int(code_start or 0) < 300:
@@ -1398,7 +1426,7 @@ async def wa_restart(request: Request, tenant: int | None = None, k: str | None 
             )
             return JSONResponse({"ok": True})
 
-        code_global_restart, _ = C.http("POST", f"{C.WA_WEB_URL}/session/restart", body=start_payload)
+        code_global_restart, _ = common.http("POST", f"{common.WA_WEB_URL}/session/restart", body=start_payload)
         if 200 <= int(code_global_restart or 0) < 300:
             wa_logger.info(
                 "wa_restart success tenant=%s stage=global_restart code=%s",
@@ -1407,7 +1435,7 @@ async def wa_restart(request: Request, tenant: int | None = None, k: str | None 
             )
             return JSONResponse({"ok": True})
 
-        code_global_start, _ = C.http("POST", f"{C.WA_WEB_URL}/session/start", body=start_payload)
+        code_global_start, _ = common.http("POST", f"{common.WA_WEB_URL}/session/start", body=start_payload)
         if 200 <= int(code_global_start or 0) < 300:
             wa_logger.info(
                 "wa_restart success tenant=%s stage=global_start code=%s",
@@ -1442,11 +1470,11 @@ def settings_get(tenant: int | str | None = None, k: str | None = None):
         tenant_id = _coerce_tenant(tenant)
     except ValueError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=400)
-    if not C.valid_key(tenant_id, k or ""):
+    if not common.valid_key(tenant_id, k or ""):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
-    C.ensure_tenant_files(tenant_id)
-    cfg = C.read_tenant_config(tenant_id)
-    persona = C.read_persona(tenant_id)
+    common.ensure_tenant_files(tenant_id)
+    cfg = common.read_tenant_config(tenant_id)
+    persona = common.read_persona(tenant_id)
     return {"ok": True, "cfg": cfg, "persona": persona}
 
 
@@ -1456,14 +1484,14 @@ async def settings_save(request: Request, tenant: int | str | None = None, k: st
         tenant_id = _coerce_tenant(tenant)
     except ValueError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=400)
-    if not C.valid_key(tenant_id, k or ""):
+    if not common.valid_key(tenant_id, k or ""):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
-    C.ensure_tenant_files(tenant_id)
+    common.ensure_tenant_files(tenant_id)
     try:
         payload = await request.json()
     except Exception:
         payload = {}
-    cfg = C.read_tenant_config(tenant_id)
+    cfg = common.read_tenant_config(tenant_id)
     if isinstance(payload.get("cfg"), dict):
         cfg = payload["cfg"]
     else:
@@ -1472,9 +1500,9 @@ async def settings_save(request: Request, tenant: int | str | None = None, k: st
                 cfg.setdefault(section, {}).update(payload[section])
         if isinstance(payload.get("catalogs"), list):
             cfg["catalogs"] = payload["catalogs"]
-    C.write_tenant_config(tenant_id, cfg)
+    common.write_tenant_config(tenant_id, cfg)
     if isinstance(payload.get("persona"), str):
-        C.write_persona(tenant_id, payload.get("persona") or "")
+        common.write_persona(tenant_id, payload.get("persona") or "")
     return {"ok": True}
 
 
@@ -1523,8 +1551,8 @@ async def catalog_upload(
             status_code=400,
         )
 
-    C.ensure_tenant_files(tenant_id)
-    tenant_root = pathlib.Path(C.tenant_dir(tenant_id))
+    common.ensure_tenant_files(tenant_id)
+    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
     uploads_dir = tenant_root / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1643,7 +1671,7 @@ async def catalog_upload(
             append_log("info", "csv_written", items=items, columns=len(ordered_columns), pipeline=pipeline_info)
 
             # Persist config updates
-            cfg = C.read_tenant_config(tenant_id)
+            cfg = common.read_tenant_config(tenant_id)
             if not isinstance(cfg, dict):
                 cfg = {}
             catalogs = cfg.get("catalogs") if isinstance(cfg.get("catalogs"), list) else []
@@ -1703,7 +1731,7 @@ async def catalog_upload(
             uploaded_meta = {k: v for k, v in uploaded_meta.items() if v is not None}
             integrations["uploaded_catalog"] = uploaded_meta
 
-            C.write_tenant_config(tenant_id, cfg)
+            common.write_tenant_config(tenant_id, cfg)
             append_log("info", "config_updated", catalog_type=catalog_type)
         except Exception as exc:  # final safety net
             logger.exception("catalog job crashed", exc_info=exc)
@@ -1759,7 +1787,7 @@ def catalog_upload_status(tenant: int, job_id: str, request: Request):
     if not authorized:
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
-    tenant_root = pathlib.Path(C.tenant_dir(tenant_id))
+    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
     status_path = tenant_root / "catalog_jobs" / job_id / "status.json"
     if not status_path.exists():
         return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)

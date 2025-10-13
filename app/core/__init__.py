@@ -16,19 +16,19 @@ except Exception:  # библиотека может быть не устано�
     openai = None  # type: ignore
 
 try:
-    from .brain import planner, quality
+    from ..brain import planner, quality
 except Exception:  # pragma: no cover
     import importlib
 
-    planner = importlib.import_module("brain.planner")  # type: ignore
-    quality = importlib.import_module("brain.quality")  # type: ignore
+    planner = importlib.import_module("app.brain.planner")  # type: ignore
+    quality = importlib.import_module("app.brain.quality")  # type: ignore
 
 try:
-    from .catalog import retriever as catalog_retriever  # type: ignore
+    from ..catalog import retriever as catalog_retriever  # type: ignore
 except Exception:  # pragma: no cover
     catalog_retriever = None
 try:
-    from .training import retriever as training_retriever  # type: ignore
+    from ..training import retriever as training_retriever  # type: ignore
 except Exception:  # pragma: no cover
     training_retriever = None
 
@@ -40,7 +40,7 @@ except Exception:  # опциональная зависимость для Exce
     load_workbook = None  # type: ignore
 
 
-BASE_DIR = pathlib.Path(__file__).resolve().parent
+BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 ROOT_DIR = BASE_DIR.parent
 DATA_DIR = pathlib.Path(os.getenv("APP_DATA_DIR") or (BASE_DIR / "data"))
 
