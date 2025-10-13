@@ -5,6 +5,37 @@ from dataclasses import dataclass
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
+
+class _CoreSettingsProxy:
+    __slots__ = ()
+
+    def _resolve(self) -> Any:
+        from app.core import settings as core_settings  # type: ignore[attr-defined]
+
+        return core_settings
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in {"_resolve"}:
+            return object.__getattribute__(self, name)
+        if name == "__class__":
+            return self._resolve().__class__
+        target = self._resolve()
+        return getattr(target, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._resolve(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(self._resolve(), name)
+
+    def __dir__(self) -> list[str]:
+        target = self._resolve()
+        return sorted(set(dir(target)))
+
+    def __repr__(self) -> str:
+        return repr(self._resolve())
 
 
 DEFAULT_TG_WORKER_URL = "http://tgworker:8085"
@@ -81,4 +112,6 @@ def tg_worker_url() -> str:
     return _normalize_worker_url(raw)
 
 
-__all__ = ["TelegramConfig", "telegram_config", "tg_worker_url"]
+settings = _CoreSettingsProxy()
+
+__all__ = ["TelegramConfig", "telegram_config", "tg_worker_url", "settings"]
