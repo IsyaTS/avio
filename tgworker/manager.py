@@ -989,7 +989,7 @@ class TelegramSessionManager:
 
         if client is None:
             return TwoFASubmitResult(
-                status_code=500,
+                status_code=400,
                 body={"error": "password_exception", "detail": "client_unavailable"},
             )
 
@@ -998,13 +998,14 @@ class TelegramSessionManager:
             error_code: str,
             *,
             backoff: Optional[float] = None,
+            last_error: Optional[str] = None,
         ) -> None:
             async with self._lock:
                 state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
                 self._set_status(tenant, state, "needs_2fa", reason=reason)
                 state.needs_2fa = True
                 state.awaiting_password = True
-                state.last_error = error_code
+                state.last_error = last_error if last_error is not None else error_code
                 state.last_seen = time.time()
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
@@ -1025,9 +1026,10 @@ class TelegramSessionManager:
             backoff: Optional[float] = None,
             exc: Optional[Exception] = None,
             extra: Optional[Dict[str, Any]] = None,
+            last_error: Optional[str] = None,
         ) -> TwoFASubmitResult:
             EVENT_ERRORS.labels("password_failed").inc()
-            await _mark_failure(event, error, backoff=backoff)
+            await _mark_failure(event, error, backoff=backoff, last_error=last_error)
             parts = [f"stage=password_failed event={event} tenant_id={tenant}"]
             detail_value = detail or error
             if retry_after is not None:
@@ -1069,18 +1071,38 @@ class TelegramSessionManager:
                     return
                 raise
 
+        def _is_network_or_mtproto_error(exc: Exception) -> bool:
+            if isinstance(exc, RPCError):
+                return True
+            if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+                return True
+            return False
+
         max_attempts = 2
         signed_in = False
         for attempt in range(max_attempts):
             try:
                 await client(functions.account.GetPasswordRequest())
-            except Exception as exc:
+            except BadRequestError as exc_bad_request:
+                detail = str(exc_bad_request) or "get_password_bad_request"
                 return await _failure_response(
-                    status=500,
+                    status=400,
                     error="password_exception",
                     event="password_exception",
-                    detail="get_password_failed",
+                    detail=detail,
+                    exc=exc_bad_request,
+                    last_error="password_exception",
+                )
+            except Exception as exc:
+                status = 502 if _is_network_or_mtproto_error(exc) else 400
+                detail = str(exc) or "get_password_failed"
+                return await _failure_response(
+                    status=status,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
                     exc=exc,
+                    last_error="password_exception",
                 )
 
             try:
@@ -1093,6 +1115,7 @@ class TelegramSessionManager:
                     error="password_invalid",
                     event="password_invalid",
                     detail="password_invalid",
+                    last_error="password_exception",
                 )
             except PhonePasswordFloodError as exc_flood:
                 wait_seconds = getattr(exc_flood, "seconds", None)
@@ -1101,7 +1124,7 @@ class TelegramSessionManager:
                 wait_seconds = max(1, int(wait_seconds))
                 return await _failure_response(
                     status=429,
-                    error="phone_password_flood",
+                    error="flood_wait",
                     event="phone_password_flood",
                     retry_after=wait_seconds,
                     backoff=float(wait_seconds),
@@ -1145,20 +1168,22 @@ class TelegramSessionManager:
                     await asyncio.sleep(0)
                     continue
                 return await _failure_response(
-                    status=500,
+                    status=400,
                     error="password_exception",
                     event="password_exception",
                     detail=message or "bad_request_error",
                     exc=exc_bad,
+                    last_error="password_exception",
                 )
             except RPCError as exc_rpc:
                 detail = str(exc_rpc) or "telegram_error"
                 return await _failure_response(
-                    status=500,
+                    status=502,
                     error="password_exception",
                     event="password_exception",
                     detail=detail,
                     exc=exc_rpc,
+                    last_error="password_exception",
                 )
             except SessionPasswordNeededError:
                 return TwoFASubmitResult(
@@ -1168,28 +1193,32 @@ class TelegramSessionManager:
             except TypeError as exc_type:
                 detail = str(exc_type) or "type_error"
                 return await _failure_response(
-                    status=500,
+                    status=400,
                     error="password_exception",
                     event="password_exception",
                     detail=detail,
                     exc=exc_type,
+                    last_error="password_exception",
                 )
             except Exception as exc_generic:
                 detail = str(exc_generic) or "exception"
+                status = 502 if _is_network_or_mtproto_error(exc_generic) else 400
                 return await _failure_response(
-                    status=500,
+                    status=status,
                     error="password_exception",
                     event="password_exception",
                     detail=detail,
                     exc=exc_generic,
+                    last_error="password_exception",
                 )
 
         if not signed_in:
             return await _failure_response(
-                status=500,
+                status=400,
                 error="password_exception",
                 event="password_exception",
                 detail="password_loop_exhausted",
+                last_error="password_exception",
             )
 
         async with self._lock:
