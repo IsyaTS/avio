@@ -821,6 +821,13 @@ def _normalize_public_token(value: str | None) -> str:
     return str(value).strip()
 
 
+def _resolve_qr_identifier(primary: str | None, legacy: str | None = None) -> str:
+    candidate = primary if primary is not None else legacy
+    if candidate is None:
+        return ""
+    return str(candidate).strip()
+
+
 def _admin_token_valid(request: Request) -> bool:
     token = request.headers.get("X-Admin-Token")
     return bool(token) and token == settings.ADMIN_TOKEN
@@ -1133,34 +1140,63 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
 
 
 @router.get("/pub/tg/qr.png")
-async def tg_qr_png(qr_id: str | None = None):
+async def tg_qr_png(
+    request: Request,
+    tenant: int | str | None = None,
+    qr_id: str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+):
     route = "/pub/tg/qr.png"
-    qr_value = "" if qr_id is None else str(qr_id).strip()
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+        request, tenant, k or key
+    )
+    try:
+        tenant_id = _coerce_tenant(tenant_candidate)
+    except ValueError:
+        return _invalid_tenant_response(route, tenant_candidate)
+
+    if not _has_public_tg_access(request, key_candidate):
+        return _unauthorized_response(route, tenant_id)
+
+    qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
     if not qr_value:
-        _log_tg_proxy(route, None, 404, None, error="missing_qr_id")
+        _log_tg_proxy(route, tenant_id, 404, None, error="missing_qr_id")
         headers = _no_store_headers({"X-Telegram-Upstream-Status": "404"})
         return JSONResponse({"error": "missing_qr_id"}, status_code=404, headers=headers)
 
-    safe_qr = quote(qr_value, safe="")
     try:
-        upstream = await C.tg_get(f"/session/qr/{safe_qr}.png", timeout=5.0)
+        upstream = await C.tg_get(
+            "/rpc/qr.png",
+            {"tenant": tenant_id, "qr_id": qr_value},
+            timeout=5.0,
+            stream=True,
+        )
     except httpx.HTTPError as exc:
-        return _tg_unavailable_response(route, None, exc)
+        return _tg_unavailable_response(route, tenant_id, exc)
     except Exception as exc:
-        return _tg_unavailable_response(route, None, exc)
+        return _tg_unavailable_response(route, tenant_id, exc)
+
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    if status_code not in {200, 404, 410}:
+        detail = f"status_{status_code}" if status_code else "status_0"
+        return _tg_unavailable_response(route, tenant_id, detail)
+
+    upstream_headers = getattr(upstream, "headers", {}) or {}
+    error_content_type = upstream_headers.get("Content-Type") or "application/json"
 
     return _passthrough_upstream_response(
         route,
-        None,
+        tenant_id,
         upstream,
         success_content_type="image/png",
-        error_content_type="application/json",
+        error_content_type=error_content_type,
     )
 
 
 @router.get("/pub/tg/qr.txt")
-def tg_qr_txt(qr_id: str | None = None):
-    qr_value = "" if qr_id is None else str(qr_id).strip()
+def tg_qr_txt(request: Request, qr_id: str | None = None):
+    qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
     if not qr_value:
         _log_tg_proxy("/pub/tg/qr.txt", None, 400, None, error="missing_qr_id")
         return JSONResponse(

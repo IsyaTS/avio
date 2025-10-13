@@ -78,10 +78,22 @@ async def tg_get(
     payload: Mapping[str, Any] | None = None,
     *,
     timeout: float = 5.0,
+    stream: bool = False,
 ) -> httpx.Response:
     params = None if payload is None else dict(payload)
     async with httpx.AsyncClient(timeout=_http_timeout(timeout)) as client:
-        return await client.get(_resolve_url(path), params=params)
+        url = _resolve_url(path)
+        if stream:
+            async with client.stream("GET", url, params=params) as response:
+                content = await response.aread()
+                return httpx.Response(
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    content=content,
+                    request=response.request,
+                    extensions=response.extensions,
+                )
+        return await client.get(url, params=params)
 
 
 __all__ = ["tg_post", "tg_get"]

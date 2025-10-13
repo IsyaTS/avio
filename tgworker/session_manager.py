@@ -152,8 +152,8 @@ class SessionManager:
     async def submit_password(self, tenant_id: int, password: str) -> TwoFASubmitResult:
         return await self._manager.submit_password(tenant_id, password)
 
-    def get_qr_png(self, qr_id: str) -> bytes:
-        return self._manager.get_qr_png(qr_id)
+    def get_qr_png(self, qr_id: str, tenant: int | None = None) -> bytes:
+        return self._manager.get_qr_png(qr_id, tenant=tenant)
 
     def get_qr_url(self, qr_id: str) -> str:
         return self._manager.get_qr_url(qr_id)
