@@ -364,11 +364,7 @@ def test_tg_password_accepts_form_payload(monkeypatch):
         (
             42,
             429,
-            {
-                "error": "phone_password_flood",
-                "retry_after": 17,
-                "detail": "phone_password_flood 17",
-            },
+            {"error": "flood_wait", "retry_after": 17, "detail": "phone_password_flood 17"},
             {"Retry-After": "17"},
         ),
         (
@@ -405,6 +401,30 @@ def test_tg_password_error_passthrough(monkeypatch, tenant_id, upstream_status, 
             upstream_body.get("retry_after")
         )
         assert response.headers.get("retry-after") == expected_retry
+
+
+def test_tg_password_invalid_2fa_returns_client_error(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    async def _fake_post(path: str, payload: dict, timeout: float = 8.0):
+        assert path == "/rpc/twofa.submit"
+        return httpx.Response(400, json={"error": "password_invalid"})
+
+    monkeypatch.setattr(public_module.C, "tg_post", _fake_post)
+    monkeypatch.setattr(public_module, "_register_password_attempt", lambda *args, **kwargs: (True, None))
+
+    client = TestClient(app)
+    response = client.post(
+        "/pub/tg/password",
+        params={"tenant": 55},
+        json={"password": "wrong"},
+        headers={"X-Admin-Token": "admin-token"},
+    )
+
+    assert response.status_code == 400
+    assert response.status_code not in {500, 502}
+    assert response.json() == {"error": "password_invalid"}
+    assert response.headers.get("x-telegram-upstream-status") == "400"
 
 
 def test_public_tg_empty_public_key_accepts_admin_token(monkeypatch):

@@ -24,11 +24,11 @@ services:
     image: avio/app:local
     env_file: .env
     environment:
-      - TENANTS_DIR=/app/tenants
-      - TG_SESSIONS_DIR=/app/tg-sessions
-      - TG_WORKER_URL=http://tgworker:8085
-      - PUBLIC_KEY=${PUBLIC_KEY:-}
-      - PYTHONPATH=/app
+      TENANTS_DIR: /app/tenants
+      TG_SESSIONS_DIR: /app/tg-sessions
+      TG_WORKER_URL: http://tgworker:8085
+      PUBLIC_KEY: ${PUBLIC_KEY}
+      PYTHONPATH: /app
     depends_on: [redis, postgres]
     working_dir: /app
     command: ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
