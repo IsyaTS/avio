@@ -11,15 +11,21 @@
         : {};
     const config = { ...providedConfig, ...globalConfig };
     const tenantValue = globalConfig.tenant !== undefined ? globalConfig.tenant : config.tenant;
-    const keyValue = globalConfig.key !== undefined ? globalConfig.key : config.key;
     const urls = config.urls && typeof config.urls === 'object' ? config.urls : {};
-    const startUrlBase = urls.tg_start || urls.start || '/pub/tg/start';
-    const statusUrlBase = urls.tg_status || urls.status || '/pub/tg/status';
+    const urlPublicKeyValue = urls.public_key !== undefined ? urls.public_key : urls.publicKey;
+    const keyValue = globalConfig.key !== undefined ? globalConfig.key : config.key;
+    const resolvedKeyValue =
+      urlPublicKeyValue !== undefined && urlPublicKeyValue !== null && urlPublicKeyValue !== ''
+        ? urlPublicKeyValue
+        : keyValue;
+    const startUrlBase = urls.tg_start_url || urls.tg_start || urls.start || '/pub/tg/start';
+    const statusUrlBase = urls.tg_status_url || urls.tg_status || urls.status || '/pub/tg/status';
     const qrUrlBase = urls.tg_qr_png || urls.qr || '/pub/tg/qr.png';
     const passwordUrlBase = urls.tg_password || urls.password || '/pub/tg/password';
 
     const tenant = tenantValue === undefined || tenantValue === null ? '' : String(tenantValue).trim();
-    const key = keyValue === undefined || keyValue === null ? '' : String(keyValue).trim();
+    const key =
+      resolvedKeyValue === undefined || resolvedKeyValue === null ? '' : String(resolvedKeyValue).trim();
 
     const statusEl = document.getElementById('tg-status');
     const qrBlock = document.getElementById('tg-qr-block');
@@ -49,10 +55,6 @@
       return;
     }
 
-    const baseParams = new URLSearchParams();
-    baseParams.set('tenant', tenant);
-    baseParams.set('k', key);
-
     const tenantNumber = Number(tenant);
     const tenantIdPayload = Number.isFinite(tenantNumber) && !Number.isNaN(tenantNumber) ? tenantNumber : tenant;
 
@@ -81,7 +83,7 @@
       return false;
     }
 
-    function buildUrl(basePath, extraParams) {
+    function buildUrl(basePath, extraParams, options) {
       let target;
       try {
         target = new URL(basePath || '/', window.location.origin);
@@ -91,9 +93,19 @@
           target.pathname = basePath;
         }
       }
-      baseParams.forEach((value, name) => {
-        target.searchParams.set(name, value);
-      });
+      const includeTenant = !options || options.includeTenant !== false;
+      if (includeTenant && tenant) {
+        target.searchParams.set('tenant', tenant);
+      }
+      const includeKey = !options || options.includeKey !== false;
+      if (includeKey && key) {
+        const currentKey = target.searchParams.get('k');
+        if (!currentKey) {
+          target.searchParams.set('k', key);
+        } else if (currentKey !== key) {
+          target.searchParams.set('k', key);
+        }
+      }
       if (extraParams && typeof extraParams === 'object') {
         Object.entries(extraParams).forEach(([name, value]) => {
           if (value === undefined || value === null || value === '') {
