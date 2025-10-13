@@ -17,6 +17,7 @@ from typing import Any, Iterable, Mapping
 
 from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response
+import httpx
 import urllib.request
 import urllib.error
 
@@ -992,7 +993,7 @@ async def tg_start(
     payload = {"tenant_id": tenant_id, "force": force_flag}
     try:
         upstream = await C.tg_post("/rpc/start", payload, timeout=5.0)
-    except C.TGWorkerConnectionError as exc:
+    except httpx.HTTPError as exc:
         return _tg_unavailable_response(route, tenant_id, exc, force=force_flag)
     except Exception as exc:
         return _tg_unavailable_response(route, tenant_id, exc, force=force_flag)
@@ -1067,7 +1068,7 @@ async def tg_password(
             {"tenant_id": tenant_id, "password": password_text},
             timeout=5.0,
         )
-    except C.TGWorkerConnectionError as exc:
+    except httpx.HTTPError as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
     except Exception as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
@@ -1098,7 +1099,7 @@ async def tg_restart(
             {"tenant_id": tenant_id},
             timeout=5.0,
         )
-    except C.TGWorkerConnectionError as exc:
+    except httpx.HTTPError as exc:
         return _tg_unavailable_response(route, tenant_id, exc, force=True)
     except Exception as exc:
         return _tg_unavailable_response(route, tenant_id, exc, force=True)
@@ -1123,7 +1124,7 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
             {"tenant_id": tenant_id},
             timeout=5.0,
         )
-    except C.TGWorkerConnectionError as exc:
+    except httpx.HTTPError as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
     except Exception as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
@@ -1143,7 +1144,7 @@ async def tg_qr_png(qr_id: str | None = None):
     safe_qr = quote(qr_value, safe="")
     try:
         upstream = await C.tg_get(f"/session/qr/{safe_qr}.png", timeout=5.0)
-    except C.TGWorkerConnectionError as exc:
+    except httpx.HTTPError as exc:
         return _tg_unavailable_response(route, None, exc)
     except Exception as exc:
         return _tg_unavailable_response(route, None, exc)
@@ -1240,7 +1241,7 @@ async def tg_logout(
             {"tenant_id": tenant_id},
             timeout=5.0,
         )
-    except C.TGWorkerConnectionError as exc:
+    except httpx.HTTPError as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
     except Exception as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
