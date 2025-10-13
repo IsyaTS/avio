@@ -1169,7 +1169,6 @@ async def tg_qr_png(
         upstream = await C.tg_get(
             "/rpc/qr.png",
             {"tenant": tenant_id, "qr_id": qr_value},
-            timeout=5.0,
             stream=True,
         )
     except httpx.HTTPError as exc:
@@ -1178,20 +1177,47 @@ async def tg_qr_png(
         return _tg_unavailable_response(route, tenant_id, exc)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
-    if status_code not in {200, 404, 410}:
-        detail = f"status_{status_code}" if status_code else "status_0"
-        return _tg_unavailable_response(route, tenant_id, detail)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    if status_code == 200:
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
+        return Response(
+            content=body_bytes,
+            status_code=200,
+            headers={
+                "Content-Type": "image/png",
+                "Cache-Control": "no-store",
+                "X-Telegram-Upstream-Status": "200",
+            },
+        )
 
-    upstream_headers = getattr(upstream, "headers", {}) or {}
-    error_content_type = upstream_headers.get("Content-Type") or "application/json"
+    if status_code in {404, 410}:
+        detail = _stringify_detail(body_bytes) or f"status_{status_code}"
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail)
+        upstream_headers = getattr(upstream, "headers", {}) or {}
+        headers: dict[str, str] = {
+            "Cache-Control": "no-store",
+            "X-Telegram-Upstream-Status": str(status_code),
+        }
+        content_type = upstream_headers.get("Content-Type")
+        if content_type:
+            headers["Content-Type"] = content_type
+        else:
+            headers["Content-Type"] = "application/json"
+        retry_after = upstream_headers.get("Retry-After")
+        if retry_after:
+            headers["Retry-After"] = retry_after
+        return Response(content=body_bytes, status_code=status_code, headers=headers)
 
-    return _passthrough_upstream_response(
-        route,
-        tenant_id,
-        upstream,
-        success_content_type="image/png",
-        error_content_type=error_content_type,
-    )
+    detail = "status_0" if status_code <= 0 else f"status_{status_code}"
+    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Telegram-Upstream-Status": str(status_code or "-"),
+    }
+    body: dict[str, Any] = {"error": "tg_unavailable"}
+    if detail and detail != "status_0":
+        body["detail"] = detail
+    return JSONResponse(body, status_code=502, headers=headers)
 
 
 @router.get("/pub/tg/qr.txt")

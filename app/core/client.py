@@ -7,7 +7,39 @@ import httpx
 
 from config import tg_worker_url
 
-_MAX_TIMEOUT = 5.0
+_DEFAULT_TIMEOUT_SECONDS = 5.0
+
+
+def _default_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=3.0,
+        read=_DEFAULT_TIMEOUT_SECONDS,
+        write=_DEFAULT_TIMEOUT_SECONDS,
+        pool=3.0,
+    )
+
+
+def _normalize_timeout(value: float | httpx.Timeout | None) -> float | httpx.Timeout:
+    if value is None:
+        return _default_timeout()
+    if isinstance(value, httpx.Timeout):
+        connect = value.connect if value.connect is not None else 3.0
+        read = value.read if value.read is not None else _DEFAULT_TIMEOUT_SECONDS
+        write = value.write if value.write is not None else _DEFAULT_TIMEOUT_SECONDS
+        pool = value.pool if value.pool is not None else 3.0
+        return httpx.Timeout(
+            connect=min(connect, 3.0),
+            read=min(read, _DEFAULT_TIMEOUT_SECONDS),
+            write=min(write, _DEFAULT_TIMEOUT_SECONDS),
+            pool=min(pool, 3.0),
+        )
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = _DEFAULT_TIMEOUT_SECONDS
+    if numeric <= 0:
+        numeric = _DEFAULT_TIMEOUT_SECONDS
+    return min(numeric, _DEFAULT_TIMEOUT_SECONDS)
 
 
 def _base_url() -> str:
@@ -30,46 +62,13 @@ def _resolve_url(path: str) -> str:
     return f"{_base_url()}{path}"
 
 
-def _clamp_timeout(value: float | None) -> float:
-    try:
-        numeric = float(value) if value is not None else _MAX_TIMEOUT
-    except (TypeError, ValueError):
-        numeric = _MAX_TIMEOUT
-    if numeric <= 0:
-        return _MAX_TIMEOUT
-    return min(numeric, _MAX_TIMEOUT)
-
-
-def _http_timeout(value: float | httpx.Timeout | None) -> httpx.Timeout | float:
-    if isinstance(value, httpx.Timeout):
-        connect = _clamp_timeout(getattr(value, "connect", None))
-        read = _clamp_timeout(getattr(value, "read", None))
-        write = _clamp_timeout(getattr(value, "write", None))
-        pool = _clamp_timeout(getattr(value, "pool", None))
-        return httpx.Timeout(
-            connect=min(connect, 3.0),
-            read=min(read, _MAX_TIMEOUT),
-            write=min(write, _MAX_TIMEOUT),
-            pool=min(pool, 3.0),
-        )
-    numeric = _clamp_timeout(value if isinstance(value, (int, float)) else None)
-    if numeric == _MAX_TIMEOUT:
-        return _MAX_TIMEOUT
-    return httpx.Timeout(
-        connect=min(3.0, numeric),
-        read=numeric,
-        write=numeric,
-        pool=min(3.0, numeric),
-    )
-
-
 async def tg_post(
     path: str,
     payload: Mapping[str, Any] | None = None,
     *,
     timeout: float = 5.0,
 ) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=_http_timeout(timeout)) as client:
+    async with httpx.AsyncClient(timeout=_normalize_timeout(timeout)) as client:
         return await client.post(_resolve_url(path), json=payload)
 
 
@@ -81,7 +80,7 @@ async def tg_get(
     stream: bool = False,
 ) -> httpx.Response:
     params = None if payload is None else dict(payload)
-    async with httpx.AsyncClient(timeout=_http_timeout(timeout)) as client:
+    async with httpx.AsyncClient(timeout=_normalize_timeout(timeout)) as client:
         url = _resolve_url(path)
         if stream:
             async with client.stream("GET", url, params=params) as response:
