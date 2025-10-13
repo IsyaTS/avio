@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 
 import httpx
 import pytest
@@ -11,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.web import public as public_module
 
 
-def _base_app(monkeypatch):
+def _base_app(monkeypatch, public_key: str = "public-key"):
     app = FastAPI()
     app.include_router(public_module.router)
 
@@ -34,8 +33,7 @@ def _base_app(monkeypatch):
     monkeypatch.setattr(public_module.common, "public_base_url", lambda request=None: "https://example.test")
     monkeypatch.setattr(public_module.common, "public_url", lambda request, url: str(url))
     monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
-    monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", "public-key")
-    monkeypatch.setattr(public_module, "_public_key_fallback_warned", False)
+    monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", public_key)
     public_module._LOCAL_PASSWORD_ATTEMPTS.clear()
 
     return app
@@ -227,7 +225,7 @@ def test_tg_status_rejects_invalid_key(monkeypatch):
     assert called is False
 
 
-def test_public_tg_status_and_qr_require_public_key(monkeypatch):
+def test_tg_qr_requires_token(monkeypatch):
     app = _base_app(monkeypatch)
 
     async def _fake_get(
@@ -236,32 +234,72 @@ def test_public_tg_status_and_qr_require_public_key(monkeypatch):
         timeout: float = 5.0,
         stream: bool = False,
     ) -> httpx.Response:
-        if path == "/rpc/status":
-            return httpx.Response(200, json={"status": "authorized"})
-        if path == "/rpc/qr.png":
-            return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"img")
-        raise AssertionError(f"unexpected path {path}")
+        raise AssertionError("should not call tgworker without auth")
 
     monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
 
     client = TestClient(app)
+    resp = client.get("/pub/tg/qr.png", params={"tenant": 1, "qr_id": "qr"})
 
-    status_without_key = client.get("/pub/tg/status", params={"tenant": 1})
-    assert status_without_key.status_code == 401
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
 
-    status_with_key = client.get("/pub/tg/status", params={"tenant": 1, "k": "public-key"})
-    assert status_with_key.status_code == 200
-    assert status_with_key.json()["status"] == "authorized"
 
-    qr_without_key = client.get("/pub/tg/qr.png", params={"tenant": 1, "qr_id": "qr"})
-    assert qr_without_key.status_code == 401
+def test_tg_qr_png_admin_token_header(monkeypatch):
+    app = _base_app(monkeypatch)
 
-    qr_with_key = client.get(
+    async def _fake_qr(
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout: float = 5.0,
+        stream: bool = False,
+    ) -> httpx.Response:
+        assert path == "/rpc/qr.png"
+        assert payload == {"tenant": 1, "qr_id": "qr"}
+        assert stream is True
+        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"img")
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
+
+    client = TestClient(app)
+    resp = client.get(
         "/pub/tg/qr.png",
-        params={"tenant": 1, "qr_id": "qr", "k": "public-key"},
+        params={"tenant": 1, "qr_id": "qr"},
+        headers={"X-Admin-Token": "admin-token"},
     )
-    assert qr_with_key.status_code == 200
-    assert qr_with_key.content == b"img"
+
+    assert resp.status_code == 200
+    assert resp.headers.get("content-type") == "image/png"
+    assert resp.content == b"img"
+
+
+def test_tg_qr_public_key_when_present(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    async def _fake_qr(
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout: float = 5.0,
+        stream: bool = False,
+    ) -> httpx.Response:
+        assert path == "/rpc/qr.png"
+        assert payload == {"tenant": 4, "qr_id": "qr"}
+        assert stream is True
+        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"img")
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
+
+    client = TestClient(app)
+    resp = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 4, "qr_id": "qr", "k": "public-key"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers.get("content-type") == "image/png"
+    assert resp.content == b"img"
 
 
 def test_tg_password_proxies_json_payload(monkeypatch):
@@ -285,10 +323,12 @@ def test_tg_password_proxies_json_payload(monkeypatch):
     )
 
     assert response.status_code == 200
+    assert response.json() == {"ok": True}
     assert captured["path"] == "/rpc/twofa.submit"
     assert captured["payload"] == {"tenant_id": 5, "password": "pass123"}
     assert captured["timeout"] == 5.0
     assert response.headers.get("x-telegram-upstream-status") == "200"
+    assert response.headers.get("content-type") == "application/json"
 
 
 def test_tg_password_accepts_form_payload(monkeypatch):
@@ -311,31 +351,41 @@ def test_tg_password_accepts_form_payload(monkeypatch):
     )
 
     assert response.status_code == 200
+    assert response.json() == {"ok": True}
     assert captured["path"] == "/rpc/twofa.submit"
     assert captured["payload"] == {"tenant_id": 6, "password": "form-pass"}
     assert captured["timeout"] == 5.0
 
 
 @pytest.mark.parametrize(
-    ("tenant_id", "status_code", "body", "headers"),
+    "tenant_id,upstream_status,upstream_body,upstream_headers",
     [
-        (41, 400, {"error": "password_invalid"}, {}),
-        (42, 409, {"error": "srp_invalid"}, {}),
+        (41, 400, {"error": "password_invalid", "detail": "password_invalid"}, {}),
+        (
+            42,
+            429,
+            {
+                "error": "phone_password_flood",
+                "retry_after": 17,
+                "detail": "phone_password_flood 17",
+            },
+            {"Retry-After": "17"},
+        ),
         (
             43,
             429,
-            {"error": "password_flood", "retry_after": 17, "backoff_until": 1700},
-            {"Retry-After": "17"},
+            {"error": "flood_wait", "retry_after": 9, "detail": "flood_wait 9"},
+            {},
         ),
     ],
 )
-def test_tg_password_error_passthrough(monkeypatch, tenant_id, status_code, body, headers):
+def test_tg_password_error_passthrough(monkeypatch, tenant_id, upstream_status, upstream_body, upstream_headers):
     app = _base_app(monkeypatch)
 
     async def _fake_post(path: str, payload: dict, timeout: float = 8.0):
         assert path == "/rpc/twofa.submit"
         assert payload["tenant_id"] == tenant_id
-        return httpx.Response(status_code, json=body, headers=headers)
+        return httpx.Response(upstream_status, json=upstream_body, headers=upstream_headers)
 
     monkeypatch.setattr(public_module.C, "tg_post", _fake_post)
 
@@ -347,17 +397,18 @@ def test_tg_password_error_passthrough(monkeypatch, tenant_id, status_code, body
         headers={"X-Admin-Token": "admin-token"},
     )
 
-    assert response.status_code == status_code
-    assert response.json() == body
-    assert response.headers.get("x-telegram-upstream-status") == str(status_code)
-    if status_code == 429:
-        assert response.headers.get("retry-after") == headers.get("Retry-After")
+    assert response.status_code == upstream_status
+    assert response.json() == upstream_body
+    assert response.headers.get("x-telegram-upstream-status") == str(upstream_status)
+    if upstream_status == 429:
+        expected_retry = upstream_headers.get("Retry-After") or str(
+            upstream_body.get("retry_after")
+        )
+        assert response.headers.get("retry-after") == expected_retry
 
 
-def test_public_tg_allows_admin_token_fallback(monkeypatch, caplog):
-    app = _base_app(monkeypatch)
-    monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", "")
-    monkeypatch.setattr(public_module, "_public_key_fallback_warned", False)
+def test_public_tg_empty_public_key_accepts_admin_token(monkeypatch):
+    app = _base_app(monkeypatch, public_key="")
 
     async def _fake_status(
         path: str,
@@ -371,17 +422,39 @@ def test_public_tg_allows_admin_token_fallback(monkeypatch, caplog):
     monkeypatch.setattr(public_module.C, "tg_get", _fake_status)
 
     client = TestClient(app)
-    with caplog.at_level(logging.WARNING, logger=public_module.logger.name):
-        response = client.get(
-            "/pub/tg/status",
-            params={"tenant": 5, "k": "admin-token"},
-        )
+    response = client.get(
+        "/pub/tg/status",
+        params={"tenant": 5},
+        headers={"X-Admin-Token": "admin-token"},
+    )
 
     assert response.status_code == 200
     assert response.json()["status"] == "waiting_qr"
-    assert any(
-        "allowing ADMIN_TOKEN fallback" in record.getMessage() for record in caplog.records
+
+
+def test_public_tg_empty_public_key_rejects_query_param(monkeypatch):
+    app = _base_app(monkeypatch, public_key="")
+
+    async def _fake_qr(
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout: float = 5.0,
+        stream: bool = False,
+    ) -> httpx.Response:
+        raise AssertionError("should not hit tgworker when unauthorized")
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
+
+    client = TestClient(app)
+    status_resp = client.get("/pub/tg/status", params={"tenant": 2, "k": "anything"})
+    assert status_resp.status_code == 401
+
+    qr_resp = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 2, "qr_id": "qr", "k": "anything"},
     )
+    assert qr_resp.status_code == 401
 
 
 def test_tg_qr_png_expired(monkeypatch):
@@ -410,10 +483,10 @@ def test_tg_qr_png_expired(monkeypatch):
         headers={"X-Admin-Token": "admin-token"},
     )
 
-    assert resp.status_code == 404
+    assert resp.status_code == 410
     assert resp.json() == {"error": "qr_expired"}
     assert resp.headers.get("cache-control") == "no-store"
-    assert resp.headers.get("x-telegram-upstream-status") == "404"
+    assert resp.headers.get("x-telegram-upstream-status") == "410"
 
 
 def test_tg_qr_png_gone(monkeypatch):

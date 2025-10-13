@@ -4,6 +4,11 @@ import asyncio
 import json
 import os
 import sys
+
+module_obj = sys.modules.get(__name__)
+if module_obj is not None:
+    sys.modules[__name__] = module_obj
+    sys.modules["app.web.common"] = module_obj
 import time
 import urllib.error
 import urllib.parse

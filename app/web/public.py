@@ -74,14 +74,14 @@ wa_logger.propagate = False
 
 TG_WORKER_BASE = tg_worker_url()
 
+if not hasattr(C, "valid_key"):
+    setattr(C, "valid_key", common.valid_key)
+
 NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
 
 PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
 _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
-
-
-_public_key_fallback_warned = False
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -753,7 +753,8 @@ def _ensure_valid_qr_request(raw_tenant: int | str | None, raw_key: str | None) 
     if not raw_key:
         return None
     key = str(raw_key)
-    if not common.valid_key(tenant_id, key):
+    validator = getattr(C, "valid_key", common.valid_key)
+    if not validator(tenant_id, key):
         return None
     return tenant_id, key
 
@@ -847,8 +848,6 @@ def _admin_token_valid(request: Request) -> bool:
 
 
 def _has_public_tg_access(request: Request, key_candidate: str | None) -> bool:
-    global _public_key_fallback_warned
-
     if _admin_token_valid(request):
         return True
     expected = _normalize_public_token(getattr(settings, "PUBLIC_KEY", ""))
@@ -858,15 +857,6 @@ def _has_public_tg_access(request: Request, key_candidate: str | None) -> bool:
 
     if expected:
         return provided == expected
-
-    fallback = _normalize_public_token(getattr(settings, "ADMIN_TOKEN", ""))
-    if provided and provided == fallback:
-        if not _public_key_fallback_warned:
-            logger.warning(
-                "PUBLIC_KEY is empty; allowing ADMIN_TOKEN fallback for /pub/tg endpoints"
-            )
-            _public_key_fallback_warned = True
-        return True
 
     return False
 
@@ -1108,7 +1098,60 @@ async def tg_password(
     except Exception as exc:
         return _tg_unavailable_response(route, tenant_id, exc)
 
-    return _passthrough_upstream_response(route, tenant_id, upstream)
+    status_code = int(getattr(upstream, "status_code", 0) or 0)
+    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
+    parsed: Any | None
+    try:
+        parsed = upstream.json()
+    except ValueError:
+        parsed = None
+
+    detail = None
+    if not (200 <= status_code < 300):
+        if isinstance(parsed, dict):
+            detail = _stringify_detail(parsed.get("detail")) or _stringify_detail(
+                parsed.get("error")
+            )
+        if not detail:
+            detail = _stringify_detail(body_bytes) or _stringify_detail(
+                getattr(upstream, "text", "")
+            )
+        if not detail and status_code > 0:
+            detail = f"status_{status_code}"
+
+    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail)
+
+    if status_code <= 0:
+        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
+
+    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
+    retry_after_header = getattr(upstream, "headers", {}).get("Retry-After")
+    if retry_after_header:
+        headers["Retry-After"] = retry_after_header
+
+    body_payload: Any
+    if isinstance(parsed, (dict, list)):
+        body_payload = parsed
+    else:
+        try:
+            body_payload = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+        except Exception:
+            body_payload = {}
+
+    if status_code not in {200, 400, 429}:
+        headers["Content-Type"] = "application/json"
+        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
+
+    if status_code == 429 and not retry_after_header:
+        retry_after_value = None
+        if isinstance(body_payload, dict):
+            retry_after_value = body_payload.get("retry_after")
+        if retry_after_value is not None:
+            headers["Retry-After"] = str(retry_after_value)
+
+    headers["Content-Type"] = "application/json"
+    return JSONResponse(body_payload, status_code=status_code, headers=headers)
 
 
 @router.post("/pub/tg/restart")
@@ -1219,12 +1262,24 @@ async def tg_qr_png(
         )
 
     if status_code in {404, 410}:
-        detail = _stringify_detail(body_bytes) or f"status_{status_code}"
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail)
+        parsed_detail = None
+        try:
+            parsed_json = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+        except Exception:
+            parsed_json = {}
+        if isinstance(parsed_json, dict):
+            detail_value = parsed_json.get("detail") or parsed_json.get("error")
+            if isinstance(detail_value, str):
+                parsed_detail = detail_value
+        status_out = status_code
+        if status_code == 404 and parsed_detail == "qr_expired":
+            status_out = 410
+        detail = parsed_detail or f"status_{status_out}" if status_out else "status_0"
+        _log_tg_proxy(route, tenant_id, status_out, body_bytes, error=detail)
         upstream_headers = getattr(upstream, "headers", {}) or {}
         headers: dict[str, str] = {
             "Cache-Control": "no-store",
-            "X-Telegram-Upstream-Status": str(status_code),
+            "X-Telegram-Upstream-Status": str(status_out),
         }
         content_type = upstream_headers.get("Content-Type")
         if content_type:
@@ -1234,7 +1289,7 @@ async def tg_qr_png(
         retry_after = upstream_headers.get("Retry-After")
         if retry_after:
             headers["Retry-After"] = retry_after
-        return Response(content=body_bytes, status_code=status_code, headers=headers)
+        return Response(content=body_bytes, status_code=status_out, headers=headers)
 
     detail = "status_0" if status_code <= 0 else f"status_{status_code}"
     _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail)

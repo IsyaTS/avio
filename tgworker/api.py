@@ -250,9 +250,20 @@ def create_app() -> FastAPI:
             return JSONResponse(snapshot.to_payload(), status_code=200, headers=headers)
 
         if error == "password_invalid":
-            return JSONResponse({"error": error}, status_code=400, headers=headers)
+            detail = body.get("detail") if isinstance(body, dict) else None
+            response_body = {"error": error}
+            if detail:
+                response_body["detail"] = detail
+            return JSONResponse(response_body, status_code=400, headers=headers)
 
-        if error in {"password_flood", "flood_wait"}:
+        if error == "srp_invalid":
+            detail = body.get("detail") if isinstance(body, dict) else None
+            response_body = {"error": error}
+            if detail:
+                response_body["detail"] = detail
+            return JSONResponse(response_body, status_code=409, headers=headers)
+
+        if error in {"phone_password_flood", "flood_wait"}:
             snapshot = await manager.get_status(payload.tenant_id)
             response_body = {"error": error}
             retry_after = body.get("retry_after")
@@ -261,6 +272,9 @@ def create_app() -> FastAPI:
             backoff_until = snapshot.twofa_backoff_until
             if backoff_until is not None:
                 response_body["backoff_until"] = int(backoff_until)
+            detail = body.get("detail") if isinstance(body, dict) else None
+            if detail:
+                response_body["detail"] = detail
             return JSONResponse(response_body, status_code=429, headers=headers)
 
         if error:

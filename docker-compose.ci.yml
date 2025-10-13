@@ -1,0 +1,18 @@
+services:
+  app:
+    environment:
+      TG_WORKER_URL: http://mocktg:8085
+    depends_on:
+      mocktg:
+        condition: service_started
+  mocktg:
+    image: python:3.11-slim
+    command: ["python", "/mock/mock_tgworker.py"]
+    working_dir: /mock
+    volumes:
+      - ./tools/mock_tgworker.py:/mock/mock_tgworker.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
