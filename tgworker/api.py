@@ -72,6 +72,11 @@ def create_app() -> FastAPI:
         api_hash=cfg.api_hash,
         sessions_dir=cfg.sessions_dir,
         webhook_url=webhook_url,
+        device_model=cfg.device_model,
+        system_version=cfg.system_version,
+        app_version=cfg.app_version,
+        lang_code=cfg.lang_code,
+        system_lang_code=cfg.system_lang_code,
         webhook_token=webhook_token,
     )
 
