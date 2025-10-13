@@ -27,6 +27,11 @@ class TelegramConfig:
     api_id: int
     api_hash: str
     sessions_dir: Path
+    device_model: str
+    system_version: str
+    app_version: str
+    lang_code: str
+    system_lang_code: str
 
 
 def _resolve_sessions_dir(raw: str | None) -> Path:
@@ -51,7 +56,21 @@ def telegram_config() -> TelegramConfig:
     api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
     sessions_dir = _resolve_sessions_dir(os.getenv("TG_SESSIONS_DIR"))
 
-    return TelegramConfig(api_id=api_id, api_hash=api_hash, sessions_dir=sessions_dir)
+    device_model = os.getenv("TG_DEVICE_MODEL", "Avio tgworker").strip() or "Avio tgworker"
+    system_version = os.getenv("TG_SYSTEM_VERSION", "1.0").strip() or "1.0"
+    app_version = os.getenv("TG_APP_VERSION", "1.0").strip() or "1.0"
+    lang = os.getenv("TG_LANG", "ru").strip() or "ru"
+
+    return TelegramConfig(
+        api_id=api_id,
+        api_hash=api_hash,
+        sessions_dir=sessions_dir,
+        device_model=device_model,
+        system_version=system_version,
+        app_version=app_version,
+        lang_code=lang,
+        system_lang_code=lang,
+    )
 
 
 @lru_cache(maxsize=1)

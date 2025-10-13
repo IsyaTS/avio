@@ -1,0 +1,4 @@
+# Telegram session files are stored here at runtime.
+# Keep the directory in version control without tracking sessions.
+*
+!.gitignore

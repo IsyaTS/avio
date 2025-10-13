@@ -86,6 +86,12 @@ class SessionManager:
         api_hash: str,
         sessions_dir,
         webhook_url: str,
+        *,
+        device_model: str,
+        system_version: str,
+        app_version: str,
+        lang_code: str,
+        system_lang_code: str,
         webhook_token: Optional[str] = None,
     ) -> None:
         self._manager = TelegramSessionManager(
@@ -93,6 +99,11 @@ class SessionManager:
             api_hash=api_hash,
             sessions_dir=sessions_dir,
             webhook_url=webhook_url,
+            device_model=device_model,
+            system_version=system_version,
+            app_version=app_version,
+            lang_code=lang_code,
+            system_lang_code=system_lang_code,
             webhook_token=webhook_token,
         )
 
