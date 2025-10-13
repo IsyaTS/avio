@@ -45,6 +45,26 @@ ROOT_DIR = BASE_DIR.parent
 DATA_DIR = pathlib.Path(os.getenv("APP_DATA_DIR") or (BASE_DIR / "data"))
 
 
+_public_key_warning_logged = False
+
+
+def _resolve_public_key(admin_token: str) -> str:
+    """Return PUBLIC_KEY with ADMIN_TOKEN fallback and warn once."""
+
+    global _public_key_warning_logged
+
+    raw_value = os.getenv("PUBLIC_KEY")
+    normalized = "" if raw_value is None else str(raw_value).strip()
+    if normalized:
+        return normalized
+
+    if not _public_key_warning_logged:
+        logger.warning("PUBLIC_KEY is empty; falling back to ADMIN_TOKEN")
+        _public_key_warning_logged = True
+
+    return admin_token
+
+
 def _resolve_tenants_dir() -> pathlib.Path:
     env_value = os.getenv("TENANTS_DIR")
     if env_value:
@@ -107,12 +127,7 @@ class Settings:
 
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "sueta").strip()
-    _public_key_raw = os.getenv("PUBLIC_KEY")
-    if _public_key_raw is None:
-        raise RuntimeError("PUBLIC_KEY environment variable is required")
-    PUBLIC_KEY = str(_public_key_raw).strip()
-    if not PUBLIC_KEY:
-        raise RuntimeError("PUBLIC_KEY environment variable must be a non-empty string")
+    PUBLIC_KEY    = _resolve_public_key(ADMIN_TOKEN)
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
 
     # LLM
