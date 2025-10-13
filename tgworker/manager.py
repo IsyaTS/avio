@@ -1014,6 +1014,7 @@ class TelegramSessionManager:
             retry_after: Optional[int] = None,
             backoff: Optional[float] = None,
             exc: Optional[Exception] = None,
+            extra: Optional[Dict[str, Any]] = None,
         ) -> TwoFASubmitResult:
             EVENT_ERRORS.labels("password_failed").inc()
             await _mark_failure(event, error, backoff=backoff)
@@ -1038,7 +1039,24 @@ class TelegramSessionManager:
                 body["retry_after"] = int(retry_after)
                 if status == 429:
                     headers = {"Retry-After": str(int(retry_after))}
+            if extra:
+                body.update(extra)
             return TwoFASubmitResult(status_code=status, body=body, headers=headers)
+
+        async def _sign_in_with_compat() -> None:
+            try:
+                await client.sign_in(password=secret)
+            except TypeError as exc_type:
+                message = str(exc_type) if exc_type else ""
+                if "unexpected keyword" in message or "logout_other_sessions" in message:
+                    LOGGER.warning(
+                        "stage=password_warn event=sign_in_retry tenant_id=%s detail=%s",
+                        tenant,
+                        message or "unexpected_keyword",
+                    )
+                    await client.sign_in(secret)
+                    return
+                raise
 
         max_attempts = 2
         signed_in = False
@@ -1055,12 +1073,12 @@ class TelegramSessionManager:
                 )
 
             try:
-                await client.sign_in(password=secret, logout_other_sessions=False)
+                await _sign_in_with_compat()
                 signed_in = True
                 break
             except PasswordHashInvalidError:
                 return await _failure_response(
-                    status=401,
+                    status=400,
                     error="password_invalid",
                     event="password_invalid",
                 )
@@ -1071,11 +1089,12 @@ class TelegramSessionManager:
                 wait_seconds = max(1, int(wait_seconds))
                 return await _failure_response(
                     status=429,
-                    error="flood_wait",
-                    event="flood_wait",
+                    error="password_flood",
+                    event="password_flood",
                     retry_after=wait_seconds,
                     backoff=float(wait_seconds),
                     detail="phone_password",
+                    extra={"ttl": int(wait_seconds)},
                 )
             except FloodWaitError as exc_wait:
                 wait_seconds = max(
@@ -1088,6 +1107,7 @@ class TelegramSessionManager:
                     retry_after=wait_seconds,
                     backoff=float(wait_seconds),
                     detail="flood_wait",
+                    extra={"ttl": int(wait_seconds)},
                 )
             except BadRequestError as exc_bad:
                 message = (
@@ -1131,6 +1151,15 @@ class TelegramSessionManager:
                 return TwoFASubmitResult(
                     status_code=409,
                     body={"error": "twofa_pending"},
+                )
+            except TypeError as exc_type:
+                detail = str(exc_type) or "type_error"
+                return await _failure_response(
+                    status=500,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_type,
                 )
             except Exception as exc_generic:
                 detail = str(exc_generic) or "exception"

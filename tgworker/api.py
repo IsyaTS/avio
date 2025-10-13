@@ -237,7 +237,39 @@ def create_app() -> FastAPI:
                 status_code=500,
                 headers=dict(NO_STORE_HEADERS),
             )
-        return _password_response(result)
+        headers = dict(NO_STORE_HEADERS)
+        if result.headers:
+            headers.update(result.headers)
+
+        body = dict(result.body)
+        status_code = int(result.status_code)
+        error = str(body.get("error") or "").strip()
+
+        if status_code == 200 and not error:
+            snapshot = await manager.get_status(payload.tenant_id)
+            return JSONResponse(snapshot.to_payload(), status_code=200, headers=headers)
+
+        if error == "password_invalid":
+            return JSONResponse({"error": error}, status_code=400, headers=headers)
+
+        if error in {"password_flood", "flood_wait"}:
+            snapshot = await manager.get_status(payload.tenant_id)
+            response_body = {"error": error}
+            retry_after = body.get("retry_after")
+            if retry_after is not None:
+                response_body["retry_after"] = retry_after
+            backoff_until = snapshot.twofa_backoff_until
+            if backoff_until is not None:
+                response_body["backoff_until"] = int(backoff_until)
+            return JSONResponse(response_body, status_code=429, headers=headers)
+
+        if error:
+            logger.error(
+                "stage=rpc_twofa_submit_error event=%s tenant_id=%s", error, payload.tenant_id
+            )
+            return JSONResponse({"error": error}, status_code=500, headers=headers)
+
+        return JSONResponse(body or {"error": "password_exception"}, status_code=500, headers=headers)
 
     @app.post("/send")
     async def send_message(payload: SendRequest, _: None = Depends(require_credentials)):
