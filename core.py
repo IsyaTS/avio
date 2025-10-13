@@ -1,8 +1,16 @@
 from app.core import *  # noqa: F401,F403
+from app.core import (
+    get_tenant_pubkey as _core_get_tenant_pubkey,
+    set_tenant_pubkey as _core_set_tenant_pubkey,
+)
+from config import settings as _config_settings
 
 import importlib as _importlib
 
 ADMIN_COOKIE = "admin_session"
+settings = _config_settings
+get_tenant_pubkey = _core_get_tenant_pubkey
+set_tenant_pubkey = _core_set_tenant_pubkey
 
 _core_pkg = _importlib.import_module("app.core")
 for _name, _value in _core_pkg.__dict__.items():
@@ -15,4 +23,13 @@ for _export in ("ADMIN_COOKIE", "settings", "get_tenant_pubkey", "set_tenant_pub
     if _export not in __all__:
         __all__.append(_export)
 
-del _core_pkg, _importlib, _name, _value, _export
+del (
+    _core_pkg,
+    _importlib,
+    _name,
+    _value,
+    _export,
+    _config_settings,
+    _core_get_tenant_pubkey,
+    _core_set_tenant_pubkey,
+)
