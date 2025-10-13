@@ -12,9 +12,11 @@ from types import ModuleType
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from fastapi.staticfiles import StaticFiles
 import logging
 from logging import StreamHandler
+import httpx
 
 project_root = pathlib.Path(__file__).resolve().parent.parent
 if __package__ in (None, ""):
@@ -135,16 +137,80 @@ def _init_logging():
             lg.addHandler(handler)
 
 
+from config import CHANNEL_ENDPOINTS
+from app.schemas import TransportMessage
+from app.lib.transport_utils import transport_message_asdict
+from app.metrics import MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
+from app.starlette_ext import register_transport_validation
+
+
 _init_logging()
 
 # Module-level logger for request access
 _access_logger = logging.getLogger("app.access")
+transport_logger = logging.getLogger("app.transport")
 
 app = FastAPI(title="avio-api")
 static_dir = ROOT / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 webhook = APIRouter()
+
+register_transport_validation(app)
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+@app.post("/send")
+async def send_transport_message(message: TransportMessage) -> JSONResponse:
+    if not message.has_content:
+        raise HTTPException(status_code=400, detail="empty_message")
+
+    endpoint = CHANNEL_ENDPOINTS.get(message.channel)
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="channel_unknown")
+
+    payload = transport_message_asdict(message)
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            response = await client.post(endpoint, json=payload)
+    except httpx.HTTPError as exc:
+        SEND_FAIL_COUNTER.labels(message.channel, "http_error").inc()
+        transport_logger.error(
+            "event=message_out stage=dispatch_error channel=%s tenant=%s error=%s",
+            message.channel,
+            message.tenant,
+            exc,
+        )
+        raise HTTPException(status_code=502, detail="worker_unreachable") from exc
+
+    if not (200 <= response.status_code < 300):
+        reason = f"status_{response.status_code}"
+        SEND_FAIL_COUNTER.labels(message.channel, reason).inc()
+        transport_logger.warning(
+            "event=message_out stage=dispatch_fail channel=%s tenant=%s status=%s",
+            message.channel,
+            message.tenant,
+            response.status_code,
+        )
+        detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail or "worker_error")
+
+    MESSAGE_OUT_COUNTER.labels(message.channel).inc()
+    transport_logger.info(
+        "event=message_out stage=dispatch_ok channel=%s tenant=%s",
+        message.channel,
+        message.tenant,
+    )
+    try:
+        body = response.json()
+    except Exception:
+        body = {"ok": True}
+    return JSONResponse(body, status_code=response.status_code)
 
 
 def _digits(s: str) -> str:

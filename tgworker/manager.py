@@ -16,6 +16,8 @@ from typing import Any, Dict, Optional
 import httpx
 import qrcode
 from prometheus_client import Counter, Gauge
+from app.lib.transport_utils import message_in_asdict
+from app.schemas import Attachment, MessageIn
 from telethon import TelegramClient, events, functions
 from telethon.errors import BadRequestError, RPCError, SessionPasswordNeededError
 from telethon.errors.rpcerrorlist import (
@@ -56,15 +58,20 @@ AUTHORIZED_DISCONNECTS = Counter(
     "Authorized Telegram sessions transitioning to disconnected without manual logout",
     labelnames=("reason",),
 )
-INCOMING_MESSAGES = Counter(
-    "tgworker_incoming_messages_total",
-    "Telegram messages received from MTProto",
-    labelnames=("tenant",),
+MESSAGE_IN_COUNTER = Counter(
+    "message_in_total",
+    "Normalized incoming messages",
+    labelnames=("channel",),
 )
-OUTGOING_MESSAGES = Counter(
-    "tgworker_outgoing_messages_total",
-    "Telegram messages sent to users",
-    labelnames=("tenant",),
+MESSAGE_OUT_COUNTER = Counter(
+    "message_out_total",
+    "Normalized outgoing messages",
+    labelnames=("channel",),
+)
+SEND_FAIL_COUNTER = Counter(
+    "send_fail_total",
+    "Failed send attempts",
+    labelnames=("channel", "reason"),
 )
 
 
@@ -158,6 +165,8 @@ class TelegramSessionManager:
         self._lock = asyncio.Lock()
         self._loop = asyncio.get_event_loop()
         self._started = False
+        self._delivered_incoming: int = 0
+        self._self_ids: Dict[int, Any] = {}
         self._bootstrap_task: Optional[asyncio.Task[None]] = None
         self._bootstrap_ready = asyncio.Event()
         self._bootstrap_ready.set()
@@ -1318,52 +1327,81 @@ class TelegramSessionManager:
             message = event.message
             sender = await event.get_sender()
             username = getattr(sender, "username", None) or getattr(event.chat, "username", None)
+
+            sender_id = getattr(message, "sender_id", None)
+            if sender_id is None:
+                from_peer = getattr(message, "from_id", None)
+                sender_id = (
+                    getattr(from_peer, "user_id", None)
+                    or getattr(from_peer, "channel_id", None)
+                    or getattr(from_peer, "chat_id", None)
+                )
+
             peer_id = None
             try:
                 if message.peer_id is not None:
-                    peer_id = getattr(message.peer_id, "user_id", None) or getattr(message.peer_id, "channel_id", None)
+                    peer_id = (
+                        getattr(message.peer_id, "user_id", None)
+                        or getattr(message.peer_id, "channel_id", None)
+                        or getattr(message.peer_id, "chat_id", None)
+                    )
             except AttributeError:
-                peer_id = getattr(message, "sender_id", None)
+                peer_id = getattr(message, "chat_id", None)
 
-            media_payload: Any = None
-            attachments: list[Dict[str, Any]] = []
+            me = self._self_ids.get(tenant)
+            if me is None:
+                with contextlib.suppress(Exception):
+                    me_info = await client.get_me()
+                    me = getattr(me_info, "id", None)
+                    if me is not None:
+                        self._self_ids[tenant] = me
+
+            attachments: list[Attachment] = []
             if message.media:
-                media_payload = {"class": message.media.__class__.__name__}
-                attachments.append(media_payload)
+                att_type = message.media.__class__.__name__
+                file_obj = getattr(message, "file", None)
+                name = getattr(file_obj, "name", None)
+                mime = getattr(file_obj, "mime_type", None)
+                size = getattr(file_obj, "size", None)
+                fallback_id = getattr(message, "id", None)
+                url = f"telegram://{tenant}/{fallback_id or 0}"
+                try:
+                    attachments.append(
+                        Attachment(type=att_type, url=url, name=name, mime=mime, size=size)
+                    )
+                except Exception:
+                    LOGGER.debug(
+                        "stage=attachment_normalize_fail tenant_id=%s attachment_type=%s",
+                        tenant,
+                        att_type,
+                    )
 
-            message_id = getattr(message, "id", None)
             ts = getattr(message, "date", None)
             if isinstance(ts, datetime):
-                ts_ms = int(ts.timestamp() * 1000)
+                ts_unix = int(ts.timestamp())
             else:
-                ts_ms = int(time.time() * 1000)
+                ts_unix = int(time.time())
 
-            payload = {
-                "event": "messages.incoming",
-                "ch": "telegram",
-                "tenant": tenant,
-                "tenant_id": tenant,
-                "source": {"type": "telegram", "tenant": tenant},
-                "message_id": message_id,
-                "peer_id": peer_id,
-                "telegram_user_id": peer_id,
-                "username": username,
-                "text": message.message or "",
-                "attachments": attachments,
-                "ts": ts_ms,
-                "message": {
-                    "text": message.message or "",
-                    "telegram_user_id": peer_id,
-                    "telegram_username": username,
-                    "peer_id": peer_id,
-                    "username": username,
-                    "attachments": attachments,
-                    "message_id": message_id,
-                },
-            }
-            await self._send_webhook(payload)
-            INCOMING_MESSAGES.labels(str(tenant)).inc()
-            LOGGER.info("stage=incoming tenant_id=%s peer_id=%s", tenant, peer_id)
+            normalized = MessageIn(
+                tenant=tenant,
+                channel="telegram",
+                from_id=sender_id or username or "unknown",
+                to=me or peer_id or tenant,
+                text=message.message or "",
+                attachments=attachments,
+                ts=ts_unix,
+                provider_raw=message.to_dict(),
+            )
+            delivered = await self._send_webhook(normalized)
+            if delivered:
+                self._delivered_incoming += 1
+            MESSAGE_IN_COUNTER.labels("telegram").inc()
+            LOGGER.info(
+                "event=message_in stage=incoming tenant_id=%s from_id=%s to_id=%s",  # noqa: G004
+                tenant,
+                sender_id or username,
+                me or peer_id or tenant,
+            )
         except asyncio.CancelledError:
             raise
         except AuthKeyUnregisteredError:
@@ -1397,15 +1435,34 @@ class TelegramSessionManager:
                 source="handle_new_message",
             )
 
-    async def _send_webhook(self, payload: Dict[str, Any]) -> None:
+    async def _send_webhook(self, message: MessageIn) -> bool:
         headers = {"Content-Type": "application/json"}
         if self._webhook_token:
             headers["X-Webhook-Token"] = self._webhook_token
         try:
-            await self._http.post(self._webhook_url, json=payload, headers=headers)
+            response = await self._http.post(
+                self._webhook_url,
+                json=message_in_asdict(message),
+                headers=headers,
+            )
+            if 200 <= response.status_code < 300:
+                return True
+            reason = f"status_{response.status_code}"
+            SEND_FAIL_COUNTER.labels("telegram", reason).inc()
+            LOGGER.warning(
+                "event=message_in_forward_fail stage=webhook_status tenant_id=%s status=%s",
+                message.tenant,
+                response.status_code,
+            )
         except httpx.HTTPError as exc:
             EVENT_ERRORS.labels("webhook").inc()
-            LOGGER.error("stage=send_fail tenant_id=%s error=%s", payload.get("tenant_id"), exc)
+            SEND_FAIL_COUNTER.labels("telegram", "http_error").inc()
+            LOGGER.error(
+                "event=message_in_forward_fail stage=webhook_error tenant_id=%s error=%s",
+                message.tenant,
+                exc,
+            )
+        return False
 
     async def get_status(self, tenant: int) -> SessionState:
         await self.wait_until_ready()
@@ -1645,7 +1702,9 @@ class TelegramSessionManager:
                                 exc,
                             )
                             continue
-                        caption = attachment.get("caption") if isinstance(attachment, dict) else None
+                        caption = None
+                        if isinstance(attachment, dict):
+                            caption = attachment.get("caption") or attachment.get("text")
                         caption_text = caption if isinstance(caption, str) else None
                         if text and not sent_text:
                             caption_text = text
@@ -1660,16 +1719,48 @@ class TelegramSessionManager:
                 await client.send_message(entity, text or "", reply_to=reply_to_id)
             elif not attachments_list:
                 await client.send_message(entity, text or "", reply_to=reply_to_id)
-            OUTGOING_MESSAGES.labels(str(tenant)).inc()
-            LOGGER.info("stage=send_ok tenant_id=%s peer_id=%s", tenant, peer_id or username)
+            MESSAGE_OUT_COUNTER.labels("telegram").inc()
+            LOGGER.info(
+                "event=message_out stage=send_ok tenant_id=%s peer_id=%s",
+                tenant,
+                peer_id or username,
+            )
         except RPCError as exc:
             EVENT_ERRORS.labels("rpc_error").inc()
-            LOGGER.error("stage=send_fail tenant_id=%s peer_id=%s error=%s", tenant, peer_id or username, exc)
+            SEND_FAIL_COUNTER.labels("telegram", "rpc_error").inc()
+            LOGGER.error(
+                "event=message_out stage=send_fail tenant_id=%s peer_id=%s error=%s",
+                tenant,
+                peer_id or username,
+                exc,
+            )
             raise
         except Exception as exc:
             EVENT_ERRORS.labels("exception").inc()
-            LOGGER.exception("stage=send_fail tenant_id=%s peer_id=%s", tenant, peer_id or username)
+            SEND_FAIL_COUNTER.labels("telegram", "exception").inc()
+            LOGGER.exception(
+                "event=message_out stage=send_fail tenant_id=%s peer_id=%s",
+                tenant,
+                peer_id or username,
+            )
             raise
+
+    async def resolve_self_peer(self, tenant: int) -> int | None:
+        await self.wait_until_ready()
+        client = await self._ensure_authorized_client(tenant)
+        if client is None:
+            return None
+        me = self._self_ids.get(tenant)
+        if me is None:
+            with contextlib.suppress(Exception):
+                info = await client.get_me()
+                me = getattr(info, "id", None)
+                if me is not None:
+                    self._self_ids[tenant] = me
+        return int(me) if me is not None else None
+
+    def delivered_incoming_total(self) -> int:
+        return self._delivered_incoming
 
     async def _ensure_authorized_client(self, tenant: int) -> Optional[TelegramClient]:
         clients_to_disconnect: list[TelegramClient] = []

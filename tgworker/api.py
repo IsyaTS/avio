@@ -6,10 +6,11 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import telegram_config
+from app.schemas import TransportMessage
 
 from .session_manager import (
     QRExpiredError,
@@ -40,52 +41,14 @@ class PasswordRequest(BaseModel):
     password: SecretStr
 
 
-class Attachment(BaseModel):
-    url: str = Field(..., max_length=2048)
-    filename: Optional[str] = None
-    mime_type: Optional[str] = None
-
-
-class SendRequest(BaseModel):
-    tenant: int = Field(..., ge=1)
-    text: Optional[str] = None
-    peer_id: Optional[int] = Field(None, ge=1)
-    telegram_user_id: Optional[int] = Field(None, ge=1)
-    username: Optional[str] = None
-    attachments: list[Attachment] = Field(default_factory=list)
-    reply_to: Optional[str] = None
-
-    @model_validator(mode="before")
-    def _coerce_aliases(cls, values):
-        if isinstance(values, dict) and "tenant" not in values and "tenant_id" in values:
-            values = dict(values)
-            values["tenant"] = values.pop("tenant_id")
-        return values
-
-    @model_validator(mode="after")
-    def _validate_target(self) -> "SendRequest":
-        peer_id = self.peer_id
-        username = self.username
-        telegram_user_id = self.telegram_user_id
-        has_target = peer_id or telegram_user_id or username
-        if not has_target:
-            raise ValueError("recipient_required")
-        if not self.text and not self.attachments:
-            raise ValueError("text_or_attachments_required")
-        if username:
-            normalized = username.strip()
-            if normalized and not normalized.startswith("@"):
-                normalized = f"@{normalized}"
-            self.username = normalized or None
-        if self.reply_to:
-            self.reply_to = self.reply_to.strip()
-        return self
-
-
 def _resolve_webhook_url() -> tuple[str, Optional[str]]:
-    base = os.getenv("TG_WEBHOOK_URL") or os.getenv("APP_INTERNAL_URL") or "http://app:8000"
+    explicit = os.getenv("APP_WEBHOOK")
+    if explicit:
+        url = explicit.rstrip("/")
+    else:
+        base = os.getenv("TG_WEBHOOK_URL") or os.getenv("APP_INTERNAL_URL") or "http://app:8000"
+        url = f"{base.rstrip('/')}/webhook/provider"
     token = os.getenv("WEBHOOK_SECRET") or None
-    url = f"{base.rstrip('/')}/webhook/provider"
     if token:
         from urllib.parse import quote_plus
 
@@ -310,16 +273,49 @@ def create_app() -> FastAPI:
         return JSONResponse(body or {"error": "password_exception"}, status_code=500, headers=headers)
 
     @app.post("/send")
-    async def send_message(payload: SendRequest, _: None = Depends(require_credentials)):
+    async def send_message(payload: TransportMessage, _: None = Depends(require_credentials)):
+        if payload.channel and payload.channel not in {"telegram"}:
+            raise HTTPException(status_code=400, detail="channel_mismatch")
+        if not payload.has_content:
+            raise HTTPException(status_code=400, detail="empty_message")
+
+        target = payload.to
+        peer_id: Optional[int] = None
+        if isinstance(target, str) and target.strip().lower() == "me":
+            self_peer = await manager.resolve_self_peer(payload.tenant)
+            if self_peer is None:
+                raise HTTPException(status_code=409, detail="self_unavailable")
+            peer_id = self_peer
+        else:
+            try:
+                peer_id = int(target)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="invalid_to") from None
+            if peer_id <= 0:
+                raise HTTPException(status_code=400, detail="invalid_to")
+
+        attachments = [
+            {
+                "url": att.url,
+                "name": att.name,
+                "filename": att.name,
+                "mime": att.mime,
+                "mime_type": att.mime,
+                "size": att.size,
+                "type": att.type,
+            }
+            for att in payload.attachments
+        ]
+
         try:
             await manager.send_message(
                 tenant=payload.tenant,
                 text=payload.text,
-                peer_id=payload.peer_id,
-                telegram_user_id=payload.telegram_user_id,
-                username=payload.username,
-                attachments=[att.model_dump() for att in payload.attachments],
-                reply_to=payload.reply_to,
+                peer_id=peer_id,
+                telegram_user_id=None,
+                username=None,
+                attachments=attachments,
+                reply_to=payload.meta.get("reply_to") if isinstance(payload.meta, dict) else None,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -330,7 +326,12 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         snapshot = manager.stats_snapshot()
-        return {"authorized_count": snapshot["authorized"], "waiting_count": snapshot["waiting"], "needs_2fa": snapshot["needs_2fa"]}
+        return {
+            "authorized_count": snapshot["authorized"],
+            "waiting_count": snapshot["waiting"],
+            "needs_2fa": snapshot["needs_2fa"],
+            "message_in_total": manager.delivered_incoming_total(),
+        }
 
     @app.get("/metrics")
     async def metrics():
