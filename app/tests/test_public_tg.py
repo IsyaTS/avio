@@ -21,16 +21,16 @@ def _base_app(monkeypatch):
 
     app.include_router(dummy)
 
-    monkeypatch.setattr(public_module.C, "valid_key", lambda tenant, key: True)
-    monkeypatch.setattr(public_module.C, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: True)
+    monkeypatch.setattr(public_module.common, "ensure_tenant_files", lambda tenant: None)
     monkeypatch.setattr(
-        public_module.C,
+        public_module.common,
         "read_tenant_config",
         lambda tenant: {"passport": {"brand": "Test Brand"}, "integrations": {}},
     )
-    monkeypatch.setattr(public_module.C, "read_persona", lambda tenant: "Persona\nLine2")
-    monkeypatch.setattr(public_module.C, "public_base_url", lambda request=None: "https://example.test")
-    monkeypatch.setattr(public_module.C, "public_url", lambda request, url: str(url))
+    monkeypatch.setattr(public_module.common, "read_persona", lambda tenant: "Persona\nLine2")
+    monkeypatch.setattr(public_module.common, "public_base_url", lambda request=None: "https://example.test")
+    monkeypatch.setattr(public_module.common, "public_url", lambda request, url: str(url))
 
     return app
 
@@ -57,6 +57,20 @@ def test_tg_start_passthrough(monkeypatch):
     app = _base_app(monkeypatch)
     called: dict[str, object] = {}
 
+    async def _fake_status(path: str, payload: dict | None = None, timeout: float = 8.0):
+        called["status_path"] = path
+        called["status_payload"] = payload
+        called["status_timeout"] = timeout
+        return httpx.Response(
+            200,
+            json={
+                "status": "waiting_qr",
+                "tenant_id": 11,
+                "qr_id": None,
+                "twofa_pending": False,
+            },
+        )
+
     async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
         called["path"] = path
         called["payload"] = payload
@@ -72,6 +86,7 @@ def test_tg_start_passthrough(monkeypatch):
             },
         )
 
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_status)
     monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
 
     client = TestClient(app)
@@ -86,6 +101,9 @@ def test_tg_start_passthrough(monkeypatch):
     assert data["qr_valid_until"] == 1700000000
     assert data.get("twofa_pending") is False
     assert data.get("twofa_since") is None
+    assert called["status_path"] == "http://tgworker:8085/session/status"
+    assert called["status_payload"] == {"tenant": 11}
+    assert called["status_timeout"] == 15.0
     assert called["path"] == "http://tgworker:8085/session/start"
     assert called["payload"] == {"tenant_id": 11, "force": False}
     assert called["timeout"] == 15.0
@@ -98,9 +116,9 @@ def test_tg_status_success(monkeypatch):
     def _unexpected(*args, **kwargs):  # pragma: no cover - safeguard
         raise AssertionError("tg_post should not be called")
 
-    def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
-        called["status"].append((method, path, timeout))
-        payload = {
+    async def _fake_get(path: str, payload: dict | None = None, timeout: float = 8.0):
+        called["status"].append((path, payload, timeout))
+        body = {
             "status": "waiting_qr",
             "tenant_id": 3,
             "qr_id": "qr-test",
@@ -111,10 +129,10 @@ def test_tg_status_success(monkeypatch):
             "last_error": None,
             "stats": {"authorized": 0, "waiting": 1, "needs_2fa": 0},
         }
-        return 200, json.dumps(payload).encode("utf-8"), {"Content-Type": "application/json"}
+        return httpx.Response(200, json=body)
 
     monkeypatch.setattr(public_module.C, "tg_post", _unexpected)
-    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
 
     client = TestClient(app)
     resp = client.get("/pub/tg/status", params={"tenant": 3, "k": "key"})
@@ -132,7 +150,7 @@ def test_tg_status_success(monkeypatch):
     assert data["last_error"] is None
     assert "stats" in data
     assert called["status"] == [
-        ("GET", "http://tgworker:8085/session/status?tenant=3", 15.0)
+        ("http://tgworker:8085/session/status", {"tenant": 3}, 15.0)
     ]
 
 
@@ -193,7 +211,7 @@ def test_tg_qr_png_proxy(monkeypatch):
         assert path == "http://tgworker:8085/session/qr/qr-1.png"
         return 200, b"png-bytes", {"Content-Type": "image/png"}
 
-    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+    monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
 
     client = TestClient(app)
     resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
@@ -214,7 +232,7 @@ def test_tg_qr_png_expired(monkeypatch):
         payload = json.dumps({"detail": "qr_expired"}).encode("utf-8")
         return 404, payload, {"Content-Type": "application/json"}
 
-    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+    monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
 
     client = TestClient(app)
     resp = client.get("/pub/tg/qr.png", params={"qr_id": "qr-1"})
@@ -233,7 +251,7 @@ def test_tg_qr_txt_proxy(monkeypatch):
         assert path == "http://tgworker:8085/session/qr/qr-1.txt"
         return 200, b"tg://login?token=abc", {"Content-Type": "text/plain"}
 
-    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+    monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
 
     client = TestClient(app)
     resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1"})
@@ -254,7 +272,7 @@ def test_tg_qr_txt_expired(monkeypatch):
         payload = json.dumps({"detail": "qr_expired"}).encode("utf-8")
         return 404, payload, {"Content-Type": "application/json"}
 
-    monkeypatch.setattr(public_module.C, "tg_http", _fake_http)
+    monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
 
     client = TestClient(app)
     resp = client.get("/pub/tg/qr.txt", params={"qr_id": "qr-1"})

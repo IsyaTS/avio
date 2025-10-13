@@ -16,8 +16,7 @@ import httpx
 import qrcode
 from prometheus_client import Counter, Gauge
 from telethon import TelegramClient, events, functions
-from telethon.errors import RPCError, SessionPasswordNeededError
-from telethon.errors.rpcbaseerrors import FloodWaitError
+from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError
 from telethon.errors.rpcerrorlist import (
     AuthKeyUnregisteredError,
     PasswordHashInvalidError,
@@ -138,12 +137,35 @@ class TelegramSessionManager:
         self._lock = asyncio.Lock()
         self._loop = asyncio.get_event_loop()
         self._started = False
+        self._bootstrap_task: Optional[asyncio.Task[None]] = None
+        self._bootstrap_ready = asyncio.Event()
+        self._bootstrap_ready.set()
 
-    async def start(self) -> None:
+    async def start(self, *, background: bool = False) -> None:
         if self._started:
             return
         self._started = True
-        await self._bootstrap_existing_sessions()
+        self._bootstrap_ready.clear()
+        if background:
+            self._bootstrap_task = self._loop.create_task(self._run_bootstrap())
+        else:
+            await self._run_bootstrap()
+
+    async def wait_until_ready(self) -> None:
+        await self._bootstrap_ready.wait()
+        task = self._bootstrap_task
+        if task and not task.done():
+            with contextlib.suppress(Exception):
+                await task
+
+    async def _run_bootstrap(self) -> None:
+        try:
+            await self._bootstrap_existing_sessions()
+        except Exception:
+            LOGGER.exception("stage=bootstrap_failed_unhandled")
+        finally:
+            self._bootstrap_task = None
+            self._bootstrap_ready.set()
 
     @staticmethod
     def _qr_valid_until_ms(expires_at: Optional[float]) -> Optional[int]:
@@ -300,6 +322,11 @@ class TelegramSessionManager:
         return client, expired
 
     async def shutdown(self) -> None:
+        await self.wait_until_ready()
+        task = self._bootstrap_task
+        if task and not task.done():
+            with contextlib.suppress(Exception):
+                await task
         for state in list(self._states.values()):
             if state.waiting_task and not state.waiting_task.done():
                 state.waiting_task.cancel()
@@ -427,6 +454,7 @@ class TelegramSessionManager:
         return state, client, task, removed_session_file
 
     async def hard_reset(self, tenant: int) -> SessionState:
+        await self.wait_until_ready()
         client_to_disconnect: Optional[TelegramClient] = None
         task_to_cancel: Optional[asyncio.Task[Any]] = None
         removed_file = False
@@ -448,6 +476,7 @@ class TelegramSessionManager:
         return self._states[tenant]
 
     async def start_session(self, tenant: int, *, force: bool = False) -> SessionState:
+        await self.wait_until_ready()
         clients_to_disconnect: list[TelegramClient] = []
         tasks_to_cancel: list[asyncio.Task[Any]] = []
         result_state: Optional[SessionState] = None
@@ -690,6 +719,7 @@ class TelegramSessionManager:
         return result_state
 
     async def poll_login(self, tenant: int) -> None:
+        await self.wait_until_ready()
         async with self._lock:
             state = self._states.get(tenant)
             if not state:
@@ -826,6 +856,7 @@ class TelegramSessionManager:
             self._update_metrics()
 
     async def submit_password(self, tenant: int, password: str) -> TwoFASubmitResult:
+        await self.wait_until_ready()
         secret = password or ""
         if not secret.strip():
             return TwoFASubmitResult(ok=False, error="PASSWORD_REQUIRED")
@@ -1174,6 +1205,7 @@ class TelegramSessionManager:
             LOGGER.error("stage=send_fail tenant_id=%s error=%s", payload.get("tenant_id"), exc)
 
     async def get_status(self, tenant: int) -> SessionState:
+        await self.wait_until_ready()
         client_to_disconnect: Optional[TelegramClient] = None
         async with self._lock:
             state = self._states.get(tenant)
@@ -1343,6 +1375,7 @@ class TelegramSessionManager:
         )
 
     async def logout(self, tenant: int) -> None:
+        await self.wait_until_ready()
         removed = await self._soft_disconnect(
             tenant,
             error=None,
@@ -1363,6 +1396,7 @@ class TelegramSessionManager:
         username: str | None = None,
         media_url: str | None = None,
     ) -> None:
+        await self.wait_until_ready()
         client = await self._ensure_authorized_client(tenant)
         if client is None:
             raise RuntimeError("session_not_authorized")
