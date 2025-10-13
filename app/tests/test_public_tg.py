@@ -83,8 +83,7 @@ def test_tg_start_passthrough(monkeypatch):
     client = TestClient(app)
     resp = client.get(
         "/pub/tg/start",
-        params={"tenant": 11},
-        headers={"X-Admin-Token": "admin-token"},
+        params={"tenant": 11, "k": "public-key"},
     )
 
     assert resp.status_code == 200
@@ -265,8 +264,7 @@ def test_tg_qr_png_admin_token_header(monkeypatch):
     client = TestClient(app)
     resp = client.get(
         "/pub/tg/qr.png",
-        params={"tenant": 1, "qr_id": "qr"},
-        headers={"X-Admin-Token": "admin-token"},
+        params={"tenant": 1, "qr_id": "qr", "k": "public-key"},
     )
 
     assert resp.status_code == 200
@@ -427,7 +425,7 @@ def test_tg_password_invalid_2fa_returns_client_error(monkeypatch):
     assert response.headers.get("x-telegram-upstream-status") == "400"
 
 
-def test_public_tg_empty_public_key_accepts_admin_token(monkeypatch):
+def test_public_tg_empty_public_key_rejects_admin_token(monkeypatch):
     app = _base_app(monkeypatch, public_key="")
 
     async def _fake_status(
@@ -448,8 +446,8 @@ def test_public_tg_empty_public_key_accepts_admin_token(monkeypatch):
         headers={"X-Admin-Token": "admin-token"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "waiting_qr"
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
 
 
 def test_public_tg_empty_public_key_rejects_query_param(monkeypatch):
@@ -499,8 +497,7 @@ def test_tg_qr_png_expired(monkeypatch):
     client = TestClient(app)
     resp = client.get(
         "/pub/tg/qr.png",
-        params={"tenant": 11, "qr_id": "qr-1"},
-        headers={"X-Admin-Token": "admin-token"},
+        params={"tenant": 11, "qr_id": "qr-1", "k": "public-key"},
     )
 
     assert resp.status_code == 410
@@ -531,8 +528,7 @@ def test_tg_qr_png_gone(monkeypatch):
     client = TestClient(app)
     resp = client.get(
         "/pub/tg/qr.png",
-        params={"tenant": 12, "qr_id": "qr-expired"},
-        headers={"X-Admin-Token": "admin-token"},
+        params={"tenant": 12, "qr_id": "qr-expired", "k": "public-key"},
     )
 
     assert resp.status_code == 410
@@ -546,7 +542,7 @@ def test_tg_qr_txt_proxy(monkeypatch):
     app = _base_app(monkeypatch)
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
-        assert path == "http://tgworker:8085/session/qr/qr-1.txt"
+        assert path == "http://tgworker:9000/session/qr/qr-1.txt"
         return 200, b"tg://login?token=abc", {"Content-Type": "text/plain"}
 
     monkeypatch.setattr(public_module.common, "tg_http", _fake_http)
@@ -566,7 +562,7 @@ def test_tg_qr_txt_expired(monkeypatch):
     app = _base_app(monkeypatch)
 
     def _fake_http(method: str, path: str, body: bytes | None = None, timeout: float = 8.0):
-        assert path == "http://tgworker:8085/session/qr/qr-1.txt"
+        assert path == "http://tgworker:9000/session/qr/qr-1.txt"
         payload = json.dumps({"detail": "qr_expired"}).encode("utf-8")
         return 404, payload, {"Content-Type": "application/json"}
 

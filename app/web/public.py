@@ -763,6 +763,9 @@ async def _resolve_tenant_and_key(
     request: Request | None,
     raw_tenant: int | str | None,
     raw_key: str | None,
+    *,
+    query_keys: tuple[str, ...] = ("key", "k"),
+    allow_body: bool = True,
 ) -> tuple[int | str | None, str | None]:
     tenant_candidate: int | str | None = raw_tenant
     key_candidate: str | None = raw_key
@@ -771,9 +774,15 @@ async def _resolve_tenant_and_key(
         if tenant_candidate is None:
             tenant_candidate = request.query_params.get("tenant")
         if not key_candidate:
-            key_candidate = request.query_params.get("key") or request.query_params.get("k")
+            for query_key in query_keys:
+                value = request.query_params.get(query_key)
+                if value:
+                    key_candidate = value
+                    break
 
-        needs_body = request.method.upper() in {"POST", "PUT", "PATCH"}
+        needs_body = (
+            allow_body and request.method.upper() in {"POST", "PUT", "PATCH"}
+        )
         if needs_body and (tenant_candidate is None or not key_candidate):
             try:
                 raw_body = await request.body()
@@ -808,7 +817,11 @@ async def _resolve_tenant_and_key(
             if tenant_candidate is None:
                 tenant_candidate = payload.get("tenant")
             if not key_candidate:
-                key_candidate = payload.get("key") or payload.get("k")
+                for query_key in query_keys:
+                    value = payload.get(query_key)
+                    if value:
+                        key_candidate = value
+                        break
 
     return tenant_candidate, key_candidate
 
@@ -847,12 +860,20 @@ def _admin_token_valid(request: Request) -> bool:
     return bool(token) and token == settings.ADMIN_TOKEN
 
 
-def _has_public_tg_access(request: Request, key_candidate: str | None) -> bool:
-    if _admin_token_valid(request):
+def _has_public_tg_access(
+    request: Request,
+    key_candidate: str | None,
+    *,
+    allow_admin: bool = True,
+    query_param_only: bool = False,
+) -> bool:
+    if allow_admin and _admin_token_valid(request):
         return True
     expected = _normalize_public_token(getattr(settings, "PUBLIC_KEY", ""))
     provided = _normalize_public_token(key_candidate)
-    if not provided and request is not None:
+    if query_param_only and request is not None:
+        provided = _normalize_public_token(request.query_params.get("k"))
+    elif not provided and request is not None:
         provided = _normalize_public_token(request.query_params.get("k"))
 
     if expected:
@@ -1002,17 +1023,27 @@ async def tg_start(
     request: Request,
     tenant: int | str | None = None,
     k: str | None = None,
-    key: str | None = None,
 ):
     route = "/pub/tg/start"
     force_flag = bool(_parse_force_flag(request.query_params.get("force")))
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+        request,
+        tenant,
+        k,
+        query_keys=("k",),
+        allow_body=False,
+    )
     try:
         tenant_id = _coerce_tenant(tenant_candidate)
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate, force=force_flag)
 
-    if not _has_public_tg_access(request, key_candidate):
+    if not _has_public_tg_access(
+        request,
+        key_candidate,
+        allow_admin=False,
+        query_param_only=True,
+    ):
         return _unauthorized_response(route, tenant_id, force=force_flag)
 
     payload = {"tenant_id": tenant_id, "force": force_flag}
@@ -1185,15 +1216,26 @@ async def tg_restart(
     return _passthrough_upstream_response(route, tenant_id, upstream, force=True)
 
 @router.get("/pub/tg/status")
-async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None, key: str | None = None):
+async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None):
     route = "/pub/tg/status"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+        request,
+        tenant,
+        k,
+        query_keys=("k",),
+        allow_body=False,
+    )
     try:
         tenant_id = _coerce_tenant(tenant_candidate)
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(request, key_candidate):
+    if not _has_public_tg_access(
+        request,
+        key_candidate,
+        allow_admin=False,
+        query_param_only=True,
+    ):
         return _unauthorized_response(route, tenant_id)
 
     try:
@@ -1216,18 +1258,26 @@ async def tg_qr_png(
     tenant: int | str | None = None,
     qr_id: str | None = None,
     k: str | None = None,
-    key: str | None = None,
 ):
     route = "/pub/tg/qr.png"
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
-        request, tenant, k or key
+        request,
+        tenant,
+        k,
+        query_keys=("k",),
+        allow_body=False,
     )
     try:
         tenant_id = _coerce_tenant(tenant_candidate)
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(request, key_candidate):
+    if not _has_public_tg_access(
+        request,
+        key_candidate,
+        allow_admin=False,
+        query_param_only=True,
+    ):
         return _unauthorized_response(route, tenant_id)
 
     qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))

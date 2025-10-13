@@ -25,7 +25,7 @@ REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
 WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088").rstrip("/")
 # Match waweb INTERNAL_SYNC_TOKEN resolution (WA_WEB_TOKEN or WEBHOOK_SECRET)
 WA_INTERNAL_TOKEN = (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
-TG_WORKER_URL = (os.getenv("TG_WORKER_URL", "http://tgworker:8085") or "http://tgworker:8085").rstrip("/")
+TG_WORKER_URL = (os.getenv("TG_WORKER_URL", "http://tgworker:9000") or "http://tgworker:9000").rstrip("/")
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 SEND       = (os.getenv("SEND_ENABLED","true").lower() == "true")
 
@@ -103,35 +103,52 @@ async def send_avito(tenant_id: int, lead_id: int, text: str) -> tuple[int,str]:
 async def send_telegram(
     tenant_id: int,
     peer_id: int | None,
-    username: str | None,
+    telegram_user_id: int | None,
     text: str | None,
-    media_url: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    reply_to: str | None = None,
+    username: str | None = None,
 ) -> tuple[int, str]:
     url = f"{TG_WORKER_URL}/send"
-    payload: Dict[str, Any] = {"tenant_id": tenant_id}
+    payload: Dict[str, Any] = {"tenant": tenant_id}
     if peer_id:
         payload["peer_id"] = int(peer_id)
-    if username:
-        payload["username"] = username
+    if telegram_user_id:
+        payload["telegram_user_id"] = int(telegram_user_id)
     if text:
         payload["text"] = text
-    if media_url:
-        payload["media_url"] = media_url
+    if attachments:
+        payload["attachments"] = attachments
+    if reply_to:
+        payload["reply_to"] = reply_to
+    if username:
+        payload["username"] = username
     headers: Dict[str, str] = {}
     if TG_WORKER_TOKEN:
         headers["X-Auth-Token"] = TG_WORKER_TOKEN
-    status, body = await asyncio.to_thread(_http_json, "POST", url, payload, 12.0, headers)
-    return status, body
+    last_status, last_body = 0, ""
+    for attempt in range(3):
+        last_status, last_body = await asyncio.to_thread(
+            _http_json, "POST", url, payload, 12.0, headers
+        )
+        if 200 <= last_status < 300:
+            break
+        log(
+            f"[worker] telegram send retry attempt={attempt + 1} status={last_status} body={last_body[:160]}"
+        )
+        if 200 <= last_status < 500:
+            break
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return last_status, last_body
 
 # ==== Core send ====
 async def do_send(item: dict) -> tuple[str, str]:
-    provider = (item.get("provider") or "").lower()
+    channel = (item.get("ch") or item.get("provider") or "").lower()
     text     = (item.get("text") or "").strip()
     lead_id  = int(item.get("lead_id") or 0)
     phone    = _digits(item.get("to") or "")
     peer_raw = item.get("peer_id")
     username = item.get("username")
-    media_url = item.get("media_url") if isinstance(item.get("media_url"), str) else None
     telegram_user_id = None
     if item.get("telegram_user_id") is not None:
         try:
@@ -140,25 +157,42 @@ async def do_send(item: dict) -> tuple[str, str]:
             telegram_user_id = None
     tenant   = int(item.get("tenant_id") or os.getenv("TENANT_ID","1"))
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else None
+    raw_attachments = item.get("attachments") if isinstance(item.get("attachments"), list) else []
+    attachments: list[dict[str, Any]] = []
+    for blob in raw_attachments:
+        if isinstance(blob, dict):
+            attachments.append(blob)
+    if attachment:
+        attachments.append(attachment)
+    reply_to = item.get("reply_to") if isinstance(item.get("reply_to"), str) else None
 
     if (not text and not attachment) or not lead_id:
         return ("skipped", "empty")
 
     if not SEND:
-        return ("dry-run", f"provider={provider}")
+        return ("dry-run", f"provider={channel}")
 
-    if provider == "whatsapp":
+    if channel == "whatsapp":
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
-    elif provider == "avito":
+    elif channel == "avito":
         st, body = await send_avito(tenant, lead_id, text)
-    elif provider == "telegram":
+    elif channel == "telegram":
         peer_id = None
         if peer_raw:
             try:
                 peer_id = int(peer_raw)
             except Exception:
                 peer_id = None
-        st, body = await send_telegram(tenant, peer_id, username, text or None, media_url)
+        target_user = telegram_user_id if telegram_user_id is not None else None
+        st, body = await send_telegram(
+            tenant,
+            peer_id,
+            target_user,
+            text or None,
+            attachments or None,
+            reply_to,
+            username,
+        )
     else:
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
 
@@ -185,9 +219,10 @@ async def write_result(item: dict, status: str):
     username = item.get("username") if isinstance(item.get("username"), str) else None
 
     try:
+        channel_name = (item.get("ch") or item.get("provider") or "whatsapp")
         await upsert_lead(
             lead_id,
-            channel=item.get("provider") or "whatsapp",
+            channel=channel_name,
             source_real_id=None,
             tenant_id=tenant_id,
             telegram_user_id=telegram_user_id,
@@ -202,7 +237,13 @@ async def write_result(item: dict, status: str):
     except Exception as e:
         log(f"[worker] insert_message_out err: {e}")
 
-    out = {"lead_id": lead_id, "reply": text, "status": sent_status, "version": APP_VERSION}
+    out = {
+        "lead_id": lead_id,
+        "reply": text,
+        "status": sent_status,
+        "version": APP_VERSION,
+        "ch": item.get("ch") or item.get("provider") or "whatsapp",
+    }
     await r.rpush("outbox", json.dumps(out, ensure_ascii=False))
     log(f"[worker] reply -> lead {lead_id}: {text[:160]} ({sent_status})")
 
@@ -230,7 +271,15 @@ async def process_queue():
                 continue
 
             status, body = await do_send(item)
-            log(f"[worker] send status={status} body={body[:200]}")
+            channel = (item.get("ch") or item.get("provider") or "").lower()
+            log(
+                f"[worker] send ch={channel or '-'} status={status} body={body[:200]}"
+            )
+            if channel == "telegram":
+                try:
+                    await r.incrby("metrics:telegram:outgoing", 1)
+                except Exception:
+                    pass
             await write_result(item, status)
 
         except Exception as e:

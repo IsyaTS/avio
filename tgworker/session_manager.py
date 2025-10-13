@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from .manager import (
     QRExpiredError,
@@ -164,15 +164,19 @@ class SessionManager:
         *,
         text: str | None = None,
         peer_id: int | None = None,
+        telegram_user_id: int | None = None,
         username: str | None = None,
-        media_url: str | None = None,
+        attachments: list[Dict[str, Any]] | None = None,
+        reply_to: str | None = None,
     ) -> None:
         await self._manager.send_message(
             tenant=tenant,
             text=text,
             peer_id=peer_id,
+            telegram_user_id=telegram_user_id,
             username=username,
-            media_url=media_url,
+            attachments=attachments,
+            reply_to=reply_to,
         )
 
 

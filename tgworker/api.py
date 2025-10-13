@@ -40,33 +40,57 @@ class PasswordRequest(BaseModel):
     password: SecretStr
 
 
+class Attachment(BaseModel):
+    url: str = Field(..., max_length=2048)
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+
+
 class SendRequest(BaseModel):
-    tenant_id: int = Field(..., ge=1)
+    tenant: int = Field(..., ge=1)
     text: Optional[str] = None
     peer_id: Optional[int] = Field(None, ge=1)
+    telegram_user_id: Optional[int] = Field(None, ge=1)
     username: Optional[str] = None
-    media_url: Optional[str] = Field(None, max_length=2048)
+    attachments: list[Attachment] = Field(default_factory=list)
+    reply_to: Optional[str] = None
+
+    @model_validator(mode="before")
+    def _coerce_aliases(cls, values):
+        if isinstance(values, dict) and "tenant" not in values and "tenant_id" in values:
+            values = dict(values)
+            values["tenant"] = values.pop("tenant_id")
+        return values
 
     @model_validator(mode="after")
     def _validate_target(self) -> "SendRequest":
         peer_id = self.peer_id
         username = self.username
-        if not peer_id and not username:
-            raise ValueError("peer_id_or_username_required")
-        if not self.text and not self.media_url:
-            raise ValueError("text_or_media_required")
+        telegram_user_id = self.telegram_user_id
+        has_target = peer_id or telegram_user_id or username
+        if not has_target:
+            raise ValueError("recipient_required")
+        if not self.text and not self.attachments:
+            raise ValueError("text_or_attachments_required")
         if username:
             normalized = username.strip()
             if normalized and not normalized.startswith("@"):
                 normalized = f"@{normalized}"
             self.username = normalized or None
+        if self.reply_to:
+            self.reply_to = self.reply_to.strip()
         return self
 
 
 def _resolve_webhook_url() -> tuple[str, Optional[str]]:
     base = os.getenv("TG_WEBHOOK_URL") or os.getenv("APP_INTERNAL_URL") or "http://app:8000"
     token = os.getenv("WEBHOOK_SECRET") or None
-    return f"{base.rstrip('/')}/webhook/telegram", token
+    url = f"{base.rstrip('/')}/webhook/provider"
+    if token:
+        from urllib.parse import quote_plus
+
+        url = f"{url}?token={quote_plus(token)}"
+    return url, None
 
 
 def create_app() -> FastAPI:
@@ -289,11 +313,13 @@ def create_app() -> FastAPI:
     async def send_message(payload: SendRequest, _: None = Depends(require_credentials)):
         try:
             await manager.send_message(
-                tenant=payload.tenant_id,
+                tenant=payload.tenant,
                 text=payload.text,
                 peer_id=payload.peer_id,
+                telegram_user_id=payload.telegram_user_id,
                 username=payload.username,
-                media_url=payload.media_url,
+                attachments=[att.model_dump() for att in payload.attachments],
+                reply_to=payload.reply_to,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
