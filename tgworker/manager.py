@@ -8,6 +8,7 @@ import math
 import os
 import secrets
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -54,6 +55,16 @@ AUTHORIZED_DISCONNECTS = Counter(
     "tgworker_authorized_disconnect_total",
     "Authorized Telegram sessions transitioning to disconnected without manual logout",
     labelnames=("reason",),
+)
+INCOMING_MESSAGES = Counter(
+    "tgworker_incoming_messages_total",
+    "Telegram messages received from MTProto",
+    labelnames=("tenant",),
+)
+OUTGOING_MESSAGES = Counter(
+    "tgworker_outgoing_messages_total",
+    "Telegram messages sent to users",
+    labelnames=("tenant",),
 )
 
 
@@ -1315,19 +1326,43 @@ class TelegramSessionManager:
                 peer_id = getattr(message, "sender_id", None)
 
             media_payload: Any = None
+            attachments: list[Dict[str, Any]] = []
             if message.media:
-                media_payload = {
-                    "class": message.media.__class__.__name__,
-                }
+                media_payload = {"class": message.media.__class__.__name__}
+                attachments.append(media_payload)
+
+            message_id = getattr(message, "id", None)
+            ts = getattr(message, "date", None)
+            if isinstance(ts, datetime):
+                ts_ms = int(ts.timestamp() * 1000)
+            else:
+                ts_ms = int(time.time() * 1000)
 
             payload = {
+                "event": "messages.incoming",
+                "ch": "telegram",
+                "tenant": tenant,
                 "tenant_id": tenant,
-                "user_id": peer_id,
+                "source": {"type": "telegram", "tenant": tenant},
+                "message_id": message_id,
+                "peer_id": peer_id,
+                "telegram_user_id": peer_id,
                 "username": username,
                 "text": message.message or "",
-                "media": media_payload,
+                "attachments": attachments,
+                "ts": ts_ms,
+                "message": {
+                    "text": message.message or "",
+                    "telegram_user_id": peer_id,
+                    "telegram_username": username,
+                    "peer_id": peer_id,
+                    "username": username,
+                    "attachments": attachments,
+                    "message_id": message_id,
+                },
             }
             await self._send_webhook(payload)
+            INCOMING_MESSAGES.labels(str(tenant)).inc()
             LOGGER.info("stage=incoming tenant_id=%s peer_id=%s", tenant, peer_id)
         except asyncio.CancelledError:
             raise
@@ -1561,8 +1596,10 @@ class TelegramSessionManager:
         tenant: int,
         text: str | None = None,
         peer_id: int | None = None,
+        telegram_user_id: int | None = None,
         username: str | None = None,
-        media_url: str | None = None,
+        attachments: Optional[list[Dict[str, Any]]] = None,
+        reply_to: str | None = None,
     ) -> None:
         await self.wait_until_ready()
         client = await self._ensure_authorized_client(tenant)
@@ -1572,20 +1609,58 @@ class TelegramSessionManager:
         entity = None
         if peer_id:
             entity = peer_id
+        elif telegram_user_id:
+            entity = telegram_user_id
         elif username:
             entity = username
         if entity is None:
             raise ValueError("missing_target")
 
+        reply_to_id: Optional[int | str] = None
+        if reply_to:
+            try:
+                reply_to_id = int(reply_to)
+            except (TypeError, ValueError):
+                reply_to_id = reply_to
+
+        attachments_list = attachments or []
+        sent_text = False
         try:
-            if media_url:
+            if attachments_list:
                 async with httpx.AsyncClient(timeout=15.0) as session:
-                    resp = await session.get(media_url)
-                    resp.raise_for_status()
-                    data = resp.content
-                await client.send_file(entity, file=io.BytesIO(data), caption=text or "")
-            else:
-                await client.send_message(entity, text or "")
+                    for attachment in attachments_list:
+                        url = attachment.get("url") if isinstance(attachment, dict) else None
+                        if not url:
+                            continue
+                        try:
+                            resp = await session.get(url)
+                            resp.raise_for_status()
+                            data = resp.content
+                        except httpx.HTTPError as exc:
+                            EVENT_ERRORS.labels("attachment_fetch").inc()
+                            LOGGER.error(
+                                "stage=send_fetch_fail tenant_id=%s url=%s error=%s",
+                                tenant,
+                                url,
+                                exc,
+                            )
+                            continue
+                        caption = attachment.get("caption") if isinstance(attachment, dict) else None
+                        caption_text = caption if isinstance(caption, str) else None
+                        if text and not sent_text:
+                            caption_text = text
+                            sent_text = True
+                        await client.send_file(
+                            entity,
+                            file=io.BytesIO(data),
+                            caption=caption_text or "",
+                            reply_to=reply_to_id,
+                        )
+            if text and not sent_text:
+                await client.send_message(entity, text or "", reply_to=reply_to_id)
+            elif not attachments_list:
+                await client.send_message(entity, text or "", reply_to=reply_to_id)
+            OUTGOING_MESSAGES.labels(str(tenant)).inc()
             LOGGER.info("stage=send_ok tenant_id=%s peer_id=%s", tenant, peer_id or username)
         except RPCError as exc:
             EVENT_ERRORS.labels("rpc_error").inc()

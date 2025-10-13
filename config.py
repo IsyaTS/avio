@@ -1,8 +1,8 @@
 """Lightweight configuration helpers for cross-app services."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -38,7 +38,16 @@ class _CoreSettingsProxy:
         return repr(self._resolve())
 
 
-DEFAULT_TG_WORKER_URL = "http://tgworker:8085"
+DEFAULT_TG_WORKER_URL = "http://tgworker:9000"
+
+
+def _coerce_int(value: str | None, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip() or default)
+    except ValueError:
+        return default
 
 
 def _normalize_worker_url(raw: str | None) -> str:
@@ -51,6 +60,11 @@ def _normalize_worker_url(raw: str | None) -> str:
 
 
 TG_WORKER_URL = _normalize_worker_url(os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL"))
+
+
+TELEGRAM_API_ID = _coerce_int(os.getenv("TELEGRAM_API_ID"))
+TELEGRAM_API_HASH = (os.getenv("TELEGRAM_API_HASH") or "").strip()
+PUBLIC_KEY = (os.getenv("PUBLIC_KEY") or "").strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,13 +92,8 @@ def _resolve_sessions_dir(raw: str | None) -> Path:
 
 @lru_cache(maxsize=1)
 def telegram_config() -> TelegramConfig:
-    raw_id = os.getenv("TELEGRAM_API_ID", "0").strip() or "0"
-    try:
-        api_id = int(raw_id)
-    except ValueError:
-        api_id = 0
-
-    api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+    api_id = TELEGRAM_API_ID
+    api_hash = TELEGRAM_API_HASH
     sessions_dir = _resolve_sessions_dir(os.getenv("TG_SESSIONS_DIR"))
 
     device_model = os.getenv("TG_DEVICE_MODEL", "Avio tgworker").strip() or "Avio tgworker"
@@ -114,4 +123,12 @@ def tg_worker_url() -> str:
 
 settings = _CoreSettingsProxy()
 
-__all__ = ["TelegramConfig", "telegram_config", "tg_worker_url", "settings"]
+__all__ = [
+    "TelegramConfig",
+    "TELEGRAM_API_ID",
+    "TELEGRAM_API_HASH",
+    "PUBLIC_KEY",
+    "telegram_config",
+    "tg_worker_url",
+    "settings",
+]

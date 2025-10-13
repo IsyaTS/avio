@@ -4,6 +4,7 @@ import json
 import os
 import time
 import pathlib
+import logging
 from typing import Any, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
@@ -36,6 +37,11 @@ except ImportError:  # pragma: no cover
 
 from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
 
+
+logger = logging.getLogger("app.web.webhooks")
+
+INCOMING_QUEUE_KEY = "messages:incoming"
+INCOMING_DEDUP_TTL = 60 * 60 * 24  # 24 hours
 
 router = APIRouter()
 
@@ -125,6 +131,14 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     tenant = int(src.get("tenant") or body.get("tenant_id") or os.getenv("TENANT_ID", "1"))
 
     msg = body.get("message") or {}
+    raw_message_id = (
+        msg.get("message_id")
+        or msg.get("id")
+        or (msg.get("key") or {}).get("id")
+        or body.get("message_id")
+        or body.get("id")
+    )
+    message_id = str(raw_message_id) if raw_message_id is not None else ""
     text = (msg.get("text") or msg.get("body") or body.get("text") or "").strip()
     lead_id = body.get("leadId") or body.get("lead_id") or int(time.time() * 1000)
     try:
@@ -135,15 +149,36 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     whatsapp_phone = ""
     telegram_user_id: int | None = None
     telegram_username = None
+    peer_id: int | None = None
+    attachments: list[dict[str, Any]] = []
+
+    raw_attachments = msg.get("attachments") or body.get("attachments")
+    if isinstance(raw_attachments, list):
+        attachments = [item for item in raw_attachments if isinstance(item, dict)]
 
     if provider == "telegram":
-        raw_id = msg.get("telegram_user_id") or body.get("telegram_user_id") or body.get("user_id")
+        raw_id = (
+            msg.get("telegram_user_id")
+            or body.get("telegram_user_id")
+            or body.get("user_id")
+        )
         if raw_id is not None:
             try:
                 telegram_user_id = int(raw_id)
             except Exception:
                 telegram_user_id = None
         telegram_username = msg.get("telegram_username") or body.get("username")
+        peer_candidate = (
+            msg.get("peer_id")
+            or body.get("peer_id")
+            or msg.get("chat_id")
+            or body.get("chat_id")
+        )
+        if peer_candidate is not None:
+            try:
+                peer_id = int(peer_candidate)
+            except Exception:
+                peer_id = None
     else:
         from_id = msg.get("from") or msg.get("author") or body.get("from") or ""
         whatsapp_phone = _digits(from_id.split("@", 1)[0] if from_id else "")
@@ -151,7 +186,68 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if not text and provider != "telegram":
         return _ok({"skipped": True, "reason": "no_text"})
 
+    if provider == "telegram" and await _is_duplicate("telegram", tenant, message_id or None):
+        logger.info(
+            "stage=incoming_duplicate ch=telegram tenant=%s message_id=%s", tenant, message_id
+        )
+        return _ok({"skipped": True, "reason": "duplicate"})
+
     stored_incoming = False
+    channel = provider or "whatsapp"
+    ts_ms = int(time.time() * 1000)
+    from_addr = ""
+    to_addr = ""
+
+    if provider == "telegram":
+        from_addr = str(telegram_user_id or "")
+        if telegram_user_id is not None:
+            to_addr = str(telegram_user_id)
+        elif peer_id is not None:
+            to_addr = str(peer_id)
+    else:
+        from_addr = whatsapp_phone
+        to_candidate = (
+            msg.get("to")
+            or body.get("to")
+            or (body.get("destination") if isinstance(body.get("destination"), str) else "")
+        )
+        to_addr = _digits(to_candidate)
+
+    normalized_event: Dict[str, Any] = {
+        "event": "messages.incoming",
+        "ch": channel,
+        "tenant": tenant,
+        "lead_id": lead_id,
+        "message_id": message_id or str(lead_id),
+        "from": from_addr,
+        "to": to_addr,
+        "text": text,
+        "attachments": attachments,
+        "ts": ts_ms,
+    }
+    if telegram_user_id is not None:
+        normalized_event["telegram_user_id"] = telegram_user_id
+    if telegram_username:
+        normalized_event["username"] = telegram_username
+    if peer_id is not None:
+        normalized_event["peer_id"] = peer_id
+
+    try:
+        await _redis_queue.lpush(
+            INCOMING_QUEUE_KEY, json.dumps(normalized_event, ensure_ascii=False)
+        )
+        if channel == "telegram":
+            await _redis_queue.incrby("metrics:telegram:incoming", 1)
+        elif channel == "whatsapp":
+            await _redis_queue.incrby("metrics:whatsapp:incoming", 1)
+        logger.info(
+            "stage=incoming_enqueued ch=%s tenant=%s message_id=%s", channel, tenant, normalized_event["message_id"]
+        )
+    except Exception:
+        logger.exception(
+            "stage=incoming_enqueue_failed ch=%s tenant=%s", channel, tenant
+        )
+
     contact_id = 0
     try:
         await upsert_lead(
@@ -223,13 +319,19 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "text": catalog_text,
             "provider": provider or "whatsapp",
             "tenant_id": tenant,
+            "tenant": tenant,
+            "message_id": message_id or str(lead_id),
+            "attachments": [attachment] if attachment else [],
         }
         if provider == "telegram":
             if telegram_user_id:
                 catalog_out["peer_id"] = str(telegram_user_id)
                 catalog_out["telegram_user_id"] = telegram_user_id
+                catalog_out["to"] = str(telegram_user_id)
             if telegram_username:
                 catalog_out["username"] = telegram_username
+            if peer_id and "to" not in catalog_out:
+                catalog_out["to"] = str(peer_id)
         else:
             catalog_out["to"] = whatsapp_phone
         catalog_out["attachment"] = attachment
@@ -253,13 +355,19 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         "text": reply,
         "provider": provider or "whatsapp",
         "tenant_id": tenant,
+        "tenant": tenant,
+        "message_id": message_id or str(lead_id),
+        "attachments": [],
     }
     if provider == "telegram":
         if telegram_user_id:
             out["peer_id"] = str(telegram_user_id)
             out["telegram_user_id"] = telegram_user_id
+            out["to"] = str(telegram_user_id)
         if telegram_username:
             out["username"] = telegram_username
+        if peer_id and "to" not in out:
+            out["to"] = str(peer_id)
     else:
         out["to"] = whatsapp_phone
 
@@ -283,13 +391,19 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     "text": page,
                     "provider": provider or "whatsapp",
                     "tenant_id": tenant,
+                    "tenant": tenant,
+                    "message_id": message_id or str(lead_id),
+                    "attachments": [],
                 }
                 if provider == "telegram":
                     if telegram_user_id:
                         page_out["peer_id"] = str(telegram_user_id)
                         page_out["telegram_user_id"] = telegram_user_id
+                        page_out["to"] = str(telegram_user_id)
                     if telegram_username:
                         page_out["username"] = telegram_username
+                    if peer_id and "to" not in page_out:
+                        page_out["to"] = str(peer_id)
                 else:
                     page_out["to"] = whatsapp_phone
                 await _redis_queue.lpush("outbox:send", json.dumps(page_out, ensure_ascii=False))
@@ -343,3 +457,15 @@ async def telegram_webhook(request: Request):
 
 
 __all__ = ["router", "process_incoming"]
+async def _is_duplicate(provider: str, tenant: int, message_id: str | None) -> bool:
+    if not message_id:
+        return False
+    key = f"incoming:{provider}:{tenant}:{message_id}"
+    try:
+        created = await _redis_queue.setnx(key, int(time.time()))
+        if not created:
+            return True
+        await _redis_queue.expire(key, INCOMING_DEDUP_TTL)
+    except Exception:
+        logger.exception("stage=dedup provider=%s tenant=%s", provider, tenant)
+    return False

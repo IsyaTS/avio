@@ -26,7 +26,7 @@ services:
     environment:
       TENANTS_DIR: /app/tenants
       TG_SESSIONS_DIR: /app/tg-sessions
-      TG_WORKER_URL: http://tgworker:8085
+      TG_WORKER_URL: http://tgworker:9000
       PUBLIC_KEY: ${PUBLIC_KEY}
       PYTHONPATH: /app
     depends_on: [redis, postgres]
@@ -138,6 +138,9 @@ services:
       - TG_SESSIONS_DIR=/app/tg-sessions
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - PUBLIC_KEY=${PUBLIC_KEY}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - APP_BASE_URL=${APP_BASE_URL:-https://api.avio.website}
       - APP_INTERNAL_URL=${APP_INTERNAL_URL:-http://app:8000}
       - PYTHONPATH=/app
       - TG_DEVICE_MODEL=${TG_DEVICE_MODEL:-Avio tgworker}
@@ -146,14 +149,14 @@ services:
       - TG_LANG=ru
       - TZ=Europe/Moscow
     depends_on:
-      app:
-        condition: service_started
+      - redis
+      - app
     working_dir: /app
-    command: ["uvicorn","tgworker.api:create_app","--host","0.0.0.0","--port","8085"]
+    command: ["uvicorn","tgworker.api:create_app","--host","0.0.0.0","--port","9000"]
     restart: unless-stopped
-    expose: ["8085"]
+    expose: ["9000"]
     healthcheck:
-      test: ["CMD","curl","-fsS","http://localhost:8085/health"]
+      test: ["CMD","curl","-fsS","http://localhost:9000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
