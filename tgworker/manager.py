@@ -1008,14 +1008,20 @@ class TelegramSessionManager:
                 self._states[tenant] = state
             else:
                 client_to_disconnect, _ = self._expire_needs_2fa_locked(tenant, state)
-                if state.status == "needs_2fa" and not state.twofa_pending:
-                    state.twofa_pending = True
-                    if state.twofa_since is None:
-                        state.twofa_since = int(time.time() * 1000.0)
+                if state.status == "needs_2fa" or state.needs_2fa:
+                    state.needs_2fa = True
+                    if state.status != "needs_2fa":
+                        state.status = "needs_2fa"
+                    if not state.twofa_pending:
+                        state.twofa_pending = True
+                        if state.twofa_since is None:
+                            state.twofa_since = int(time.time() * 1000.0)
+                    state.awaiting_password = True
+                    state.last_seen = time.time()
                     self._extend_needs_2fa_ttl(state)
-                if state.twofa_pending and state.qr_id:
-                    self._qr_lookup.pop(state.qr_id, None)
-                    self._clear_qr_state_locked(state)
+                    if state.qr_id:
+                        self._qr_lookup.pop(state.qr_id, None)
+                        self._clear_qr_state_locked(state)
             client = self._clients.get(tenant)
             is_active = bool(client and client.is_connected())
             if state.twofa_pending:
@@ -1159,7 +1165,7 @@ class TelegramSessionManager:
             tenant,
             error=None,
             allow_restart=True,
-            remove_session=True,
+            remove_session=False,
         )
         LOGGER.info(
             "stage=logout tenant_id=%s removed_session_file=%s",

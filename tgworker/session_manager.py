@@ -37,7 +37,8 @@ class SessionSnapshot:
             except Exception:
                 qr_valid_until = None
         qr_id = state.qr_id
-        if state.twofa_pending:
+        needs_twofa = bool(getattr(state, "needs_2fa", False))
+        if state.twofa_pending or needs_twofa or state.status == "needs_2fa":
             qr_id = None
             qr_valid_until = None
         twofa_since = None
@@ -49,7 +50,7 @@ class SessionSnapshot:
                 twofa_since = int(value)
             except Exception:
                 twofa_since = None
-        twofa_pending = bool(state.twofa_pending or state.status == "needs_2fa")
+        twofa_pending = bool(state.twofa_pending or state.status == "needs_2fa" or needs_twofa)
         return cls(
             tenant_id=state.tenant_id,
             status=state.status,
@@ -59,7 +60,7 @@ class SessionSnapshot:
             twofa_since=twofa_since,
             last_error=state.last_error,
             can_restart=bool(getattr(state, "can_restart", False)),
-            needs_2fa=bool(getattr(state, "needs_2fa", False) or twofa_pending),
+            needs_2fa=bool(needs_twofa or twofa_pending),
         )
 
     def to_payload(self) -> dict[str, Any]:

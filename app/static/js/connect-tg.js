@@ -64,6 +64,23 @@
     let lastQrId = '';
     let lastStatusValue = '';
 
+    function truthyFlag(value) {
+      if (value === true) {
+        return true;
+      }
+      if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (!normalized) {
+          return false;
+        }
+        return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+      }
+      if (typeof value === 'number') {
+        return Number.isFinite(value) && value !== 0;
+      }
+      return false;
+    }
+
     function buildUrl(basePath, extraParams) {
       let target;
       try {
@@ -235,9 +252,9 @@
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
       const qrIdValue = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
       const normalizedQrId = qrIdValue.trim();
-      const twofaPending = data.twofa_pending === true;
+      const twofaPending = truthyFlag(data.twofa_pending);
       const needsTwofa =
-        statusValue === 'needs_2fa' || data.needs_2fa === true || twofaPending === true;
+        statusValue === 'needs_2fa' || truthyFlag(data.needs_2fa) || twofaPending;
       const twofaTimeout = statusValue === 'twofa_timeout' || lastError === 'twofa_timeout';
       const errorCode = typeof data.error === 'string' ? data.error : '';
       let nextDelay = POLL_INTERVAL;
