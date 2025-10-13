@@ -30,11 +30,11 @@ class TelegramConfig:
 
 
 def _resolve_sessions_dir(raw: str | None) -> Path:
-    candidate = Path(raw or "/app/tg_sessions")
+    candidate = Path(raw or "/app/tg-sessions")
     try:
         candidate.mkdir(parents=True, exist_ok=True)
     except OSError:
-        alt = Path("/tmp/tg_sessions")
+        alt = Path("/tmp/tg-sessions")
         alt.mkdir(parents=True, exist_ok=True)
         return alt
     return candidate

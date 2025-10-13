@@ -4,7 +4,7 @@
 
 - Аккаунт Telegram с доступом к [my.telegram.org](https://my.telegram.org) для получения `api_id` и `api_hash`.
 - Открытый доступ tgworker к внутреннему API Avio (`APP_INTERNAL_URL`).
-- Общий том для хранения сессий: `${TG_SESSIONS_DIR}` (по умолчанию `/app/tg_sessions`).
+- Общий том для хранения сессий: `${TG_SESSIONS_DIR}` (по умолчанию `/app/tg-sessions`).
 
 ## Переменные окружения
 
