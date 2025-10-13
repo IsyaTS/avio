@@ -16,12 +16,16 @@ import httpx
 import qrcode
 from prometheus_client import Counter, Gauge
 from telethon import TelegramClient, events, functions
-from telethon.errors import FloodWaitError, RPCError, SessionPasswordNeededError
+from telethon.errors import (
+    BadRequestError,
+    FloodWaitError,
+    RPCError,
+    SessionPasswordNeededError,
+)
 from telethon.errors.rpcerrorlist import (
     AuthKeyUnregisteredError,
     PasswordHashInvalidError,
     PhonePasswordFloodError,
-    SrpIdInvalidError,
 )
 
 
@@ -94,10 +98,12 @@ class SessionState:
 
 @dataclass(slots=True)
 class TwoFASubmitResult:
-    ok: bool
-    error: Optional[str] = None
-    detail: Optional[str] = None
-    retry_after: Optional[int] = None
+    status_code: int
+    body: Dict[str, Any]
+    headers: Optional[Dict[str, str]] = None
+
+    def is_ok(self) -> bool:
+        return 200 <= int(self.status_code) < 300
 
 
 class TelegramSessionManager:
@@ -855,11 +861,16 @@ class TelegramSessionManager:
             state.qr_login = None
             self._update_metrics()
 
+
+
     async def submit_password(self, tenant: int, password: str) -> TwoFASubmitResult:
         await self.wait_until_ready()
         secret = password or ""
         if not secret.strip():
-            return TwoFASubmitResult(ok=False, error="PASSWORD_REQUIRED")
+            return TwoFASubmitResult(
+                status_code=400,
+                body={"error": "password_required"},
+            )
 
         client_to_disconnect: Optional[TelegramClient] = None
         expired_twofa = False
@@ -869,7 +880,10 @@ class TelegramSessionManager:
         async with self._lock:
             state = self._states.get(tenant)
             if not state:
-                return TwoFASubmitResult(ok=False, error="TWO_FACTOR_NOT_PENDING")
+                return TwoFASubmitResult(
+                    status_code=409,
+                    body={"error": "twofa_not_pending"},
+                )
 
             client_to_disconnect, expired_twofa = self._expire_needs_2fa_locked(tenant, state)
             if not expired_twofa:
@@ -885,15 +899,25 @@ class TelegramSessionManager:
                 )
                 if not accepts_password:
                     if state.status == "authorized":
-                        early_result = TwoFASubmitResult(ok=True)
+                        early_result = TwoFASubmitResult(
+                            status_code=200,
+                            body={"ok": True},
+                        )
                     else:
-                        early_result = TwoFASubmitResult(ok=False, error="TWO_FACTOR_NOT_PENDING")
+                        early_result = TwoFASubmitResult(
+                            status_code=409,
+                            body={"error": "twofa_not_pending"},
+                        )
                 else:
                     now = time.time()
                     if state.twofa_backoff_until and state.twofa_backoff_until > now:
-                        retry_after = max(1, int(math.ceil(state.twofa_backoff_until - now)))
+                        retry_after = max(
+                            1, int(math.ceil(state.twofa_backoff_until - now))
+                        )
                         early_result = TwoFASubmitResult(
-                            ok=False, error="PASSWORD_FLOOD", retry_after=retry_after
+                            status_code=429,
+                            body={"error": "flood_wait", "retry_after": retry_after},
+                            headers={"Retry-After": str(retry_after)},
                         )
                     else:
                         client = self._clients.get(tenant)
@@ -923,13 +947,19 @@ class TelegramSessionManager:
                 await client_to_disconnect.disconnect()
 
         if expired_twofa:
-            return TwoFASubmitResult(ok=False, error="TWOFA_TIMEOUT")
+            return TwoFASubmitResult(
+                status_code=409,
+                body={"error": "twofa_expired"},
+            )
 
         if early_result is not None:
             return early_result
 
         if client is None:
-            return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR", detail="client_unavailable")
+            return TwoFASubmitResult(
+                status_code=500,
+                body={"error": "password_exception", "detail": "client_unavailable"},
+            )
 
         async def _mark_failure(
             reason: str,
@@ -953,107 +983,150 @@ class TelegramSessionManager:
                     state.twofa_backoff_until = None
                 self._update_metrics()
 
-        attempts = 0
-        while attempts < 2:
-            attempts += 1
+        async def _failure_response(
+            *,
+            status: int,
+            error: str,
+            event: str,
+            detail: Optional[str] = None,
+            retry_after: Optional[int] = None,
+            backoff: Optional[float] = None,
+            exc: Optional[Exception] = None,
+        ) -> TwoFASubmitResult:
+            EVENT_ERRORS.labels("password_failed").inc()
+            await _mark_failure(event, error, backoff=backoff)
+            parts = [f"stage=password_failed event={event} tenant_id={tenant}"]
+            if retry_after is not None:
+                parts.append(f"retry_after={retry_after}")
+            if detail:
+                parts.append(f"detail={detail}")
+            message = " ".join(parts)
+            if event == "password_exception":
+                if exc is not None:
+                    LOGGER.exception(message, exc_info=exc)
+                else:
+                    LOGGER.error(message)
+            else:
+                LOGGER.warning(message)
+            headers = None
+            body: Dict[str, Any] = {"error": error}
+            if detail:
+                body["detail"] = detail
+            if retry_after is not None:
+                body["retry_after"] = int(retry_after)
+                if status == 429:
+                    headers = {"Retry-After": str(int(retry_after))}
+            return TwoFASubmitResult(status_code=status, body=body, headers=headers)
+
+        max_attempts = 2
+        signed_in = False
+        for attempt in range(max_attempts):
             try:
                 await client(functions.account.GetPasswordRequest())
             except Exception as exc:
-                EVENT_ERRORS.labels("password_failed").inc()
-                LOGGER.error(
-                    "stage=password_failed event=get_password_failed tenant_id=%s error=%s",
-                    tenant,
-                    exc,
+                return await _failure_response(
+                    status=500,
+                    error="password_exception",
+                    event="password_exception",
+                    detail="get_password_failed",
+                    exc=exc,
                 )
-                await _mark_failure("password_fetch_failed", "TELEGRAM_ERROR")
-                return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
 
             try:
                 await client.sign_in(password=secret, logout_other_sessions=False)
+                signed_in = True
                 break
-            except SrpIdInvalidError:
-                EVENT_ERRORS.labels("password_failed").inc()
-                LOGGER.warning(
-                    "stage=password_failed event=srp_invalid tenant_id=%s attempt=%s",
-                    tenant,
-                    attempts,
-                )
-                if attempts >= 2:
-                    await _mark_failure("srp_invalid", "SRP_ID_INVALID")
-                    return TwoFASubmitResult(ok=False, error="SRP_ID_INVALID")
-                await asyncio.sleep(0)
-                continue
             except PasswordHashInvalidError:
-                EVENT_ERRORS.labels("password_failed").inc()
-                await _mark_failure("invalid_password", "PASSWORD_HASH_INVALID")
-                LOGGER.warning(
-                    "stage=password_failed event=password_invalid tenant_id=%s", tenant
+                return await _failure_response(
+                    status=401,
+                    error="password_invalid",
+                    event="password_invalid",
                 )
-                return TwoFASubmitResult(ok=False, error="PASSWORD_HASH_INVALID")
-            except PhonePasswordFloodError:
-                EVENT_ERRORS.labels("password_failed").inc()
-                await _mark_failure(
-                    "password_flood",
-                    "PASSWORD_FLOOD",
-                    backoff=PASSWORD_FLOOD_BACKOFF,
-                )
-                LOGGER.warning(
-                    "stage=password_failed event=password_flood tenant_id=%s type=phone_password",
-                    tenant,
-                )
-                return TwoFASubmitResult(
-                    ok=False,
-                    error="PASSWORD_FLOOD",
-                    retry_after=int(PASSWORD_FLOOD_BACKOFF),
-                )
-            except FloodWaitError as exc:
-                wait_seconds = max(1, getattr(exc, "seconds", 1))
-                EVENT_ERRORS.labels("password_failed").inc()
-                await _mark_failure(
-                    "password_flood_wait",
-                    "PASSWORD_FLOOD",
+            except PhonePasswordFloodError as exc_flood:
+                wait_seconds = getattr(exc_flood, "seconds", None)
+                if wait_seconds is None or int(wait_seconds) <= 0:
+                    wait_seconds = int(PASSWORD_FLOOD_BACKOFF)
+                wait_seconds = max(1, int(wait_seconds))
+                return await _failure_response(
+                    status=429,
+                    error="flood_wait",
+                    event="flood_wait",
+                    retry_after=wait_seconds,
                     backoff=float(wait_seconds),
+                    detail="phone_password",
                 )
-                LOGGER.warning(
-                    "stage=password_failed event=password_flood tenant_id=%s type=flood_wait wait=%s",
-                    tenant,
-                    wait_seconds,
+            except FloodWaitError as exc_wait:
+                wait_seconds = max(
+                    1, int(getattr(exc_wait, "seconds", PASSWORD_FLOOD_BACKOFF))
                 )
-                return TwoFASubmitResult(
-                    ok=False,
-                    error="PASSWORD_FLOOD",
-                    retry_after=int(wait_seconds),
+                return await _failure_response(
+                    status=429,
+                    error="flood_wait",
+                    event="flood_wait",
+                    retry_after=wait_seconds,
+                    backoff=float(wait_seconds),
+                    detail="flood_wait",
+                )
+            except BadRequestError as exc_bad:
+                message = (
+                    getattr(exc_bad, "message", None)
+                    or getattr(exc_bad, "rpc_error", None)
+                    or str(exc_bad)
+                    or ""
+                )
+                normalized = message.upper()
+                if "SRP_ID_INVALID" in normalized:
+                    if attempt + 1 >= max_attempts:
+                        return await _failure_response(
+                            status=409,
+                            error="srp_invalid",
+                            event="srp_invalid",
+                        )
+                    LOGGER.warning(
+                        "stage=password_failed event=srp_invalid tenant_id=%s attempt=%s",
+                        tenant,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+                return await _failure_response(
+                    status=500,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=message or "bad_request_error",
+                    exc=exc_bad,
+                )
+            except RPCError as exc_rpc:
+                detail = str(exc_rpc) or "telegram_error"
+                return await _failure_response(
+                    status=500,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_rpc,
                 )
             except SessionPasswordNeededError:
-                LOGGER.info(
-                    "stage=password_pending event=twofa_pending tenant_id=%s", tenant
+                return TwoFASubmitResult(
+                    status_code=409,
+                    body={"error": "twofa_pending"},
                 )
-                return TwoFASubmitResult(ok=False, error="TWO_FACTOR_PENDING")
-            except RPCError as exc:
-                message = str(exc) or "telegram_error"
-                EVENT_ERRORS.labels("password_failed").inc()
-                await _mark_failure("password_rpc_error", "TELEGRAM_ERROR")
-                LOGGER.error(
-                    "stage=password_failed event=password_failed tenant_id=%s error=%s",
-                    tenant,
-                    message,
+            except Exception as exc_generic:
+                detail = str(exc_generic) or "exception"
+                return await _failure_response(
+                    status=500,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_generic,
                 )
-                return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
-            except Exception as exc:
-                EVENT_ERRORS.labels("password_failed").inc()
-                await _mark_failure("password_exception", "TELEGRAM_ERROR")
-                LOGGER.exception(
-                    "stage=password_failed event=password_exception tenant_id=%s", tenant
-                )
-                return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
 
-        else:
-            EVENT_ERRORS.labels("password_failed").inc()
-            await _mark_failure("password_unknown", "TELEGRAM_ERROR")
-            LOGGER.error(
-                "stage=password_failed event=password_loop_exhausted tenant_id=%s", tenant
+        if not signed_in:
+            return await _failure_response(
+                status=500,
+                error="password_exception",
+                event="password_exception",
+                detail="password_loop_exhausted",
             )
-            return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
 
         async with self._lock:
             state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
@@ -1082,8 +1155,7 @@ class TelegramSessionManager:
 
         self._ensure_session_permissions(self._sessions_dir / f"{tenant}.session")
         LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)
-        return TwoFASubmitResult(ok=True)
-
+        return TwoFASubmitResult(status_code=200, body={"ok": True})
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):
             return
