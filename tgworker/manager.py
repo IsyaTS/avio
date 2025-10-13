@@ -2,28 +2,36 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
 import io
 import logging
+import math
 import os
-from pathlib import Path
 import secrets
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
 import qrcode
 from prometheus_client import Counter, Gauge
-from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, RPCError
-from telethon.errors.rpcerrorlist import PasswordHashInvalidError, AuthKeyUnregisteredError
+from telethon import TelegramClient, events, functions
+from telethon.errors import RPCError, SessionPasswordNeededError
+from telethon.errors.rpcbaseerrors import FloodWaitError
+from telethon.errors.rpcerrorlist import (
+    AuthKeyUnregisteredError,
+    PasswordHashInvalidError,
+    PhonePasswordFloodError,
+    SrpIdInvalidError,
+)
 
 
 LOGGER = logging.getLogger("tgworker")
 
 
 QR_LOGIN_TIMEOUT = 120.0
-NEEDS_2FA_TTL = 600.0
+NEEDS_2FA_TTL = 90.0
+PASSWORD_FLOOD_BACKOFF = 60.0
 
 
 SESSIONS_AUTHORIZED = Gauge(
@@ -82,6 +90,15 @@ class SessionState:
     restart_pending: bool = False
     twofa_pending: bool = False
     twofa_since: Optional[float] = None
+    twofa_backoff_until: Optional[float] = None
+
+
+@dataclass(slots=True)
+class TwoFASubmitResult:
+    ok: bool
+    error: Optional[str] = None
+    detail: Optional[str] = None
+    retry_after: Optional[int] = None
 
 
 class TelegramSessionManager:
@@ -273,6 +290,7 @@ class TelegramSessionManager:
             state.last_needs_2fa_at = None
             state.twofa_pending = False
             state.twofa_since = None
+            state.twofa_backoff_until = None
             state.can_restart = True
             expired = True
             LOGGER.warning(
@@ -402,6 +420,7 @@ class TelegramSessionManager:
         state.last_seen = time.time()
         state.twofa_pending = False
         state.twofa_since = None
+        state.twofa_backoff_until = None
         state.qr_login = None
         self._states[tenant] = state
         self._update_metrics()
@@ -639,6 +658,7 @@ class TelegramSessionManager:
                     state.last_seen = time.time()
                     state.twofa_pending = False
                     state.twofa_since = None
+                    state.twofa_backoff_until = None
                     self._qr_lookup[qr_id] = tenant
                     LOGGER.info("stage=qr_start tenant_id=%s qr_id=%s", tenant, qr_id)
                     LOGGER.info(
@@ -726,6 +746,7 @@ class TelegramSessionManager:
                 state.last_seen = time.time()
                 state.twofa_pending = False
                 state.twofa_since = None
+                state.twofa_backoff_until = None
                 self._register_handlers(tenant, client)
                 LOGGER.info("stage=authorized tenant_id=%s", tenant)
                 break
@@ -747,6 +768,7 @@ class TelegramSessionManager:
             state.qr_expires_at = None
             state.qr_login = None
             state.can_restart = False
+            state.twofa_backoff_until = None
             EVENT_ERRORS.labels("needs_2fa").inc()
             LOGGER.warning(
                 "stage=needs_2fa state=needs_2fa ttl=%ss tenant_id=%s",
@@ -803,18 +825,21 @@ class TelegramSessionManager:
             state.qr_login = None
             self._update_metrics()
 
-    async def submit_password(self, tenant: int, password: str) -> bool:
+    async def submit_password(self, tenant: int, password: str) -> TwoFASubmitResult:
         secret = password or ""
-        if not secret:
-            raise ValueError("password_required")
+        if not secret.strip():
+            return TwoFASubmitResult(ok=False, error="PASSWORD_REQUIRED")
 
         client_to_disconnect: Optional[TelegramClient] = None
         expired_twofa = False
         client: Optional[TelegramClient] = None
+        early_result: Optional[TwoFASubmitResult] = None
+
         async with self._lock:
             state = self._states.get(tenant)
             if not state:
-                raise ValueError("session_not_found")
+                return TwoFASubmitResult(ok=False, error="TWO_FACTOR_NOT_PENDING")
+
             client_to_disconnect, expired_twofa = self._expire_needs_2fa_locked(tenant, state)
             if not expired_twofa:
                 awaiting_valid = (
@@ -828,100 +853,176 @@ class TelegramSessionManager:
                     state.status == "needs_2fa" or state.twofa_pending or awaiting_valid
                 )
                 if not accepts_password:
-                    raise ValueError("two_factor_not_pending")
-                client = self._clients.get(tenant)
-                if client is None:
-                    client = self._build_client(tenant)
-                    await client.connect()
-                    self._clients[tenant] = client
-                elif not client.is_connected():
-                    await client.connect()
-                self._set_status(tenant, state, "needs_2fa", reason="password_submit")
-                state.needs_2fa = True
-                state.awaiting_password = True
-                state.twofa_pending = True
-                if state.twofa_since is None:
-                    state.twofa_since = int(time.time() * 1000.0)
-                state.qr_id = None
-                state.qr_png = None
-                state.qr_expires_at = None
-                state.last_seen = time.time()
-                self._extend_needs_2fa_ttl(state)
-                state.last_needs_2fa_at = time.time()
+                    if state.status == "authorized":
+                        early_result = TwoFASubmitResult(ok=True)
+                    else:
+                        early_result = TwoFASubmitResult(ok=False, error="TWO_FACTOR_NOT_PENDING")
+                else:
+                    now = time.time()
+                    if state.twofa_backoff_until and state.twofa_backoff_until > now:
+                        retry_after = max(1, int(math.ceil(state.twofa_backoff_until - now)))
+                        early_result = TwoFASubmitResult(
+                            ok=False, error="PASSWORD_FLOOD", retry_after=retry_after
+                        )
+                    else:
+                        client = self._clients.get(tenant)
+                        if client is None:
+                            client = self._build_client(tenant)
+                            await client.connect()
+                            self._clients[tenant] = client
+                        elif not client.is_connected():
+                            await client.connect()
+
+                        self._set_status(tenant, state, "needs_2fa", reason="password_submit")
+                        state.needs_2fa = True
+                        state.awaiting_password = True
+                        state.twofa_pending = True
+                        if state.twofa_since is None:
+                            state.twofa_since = int(time.time() * 1000.0)
+                        state.qr_id = None
+                        state.qr_png = None
+                        state.qr_expires_at = None
+                        state.last_seen = time.time()
+                        state.last_needs_2fa_at = time.time()
+                        state.twofa_backoff_until = None
+                        self._extend_needs_2fa_ttl(state)
 
         if client_to_disconnect:
             with contextlib.suppress(Exception):
                 await client_to_disconnect.disconnect()
 
         if expired_twofa:
-            raise ValueError("twofa_timeout")
+            return TwoFASubmitResult(ok=False, error="TWOFA_TIMEOUT")
+
+        if early_result is not None:
+            return early_result
 
         if client is None:
-            raise RuntimeError("client_unavailable")
+            return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR", detail="client_unavailable")
 
-        try:
-            await client.sign_in(password=secret, logout_other_sessions=False)
-        except PasswordHashInvalidError:
+        async def _mark_failure(
+            reason: str,
+            error_code: str,
+            *,
+            backoff: Optional[float] = None,
+        ) -> None:
             async with self._lock:
                 state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
-                self._set_status(tenant, state, "needs_2fa", reason="invalid_2fa_password")
+                self._set_status(tenant, state, "needs_2fa", reason=reason)
                 state.needs_2fa = True
                 state.awaiting_password = True
-                state.last_error = "invalid_2fa_password"
+                state.last_error = error_code
                 state.last_seen = time.time()
                 self._extend_needs_2fa_ttl(state)
                 state.twofa_pending = True
                 state.twofa_since = int(time.time() * 1000.0)
+                if backoff and backoff > 0:
+                    state.twofa_backoff_until = time.time() + backoff
+                else:
+                    state.twofa_backoff_until = None
                 self._update_metrics()
+
+        attempts = 0
+        while attempts < 2:
+            attempts += 1
+            try:
+                await client(functions.account.GetPasswordRequest())
+            except Exception as exc:
+                EVENT_ERRORS.labels("password_failed").inc()
+                LOGGER.error(
+                    "stage=password_failed event=get_password_failed tenant_id=%s error=%s",
+                    tenant,
+                    exc,
+                )
+                await _mark_failure("password_fetch_failed", "TELEGRAM_ERROR")
+                return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
+
+            try:
+                await client.sign_in(password=secret, logout_other_sessions=False)
+                break
+            except SrpIdInvalidError:
+                EVENT_ERRORS.labels("password_failed").inc()
+                LOGGER.warning(
+                    "stage=password_failed event=srp_invalid tenant_id=%s attempt=%s",
+                    tenant,
+                    attempts,
+                )
+                if attempts >= 2:
+                    await _mark_failure("srp_invalid", "SRP_ID_INVALID")
+                    return TwoFASubmitResult(ok=False, error="SRP_ID_INVALID")
+                await asyncio.sleep(0)
+                continue
+            except PasswordHashInvalidError:
+                EVENT_ERRORS.labels("password_failed").inc()
+                await _mark_failure("invalid_password", "PASSWORD_HASH_INVALID")
+                LOGGER.warning(
+                    "stage=password_failed event=password_invalid tenant_id=%s", tenant
+                )
+                return TwoFASubmitResult(ok=False, error="PASSWORD_HASH_INVALID")
+            except PhonePasswordFloodError:
+                EVENT_ERRORS.labels("password_failed").inc()
+                await _mark_failure(
+                    "password_flood",
+                    "PASSWORD_FLOOD",
+                    backoff=PASSWORD_FLOOD_BACKOFF,
+                )
+                LOGGER.warning(
+                    "stage=password_failed event=password_flood tenant_id=%s type=phone_password",
+                    tenant,
+                )
+                return TwoFASubmitResult(
+                    ok=False,
+                    error="PASSWORD_FLOOD",
+                    retry_after=int(PASSWORD_FLOOD_BACKOFF),
+                )
+            except FloodWaitError as exc:
+                wait_seconds = max(1, getattr(exc, "seconds", 1))
+                EVENT_ERRORS.labels("password_failed").inc()
+                await _mark_failure(
+                    "password_flood_wait",
+                    "PASSWORD_FLOOD",
+                    backoff=float(wait_seconds),
+                )
+                LOGGER.warning(
+                    "stage=password_failed event=password_flood tenant_id=%s type=flood_wait wait=%s",
+                    tenant,
+                    wait_seconds,
+                )
+                return TwoFASubmitResult(
+                    ok=False,
+                    error="PASSWORD_FLOOD",
+                    retry_after=int(wait_seconds),
+                )
+            except SessionPasswordNeededError:
+                LOGGER.info(
+                    "stage=password_pending event=twofa_pending tenant_id=%s", tenant
+                )
+                return TwoFASubmitResult(ok=False, error="TWO_FACTOR_PENDING")
+            except RPCError as exc:
+                message = str(exc) or "telegram_error"
+                EVENT_ERRORS.labels("password_failed").inc()
+                await _mark_failure("password_rpc_error", "TELEGRAM_ERROR")
+                LOGGER.error(
+                    "stage=password_failed event=password_failed tenant_id=%s error=%s",
+                    tenant,
+                    message,
+                )
+                return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
+            except Exception as exc:
+                EVENT_ERRORS.labels("password_failed").inc()
+                await _mark_failure("password_exception", "TELEGRAM_ERROR")
+                LOGGER.exception(
+                    "stage=password_failed event=password_exception tenant_id=%s", tenant
+                )
+                return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
+
+        else:
             EVENT_ERRORS.labels("password_failed").inc()
-            LOGGER.warning(
-                "stage=password_failed event=password_failed tenant_id=%s error=invalid_2fa_password",
-                tenant,
-            )
-            raise ValueError("invalid_2fa_password")
-        except SessionPasswordNeededError:
-            LOGGER.info(
-                "stage=password_pending event=twofa_pending tenant_id=%s", tenant
-            )
-            raise ValueError("two_factor_pending")
-        except RPCError as exc:
-            message = str(exc) or "telegram_error"
-            async with self._lock:
-                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
-                self._set_status(tenant, state, "needs_2fa", reason="password_error")
-                state.needs_2fa = True
-                state.awaiting_password = True
-                state.last_error = message
-                state.last_seen = time.time()
-                self._extend_needs_2fa_ttl(state)
-                state.twofa_pending = True
-                state.twofa_since = int(time.time() * 1000.0)
-                self._update_metrics()
-            EVENT_ERRORS.labels("password_failed").inc()
+            await _mark_failure("password_unknown", "TELEGRAM_ERROR")
             LOGGER.error(
-                "stage=password_failed event=password_failed tenant_id=%s error=%s",
-                tenant,
-                message,
+                "stage=password_failed event=password_loop_exhausted tenant_id=%s", tenant
             )
-            raise RuntimeError("telegram_error") from exc
-        except Exception as exc:
-            async with self._lock:
-                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
-                self._set_status(tenant, state, "needs_2fa", reason="password_exception")
-                state.needs_2fa = True
-                state.awaiting_password = True
-                state.last_error = str(exc)
-                state.last_seen = time.time()
-                self._extend_needs_2fa_ttl(state)
-                state.twofa_pending = True
-                state.twofa_since = int(time.time() * 1000.0)
-                self._update_metrics()
-            EVENT_ERRORS.labels("password_failed").inc()
-            LOGGER.exception(
-                "stage=password_failed event=password_failed tenant_id=%s",
-                tenant,
-            )
-            raise RuntimeError("telegram_error") from exc
+            return TwoFASubmitResult(ok=False, error="TELEGRAM_ERROR")
 
         async with self._lock:
             state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
@@ -939,15 +1040,18 @@ class TelegramSessionManager:
             state.twofa_pending = False
             state.twofa_since = None
             state.can_restart = False
+            state.twofa_backoff_until = None
             self._register_handlers(tenant, client)
             self._update_metrics()
+
         with contextlib.suppress(Exception):
             session_obj = getattr(client, "session", None)
             if session_obj is not None:
                 session_obj.save()
+
         self._ensure_session_permissions(self._sessions_dir / f"{tenant}.session")
         LOGGER.info("stage=password_ok event=password_ok tenant_id=%s", tenant)
-        return True
+        return TwoFASubmitResult(ok=True)
 
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):

@@ -11,7 +11,12 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import telegram_config
 
-from .session_manager import SessionManager, QRExpiredError, QRNotFoundError
+from .session_manager import (
+    QRExpiredError,
+    QRNotFoundError,
+    SessionManager,
+    TwoFASubmitResult,
+)
 
 
 logger = logging.getLogger("tgworker.api")
@@ -152,62 +157,45 @@ def create_app() -> FastAPI:
         await manager.logout(payload.tenant_id)
         return JSONResponse({"ok": True}, headers=dict(NO_STORE_HEADERS))
 
+    def _password_response(result: TwoFASubmitResult) -> JSONResponse:
+        headers = dict(NO_STORE_HEADERS)
+        if result.ok:
+            return JSONResponse({"ok": True}, headers=headers)
+
+        error_code = result.error or "TELEGRAM_ERROR"
+        status_map = {
+            "PASSWORD_REQUIRED": 400,
+            "PASSWORD_HASH_INVALID": 400,
+            "TWO_FACTOR_PENDING": 409,
+            "TWO_FACTOR_NOT_PENDING": 409,
+            "TWOFA_TIMEOUT": 409,
+            "SRP_ID_INVALID": 409,
+            "PASSWORD_FLOOD": 429,
+            "TELEGRAM_ERROR": 502,
+        }
+        status_code = status_map.get(error_code, 502)
+        body: dict[str, object] = {"error": error_code}
+        if result.detail:
+            body["detail"] = result.detail
+        if result.retry_after is not None:
+            body["retry_after"] = int(result.retry_after)
+            if status_code == 429:
+                headers["Retry-After"] = str(int(result.retry_after))
+        return JSONResponse(body, status_code=status_code, headers=headers)
+
     @app.post("/session/password")
     async def session_password(payload: PasswordRequest):
-        tenant = payload.tenant_id
-        password = payload.password.get_secret_value()
-        cache_headers = dict(NO_STORE_HEADERS)
-        if not password:
-            return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
+        result = await manager.submit_password(
+            payload.tenant_id, payload.password.get_secret_value()
+        )
+        return _password_response(result)
 
-        snapshot = await manager.get_status(tenant)
-        if not snapshot.twofa_pending:
-            body = snapshot.to_payload()
-            body["stats"] = manager.stats_snapshot()
-            status_value = str(body.get("status") or "")
-            last_error = body.get("last_error") or ""
-            if status_value == "authorized":
-                logger.info(
-                    "stage=password_skip event=already_authorized tenant_id=%s", tenant
-                )
-                return JSONResponse({"ok": True}, headers=cache_headers)
-            if last_error == "twofa_timeout":
-                body["error"] = "twofa_timeout"
-                return JSONResponse(body, status_code=409, headers=cache_headers)
-            body["error"] = "two_factor_not_pending"
-            return JSONResponse(body, status_code=409, headers=cache_headers)
-
-        try:
-            await manager.submit_password(tenant, password)
-        except ValueError as exc:
-            message = str(exc)
-            if message == "invalid_2fa_password":
-                return JSONResponse({"error": "invalid_2fa_password"}, status_code=400, headers=cache_headers)
-            if message == "password_required":
-                return JSONResponse({"error": "password_required"}, status_code=400, headers=cache_headers)
-            if message == "twofa_timeout":
-                return JSONResponse({"error": "twofa_timeout"}, status_code=409, headers=cache_headers)
-            if message == "two_factor_pending":
-                return JSONResponse({"error": "two_factor_pending"}, status_code=409, headers=cache_headers)
-            if message == "two_factor_not_pending":
-                logger.info(
-                    "stage=password event=password_not_pending tenant_id=%s", tenant
-                )
-                return JSONResponse({"error": "two_factor_not_pending"}, status_code=409, headers=cache_headers)
-            logger.error(
-                "stage=password event=password_unhandled tenant_id=%s error=%s", tenant, message
-            )
-            return JSONResponse({"error": "telegram_error"}, status_code=502, headers=cache_headers)
-        except RuntimeError as exc:
-            logger.error(
-                "stage=password event=password_runtime_error tenant_id=%s error=%s",
-                tenant,
-                exc,
-            )
-            return JSONResponse({"error": "telegram_error"}, status_code=502, headers=cache_headers)
-
-        logger.info("stage=password_ok event=password_forward tenant_id=%s", tenant)
-        return JSONResponse({"ok": True}, headers=cache_headers)
+    @app.post("/rpc/twofa.submit")
+    async def rpc_twofa_submit(payload: PasswordRequest):
+        result = await manager.submit_password(
+            payload.tenant_id, payload.password.get_secret_value()
+        )
+        return _password_response(result)
 
     @app.post("/send")
     async def send_message(payload: SendRequest, _: None = Depends(require_credentials)):

@@ -536,7 +536,8 @@
           }
           const errorData = payload && typeof payload === 'object' ? payload : null;
           const errorCode = errorData && typeof errorData.error === 'string' ? errorData.error : '';
-          if (errorCode === 'invalid_2fa_password') {
+          const normalizedCode = typeof errorCode === 'string' ? errorCode.toUpperCase() : '';
+          if (normalizedCode === 'PASSWORD_HASH_INVALID' || errorCode === 'invalid_2fa_password') {
             inTwoFA = true;
             updateControls();
             showTwofa('Неверный пароль. Попробуйте ещё раз.');
@@ -546,11 +547,11 @@
             }
             return;
           }
-          if (errorCode === 'twofa_timeout') {
+          if (normalizedCode === 'TWOFA_TIMEOUT' || errorCode === 'twofa_timeout') {
             handleTwofaTimeout();
             return;
           }
-          if (errorCode === 'two_factor_pending') {
+          if (normalizedCode === 'TWO_FACTOR_PENDING' || errorCode === 'two_factor_pending') {
             inTwoFA = true;
             updateControls();
             showTwofa('Введите пароль 2FA.');
@@ -560,7 +561,7 @@
             }
             return;
           }
-          if (errorCode === 'two_factor_not_pending') {
+          if (normalizedCode === 'TWO_FACTOR_NOT_PENDING' || errorCode === 'two_factor_not_pending') {
             if (errorData && typeof errorData === 'object') {
               const processedDelay = processStatus(errorData);
               if (!authorized && typeof processedDelay === 'number' && Number.isFinite(processedDelay)) {
@@ -572,9 +573,36 @@
             }
             return;
           }
-          if (errorCode === 'password_required') {
+          if (normalizedCode === 'PASSWORD_REQUIRED' || errorCode === 'password_required') {
             showTwofa('Введите пароль.');
             setStatus('Введите пароль 2FA.', 'alert');
+            return;
+          }
+          if (normalizedCode === 'PASSWORD_FLOOD' || errorCode === 'password_flood') {
+            const retryAfter = errorData && typeof errorData.retry_after === 'number' && Number.isFinite(errorData.retry_after)
+              ? Math.max(1, Math.floor(errorData.retry_after))
+              : null;
+            const waitMessage = retryAfter
+              ? `Слишком много попыток. Попробуйте ещё раз через ${retryAfter} с.`
+              : 'Слишком много попыток. Попробуйте позже.';
+            inTwoFA = true;
+            updateControls();
+            showTwofa(waitMessage);
+            setStatus(waitMessage, 'alert');
+            if (!authorized) {
+              const delayMs = retryAfter ? Math.max(600, retryAfter * 1000) : Math.max(5000, POLL_INTERVAL);
+              scheduleNext(delayMs);
+            }
+            return;
+          }
+          if (normalizedCode === 'SRP_ID_INVALID') {
+            inTwoFA = true;
+            updateControls();
+            showTwofa('Сеанс устарел. Обновите QR-код и попробуйте ещё раз.');
+            setStatus('Сеанс устарел. Обновите QR-код и попробуйте ещё раз.', 'alert');
+            if (!authorized) {
+              scheduleNext(Math.max(4000, POLL_INTERVAL));
+            }
             return;
           }
           if (errorData && typeof errorData.detail === 'string') {
