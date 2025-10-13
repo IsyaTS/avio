@@ -16,14 +16,14 @@ def _auth_ok(request: Request) -> bool:
     token = (request.query_params.get("token") or request.headers.get("X-Admin-Token") or "").strip()
     if token and token == settings.ADMIN_TOKEN:
         return True
-    cookie = (request.cookies.get("admin") or "").strip()
-    return bool(cookie) and cookie == ADMIN_COOKIE
+    cookie = (request.cookies.get(ADMIN_COOKIE) or "").strip()
+    return bool(cookie) and cookie == settings.ADMIN_TOKEN
 
 
 @router.get("/admin/login")
 def login(request: Request, token: str | None = None):
-    cookie_value = (request.cookies.get("admin") or "").strip()
-    if cookie_value == ADMIN_COOKIE:
+    cookie_value = (request.cookies.get(ADMIN_COOKIE) or "").strip()
+    if cookie_value and cookie_value == settings.ADMIN_TOKEN:
         return RedirectResponse(url="/admin")
 
     admin_token = settings.ADMIN_TOKEN
@@ -33,7 +33,14 @@ def login(request: Request, token: str | None = None):
         token = token.strip()
         if token and token == admin_token:
             resp = RedirectResponse(url="/admin", status_code=303)
-            resp.set_cookie("admin", ADMIN_COOKIE, max_age=86400 * 7, httponly=True, samesite="lax")
+            resp.set_cookie(
+                ADMIN_COOKIE,
+                admin_token,
+                max_age=60 * 60 * 24 * 14,
+                httponly=True,
+                secure=True,
+                samesite="lax",
+            )
             return resp
         error = "Неверный токен доступа"
 
