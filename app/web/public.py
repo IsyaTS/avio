@@ -9,6 +9,7 @@ import math
 import mimetypes
 import pathlib
 import re
+import hashlib
 import sys
 import time
 import uuid
@@ -76,7 +77,7 @@ NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
 
 PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
-_LOCAL_PASSWORD_ATTEMPTS: dict[int, list[float]] = {}
+_LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -189,8 +190,14 @@ def _parse_force_flag(raw_value: str | None) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _register_password_attempt(tenant_id: int) -> tuple[bool, int | None]:
-    key = f"tenant:{int(tenant_id)}:twofa_attempts"
+def _password_attempt_key(tenant_id: int, token: str) -> str:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+    return f"tenant:{int(tenant_id)}:twofa_attempts:{digest}"
+
+
+def _register_password_attempt(tenant_id: int, client_token: str) -> tuple[bool, int | None]:
+    token = (client_token or "-").strip() or "-"
+    key = _password_attempt_key(tenant_id, token)
     try:
         client = common.redis_client()
     except Exception:
@@ -213,7 +220,8 @@ def _register_password_attempt(tenant_id: int) -> tuple[bool, int | None]:
             client = None
 
     now = time.monotonic()
-    entries = _LOCAL_PASSWORD_ATTEMPTS.setdefault(int(tenant_id), [])
+    local_key = (int(tenant_id), token)
+    entries = _LOCAL_PASSWORD_ATTEMPTS.setdefault(local_key, [])
     cutoff = now - PASSWORD_ATTEMPT_WINDOW
     filtered = [stamp for stamp in entries if stamp > cutoff]
     allowed = len(filtered) < PASSWORD_ATTEMPT_LIMIT
@@ -226,8 +234,21 @@ def _register_password_attempt(tenant_id: int) -> tuple[bool, int | None]:
             retry_after = max(1, int(math.ceil(remaining))) if remaining > 0 else 1
         else:
             retry_after = int(PASSWORD_ATTEMPT_WINDOW)
-    _LOCAL_PASSWORD_ATTEMPTS[int(tenant_id)] = filtered
+    _LOCAL_PASSWORD_ATTEMPTS[local_key] = filtered
     return allowed, retry_after
+
+
+def _client_identifier(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None) if client else None
+    if host:
+        return str(host)
+    return "-"
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
@@ -887,21 +908,42 @@ async def tg_start(
     if not force_flag:
         try:
             status_response = await C.tg_get(
-                f"{TG_WORKER_BASE}/session/status",
+                "/session/status",
                 {"tenant": tenant_id},
-                timeout=15.0,
+                timeout=5.0,
             )
-        except Exception as exc:
+        except C.TGWorkerConnectionError as exc:
+            detail_text = str(exc) or "tg_unavailable"
             _log_tg_proxy(
                 "/pub/tg/start",
                 tenant_id,
                 0,
                 None,
-                error=str(exc),
+                error=detail_text,
                 force=force_flag,
             )
             fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-            return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=fail_headers)
+            return JSONResponse(
+                {"error": "tg_unavailable", "detail": detail_text},
+                status_code=502,
+                headers=fail_headers,
+            )
+        except Exception as exc:
+            detail_text = str(exc) or "tg_unavailable"
+            _log_tg_proxy(
+                "/pub/tg/start",
+                tenant_id,
+                0,
+                None,
+                error=detail_text,
+                force=force_flag,
+            )
+            fail_headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
+            return JSONResponse(
+                {"error": "tg_unavailable", "detail": detail_text},
+                status_code=502,
+                headers=fail_headers,
+            )
 
         status_code = int(getattr(status_response, "status_code", 0) or 0)
         status_body_bytes = bytes(getattr(status_response, "content", b"") or b"")
@@ -955,13 +997,40 @@ async def tg_start(
 
     try:
         upstream = await C.tg_post(
-            f"{TG_WORKER_BASE}/session/start",
+            "/session/start",
             payload,
-            timeout=15.0,
+            timeout=5.0,
+        )
+    except C.TGWorkerConnectionError as exc:
+        detail_text = str(exc) or "tg_unavailable"
+        _log_tg_proxy(
+            "/pub/tg/start",
+            tenant_id,
+            0,
+            None,
+            error=detail_text,
+            force=force_flag,
+        )
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": detail_text},
+            status_code=502,
+            headers=_no_store_headers(),
         )
     except Exception as exc:
-        _log_tg_proxy("/pub/tg/start", tenant_id, 0, None, error=str(exc), force=force_flag)
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
+        detail_text = str(exc) or "tg_unavailable"
+        _log_tg_proxy(
+            "/pub/tg/start",
+            tenant_id,
+            0,
+            None,
+            error=detail_text,
+            force=force_flag,
+        )
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": detail_text},
+            status_code=502,
+            headers=_no_store_headers(),
+        )
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
@@ -999,6 +1068,7 @@ async def tg_password(
         return validation
 
     tenant_id, _ = validation
+    client_token = _client_identifier(request)
 
     password_value: str | None = None
     try:
@@ -1024,26 +1094,39 @@ async def tg_password(
         _log_tg_proxy("/pub/tg/password", tenant_id, 400, None, error="password_required")
         return JSONResponse({"error": "password_required"}, status_code=400, headers=_no_store_headers())
 
-    allowed, retry_after = _register_password_attempt(tenant_id)
+    allowed, retry_after = _register_password_attempt(tenant_id, client_token)
     if not allowed:
         headers = _no_store_headers()
         if retry_after and retry_after > 0:
             headers["Retry-After"] = str(int(retry_after))
-        _log_tg_proxy("/pub/tg/password", tenant_id, 429, None, error="PASSWORD_FLOOD")
-        body = {"error": "PASSWORD_FLOOD"}
+        _log_tg_proxy("/pub/tg/password", tenant_id, 429, None, error="flood_wait")
+        body = {"error": "flood_wait"}
         if retry_after and retry_after > 0:
             body["retry_after"] = int(retry_after)
         return JSONResponse(body, status_code=429, headers=headers)
 
     try:
         upstream = await C.tg_post(
-            f"{TG_WORKER_BASE}/rpc/twofa.submit",
+            "/rpc/twofa.submit",
             {"tenant_id": tenant_id, "password": password_text},
-            timeout=15.0,
+            timeout=5.0,
+        )
+    except C.TGWorkerConnectionError as exc:
+        detail_text = str(exc) or "tg_unavailable"
+        _log_tg_proxy("/pub/tg/password", tenant_id, 0, None, error=detail_text)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": detail_text},
+            status_code=502,
+            headers=_no_store_headers(),
         )
     except Exception as exc:
-        _log_tg_proxy("/pub/tg/password", tenant_id, 0, None, error=str(exc))
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=_no_store_headers())
+        detail_text = str(exc) or "tg_unavailable"
+        _log_tg_proxy("/pub/tg/password", tenant_id, 0, None, error=detail_text)
+        return JSONResponse(
+            {"error": "tg_unavailable", "detail": detail_text},
+            status_code=502,
+            headers=_no_store_headers(),
+        )
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
@@ -1161,14 +1244,25 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
 
     try:
         upstream = await C.tg_get(
-            f"{TG_WORKER_BASE}/session/status",
+            "/session/status",
             {"tenant": tenant_id},
-            timeout=15.0,
+            timeout=5.0,
         )
-    except Exception as exc:
-        _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error=str(exc))
+    except C.TGWorkerConnectionError as exc:
+        detail_text = str(exc) or "tg_unavailable"
+        _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error=detail_text)
         fail_headers = _tg_cache_headers("-", {"Content-Type": "application/json"})
-        fail_body = json.dumps({"error": "tg_unavailable"}, ensure_ascii=False).encode("utf-8")
+        fail_body = json.dumps(
+            {"error": "tg_unavailable", "detail": detail_text}, ensure_ascii=False
+        ).encode("utf-8")
+        return Response(content=fail_body, status_code=502, headers=fail_headers)
+    except Exception as exc:
+        detail_text = str(exc) or "tg_unavailable"
+        _log_tg_proxy("/pub/tg/status", tenant_id, 0, None, error=detail_text)
+        fail_headers = _tg_cache_headers("-", {"Content-Type": "application/json"})
+        fail_body = json.dumps(
+            {"error": "tg_unavailable", "detail": detail_text}, ensure_ascii=False
+        ).encode("utf-8")
         return Response(content=fail_body, status_code=502, headers=fail_headers)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)

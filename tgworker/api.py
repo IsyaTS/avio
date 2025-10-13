@@ -86,6 +86,7 @@ def create_app() -> FastAPI:
     )
 
     app = FastAPI(title="tgworker")
+    app.state.session_manager = manager
 
     NO_STORE_HEADERS = {
         "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -159,42 +160,44 @@ def create_app() -> FastAPI:
 
     def _password_response(result: TwoFASubmitResult) -> JSONResponse:
         headers = dict(NO_STORE_HEADERS)
-        if result.ok:
-            return JSONResponse({"ok": True}, headers=headers)
-
-        error_code = result.error or "TELEGRAM_ERROR"
-        status_map = {
-            "PASSWORD_REQUIRED": 400,
-            "PASSWORD_HASH_INVALID": 400,
-            "TWO_FACTOR_PENDING": 409,
-            "TWO_FACTOR_NOT_PENDING": 409,
-            "TWOFA_TIMEOUT": 409,
-            "SRP_ID_INVALID": 409,
-            "PASSWORD_FLOOD": 429,
-            "TELEGRAM_ERROR": 502,
-        }
-        status_code = status_map.get(error_code, 502)
-        body: dict[str, object] = {"error": error_code}
-        if result.detail:
-            body["detail"] = result.detail
-        if result.retry_after is not None:
-            body["retry_after"] = int(result.retry_after)
-            if status_code == 429:
-                headers["Retry-After"] = str(int(result.retry_after))
+        if result.headers:
+            headers.update(result.headers)
+        status_code = int(result.status_code)
+        body = dict(result.body)
         return JSONResponse(body, status_code=status_code, headers=headers)
 
     @app.post("/session/password")
     async def session_password(payload: PasswordRequest):
-        result = await manager.submit_password(
-            payload.tenant_id, payload.password.get_secret_value()
-        )
+        try:
+            result = await manager.submit_password(
+                payload.tenant_id, payload.password.get_secret_value()
+            )
+        except Exception:
+            logger.exception(
+                "stage=password_failed event=password_exception endpoint=session_password"
+            )
+            return JSONResponse(
+                {"error": "password_exception"},
+                status_code=500,
+                headers=dict(NO_STORE_HEADERS),
+            )
         return _password_response(result)
 
     @app.post("/rpc/twofa.submit")
     async def rpc_twofa_submit(payload: PasswordRequest):
-        result = await manager.submit_password(
-            payload.tenant_id, payload.password.get_secret_value()
-        )
+        try:
+            result = await manager.submit_password(
+                payload.tenant_id, payload.password.get_secret_value()
+            )
+        except Exception:
+            logger.exception(
+                "stage=password_failed event=password_exception endpoint=rpc_twofa_submit"
+            )
+            return JSONResponse(
+                {"error": "password_exception"},
+                status_code=500,
+                headers=dict(NO_STORE_HEADERS),
+            )
         return _password_response(result)
 
     @app.post("/send")

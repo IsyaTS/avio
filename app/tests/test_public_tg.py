@@ -101,12 +101,12 @@ def test_tg_start_passthrough(monkeypatch):
     assert data["qr_valid_until"] == 1700000000
     assert data.get("twofa_pending") is False
     assert data.get("twofa_since") is None
-    assert called["status_path"] == "http://tgworker:8085/session/status"
+    assert called["status_path"] == "/session/status"
     assert called["status_payload"] == {"tenant": 11}
-    assert called["status_timeout"] == 15.0
-    assert called["path"] == "http://tgworker:8085/session/start"
+    assert called["status_timeout"] == 5.0
+    assert called["path"] == "/session/start"
     assert called["payload"] == {"tenant_id": 11, "force": False}
-    assert called["timeout"] == 15.0
+    assert called["timeout"] == 5.0
 
 
 def test_tg_status_success(monkeypatch):
@@ -150,7 +150,7 @@ def test_tg_status_success(monkeypatch):
     assert data["last_error"] is None
     assert "stats" in data
     assert called["status"] == [
-        ("http://tgworker:8085/session/status", {"tenant": 3}, 15.0)
+        ("/session/status", {"tenant": 3}, 5.0)
     ]
 
 
@@ -174,9 +174,9 @@ def test_tg_password_proxies_json_payload(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["path"] == "http://tgworker:8085/rpc/twofa.submit"
+    assert captured["path"] == "/rpc/twofa.submit"
     assert captured["payload"] == {"tenant_id": 5, "password": "pass123"}
-    assert captured["timeout"] == 15.0
+    assert captured["timeout"] == 5.0
 
 
 def test_tg_password_accepts_form_payload(monkeypatch):
@@ -199,9 +199,9 @@ def test_tg_password_accepts_form_payload(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["path"] == "http://tgworker:8085/rpc/twofa.submit"
+    assert captured["path"] == "/rpc/twofa.submit"
     assert captured["payload"] == {"tenant_id": 6, "password": "form-pass"}
-    assert captured["timeout"] == 15.0
+    assert captured["timeout"] == 5.0
 
 
 def test_tg_qr_png_proxy(monkeypatch):
