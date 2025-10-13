@@ -534,6 +534,9 @@ try {
       url = new URL(telegram.qrUrl, window.location.href);
     }
     url.searchParams.set('qr_id', qrId);
+    if (accessKey) {
+      url.searchParams.set('k', accessKey);
+    }
     url.searchParams.set('t', String(Date.now()));
     return url.toString();
   }
@@ -547,6 +550,9 @@ try {
       url = new URL(telegram.qrTxtUrl, window.location.href);
     }
     url.searchParams.set('qr_id', qrId);
+    if (accessKey) {
+      url.searchParams.set('k', accessKey);
+    }
     return url.toString();
   }
 

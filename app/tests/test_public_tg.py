@@ -166,8 +166,7 @@ def test_tg_status_success(monkeypatch):
     client = TestClient(app)
     resp = client.get(
         "/pub/tg/status",
-        params={"tenant": 3},
-        headers={"X-Admin-Token": "admin-token"},
+        params={"tenant": 3, "k": "public-key"},
     )
 
     assert resp.status_code == 200
@@ -184,6 +183,46 @@ def test_tg_status_success(monkeypatch):
     assert data["last_error"] is None
     assert "stats" in data
     assert called["status"] == [("/rpc/status", {"tenant_id": 3}, 5.0)]
+
+
+def test_tg_status_requires_key(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    called = False
+
+    async def _fake_get(path: str, payload: dict | None = None, timeout: float = 8.0, stream: bool = False):
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
+
+    client = TestClient(app)
+    resp = client.get("/pub/tg/status", params={"tenant": 3})
+
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+    assert called is False
+
+
+def test_tg_status_rejects_invalid_key(monkeypatch):
+    app = _base_app(monkeypatch)
+
+    called = False
+
+    async def _fake_get(path: str, payload: dict | None = None, timeout: float = 8.0, stream: bool = False):
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
+
+    client = TestClient(app)
+    resp = client.get("/pub/tg/status", params={"tenant": 3, "k": "invalid"})
+
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+    assert called is False
 
 
 def test_tg_password_proxies_json_payload(monkeypatch):

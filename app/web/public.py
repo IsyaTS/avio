@@ -850,6 +850,8 @@ def _has_public_tg_access(request: Request, key_candidate: str | None) -> bool:
     if not expected:
         return False
     provided = _normalize_public_token(key_candidate)
+    if not provided and request is not None:
+        provided = _normalize_public_token(request.query_params.get("k"))
     return provided == expected
 
 
