@@ -121,7 +121,12 @@ def create_app() -> FastAPI:
     @app.post("/rpc/start")
     async def rpc_start(payload: StartRequest):
         snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
-        return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
+        body = {
+            "status": snapshot.status,
+            "qr_id": snapshot.qr_id,
+            "qr_valid_until": snapshot.qr_valid_until,
+        }
+        return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):

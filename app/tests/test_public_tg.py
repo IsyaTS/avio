@@ -61,7 +61,7 @@ def test_tg_start_passthrough(monkeypatch):
     app = _base_app(monkeypatch)
     called: dict[str, object] = {}
 
-    async def _fake_start(path: str, payload: dict, timeout: float = 8.0):
+    async def _fake_start(path: str, payload: dict, timeout: float = 5.0):
         called["path"] = path
         called["payload"] = payload
         called["timeout"] = timeout
@@ -71,8 +71,6 @@ def test_tg_start_passthrough(monkeypatch):
                 "status": "waiting_qr",
                 "qr_id": "qr-1",
                 "qr_valid_until": 1700000000,
-                "twofa_pending": False,
-                "twofa_since": None,
             },
         )
 
@@ -90,11 +88,11 @@ def test_tg_start_passthrough(monkeypatch):
     assert "no-store" in cache_header
     assert resp.headers.get("x-telegram-upstream-status") == "200"
     data = resp.json()
-    assert data["status"] == "waiting_qr"
-    assert data["qr_id"] == "qr-1"
-    assert data["qr_valid_until"] == 1700000000
-    assert data.get("twofa_pending") is False
-    assert data.get("twofa_since") is None
+    assert data == {
+        "status": "waiting_qr",
+        "qr_id": "qr-1",
+        "qr_valid_until": 1700000000,
+    }
     assert called["path"] == "/rpc/start"
     assert called["payload"] == {"tenant_id": 11, "force": False}
     assert called["timeout"] == 5.0
