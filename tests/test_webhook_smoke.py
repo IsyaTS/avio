@@ -13,8 +13,17 @@ class _DummyRedis:
     def __init__(self) -> None:
         self.items: list[tuple[str, str]] = []
 
-    def lpush(self, key: str, value: str) -> None:
+    async def lpush(self, key: str, value: str) -> None:
         self.items.append((key, value))
+
+    async def incrby(self, key: str, value: int) -> None:  # pragma: no cover - unused safety
+        return None
+
+    async def setnx(self, key: str, value: int) -> int:  # pragma: no cover - unused safety
+        return 1
+
+    async def expire(self, key: str, ttl: int) -> None:  # pragma: no cover - unused safety
+        return None
 
 
 @pytest.fixture
@@ -22,6 +31,16 @@ def app_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _DummyRedis
     redis_stub = _DummyRedis()
     monkeypatch.setattr(public_module.common, "redis_client", lambda: redis_stub)
     monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: True)
+    monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
+    monkeypatch.setattr(main, "_r", redis_stub)
+    if hasattr(main, "_webhooks_mod"):
+        monkeypatch.setattr(main._webhooks_mod, "_redis_queue", redis_stub)
+        monkeypatch.setattr(
+            public_module,
+            "INBOX_MESSAGE_KEY",
+            getattr(main._webhooks_mod, "INCOMING_QUEUE_KEY", "messages:incoming"),
+            raising=False,
+        )
     with TestClient(main.app) as client:
         yield client, redis_stub
 
@@ -44,7 +63,9 @@ def test_webhook_smoke_and_outgoing(
         },
     }
 
-    response = client.post("/webhook/provider", json=inbound_payload)
+    headers = {"X-Admin-Token": "admin-token"}
+
+    response = client.post("/webhook/provider", json=inbound_payload, headers=headers)
     assert response.status_code == 200
 
     assert redis_stub.items, "webhook payload was not stored"
@@ -84,7 +105,7 @@ def test_webhook_smoke_and_outgoing(
         "meta": {},
     }
 
-    send_response = client.post("/send", json=outbound_payload)
+    send_response = client.post("/send", json=outbound_payload, headers=headers)
     assert send_response.status_code == 200
     assert captured["calls"], "outgoing request to tgworker was not captured"
 
@@ -113,7 +134,8 @@ def test_app_send_to_me(monkeypatch: pytest.MonkeyPatch, app_client):
     monkeypatch.setattr(main.httpx, "AsyncClient", _DummyAsyncClient)
 
     payload = {"tenant": 1, "channel": "telegram", "to": "me", "text": "ping"}
-    response = client.post("/send", json=payload)
+    headers = {"X-Admin-Token": "admin-token"}
+    response = client.post("/send", json=payload, headers=headers)
     assert response.status_code == 200
     assert captured["calls"], "expected request to tgworker"
     forwarded = captured["calls"][0]["json"]

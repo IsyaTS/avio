@@ -52,13 +52,6 @@ TGWORKER_SEND_URL = f"{TGWORKER_BASE_URL}/send"
 TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 OUTBOX_ENABLED = (os.getenv("OUTBOX_ENABLED", "false").strip().lower() == "true")
-_WHITELIST_RAW = os.getenv("OUTBOX_WHITELIST", "")
-OUTBOX_WHITELIST = {
-    token.strip().lower()
-    for token in re.split(r"[\s,]+", _WHITELIST_RAW)
-    if token and token.strip()
-}
-
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 OUTBOX     = "outbox:send"
 DLQ        = "outbox:dlq"
@@ -93,51 +86,60 @@ def _normalize_username(value: str | None) -> str | None:
     return cleaned
 
 
-def _recipient_tokens(
-    channel: str,
+_WHITELIST_RAW = os.getenv("OUTBOX_WHITELIST", "")
+_OUTBOX_WHITELIST_TOKENS = [
+    token.strip()
+    for token in re.split(r"[\s,]+", _WHITELIST_RAW)
+    if token and token.strip()
+]
+OUTBOX_WHITELIST_IDS: set[int] = set()
+OUTBOX_WHITELIST_USERNAMES: set[str] = set()
+for token in _OUTBOX_WHITELIST_TOKENS:
+    try:
+        OUTBOX_WHITELIST_IDS.add(int(token))
+        continue
+    except ValueError:
+        pass
+    normalized_token = _normalize_username(token)
+    if normalized_token:
+        lower = normalized_token.lower()
+        OUTBOX_WHITELIST_USERNAMES.add(lower)
+        OUTBOX_WHITELIST_USERNAMES.add(lower.lstrip("@"))
+
+OUTBOX_WHITELIST = frozenset(_OUTBOX_WHITELIST_TOKENS)
+_WHITELIST_PRESENT = bool(OUTBOX_WHITELIST_IDS or OUTBOX_WHITELIST_USERNAMES)
+
+
+def _whitelist_allows(
     *,
-    lead_id: int,
-    phone: str,
-    raw_to: Any,
     telegram_user_id: Optional[int],
     username: Optional[str],
-) -> set[str]:
-    tokens: set[str] = set()
+    raw_to: Any,
+) -> bool:
+    if not _WHITELIST_PRESENT:
+        return False
 
-    def _add(value: Any) -> None:
-        if value is None:
-            return
-        if isinstance(value, str):
-            cleaned = value.strip()
-        else:
-            cleaned = str(value)
-        if not cleaned:
-            return
-        lowered = cleaned.lower()
-        tokens.add(lowered)
-        tokens.add(f"{channel}:{lowered}")
+    candidate_ids: set[int] = set()
+    if telegram_user_id is not None:
+        candidate_ids.add(int(telegram_user_id))
+    raw_id = _coerce_int(raw_to)
+    if raw_id is not None:
+        candidate_ids.add(raw_id)
+    for candidate in candidate_ids:
+        if candidate in OUTBOX_WHITELIST_IDS:
+            return True
 
-    if lead_id:
-        _add(str(lead_id))
-    if phone:
-        _add(phone)
-        digits = _digits(phone)
-        if digits:
-            _add(digits)
-    if raw_to is not None:
-        _add(str(raw_to))
-    if telegram_user_id:
-        _add(str(telegram_user_id))
-    if username:
-        norm = username.strip()
-        if norm:
-            if norm.startswith("@"):  # include both @user and user
-                _add(norm)
-                _add(norm.lstrip("@"))
-            else:
-                _add(norm)
-                _add(f"@{norm}")
-    return {token for token in tokens if token}
+    candidate_names: set[str] = set()
+    normalized = _normalize_username(username)
+    if normalized:
+        candidate_names.add(normalized.lower())
+        candidate_names.add(normalized.lower().lstrip("@"))
+    if isinstance(raw_to, str):
+        alt = _normalize_username(raw_to)
+        if alt:
+            candidate_names.add(alt.lower())
+            candidate_names.add(alt.lower().lstrip("@"))
+    return any(name in OUTBOX_WHITELIST_USERNAMES for name in candidate_names)
 
 
 def _normalize_url(url: str) -> str:
@@ -474,24 +476,21 @@ async def do_send(item: dict) -> tuple[str, str]:
         )
         return ("skipped", "outbox_disabled")
 
-    recipient_tokens = _recipient_tokens(
-        channel,
-        lead_id=lead_id,
-        phone=phone,
-        raw_to=raw_to,
-        telegram_user_id=telegram_user_id,
-        username=username,
-    )
-
-    if not OUTBOX_WHITELIST:
+    if not _WHITELIST_PRESENT:
         log(
             f"event=send_result status=skipped reason=whitelist_empty channel={channel} lead_id={lead_id}"
         )
         return ("skipped", "whitelist")
 
-    if recipient_tokens.isdisjoint(OUTBOX_WHITELIST):
+    if not _whitelist_allows(
+        telegram_user_id=telegram_user_id,
+        username=username,
+        raw_to=raw_to,
+    ):
         log(
-            f"event=send_result status=skipped reason=whitelist_miss channel={channel} lead_id={lead_id}"
+            "event=send_result status=skipped reason=whitelist_miss "
+            f"channel={channel} lead_id={lead_id} telegram_user_id={telegram_user_id} "
+            f"username={username} raw_to={raw_to}"
         )
         return ("skipped", "whitelist")
 
@@ -575,9 +574,10 @@ async def write_result(item: dict, status: str):
             telegram_user_id = None
     username = item.get("username") if isinstance(item.get("username"), str) else None
 
+    channel_name = (item.get("ch") or item.get("provider") or "whatsapp")
+    resolved_lead_id: Optional[int] = None
     try:
-        channel_name = (item.get("ch") or item.get("provider") or "whatsapp")
-        await upsert_lead(
+        resolved_lead_id = await upsert_lead(
             lead_id,
             channel=channel_name,
             source_real_id=None,
@@ -585,23 +585,49 @@ async def write_result(item: dict, status: str):
             telegram_user_id=telegram_user_id,
             telegram_username=username,
         )
-    except Exception as e:
-        log(f"[worker] upsert_lead err: {e}")
-
-    sent_status = "sent" if status.startswith("sent") else status
-    try:
-        await insert_message_out(
-            lead_id,
-            text,
-            None,
-            status=sent_status,
-            tenant_id=tenant_id,
-            channel=channel_name,
-            telegram_user_id=telegram_user_id,
-            telegram_username=username,
+    except Exception as exc:
+        log(
+            "event=send_result status=skipped reason=lead_upsert_error "
+            f"channel={channel_name} lead_id={lead_id} tenant={tenant_id} error={exc}"
         )
-    except Exception as e:
-        log(f"[worker] insert_message_out err: {e}")
+
+    lead_ref = resolved_lead_id or lead_id
+    lead_available = False
+    if resolved_lead_id:
+        try:
+            lead_available = await lead_exists(resolved_lead_id, tenant_id=tenant_id)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("lead_exists").inc()
+            log(
+                "event=send_result status=skipped reason=lead_check_error "
+                f"channel={channel_name} lead_id={resolved_lead_id} tenant={tenant_id} error={exc}"
+            )
+    else:
+        log(
+            "event=send_result status=skipped reason=lead_upsert_missing "
+            f"channel={channel_name} lead_id={lead_id} tenant={tenant_id}"
+        )
+
+    if lead_available:
+        sent_status = "sent" if status.startswith("sent") else status
+        try:
+            await insert_message_out(
+                lead_ref,
+                text,
+                None,
+                status=sent_status,
+                tenant_id=tenant_id,
+                channel=channel_name,
+                telegram_user_id=telegram_user_id,
+                telegram_username=username,
+            )
+        except Exception as exc:
+            log(f"[worker] insert_message_out err: {exc}")
+    else:
+        log(
+            "event=send_result status=skipped reason=lead_missing_for_message "
+            f"channel={channel_name} lead_id={lead_ref} tenant={tenant_id}"
+        )
 
     out = {
         "lead_id": lead_id,

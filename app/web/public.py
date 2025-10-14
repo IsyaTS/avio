@@ -14,6 +14,7 @@ import hashlib
 import sys
 import time
 import uuid
+import asyncio
 from typing import Any, Iterable, Mapping
 
 from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException
@@ -66,9 +67,16 @@ from config import tg_worker_url
 
 from app.core import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
-from app.schemas import MessageIn
+from app.schemas import MessageIn, PingEvent
 from app.db import insert_message_in, upsert_lead
 from . import common as common
+try:  # pragma: no cover - optional webhooks import
+    from . import webhooks as webhook_module  # type: ignore
+except ImportError:  # pragma: no cover - fallback when module alias missing
+    try:
+        from app.web import webhooks as webhook_module  # type: ignore
+    except ImportError:
+        webhook_module = None  # type: ignore[assignment]
 from .ui import templates
 
 logger = logging.getLogger(__name__)
@@ -88,6 +96,8 @@ NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
 PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
 _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
+
+INBOX_MESSAGE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "messages:incoming")
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -134,12 +144,12 @@ async def _tg_call(
     params: Mapping[str, Any] | None = None,
     json: Mapping[str, Any] | None = None,
     timeout: float = 5,
+    route: str | None = None,
 ) -> tuple[int, httpx.Response]:
     url = _tg_make_url(path)
     headers: dict[str, str] = {}
     admin_token = getattr(settings, "ADMIN_TOKEN", "")
-    if admin_token:
-        headers["X-Admin-Token"] = admin_token
+    headers["X-Admin-Token"] = admin_token or ""
     request_kwargs: dict[str, Any] = {
         "params": dict(params or {}),
         "headers": headers,
@@ -152,11 +162,20 @@ async def _tg_call(
             response = await client.request(method.upper(), url, **request_kwargs)
     except httpx.HTTPError as exc:  # pragma: no cover - network failures
         detail = str(exc)
-        logger.warning("tg_proxy attempt=%s status=error detail=%s", url, detail)
+        logger.warning(
+            "event=tg_proxy_error route=%s url=%s status=error detail=%s",
+            route or path,
+            url,
+            detail,
+        )
         raise TgWorkerCallError(url, detail) from exc
 
     status_code = int(getattr(response, "status_code", 0) or 0)
-    logger.info("tg_proxy attempt=%s status=%s", url, status_code)
+    log_args = (route or path, url, status_code)
+    if status_code == 401:
+        logger.warning("event=tg_proxy_response route=%s url=%s status=%s unauthorized", *log_args)
+    else:
+        logger.info("event=tg_proxy_response route=%s url=%s status=%s", *log_args)
     return status_code, response
 
 
@@ -667,11 +686,18 @@ def _auto_reply_enabled(tenant: int) -> bool:
 
 
 @router.post("/webhook/provider")
-async def provider_webhook(message: MessageIn, request: Request) -> JSONResponse:
+async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> JSONResponse:
     admin_header = request.headers.get("X-Admin-Token", "")
     expected_token = getattr(settings, "ADMIN_TOKEN", "") or ""
     if not admin_header or admin_header != expected_token:
         raise HTTPException(status_code=401, detail="unauthorized")
+
+    if isinstance(message, PingEvent):
+        tenant_hint = message.tenant or 0
+        logger.info(
+            "event=webhook_ping_received tenant=%s channel=%s", tenant_hint, message.channel or ""
+        )
+        return JSONResponse({"ok": True, "event": "ping"})
 
     logger.info(
         "event=webhook_received channel=%s tenant=%s ts=%s",
@@ -708,9 +734,47 @@ async def provider_webhook(message: MessageIn, request: Request) -> JSONResponse
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("upsert_lead").inc()
         logger.exception("event=message_in_lead_upsert_fail tenant=%s", tenant)
-        raise HTTPException(status_code=500, detail="db_error") from exc
+        return JSONResponse(
+            {"ok": False, "error": "db_error", "stage": "lead_upsert"}, status_code=202
+        )
 
     text_value = message.text or ""
+    message_id = ""
+    if isinstance(message.provider_raw, dict):
+        raw_message_id = message.provider_raw.get("message_id") or message.provider_raw.get("id")
+        if raw_message_id:
+            message_id = str(raw_message_id)
+    if not message_id:
+        fallback = lead_id or lead_hint or int(time.time() * 1000)
+        message_id = str(fallback)
+    inbox_event = {
+        "event": "messages.incoming",
+        "tenant": tenant,
+        "lead_id": lead_hint,
+        "message_id": message_id,
+        "channel": channel or "telegram",
+        "text": text_value,
+        "ts": int(time.time() * 1000),
+        "provider_raw": message.provider_raw or {},
+    }
+    try:
+        client = common.redis_client()
+    except Exception:
+        client = None
+    if client is not None:
+        try:
+            result = client.lpush(INBOX_MESSAGE_KEY, json.dumps(inbox_event, ensure_ascii=False))
+            if asyncio.iscoroutine(result):
+                await result
+        except redis_ex.RedisError:
+            logger.debug(
+                "event=webhook_enqueue_failed tenant=%s lead_id=%s", tenant, lead_hint, exc_info=True
+            )
+        except Exception:
+            logger.debug(
+                "event=webhook_enqueue_failed tenant=%s lead_id=%s", tenant, lead_hint, exc_info=True
+            )
+
     try:
         await insert_message_in(
             lead_id,
@@ -722,7 +786,10 @@ async def provider_webhook(message: MessageIn, request: Request) -> JSONResponse
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("insert_message_in").inc()
         logger.exception("event=message_in_store_fail tenant=%s", tenant)
-        raise HTTPException(status_code=500, detail="db_error") from exc
+        return JSONResponse(
+            {"ok": False, "error": "db_error", "stage": "store_message"},
+            status_code=202,
+        )
 
     MESSAGE_IN_COUNTER.labels(message.channel).inc()
     message_in_logger.info(
