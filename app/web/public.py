@@ -667,13 +667,14 @@ def _process_pdf(
 router = APIRouter()
 
 
-def _coerce_int(value: Any) -> int:
+def _coerce_int(value: Any) -> int | None:
     if value is None:
-        return 0
+        return None
     try:
-        return int(str(value).strip())
+        candidate = int(str(value).strip())
     except Exception:
-        return 0
+        return None
+    return candidate
 
 
 def _find_username(value: Any) -> str | None:
@@ -735,31 +736,63 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
             "event=webhook_unsupported_channel tenant=%s channel=%s", tenant, message.channel
         )
         return JSONResponse({"ok": False, "error": "unsupported_channel"}, status_code=400)
-    telegram_user_id = 0
+    telegram_user_id: int | None = None
     telegram_username: str | None = None
+    peer_id: int | None = None
 
     if channel == "telegram":
-        telegram_user_id = _coerce_int(message.from_id)
-        if not telegram_user_id:
-            telegram_user_id = _coerce_int(message.provider_raw.get("from_id")) if isinstance(message.provider_raw, dict) else 0
-        telegram_username = _find_username(message.provider_raw)
-    lead_hint = telegram_user_id if telegram_user_id else _coerce_int(message.from_id)
+        raw_payload = message.provider_raw if isinstance(message.provider_raw, dict) else {}
+        peer_id = _coerce_int(raw_payload.get("peer_id"))
+        if peer_id is None:
+            peer_id = _coerce_int(raw_payload.get("peerId"))
+        if peer_id is not None and peer_id <= 0:
+            peer_id = None
+        telegram_user_id = peer_id
+        if telegram_user_id is None:
+            telegram_user_id = _coerce_int(message.from_id)
+        if telegram_user_id is None:
+            telegram_user_id = _coerce_int(raw_payload.get("from_id"))
+        if telegram_user_id is not None and telegram_user_id <= 0:
+            telegram_user_id = None
+        username_candidate = raw_payload.get("username") if isinstance(raw_payload, dict) else None
+        if isinstance(username_candidate, str) and username_candidate.strip():
+            telegram_username = username_candidate.strip()
+        else:
+            telegram_username = _find_username(raw_payload)
+
+    lead_hint = telegram_user_id
+    if lead_hint is None:
+        fallback_from = _coerce_int(message.from_id)
+        if fallback_from is not None and fallback_from > 0:
+            lead_hint = fallback_from
+
+    title_hint: str | None = None
+    if telegram_username:
+        normalized = telegram_username.lstrip("@")
+        title_hint = f"tg:@{normalized}" if normalized else None
+    elif telegram_user_id is not None:
+        title_hint = f"tg:id {telegram_user_id}"
+
+    if lead_hint is None:
+        logger.error(
+            "event=message_in_lead_missing tenant=%s channel=%s from_id=%s", tenant, channel, message.from_id
+        )
+        raise HTTPException(status_code=400, detail="invalid_lead")
 
     try:
         lead_id = await upsert_lead(
             lead_hint,
             channel=channel or "telegram",
             tenant_id=tenant,
-            telegram_user_id=telegram_user_id if telegram_user_id > 0 else None,
+            telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
-            peer_id=telegram_user_id if telegram_user_id > 0 else None,
+            peer_id=peer_id,
+            title=title_hint,
         )
-    except Exception as exc:
+    except Exception:
         DB_ERRORS_COUNTER.labels("upsert_lead").inc()
         logger.exception("event=message_in_lead_upsert_fail tenant=%s", tenant)
-        return JSONResponse(
-            {"ok": False, "error": "db_error", "stage": "lead_upsert"}, status_code=202
-        )
+        raise HTTPException(status_code=500, detail="lead_upsert_failed")
 
     text_value = message.text or ""
     message_id = ""
@@ -804,15 +837,13 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
             text_value,
             status="received",
             tenant_id=tenant,
-            telegram_user_id=telegram_user_id if telegram_user_id > 0 else None,
+            telegram_user_id=telegram_user_id,
+            provider_msg_id=message_id,
         )
-    except Exception as exc:
+    except Exception:
         DB_ERRORS_COUNTER.labels("insert_message_in").inc()
         logger.exception("event=message_in_store_fail tenant=%s", tenant)
-        return JSONResponse(
-            {"ok": False, "error": "db_error", "stage": "store_message"},
-            status_code=202,
-        )
+        raise HTTPException(status_code=500, detail="store_message_failed")
 
     MESSAGE_IN_COUNTER.labels(message.channel).inc()
     message_in_logger.info(
@@ -1336,7 +1367,7 @@ def _truthy_flag(value: Any) -> bool:
     return False
 
 
-WA_ENABLED = _truthy_flag(os.getenv("WA_ENABLED"))
+WA_ENABLED = _truthy_flag(os.getenv("WA_ENABLED", "true"))
 
 
 def _coerce_body_bytes(body: Any) -> bytes:

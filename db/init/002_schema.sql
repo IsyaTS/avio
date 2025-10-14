@@ -1,22 +1,23 @@
 -- Лиды
 CREATE TABLE IF NOT EXISTS leads (
-  lead_id           BIGINT PRIMARY KEY,
+  id                BIGINT PRIMARY KEY,
   title             TEXT,
-  channel           TEXT,              -- avito / whatsapp / etc
-  source_real_id    INTEGER,           -- кеш realId источника
+  channel           TEXT,
+  source_real_id    INTEGER,
   tenant_id         INTEGER NOT NULL DEFAULT 0,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  telegram_user_id  BIGINT NOT NULL DEFAULT 0,
-  telegram_username TEXT,
-  id                BIGINT GENERATED ALWAYS AS (lead_id) STORED
+  telegram_user_id  BIGINT,
+  telegram_username TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_leads_updated_at ON leads(updated_at);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_id ON leads(id);
+CREATE INDEX IF NOT EXISTS idx_leads_tenant_updated_at
+  ON leads(tenant_id, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_tenant_telegram
   ON leads(tenant_id, telegram_user_id)
-  WHERE telegram_user_id > 0;
+  WHERE telegram_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_leads_tenant_username
+  ON leads(tenant_id, telegram_username);
 
 -- Сообщения
 CREATE TABLE IF NOT EXISTS messages (
@@ -38,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_tenant_telegram_user ON messages(tenant_
 -- Outbox (для отправок и идемпотентности)
 CREATE TABLE IF NOT EXISTS outbox (
   id             BIGSERIAL PRIMARY KEY,
-  lead_id        BIGINT NOT NULL REFERENCES leads(lead_id) ON DELETE CASCADE,
+  lead_id        BIGINT NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
   text           TEXT NOT NULL,
   dedup_hash     CHAR(40) NOT NULL, -- sha1(text)
   status         TEXT NOT NULL DEFAULT 'queued', -- queued/sent/failed/retry

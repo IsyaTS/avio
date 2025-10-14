@@ -335,7 +335,10 @@ async def upsert_lead(
     telegram_username: Optional[str] = None,
     *,
     peer_id: Optional[int] = None,
+    title: Optional[str] = None,
 ) -> int:
+    """Ensure that a lead record exists and refresh metadata."""
+
     try:
         tenant_val = int(tenant_id) if tenant_id is not None else 0
     except Exception:
@@ -343,154 +346,138 @@ async def upsert_lead(
 
     channel_val = (channel or "avito").strip() or "avito"
 
-    try:
-        telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
-    except Exception:
-        telegram_val = 0
+    def _normalize_int(value: Optional[int]) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            coerced = int(value)
+        except Exception:
+            return None
+        return coerced if coerced != 0 else None
 
-    try:
-        peer_val = int(peer_id) if peer_id is not None else 0
-    except Exception:
-        peer_val = 0
+    telegram_val = _normalize_int(telegram_user_id)
+    peer_val = _normalize_int(peer_id)
+    lead_val = _normalize_int(lead_id)
 
-    try:
-        lead_val = int(lead_id) if lead_id is not None else 0
-    except Exception:
-        lead_val = 0
+    if lead_val is None:
+        lead_val = telegram_val or peer_val
 
-    if not lead_val:
-        if telegram_val:
-            lead_val = telegram_val
-        elif peer_val:
-            lead_val = peer_val
+    if source_real_id is None and peer_val is not None:
+        source_real_id = peer_val
 
     username_val = (telegram_username or "").strip()
     username_param = username_val or None
-
-    if source_real_id is None and peer_val:
-        source_real_id = peer_val
+    title_val = (title or "").strip() or None
 
     existing: Optional[Dict[str, Any]] = None
-    if telegram_val > 0:
+    if telegram_val is not None:
         existing = await _fetchrow(
-            "SELECT lead_id, tenant_id FROM leads WHERE tenant_id = $1 AND telegram_user_id = $2",
+            """
+            SELECT id, tenant_id
+            FROM leads
+            WHERE tenant_id = $1
+              AND channel = $2
+              AND telegram_user_id = $3
+            LIMIT 1;
+            """,
             tenant_val,
+            channel_val,
             telegram_val,
         )
-    if existing is None and peer_val:
-        if tenant_val > 0:
-            existing = await _fetchrow(
-                "SELECT lead_id, tenant_id FROM leads WHERE tenant_id = $1 AND lead_id = $2",
-                tenant_val,
-                peer_val,
-            )
-        else:
-            existing = await _fetchrow(
-                "SELECT lead_id, tenant_id FROM leads WHERE lead_id = $1 LIMIT 1",
-                peer_val,
-            )
-    if existing is None and peer_val:
-        if tenant_val > 0:
-            existing = await _fetchrow(
-                "SELECT lead_id, tenant_id FROM leads WHERE tenant_id = $1 AND source_real_id = $2",
-                tenant_val,
-                peer_val,
-            )
-        else:
-            existing = await _fetchrow(
-                "SELECT lead_id, tenant_id FROM leads WHERE source_real_id = $1 LIMIT 1",
-                peer_val,
-            )
-    if existing is None and lead_val:
-        if tenant_val > 0:
-            existing = await _fetchrow(
-                "SELECT lead_id, tenant_id FROM leads WHERE tenant_id = $1 AND lead_id = $2",
-                tenant_val,
-                lead_val,
-            )
-        else:
-            existing = await _fetchrow(
-                "SELECT lead_id, tenant_id FROM leads WHERE lead_id = $1 LIMIT 1",
-                lead_val,
-            )
+    if existing is None and lead_val is not None:
+        existing = await _fetchrow(
+            """
+            SELECT id, tenant_id
+            FROM leads
+            WHERE id = $1
+              AND ($2 = 0 OR tenant_id = $2)
+            LIMIT 1;
+            """,
+            lead_val,
+            tenant_val,
+        )
+    if existing is None and source_real_id is not None:
+        existing = await _fetchrow(
+            """
+            SELECT id, tenant_id
+            FROM leads
+            WHERE source_real_id = $1
+              AND ($2 = 0 OR tenant_id = $2)
+            LIMIT 1;
+            """,
+            source_real_id,
+            tenant_val,
+        )
 
     if existing is not None:
-        existing_lead = existing.get("lead_id")
+        existing_id = existing.get("id")
         try:
-            existing_lead_val = int(existing_lead) if existing_lead is not None else 0
+            existing_id_val = int(existing_id) if existing_id is not None else 0
         except Exception:
-            existing_lead_val = 0
-        new_lead_val = lead_val if lead_val else existing_lead_val
+            existing_id_val = 0
+        target_id = lead_val or existing_id_val
         existing_tenant = existing.get("tenant_id")
         try:
             existing_tenant_val = int(existing_tenant) if existing_tenant is not None else 0
         except Exception:
             existing_tenant_val = 0
-        target_tenant = existing_tenant_val if existing_tenant_val > 0 else tenant_val
+        tenant_update = existing_tenant_val if existing_tenant_val > 0 else tenant_val
         await _exec(
             """
             UPDATE leads
-            SET channel = COALESCE(NULLIF($2, ''), channel),
+            SET channel = CASE WHEN $2 <> '' THEN $2 ELSE channel END,
                 source_real_id = COALESCE($3, source_real_id),
-                tenant_id = CASE
-                    WHEN $4 IS NULL OR $4 = 0 THEN tenant_id
-                    WHEN tenant_id IS NULL OR tenant_id = 0 THEN $4
-                    ELSE tenant_id
-                END,
-                telegram_user_id = CASE WHEN $5 > 0 THEN $5 ELSE telegram_user_id END,
+                tenant_id = CASE WHEN $4 > 0 THEN $4 ELSE tenant_id END,
+                telegram_user_id = CASE WHEN $5 IS NOT NULL THEN $5 ELSE telegram_user_id END,
                 telegram_username = COALESCE(NULLIF($6, ''), telegram_username),
-                lead_id = CASE WHEN $7 <> 0 THEN $7 ELSE lead_id END,
-                id = CASE WHEN $7 <> 0 THEN $7 ELSE id END,
+            title = COALESCE(NULLIF($7, ''), title),
                 updated_at = now()
-            WHERE tenant_id = $1 AND lead_id = $8;
-        """,
-            target_tenant,
+            WHERE id = $1;
+            """,
+            existing_id_val,
             channel_val,
             source_real_id,
-            tenant_val,
+            tenant_update,
             telegram_val,
             username_val,
-            new_lead_val,
-            existing_lead_val,
+            title_val or "",
         )
-        return new_lead_val or existing_lead_val
+        return target_id or existing_id_val
 
-    insert_lead_id = lead_val if lead_val else None
-    insert_id = insert_lead_id
+    if lead_val is None:
+        raise ValueError("lead_id or telegram_user_id must be provided")
+
     row = await _fetchrow(
         """
-        INSERT INTO leads(lead_id, id, channel, source_real_id, tenant_id, telegram_user_id, telegram_username)
+        INSERT INTO leads(id, title, channel, source_real_id, tenant_id, telegram_user_id, telegram_username)
         VALUES($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (tenant_id, lead_id)
+        ON CONFLICT (id)
         DO UPDATE SET channel = EXCLUDED.channel,
                       source_real_id = COALESCE(EXCLUDED.source_real_id, leads.source_real_id),
                       tenant_id = CASE
-                          WHEN EXCLUDED.tenant_id IS NULL OR EXCLUDED.tenant_id = 0 THEN leads.tenant_id
-                          WHEN leads.tenant_id IS NULL OR leads.tenant_id = 0 THEN EXCLUDED.tenant_id
+                          WHEN EXCLUDED.tenant_id > 0 THEN EXCLUDED.tenant_id
                           ELSE leads.tenant_id
                       END,
-                      telegram_user_id = CASE WHEN EXCLUDED.telegram_user_id > 0 THEN EXCLUDED.telegram_user_id ELSE leads.telegram_user_id END,
-                      telegram_username = COALESCE(NULLIF(EXCLUDED.telegram_username, ''), leads.telegram_username),
-                      id = CASE WHEN EXCLUDED.id IS NOT NULL THEN EXCLUDED.id ELSE leads.id END,
+                      telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, leads.telegram_user_id),
+                      telegram_username = COALESCE(EXCLUDED.telegram_username, leads.telegram_username),
+                      title = COALESCE(EXCLUDED.title, leads.title),
                       updated_at = now()
-        RETURNING lead_id;
-    """,
-        insert_lead_id,
-        insert_id,
+        RETURNING id;
+        """,
+        lead_val,
+        title_val,
         channel_val,
         source_real_id,
         tenant_val,
         telegram_val,
         username_param,
     )
-    if row and "lead_id" in row and row["lead_id"] is not None:
+    if row and "id" in row and row["id"] is not None:
         try:
-            return int(row["lead_id"])
+            return int(row["id"])
         except Exception:
             pass
-    if lead_val > 0:
-        return lead_val
-    return telegram_val
+    return lead_val
 
 async def upsert_source_cache(lead_id: int, real_id: int):
     await _exec("""
@@ -514,7 +501,7 @@ async def lead_exists(lead_id: int, tenant_id: Optional[int] = None) -> bool:
     except Exception:
         tenant_val = 0
     row = await _fetchrow(
-        "SELECT 1 FROM leads WHERE lead_id = $1 AND ($2 = 0 OR tenant_id = $2) LIMIT 1",
+        "SELECT 1 FROM leads WHERE id = $1 AND ($2 = 0 OR tenant_id = $2) LIMIT 1",
         lead_val,
         tenant_val,
     )
@@ -651,26 +638,30 @@ async def insert_message_in(
     status: str = "received",
     tenant_id: Optional[int] = None,
     telegram_user_id: Optional[int] = None,
-):
+    provider_msg_id: Optional[str] = None,
+) -> int:
     if _offline_enabled():
         _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id)
-        return
+        return 0
     tenant_val = int(tenant_id or 0)
     try:
         telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
     except Exception:
         telegram_val = 0
-    await _exec(
+    row = await _fetchrow(
         """
         INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
-        VALUES($1, 0, $2, NULL, $3, $4, $5);
+        VALUES($1, 0, $2, $3, $4, $5, $6)
+        RETURNING id;
     """,
         lead_id,
         text,
+        provider_msg_id,
         status,
         tenant_val,
         telegram_val,
     )
+    return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
 
 async def insert_message_out(
@@ -682,27 +673,32 @@ async def insert_message_out(
     channel: str | None = None,
     telegram_user_id: Optional[int] = None,
     telegram_username: Optional[str] = None,
-):
+    *,
+    title: Optional[str] = None,
+) -> int:
     resolved_lead_id = await upsert_lead(
         lead_id,
         channel=channel or "whatsapp",
         tenant_id=tenant_id,
         telegram_user_id=telegram_user_id,
         telegram_username=telegram_username,
+        title=title,
+        peer_id=telegram_user_id,
     )
     lead_ref = resolved_lead_id or lead_id
     if _offline_enabled():
         _offline_append_message(lead_ref, text, direction=1, tenant_id=tenant_id)
-        return
+        return 0
     tenant_val = int(tenant_id or 0)
     try:
         telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
     except Exception:
         telegram_val = 0
-    await _exec(
+    row = await _fetchrow(
         """
         INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
-        VALUES($1, 1, $2, $3, $4, $5, $6);
+        VALUES($1, 1, $2, $3, $4, $5, $6)
+        RETURNING id;
     """,
         lead_ref,
         text,
@@ -711,6 +707,63 @@ async def insert_message_out(
         tenant_val,
         telegram_val,
     )
+    return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
+
+
+async def update_message_status(
+    message_id: int,
+    status: str,
+    *,
+    provider_msg_id: Optional[str] = None,
+) -> None:
+    await _exec(
+        """
+        UPDATE messages
+        SET status = $2,
+            provider_msg_id = COALESCE($3, provider_msg_id)
+        WHERE id = $1;
+    """,
+        message_id,
+        status,
+        provider_msg_id,
+    )
+
+
+async def find_lead_by_telegram(
+    tenant_id: int,
+    telegram_user_id: int,
+    *,
+    channel: str = "telegram",
+) -> Optional[int]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        tenant_val = 0
+    try:
+        telegram_val = int(telegram_user_id)
+    except Exception:
+        return None
+    if telegram_val <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT id
+        FROM leads
+        WHERE tenant_id = $1
+          AND channel = $2
+          AND telegram_user_id = $3
+        LIMIT 1;
+    """,
+        tenant_val,
+        channel,
+        telegram_val,
+    )
+    if row and "id" in row and row["id"] is not None:
+        try:
+            return int(row["id"])
+        except Exception:
+            return None
+    return None
 
 async def get_recent_dialog_by_contact(contact_id: int, limit: int = 40) -> List[Dict[str, Any]]:
     rows = await _fetch("""
@@ -796,7 +849,7 @@ async def stream_whatsapp_dialogs(
             l.title,
             MAX(m.created_at) AS last_created_at
         FROM messages m
-        JOIN leads l ON l.lead_id = m.lead_id
+        JOIN leads l ON l.id = m.lead_id
         LEFT JOIN lead_contacts lc ON lc.lead_id = m.lead_id
         LEFT JOIN contacts c ON c.id = lc.contact_id
         WHERE {conditions}
@@ -869,7 +922,7 @@ async def stream_whatsapp_dialogs(
             f"""
             SELECT COUNT(*) AS msg_count
             FROM messages m
-            JOIN leads l ON l.lead_id = m.lead_id
+            JOIN leads l ON l.id = m.lead_id
             WHERE {' AND '.join(group_conditions)}
             """,
             *params_groups,
@@ -961,7 +1014,7 @@ async def stream_whatsapp_dialogs(
     count_sql = f"""
         SELECT m.lead_id, COUNT(*) AS msg_count
         FROM messages m
-        JOIN leads l ON l.lead_id = m.lead_id
+        JOIN leads l ON l.id = m.lead_id
         WHERE {' AND '.join(where_parts)}
         GROUP BY m.lead_id
     """
@@ -1063,7 +1116,7 @@ async def stream_whatsapp_dialogs(
                     m.created_at,
                     extract(epoch FROM m.created_at) AS ts
                 FROM messages m
-                JOIN leads l ON l.lead_id = m.lead_id
+                JOIN leads l ON l.id = m.lead_id
                 WHERE {' AND '.join(conditions)}
                 ORDER BY m.created_at ASC, m.id ASC
                 LIMIT ${limit_idx}
@@ -1360,7 +1413,7 @@ async def fetch_threads(
                lc.contact_id,
                l.tenant_id AS lead_tenant
         FROM messages m
-        LEFT JOIN leads l ON l.lead_id = m.lead_id
+        LEFT JOIN leads l ON l.id = m.lead_id
         LEFT JOIN lead_contacts lc ON lc.lead_id = m.lead_id
         {where_sql}
         {"AND" if where_sql else "WHERE"} COALESCE(l.tenant_id, 0) = $1
