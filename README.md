@@ -41,9 +41,18 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 | `ADMIN_TOKEN` | админ-токен для приватных RPC эндпоинтов |
 | `APP_BASE_URL` | внешний URL API (используется для обратных вызовов, по умолчанию `http://app:8000`) |
 | `TGWORKER_BASE_URL` | внутренний URL Telegram worker (по умолчанию `http://tgworker:9000`) |
+| `OUTBOX_ENABLED` | включает обработку очереди исходящих сообщений (по умолчанию `false`, чтобы ничего не отправлять без явного разрешения) |
+| `OUTBOX_WHITELIST` | список разрешённых получателей (через пробелы или запятые), любая отправка вне списка будет пропущена |
 | `TG_SESSIONS_DIR` | каталог для хранения `.session` файлов (общий с `app`) |
 
 Том сессий Telegram должен быть примонтирован к контейнерам `app` и `tgworker`, чтобы авторизация сохранялась между перезапусками.
+
+### Outbox worker guards
+
+- `ADMIN_TOKEN` обязателен для RPC-запросов к `tgworker:/send` — `app.worker` всегда отправляет заголовок `X-Admin-Token`.
+- Если `OUTBOX_ENABLED=false`, воркер только логирует задачу (`status=skipped reason=outbox_disabled`).
+- `OUTBOX_WHITELIST` фильтрует получателей по ID, username и телефону; пустое значение означает, что все отправки будут пропущены.
+- Перед отправкой воркер проверяет наличие лида в БД и, при отсутствии, помечает результат как `err:no_lead` без попытки доставки.
 
 ## Telegram Login Flow
 

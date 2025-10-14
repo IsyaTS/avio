@@ -8,10 +8,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from telethon.errors import RPCError
+from telethon.errors.rpcerrorlist import ChatAdminRequiredError
 try:  # pragma: no cover - pydantic v1/v2 compatibility
     from pydantic import ConfigDict
 except ImportError:  # pragma: no cover - pydantic v1
@@ -56,6 +57,7 @@ from .metrics import (
 
 
 logger = logging.getLogger("tgworker.api")
+ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 
 
 @dataclass(slots=True)
@@ -825,10 +827,15 @@ def create_app() -> FastAPI:
 
     @app.post("/send")
     async def send_message(
+        request: Request,
         raw_payload: dict[str, Any] = Body(...),
         _: None = Depends(require_credentials),
     ):
         headers = dict(NO_STORE_HEADERS)
+
+        admin_header = request.headers.get("X-Admin-Token", "").strip()
+        if not admin_header or admin_header != ADMIN_TOKEN:
+            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=headers)
 
         def _error(status: int, message: str) -> JSONResponse:
             return JSONResponse({"error": message}, status_code=status, headers=headers)
@@ -933,6 +940,8 @@ def create_app() -> FastAPI:
                 ],
             )
 
+        meta_peer_value: Any = None
+
         attachments = [
             {
                 "url": att.url,
@@ -949,6 +958,46 @@ def create_app() -> FastAPI:
         reply_to_value = None
         if isinstance(payload.meta, dict):
             reply_to_value = payload.meta.get("reply_to")
+            meta_peer_value = payload.meta.get("peer_id")
+            raw_meta_user = payload.meta.get("telegram_user_id")
+            if telegram_user_id is None and raw_meta_user is not None:
+                try:
+                    telegram_user_id = int(raw_meta_user)
+                except (TypeError, ValueError):
+                    telegram_user_id = telegram_user_id
+
+        forbidden_peer = False
+        candidate_ids: list[int] = []
+        for candidate in (
+            peer_entity if isinstance(peer_entity, int) else None,
+            telegram_user_id,
+        ):
+            if candidate is None:
+                continue
+            try:
+                candidate_ids.append(int(candidate))
+            except (TypeError, ValueError):
+                continue
+        if meta_peer_value is not None:
+            try:
+                candidate_ids.append(int(meta_peer_value))
+            except (TypeError, ValueError):
+                pass
+        for candidate in candidate_ids:
+            if candidate < 0 or str(candidate).startswith("-100"):
+                forbidden_peer = True
+                break
+        if not forbidden_peer and isinstance(payload.to, str):
+            lowered_target = payload.to.strip().lower()
+            if lowered_target.startswith("-100"):
+                forbidden_peer = True
+        if forbidden_peer:
+            detail = {"type": "forbidden_peer_type", "peer_id": payload.to}
+            return JSONResponse(
+                {"error": "forbidden_peer_type", "details": detail},
+                status_code=403,
+                headers=headers,
+            )
 
         async def _send_once() -> dict[str, Any]:
             return await manager.send_message(
@@ -978,6 +1027,17 @@ def create_app() -> FastAPI:
             message = str(exc).strip()
             if message:
                 detail["message"] = message
+            if isinstance(exc, ChatAdminRequiredError):
+                logger.warning(
+                    "event=send_message_forbidden_peer route=/send tenant=%s peer=%s",
+                    payload.tenant,
+                    peer_hint,
+                )
+                return JSONResponse(
+                    {"error": "forbidden_peer_type", "details": detail},
+                    status_code=403,
+                    headers=headers,
+                )
             logger.error(
                 "event=send_message_rpc_error route=/send tenant=%s type=%s peer=%s",
                 payload.tenant,

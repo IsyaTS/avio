@@ -30,6 +30,9 @@ services:
       TGWORKER_BASE_URL: http://tgworker:9000
       WA_ENABLED: "false"
       PUBLIC_KEY: ${PUBLIC_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}
+      TENANT: ${TENANT:-1}
       PYTHONPATH: /app
     depends_on: [redis, postgres]
     working_dir: /app
@@ -53,6 +56,11 @@ services:
       TG_SESSIONS_DIR: /app/tg-sessions
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}
+      OUTBOX_WHITELIST: ${OUTBOX_WHITELIST}
+      APP_BASE_URL: ${APP_BASE_URL:-http://app:8000}
+      TENANT: ${TENANT:-1}
     depends_on:
       app:
         condition: service_started
@@ -169,6 +177,7 @@ services:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - APP_BASE_URL=http://app:8000
       - APP_INTERNAL_URL=http://app:8000
+      - TENANT=${TENANT:-1}
       - PYTHONPATH=/app
       - TG_DEVICE_MODEL=${TG_DEVICE_MODEL:-Avio tgworker}
       - TG_SYSTEM_VERSION=${TG_SYSTEM_VERSION:-1.0}

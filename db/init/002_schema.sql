@@ -1,32 +1,39 @@
 -- Лиды
 CREATE TABLE IF NOT EXISTS leads (
-  lead_id        BIGINT PRIMARY KEY,
-  title          TEXT,
-  channel        TEXT,              -- avito / whatsapp / etc
-  source_real_id INTEGER,           -- кеш realId источника
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  telegram_user_id BIGINT,
-  telegram_username TEXT
+  lead_id           BIGINT PRIMARY KEY,
+  title             TEXT,
+  channel           TEXT,              -- avito / whatsapp / etc
+  source_real_id    INTEGER,           -- кеш realId источника
+  tenant_id         INTEGER NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  telegram_user_id  BIGINT NOT NULL DEFAULT 0,
+  telegram_username TEXT,
+  id                BIGINT GENERATED ALWAYS AS (lead_id) STORED
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_updated_at ON leads(updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_id ON leads(id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_tenant_telegram
   ON leads(tenant_id, telegram_user_id)
-  WHERE telegram_user_id IS NOT NULL;
+  WHERE telegram_user_id > 0;
 
 -- Сообщения
 CREATE TABLE IF NOT EXISTS messages (
-  id             BIGSERIAL PRIMARY KEY,
-  lead_id        BIGINT NOT NULL REFERENCES leads(lead_id) ON DELETE CASCADE,
-  direction      SMALLINT NOT NULL, -- 0=in, 1=out
-  text           TEXT NOT NULL,
-  provider_msg_id TEXT,
-  status         TEXT,              -- received/sent/failed
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  id               BIGSERIAL PRIMARY KEY,
+  lead_id          BIGINT NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  direction        SMALLINT NOT NULL, -- 0=in, 1=out
+  text             TEXT NOT NULL,
+  provider_msg_id  TEXT,
+  status           TEXT,              -- received/sent/failed
+  tenant_id        INTEGER NOT NULL DEFAULT 0,
+  telegram_user_id BIGINT NOT NULL DEFAULT 0,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_lead_created ON messages(lead_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_created_at ON messages(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_telegram_user ON messages(tenant_id, telegram_user_id);
 
 -- Outbox (для отправок и идемпотентности)
 CREATE TABLE IF NOT EXISTS outbox (

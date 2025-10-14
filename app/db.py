@@ -327,18 +327,81 @@ def sha1(text: str) -> str:
 # -------- Leads / sources --------
 
 async def upsert_lead(
-    lead_id: int,
+    lead_id: Optional[int],
     channel: str = "avito",
     source_real_id: Optional[int] = None,
     tenant_id: Optional[int] = None,
     telegram_user_id: Optional[int] = None,
     telegram_username: Optional[str] = None,
-):
+) -> int:
     try:
         tenant_val = int(tenant_id) if tenant_id is not None else 0
     except Exception:
         tenant_val = 0
-    await _exec(
+
+    channel_val = (channel or "avito").strip() or "avito"
+
+    try:
+        telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
+    except Exception:
+        telegram_val = 0
+
+    try:
+        lead_val = int(lead_id) if lead_id is not None else 0
+    except Exception:
+        lead_val = 0
+
+    if lead_val <= 0 and telegram_val > 0:
+        lead_val = telegram_val
+
+    username_val = (telegram_username or "").strip()
+    username_param = username_val or None
+
+    existing: Optional[Dict[str, Any]] = None
+    if telegram_val > 0:
+        existing = await _fetchrow(
+            "SELECT id, lead_id FROM leads WHERE tenant_id = $1 AND telegram_user_id = $2",
+            tenant_val,
+            telegram_val,
+        )
+    if existing is None and lead_val > 0:
+        existing = await _fetchrow("SELECT id, lead_id FROM leads WHERE lead_id = $1", lead_val)
+
+    if existing is not None:
+        existing_lead = existing.get("lead_id")
+        try:
+            existing_lead_val = int(existing_lead) if existing_lead is not None else 0
+        except Exception:
+            existing_lead_val = 0
+        new_lead_val = lead_val if lead_val > 0 else existing_lead_val
+        await _exec(
+            """
+            UPDATE leads
+            SET channel = COALESCE(NULLIF($2, ''), channel),
+                source_real_id = COALESCE($3, source_real_id),
+                tenant_id = CASE
+                    WHEN $4 IS NULL OR $4 = 0 THEN tenant_id
+                    WHEN tenant_id IS NULL OR tenant_id = 0 THEN $4
+                    ELSE tenant_id
+                END,
+                telegram_user_id = CASE WHEN $5 > 0 THEN $5 ELSE telegram_user_id END,
+                telegram_username = COALESCE(NULLIF($6, ''), telegram_username),
+                lead_id = CASE WHEN $7 > 0 THEN $7 ELSE lead_id END,
+                updated_at = now()
+            WHERE id = $1;
+        """,
+            existing["id"],
+            channel_val,
+            source_real_id,
+            tenant_val,
+            telegram_val,
+            username_val,
+            new_lead_val,
+        )
+        return new_lead_val or existing_lead_val
+
+    insert_lead_id = lead_val if lead_val > 0 else None
+    row = await _fetchrow(
         """
         INSERT INTO leads(lead_id, channel, source_real_id, tenant_id, telegram_user_id, telegram_username)
         VALUES($1, $2, $3, $4, $5, $6)
@@ -350,17 +413,26 @@ async def upsert_lead(
                           WHEN leads.tenant_id IS NULL OR leads.tenant_id = 0 THEN EXCLUDED.tenant_id
                           ELSE leads.tenant_id
                       END,
-                      telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, leads.telegram_user_id),
+                      telegram_user_id = CASE WHEN EXCLUDED.telegram_user_id > 0 THEN EXCLUDED.telegram_user_id ELSE leads.telegram_user_id END,
                       telegram_username = COALESCE(NULLIF(EXCLUDED.telegram_username, ''), leads.telegram_username),
-                      updated_at = now();
+                      updated_at = now()
+        RETURNING lead_id;
     """,
-        lead_id,
-        channel,
+        insert_lead_id,
+        channel_val,
         source_real_id,
         tenant_val,
-        telegram_user_id,
-        telegram_username,
+        telegram_val,
+        username_param,
     )
+    if row and "lead_id" in row and row["lead_id"] is not None:
+        try:
+            return int(row["lead_id"])
+        except Exception:
+            pass
+    if lead_val > 0:
+        return lead_val
+    return telegram_val
 
 async def upsert_source_cache(lead_id: int, real_id: int):
     await _exec("""
@@ -370,6 +442,25 @@ async def upsert_source_cache(lead_id: int, real_id: int):
         DO UPDATE SET real_id = EXCLUDED.real_id,
                       updated_at = now();
     """, lead_id, real_id)
+
+
+async def lead_exists(lead_id: int, tenant_id: Optional[int] = None) -> bool:
+    try:
+        lead_val = int(lead_id)
+    except Exception:
+        return False
+    if lead_val <= 0:
+        return False
+    try:
+        tenant_val = int(tenant_id) if tenant_id is not None else 0
+    except Exception:
+        tenant_val = 0
+    row = await _fetchrow(
+        "SELECT 1 FROM leads WHERE lead_id = $1 AND ($2 = 0 OR tenant_id = $2) LIMIT 1",
+        lead_val,
+        tenant_val,
+    )
+    return bool(row)
 
 # -------- Contacts / linking --------
 
@@ -496,20 +587,31 @@ async def mark_failed(lead_id: int, d: str, error: str):
 
 # -------- Messages --------
 
-async def insert_message_in(lead_id: int, text: str, status: str = "received", tenant_id: Optional[int] = None):
+async def insert_message_in(
+    lead_id: int,
+    text: str,
+    status: str = "received",
+    tenant_id: Optional[int] = None,
+    telegram_user_id: Optional[int] = None,
+):
     if _offline_enabled():
         _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id)
         return
     tenant_val = int(tenant_id or 0)
+    try:
+        telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
+    except Exception:
+        telegram_val = 0
     await _exec(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id)
-        VALUES($1, 0, $2, NULL, $3, $4);
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
+        VALUES($1, 0, $2, NULL, $3, $4, $5);
     """,
         lead_id,
         text,
         status,
         tenant_val,
+        telegram_val,
     )
 
 
@@ -519,21 +621,37 @@ async def insert_message_out(
     provider_msg_id: Optional[str],
     status: str = "sent",
     tenant_id: Optional[int] = None,
+    channel: str | None = None,
+    telegram_user_id: Optional[int] = None,
+    telegram_username: Optional[str] = None,
 ):
+    resolved_lead_id = await upsert_lead(
+        lead_id,
+        channel=channel or "whatsapp",
+        tenant_id=tenant_id,
+        telegram_user_id=telegram_user_id,
+        telegram_username=telegram_username,
+    )
+    lead_ref = resolved_lead_id or lead_id
     if _offline_enabled():
-        _offline_append_message(lead_id, text, direction=1, tenant_id=tenant_id)
+        _offline_append_message(lead_ref, text, direction=1, tenant_id=tenant_id)
         return
     tenant_val = int(tenant_id or 0)
+    try:
+        telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
+    except Exception:
+        telegram_val = 0
     await _exec(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id)
-        VALUES($1, 1, $2, $3, $4, $5);
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
+        VALUES($1, 1, $2, $3, $4, $5, $6);
     """,
-        lead_id,
+        lead_ref,
         text,
         provider_msg_id,
         status,
         tenant_val,
+        telegram_val,
     )
 
 async def get_recent_dialog_by_contact(contact_id: int, limit: int = 40) -> List[Dict[str, Any]]:
