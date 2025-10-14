@@ -46,7 +46,19 @@ except ImportError:  # pragma: no cover - pyrogram not installed
 
 LOGGER = logging.getLogger("tgworker")
 
-SESSION_DIR = Path("/app/tg-sessions")
+def _resolve_session_dir() -> Path:
+    raw = (os.getenv("TG_SESSIONS_DIR") or "/app/tg-sessions").strip()
+    path = Path(raw)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        fallback = Path("/tmp/tg-sessions")
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+    return path
+
+
+SESSION_DIR = _resolve_session_dir()
 LEGACY_DIR = Path("/app/data/tg-sessions")
 
 
@@ -217,10 +229,13 @@ class TelegramSessionManager:
         qr_ttl: float,
         qr_poll_interval: float,
     ) -> None:
+        global SESSION_DIR
         self._api_id = api_id
         self._api_hash = api_hash
-        self._sessions_dir = SESSION_DIR
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        resolved_dir = sessions_dir if sessions_dir is not None else SESSION_DIR
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+        SESSION_DIR = resolved_dir
+        self._sessions_dir = resolved_dir
         LOGGER.info("stage=session_dir_resolved path=%s", self._sessions_dir)
         self._webhook_url = webhook_url.rstrip("/")
         self._webhook_token = (webhook_token or "").strip() or None
@@ -1811,7 +1826,7 @@ class TelegramSessionManager:
                 tenant,
                 client,
                 source="send_message_precheck",
-                remove_session=True,
+                remove_session=False,
             )
             return {"error": "authkey_unregistered"}
 
@@ -1938,7 +1953,7 @@ class TelegramSessionManager:
                 tenant,
                 client,
                 source="send_message",
-                remove_session=True,
+                remove_session=False,
             )
             return {"error": "authkey_unregistered"}
         except RPCError as exc:

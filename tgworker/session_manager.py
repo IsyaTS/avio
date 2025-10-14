@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .manager import (
@@ -100,6 +101,7 @@ class SessionManager:
         api_hash: str,
         webhook_url: str,
         *,
+        sessions_dir: Path = SESSION_DIR,
         device_model: str,
         system_version: str,
         app_version: str,
@@ -112,7 +114,7 @@ class SessionManager:
         self._manager = TelegramSessionManager(
             api_id=api_id,
             api_hash=api_hash,
-            sessions_dir=SESSION_DIR,
+            sessions_dir=sessions_dir,
             webhook_url=webhook_url,
             device_model=device_model,
             system_version=system_version,
