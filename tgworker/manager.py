@@ -16,7 +16,13 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import httpx
+import json
+try:  # pragma: no cover - optional dependency
+    import orjson
+except ImportError:  # pragma: no cover - fallback to stdlib json
+    orjson = None  # type: ignore[assignment]
 import qrcode
+from fastapi.encoders import jsonable_encoder
 from prometheus_client import Counter, Gauge
 from app.lib.transport_utils import message_in_asdict
 from app.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
@@ -1437,11 +1443,13 @@ class TelegramSessionManager:
 
             ts = getattr(message, "date", None)
             if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
                 ts_unix = int(ts.timestamp())
             else:
                 ts_unix = int(time.time())
 
-            provider_raw = _json_safe(message.to_dict())
+            provider_raw = jsonable_encoder(_json_safe(message.to_dict()))
 
             normalized = MessageIn(
                 tenant=tenant,
@@ -1503,13 +1511,22 @@ class TelegramSessionManager:
         if self._admin_token:
             headers["X-Admin-Token"] = self._admin_token
         try:
-            payload = _json_safe(message_in_asdict(message))
+            payload_dict = message_in_asdict(message)
+            payload = jsonable_encoder(_json_safe(payload_dict))
+            payload_keys = ",".join(sorted(payload.keys())) if isinstance(payload, dict) else ""
             LOGGER.info(
-                "stage=webhook_request tenant_id=%s url=%s", message.tenant, self._webhook_url
+                "stage=webhook_request tenant_id=%s url=%s payload_keys=%s",
+                message.tenant,
+                self._webhook_url,
+                payload_keys,
             )
+            if orjson is not None:
+                payload_bytes = orjson.dumps(payload)
+            else:
+                payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             response = await self._http.post(
                 self._webhook_url,
-                json=payload,
+                content=payload_bytes,
                 headers=headers,
             )
             LOGGER.info(
@@ -1529,10 +1546,10 @@ class TelegramSessionManager:
         except httpx.HTTPError as exc:
             EVENT_ERRORS.labels("webhook").inc()
             SEND_FAIL_COUNTER.labels("telegram", "http_error").inc()
-            LOGGER.error(
-                "event=message_in_forward_fail stage=webhook_error tenant_id=%s error=%s",
+            LOGGER.exception(
+                "event=message_in_forward_fail stage=webhook_error tenant_id=%s",
                 message.tenant,
-                exc,
+                exc_info=True,
             )
         return False
 
@@ -1706,13 +1723,13 @@ class TelegramSessionManager:
             removed,
         )
 
-    async def logout(self, tenant: int) -> None:
+    async def logout(self, tenant: int, *, force: bool = False) -> None:
         await self.wait_until_ready()
         removed = await self._soft_disconnect(
             tenant,
             error=None,
             allow_restart=True,
-            remove_session=False,
+            remove_session=force,
         )
         LOGGER.info(
             "stage=logout tenant_id=%s removed_session_file=%s",
@@ -1729,7 +1746,7 @@ class TelegramSessionManager:
         username: str | None = None,
         attachments: Optional[list[Dict[str, Any]]] = None,
         reply_to: str | None = None,
-    ) -> None:
+    ) -> dict[str, int | None]:
         await self.wait_until_ready()
         client = await self._ensure_authorized_client(tenant)
         if client is None:
@@ -1754,6 +1771,44 @@ class TelegramSessionManager:
 
         attachments_list = attachments or []
         sent_text = False
+        last_message_id: int | None = None
+        resolved_peer_id: int | None = peer_id if isinstance(peer_id, int) else None
+
+        def _extract_identity(result: Any) -> tuple[int | None, int | None]:
+            message_obj: Any | None = None
+            if isinstance(result, (list, tuple)):
+                for item in reversed(result):
+                    if getattr(item, "id", None) is not None:
+                        message_obj = item
+                        break
+            else:
+                message_obj = result
+
+            message_id = getattr(message_obj, "id", None) if message_obj is not None else None
+            peer_obj = getattr(message_obj, "peer_id", None) if message_obj is not None else None
+
+            peer_candidate: Any = None
+            if peer_obj is not None:
+                for attr in ("user_id", "channel_id", "chat_id"):
+                    value = getattr(peer_obj, attr, None)
+                    if value is not None:
+                        peer_candidate = value
+                        break
+            if peer_candidate is None and message_obj is not None:
+                peer_candidate = getattr(message_obj, "chat_id", None)
+
+            try:
+                peer_value = int(peer_candidate) if peer_candidate is not None else None
+            except (TypeError, ValueError):
+                peer_value = None
+
+            try:
+                message_value = int(message_id) if message_id is not None else None
+            except (TypeError, ValueError):
+                message_value = None
+
+            return message_value, peer_value
+
         try:
             if attachments_list:
                 async with httpx.AsyncClient(timeout=15.0) as session:
@@ -1781,16 +1836,31 @@ class TelegramSessionManager:
                         if text and not sent_text:
                             caption_text = text
                             sent_text = True
-                        await client.send_file(
+                        result = await client.send_file(
                             entity,
                             file=io.BytesIO(data),
                             caption=caption_text or "",
                             reply_to=reply_to_id,
                         )
+                        message_value, peer_value = _extract_identity(result)
+                        if message_value is not None:
+                            last_message_id = message_value
+                        if peer_value is not None:
+                            resolved_peer_id = peer_value
             if text and not sent_text:
-                await client.send_message(entity, text or "", reply_to=reply_to_id)
+                result = await client.send_message(entity, text or "", reply_to=reply_to_id)
+                message_value, peer_value = _extract_identity(result)
+                if message_value is not None:
+                    last_message_id = message_value
+                if peer_value is not None:
+                    resolved_peer_id = peer_value
             elif not attachments_list:
-                await client.send_message(entity, text or "", reply_to=reply_to_id)
+                result = await client.send_message(entity, text or "", reply_to=reply_to_id)
+                message_value, peer_value = _extract_identity(result)
+                if message_value is not None:
+                    last_message_id = message_value
+                if peer_value is not None:
+                    resolved_peer_id = peer_value
             MESSAGE_OUT_COUNTER.labels("telegram").inc()
             LOGGER.info(
                 "event=message_out stage=send_ok tenant_id=%s peer_id=%s",
@@ -1816,6 +1886,11 @@ class TelegramSessionManager:
                 peer_id or username,
             )
             raise
+
+        return {
+            "peer_id": int(resolved_peer_id) if resolved_peer_id is not None else None,
+            "message_id": int(last_message_id) if last_message_id is not None else None,
+        }
 
     async def resolve_self_peer(self, tenant: int) -> int | None:
         await self.wait_until_ready()

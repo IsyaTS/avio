@@ -28,6 +28,7 @@ services:
       TG_SESSIONS_DIR: /app/tg-sessions
       TG_WORKER_URL: http://tgworker:9000
       TGWORKER_BASE_URL: http://tgworker:9000
+      WA_ENABLED: "false"
       PUBLIC_KEY: ${PUBLIC_KEY}
       PYTHONPATH: /app
     depends_on: [redis, postgres]
@@ -149,8 +150,8 @@ services:
       - TELEGRAM_QR_POLL_INTERVAL=${TELEGRAM_QR_POLL_INTERVAL:-1s}
       - PUBLIC_KEY=${PUBLIC_KEY}
       - ADMIN_TOKEN=${ADMIN_TOKEN}
-      - APP_BASE_URL=${APP_BASE_URL:-http://app:8000}
-      - APP_INTERNAL_URL=${APP_INTERNAL_URL:-http://app:8000}
+      - APP_BASE_URL=http://app:8000
+      - APP_INTERNAL_URL=http://app:8000
       - PYTHONPATH=/app
       - TG_DEVICE_MODEL=${TG_DEVICE_MODEL:-Avio tgworker}
       - TG_SYSTEM_VERSION=${TG_SYSTEM_VERSION:-1.0}
