@@ -23,11 +23,18 @@ try:  # pragma: no cover - optional validator APIs
     from pydantic import root_validator
 except ImportError:  # pragma: no cover - pydantic v2
     root_validator = None  # type: ignore[assignment]
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
+try:  # pragma: no cover - field validator compatibility
+    from pydantic import field_validator
+except ImportError:  # pragma: no cover - pydantic v1
+    field_validator = None  # type: ignore[assignment]
+try:  # pragma: no cover - fallback for pydantic v1
+    from pydantic import validator
+except ImportError:  # pragma: no cover - pydantic v2
+    validator = None  # type: ignore[assignment]
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from config import telegram_config
-from app.lib.transport_utils import ensure_transport_message
-from app.schemas import TransportMessage
+from app.schemas import Attachment
 
 from .session_manager import (
     QRExpiredError,
@@ -36,30 +43,18 @@ from .session_manager import (
     TwoFASubmitResult,
     LoginFlowStateSnapshot,
     SessionSnapshot,
+    NotAuthorizedError,
+)
+from .metrics import (
+    TG_2FA_REQUIRED_TOTAL,
+    TG_LOGIN_FAIL_TOTAL,
+    TG_LOGIN_SUCCESS_TOTAL,
+    TG_QR_EXPIRED_TOTAL,
+    TG_QR_START_TOTAL,
 )
 
 
 logger = logging.getLogger("tgworker.api")
-
-
-TG_QR_START_TOTAL = Counter(
-    "tg_qr_start_total", "Total number of QR login sessions initiated"
-)
-TG_QR_EXPIRED_TOTAL = Counter(
-    "tg_qr_expired_total",
-    "Total number of Telegram QR codes that expired before authorization",
-)
-TG_2FA_REQUIRED_TOTAL = Counter(
-    "tg_2fa_required_total", "Total number of login flows that required 2FA"
-)
-TG_LOGIN_SUCCESS_TOTAL = Counter(
-    "tg_login_success_total", "Total number of successful Telegram authorizations"
-)
-TG_LOGIN_FAIL_TOTAL = Counter(
-    "tg_login_fail_total",
-    "Total number of failed Telegram authorizations",
-    ["reason"],
-)
 
 
 @dataclass(slots=True)
@@ -131,6 +126,34 @@ else:  # pragma: no cover - executed only on pydantic v2
             @root_validator(pre=True)
             def _alias_tenant(cls, values: dict[str, Any]) -> dict[str, Any]:
                 return cls._ensure_tenant(values)
+
+
+class TelegramSendRequest(_TenantModel):
+    tenant: int = Field(..., ge=1)
+    channel: str = Field(..., min_length=1)
+    to: int | str
+    text: str | None = None
+    attachments: list[Attachment] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+    if field_validator is not None:  # pragma: no branch - prefer v2 API
+
+        @field_validator("channel")
+        @classmethod
+        def _normalize_channel(cls, value: str) -> str:
+            cleaned = (value or "").strip().lower()
+            if cleaned != "telegram":
+                raise ValueError("channel_must_be_telegram")
+            return "telegram"
+
+    elif validator is not None:  # pragma: no branch - fallback for v1
+
+        @validator("channel")
+        def _normalize_channel(cls, value: str) -> str:
+            cleaned = (value or "").strip().lower()
+            if cleaned != "telegram":
+                raise ValueError("channel_must_be_telegram")
+            return "telegram"
 
 
 class TenantBody(_TenantModel):
@@ -438,15 +461,20 @@ def create_app() -> FastAPI:
         async with lock:
             entry = await _refresh_pending(tenant)
             if entry.authorized:
-                body = _entry_payload(entry, stats=_safe_stats_snapshot())
-                body.update({"error": "already_authorized"})
-                return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
+                if not force_login:
+                    body = _entry_payload(entry, stats=_safe_stats_snapshot())
+                    body.update({"error": "already_authorized"})
+                    return JSONResponse(
+                        body, status_code=409, headers=dict(NO_STORE_HEADERS)
+                    )
+                await manager.logout(tenant, force=force_login)
+                entry = await _refresh_pending(tenant)
 
             if entry.state == "need_2fa":
                 body = _entry_payload(entry, stats=_safe_stats_snapshot())
                 return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
 
-            should_start = force_login
+            should_start = force_login or entry.authorized
             if not should_start:
                 if entry.state != "waiting_qr" or entry.qr_id is None:
                     should_start = True
@@ -802,32 +830,107 @@ def create_app() -> FastAPI:
         headers = dict(NO_STORE_HEADERS)
 
         def _error(status: int, message: str) -> JSONResponse:
-            return JSONResponse({"ok": False, "error": message}, status_code=status, headers=headers)
+            return JSONResponse({"error": message}, status_code=status, headers=headers)
 
         try:
-            payload = ensure_transport_message(raw_payload, default_channel="telegram")
+            payload = TelegramSendRequest(**raw_payload)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
-        if payload.channel and payload.channel not in {"telegram"}:
-            return _error(400, "channel_mismatch")
-        if not payload.has_content:
-            return _error(400, "empty_message")
+        has_text = isinstance(payload.text, str) and payload.text.strip()
+        if not has_text and not payload.attachments:
+            raise HTTPException(
+                status_code=422,
+                detail=[
+                    {
+                        "loc": ["body", "text"],
+                        "msg": "message_content_required",
+                        "type": "value_error",
+                    }
+                ],
+            )
+
+        peer_entity: Any | None = None
+        username: str | None = None
+        telegram_user_id: int | None = None
 
         target = payload.to
-        peer_id: Optional[int] = None
-        if isinstance(target, str) and target.strip().lower() == "me":
-            self_peer = await manager.resolve_self_peer(payload.tenant)
-            if self_peer is None:
-                return _error(409, "self_unavailable")
-            peer_id = self_peer
+        if isinstance(target, str):
+            normalized = target.strip()
+            lowered = normalized.lower()
+            if lowered in {"me", "self"}:
+                try:
+                    resolver = getattr(manager, "resolve_self_peer")
+                except AttributeError:
+                    return _error(400, "unsupported_version")
+                try:
+                    peer_entity = await resolver(payload.tenant)
+                except AttributeError:
+                    return _error(400, "unsupported_version")
+                except NotAuthorizedError:
+                    return _error(409, "not_authorized")
+                except Exception:
+                    logger.exception(
+                        "event=resolve_self_peer_failed route=/send tenant=%s",
+                        payload.tenant,
+                    )
+                    return _error(500, "send_failed")
+                if peer_entity is None:
+                    return _error(409, "not_authorized")
+            else:
+                try:
+                    candidate = int(normalized)
+                except (TypeError, ValueError):
+                    if not normalized:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=[
+                                {
+                                    "loc": ["body", "to"],
+                                    "msg": "recipient_required",
+                                    "type": "value_error",
+                                }
+                            ],
+                        )
+                    username = normalized
+                else:
+                    if candidate <= 0:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=[
+                                {
+                                    "loc": ["body", "to"],
+                                    "msg": "recipient_invalid",
+                                    "type": "value_error",
+                                }
+                            ],
+                        )
+                    peer_entity = candidate
         else:
-            try:
-                peer_id = int(target)
-            except (TypeError, ValueError):
-                return _error(400, "invalid_to")
-            if peer_id <= 0:
-                return _error(400, "invalid_to")
+            if target <= 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail=[
+                        {
+                            "loc": ["body", "to"],
+                            "msg": "recipient_invalid",
+                            "type": "value_error",
+                        }
+                    ],
+                )
+            peer_entity = int(target)
+
+        if peer_entity is None and username is None and telegram_user_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=[
+                    {
+                        "loc": ["body", "to"],
+                        "msg": "recipient_unresolved",
+                        "type": "value_error",
+                    }
+                ],
+            )
 
         attachments = [
             {
@@ -842,18 +945,24 @@ def create_app() -> FastAPI:
             for att in payload.attachments
         ]
 
+        reply_to_value = None
+        if isinstance(payload.meta, dict):
+            reply_to_value = payload.meta.get("reply_to")
+
         try:
             result = await manager.send_message(
                 tenant=payload.tenant,
                 text=payload.text,
-                peer_id=peer_id,
-                telegram_user_id=None,
-                username=None,
+                peer_id=peer_entity,
+                telegram_user_id=telegram_user_id,
+                username=username,
                 attachments=attachments,
-                reply_to=payload.meta.get("reply_to") if isinstance(payload.meta, dict) else None,
+                reply_to=reply_to_value,
             )
         except ValueError as exc:
             return _error(400, str(exc))
+        except NotAuthorizedError:
+            return _error(409, "not_authorized")
         except RuntimeError as exc:
             return _error(409, str(exc))
         except Exception:

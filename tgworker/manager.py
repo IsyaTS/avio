@@ -27,6 +27,7 @@ from prometheus_client import Counter, Gauge
 from app.lib.transport_utils import message_in_asdict
 from app.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
 from app.schemas import Attachment, MessageIn
+from .metrics import TG_LOGIN_SUCCESS_TOTAL
 from telethon import TelegramClient, events, functions
 from telethon.errors import BadRequestError, RPCError, SessionPasswordNeededError
 from telethon.errors.rpcerrorlist import (
@@ -35,6 +36,12 @@ from telethon.errors.rpcerrorlist import (
     PasswordHashInvalidError,
     PhonePasswordFloodError,
 )
+from telethon.tl.types import InputPeerSelf
+
+try:  # pragma: no cover - optional dependency
+    from pyrogram import Client as PyrogramClient  # type: ignore
+except ImportError:  # pragma: no cover - pyrogram not installed
+    PyrogramClient = None  # type: ignore[assignment]
 
 
 LOGGER = logging.getLogger("tgworker")
@@ -124,6 +131,10 @@ class QRExpiredError(Exception):
     def __init__(self, valid_until: Optional[float] = None) -> None:
         super().__init__("qr_expired")
         self.valid_until = valid_until
+
+
+class NotAuthorizedError(RuntimeError):
+    """Raised when a Telegram session is not authorized."""
 
 
 @dataclass(slots=True)
@@ -333,6 +344,8 @@ class TelegramSessionManager:
                     previous,
                     status,
                 )
+        if previous != "authorized" and status == "authorized":
+            TG_LOGIN_SUCCESS_TOTAL.inc()
         if previous == "authorized" and status == "disconnected" and reason != "manual_logout":
             AUTHORIZED_DISCONNECTS.labels(reason or "unknown").inc()
         state.status = status
@@ -1741,7 +1754,7 @@ class TelegramSessionManager:
         self,
         tenant: int,
         text: str | None = None,
-        peer_id: int | None = None,
+        peer_id: Any | None = None,
         telegram_user_id: int | None = None,
         username: str | None = None,
         attachments: Optional[list[Dict[str, Any]]] = None,
@@ -1752,8 +1765,8 @@ class TelegramSessionManager:
         if client is None:
             raise RuntimeError("session_not_authorized")
 
-        entity = None
-        if peer_id:
+        entity: Any | None = None
+        if peer_id is not None:
             entity = peer_id
         elif telegram_user_id:
             entity = telegram_user_id
@@ -1772,7 +1785,9 @@ class TelegramSessionManager:
         attachments_list = attachments or []
         sent_text = False
         last_message_id: int | None = None
-        resolved_peer_id: int | None = peer_id if isinstance(peer_id, int) else None
+        resolved_peer_id: int | None = None
+        if isinstance(peer_id, int):
+            resolved_peer_id = peer_id
 
         def _extract_identity(result: Any) -> tuple[int | None, int | None]:
             message_obj: Any | None = None
@@ -1862,10 +1877,11 @@ class TelegramSessionManager:
                 if peer_value is not None:
                     resolved_peer_id = peer_value
             MESSAGE_OUT_COUNTER.labels("telegram").inc()
+            target_hint: Any = peer_id if peer_id is not None else username
             LOGGER.info(
                 "event=message_out stage=send_ok tenant_id=%s peer_id=%s",
                 tenant,
-                peer_id or username,
+                target_hint,
             )
         except RPCError as exc:
             EVENT_ERRORS.labels("rpc_error").inc()
@@ -1892,19 +1908,43 @@ class TelegramSessionManager:
             "message_id": int(last_message_id) if last_message_id is not None else None,
         }
 
-    async def resolve_self_peer(self, tenant: int) -> int | None:
+    async def resolve_self_peer(self, tenant: int) -> Any:
         await self.wait_until_ready()
         client = await self._ensure_authorized_client(tenant)
         if client is None:
-            return None
-        me = self._self_ids.get(tenant)
-        if me is None:
-            with contextlib.suppress(Exception):
-                info = await client.get_me()
-                me = getattr(info, "id", None)
-                if me is not None:
-                    self._self_ids[tenant] = me
-        return int(me) if me is not None else None
+            raise NotAuthorizedError("session_not_authorized")
+
+        if isinstance(client, TelegramClient):
+            return InputPeerSelf()
+
+        cached_self = self._self_ids.get(tenant)
+        if cached_self is not None:
+            return cached_self
+
+        if PyrogramClient is not None and isinstance(client, PyrogramClient):
+            try:
+                me = await client.get_me()
+            except Exception as exc:  # pragma: no cover - pyrogram specific
+                raise RuntimeError("self_peer_resolution_failed") from exc
+            if me is None:
+                raise NotAuthorizedError("session_not_authorized")
+            identifier = getattr(me, "id", None)
+            if identifier is None:
+                return me
+            self._self_ids[tenant] = identifier
+            return identifier
+
+        if hasattr(client, "get_me"):
+            info = await client.get_me()
+            if info is None:
+                raise NotAuthorizedError("session_not_authorized")
+            identifier = getattr(info, "id", None)
+            if identifier is not None:
+                self._self_ids[tenant] = identifier
+                return identifier
+            return info
+
+        raise AttributeError("resolve_self_peer_unsupported")
 
     def delivered_incoming_total(self) -> int:
         return self._delivered_incoming

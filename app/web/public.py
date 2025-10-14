@@ -248,6 +248,26 @@ def _log_tg_proxy(
     )
 
 
+def _fingerprint_public_key(raw: str | None) -> str:
+    if not raw:
+        return "-"
+    try:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    except Exception:
+        return "-"
+    return digest[:10]
+
+
+def _log_public_tg_request(route: str, tenant_id: int, key: str | None) -> None:
+    fingerprint = _fingerprint_public_key(_normalize_public_token(key))
+    logger.info(
+        "tg_public_request route=%s tenant=%s key=%s",
+        route,
+        tenant_id,
+        fingerprint,
+    )
+
+
 def _parse_force_flag(raw_value: str | None) -> bool:
     if raw_value is None:
         return False
@@ -1173,6 +1193,8 @@ async def tg_start(
     ):
         return _unauthorized_response(route, tenant_id)
 
+    _log_public_tg_request(route, tenant_id, key_candidate)
+
     fallback_paths = ["/qr/start", "/rpc/start", "/session/start"]
     payload = {"tenant": tenant_id}
     last_error: str | None = None
@@ -1236,6 +1258,8 @@ async def _handle_tg_twofa(
 
     if not _has_public_tg_access(request, key_candidate, allow_admin=False):
         return _unauthorized_response(route, tenant_id)
+
+    _log_public_tg_request(route, tenant_id, key_candidate)
 
     client_token = _client_identifier(request)
 
@@ -1430,6 +1454,8 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         query_param_only=True,
     ):
         return _unauthorized_response(route, tenant_id)
+
+    _log_public_tg_request(route, tenant_id, key_candidate)
 
     fallback_paths = ["/status", "/rpc/status", "/session/status"]
     params = {"tenant": tenant_id}

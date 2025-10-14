@@ -90,3 +90,56 @@ def test_webhook_smoke_and_outgoing(
 
     sent_payload = captured["calls"][0]["json"]
     json.dumps(sent_payload)
+
+
+def test_app_send_to_me(monkeypatch: pytest.MonkeyPatch, app_client):
+    client, _ = app_client
+    captured: dict[str, Any] = {"calls": []}
+
+    class _DummyAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_DummyAsyncClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:  # type: ignore[override]
+            return False
+
+        async def post(self, url: str, json: Any = None, **kwargs: Any) -> httpx.Response:
+            captured["calls"].append({"url": url, "json": json})
+            return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", _DummyAsyncClient)
+
+    payload = {"tenant": 1, "channel": "telegram", "to": "me", "text": "ping"}
+    response = client.post("/send", json=payload)
+    assert response.status_code == 200
+    assert captured["calls"], "expected request to tgworker"
+    forwarded = captured["calls"][0]["json"]
+    assert forwarded["to"] == "me"
+
+
+def test_app_send_to_me_not_authorized(monkeypatch: pytest.MonkeyPatch, app_client):
+    client, _ = app_client
+
+    class _DummyAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_DummyAsyncClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:  # type: ignore[override]
+            return False
+
+        async def post(self, url: str, json: Any = None, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(409, json={"error": "not_authorized"})
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", _DummyAsyncClient)
+
+    payload = {"tenant": 1, "channel": "telegram", "to": "me", "text": "ping"}
+    response = client.post("/send", json=payload)
+    assert response.status_code == 409
+    body = response.json()
+    assert body.get("detail") == '{"error": "not_authorized"}'
