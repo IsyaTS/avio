@@ -10,6 +10,7 @@ from .manager import (
     TelegramSessionManager,
     TwoFASubmitResult,
     LoginFlowStateSnapshot,
+    NotAuthorizedError,
 )
 
 
@@ -171,7 +172,7 @@ class SessionManager:
         tenant: int,
         *,
         text: str | None = None,
-        peer_id: int | None = None,
+        peer_id: Any | None = None,
         telegram_user_id: int | None = None,
         username: str | None = None,
         attachments: list[Dict[str, Any]] | None = None,
@@ -187,6 +188,9 @@ class SessionManager:
             reply_to=reply_to,
         )
 
+    async def resolve_self_peer(self, tenant_id: int) -> Any:
+        return await self._manager.resolve_self_peer(tenant_id)
+
 
 __all__ = [
     "SessionManager",
@@ -195,4 +199,5 @@ __all__ = [
     "QRNotFoundError",
     "TwoFASubmitResult",
     "LoginFlowStateSnapshot",
+    "NotAuthorizedError",
 ]

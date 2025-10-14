@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from telethon.tl.types import InputPeerSelf
 
 from tgworker.api import create_app
+from tgworker.manager import NotAuthorizedError
 
 
 @pytest.fixture
@@ -32,7 +34,8 @@ def tgworker_app(monkeypatch: pytest.MonkeyPatch):
         def __init__(self) -> None:
             self.sent_payloads: list[dict[str, object]] = []
             self.logout_calls: list[tuple[int, bool]] = []
-            self.self_peer: int = 555
+            self.self_peer: object = InputPeerSelf()
+            self.self_peer_error: Exception | None = None
 
         async def start(self) -> None:  # pragma: no cover - startup hook
             return None
@@ -60,11 +63,14 @@ def tgworker_app(monkeypatch: pytest.MonkeyPatch):
                     "reply_to": reply_to,
                 }
             )
-            resolved_peer = peer_id or self.self_peer
-            return {"peer_id": resolved_peer, "message_id": 777}
+            return {"peer_id": 4321, "message_id": 777}
 
-        async def resolve_self_peer(self, tenant: int) -> int | None:
-            return self.self_peer if tenant == 1 else None
+        async def resolve_self_peer(self, tenant: int):
+            if self.self_peer_error:
+                raise self.self_peer_error
+            if tenant != 1 or self.self_peer is None:
+                raise NotAuthorizedError("session_not_authorized")
+            return self.self_peer
 
         async def logout(self, tenant: int, *, force: bool = False) -> None:
             self.logout_calls.append((tenant, force))
@@ -102,27 +108,37 @@ def test_send_defaults_channel(tgworker_app):
     client, manager = tgworker_app
     response = client.post(
         "/send",
-        json={"tenant": 1, "to": 123456, "text": "ping"},
+        json={"tenant": 1, "channel": "telegram", "to": 123456, "text": "ping"},
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
-    assert payload["peer_id"] == 123456
+    assert payload["peer_id"] == 4321
     assert payload["message_id"] == 777
     assert manager.sent_payloads
 
 
 def test_send_to_me_resolves_self_peer(tgworker_app):
     client, manager = tgworker_app
-    manager.self_peer = 987654
     response = client.post(
         "/send",
         json={"tenant": 1, "channel": "telegram", "to": "me", "text": "hello"},
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["peer_id"] == 987654
-    assert manager.sent_payloads[-1]["peer_id"] == 987654
+    assert data["peer_id"] == 4321
+    assert isinstance(manager.sent_payloads[-1]["peer_id"], InputPeerSelf)
+
+
+def test_send_to_me_not_authorized(tgworker_app):
+    client, manager = tgworker_app
+    manager.self_peer_error = NotAuthorizedError("session_not_authorized")
+    response = client.post(
+        "/send",
+        json={"tenant": 1, "channel": "telegram", "to": "me", "text": "hello"},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"error": "not_authorized"}
 
 
 def test_session_logout_aliases(tgworker_app):
