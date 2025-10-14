@@ -6,6 +6,16 @@ import os
 import sys
 from pathlib import Path
 
+import prometheus_client
+from prometheus_client import CollectorRegistry
+
+prometheus_client.REGISTRY = CollectorRegistry()  # reset default registry for tests
+prometheus_client.registry.REGISTRY = prometheus_client.REGISTRY
+try:  # align metrics module if already imported
+    prometheus_client.metrics.REGISTRY = prometheus_client.REGISTRY
+except AttributeError:  # pragma: no cover - metrics may not be imported
+    pass
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

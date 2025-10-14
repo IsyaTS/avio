@@ -276,8 +276,14 @@ def test_webhook_returns_pdf_attachment(monkeypatch, tmp_path):
     pushed: list[tuple[str, dict]] = []
 
     class FakeQueue:
+        def __init__(self) -> None:
+            self.metrics: dict[str, int] = {}
+
         async def lpush(self, key: str, value: str) -> None:
             pushed.append((key, json.loads(value)))
+
+        async def incrby(self, key: str, value: int) -> None:
+            self.metrics[key] = self.metrics.get(key, 0) + int(value)
 
     async def fail(*_a, **_k):  # should not be called for PDF flow
         raise AssertionError("LLM should be skipped when PDF catalog is available")
@@ -298,10 +304,10 @@ def test_webhook_returns_pdf_attachment(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert pushed, "expected message queued in Redis"
-    assert len(pushed) == 1
+    outgoing = [entry for entry in pushed if entry[0] == "outbox:send"]
+    assert len(outgoing) == 1
 
-    key, queued = pushed[0]
-    assert key == "outbox:send"
+    key, queued = outgoing[0]
     assert "attachment" in queued
     assert queued["attachment"]["filename"] == "catalog.pdf"
     assert queued["attachment"]["mime_type"] == "application/pdf"
@@ -345,9 +351,13 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
     class FakeQueue:
         def __init__(self) -> None:
             self.pushed: list[tuple[str, dict]] = []
+            self.metrics: dict[str, int] = {}
 
         async def lpush(self, key: str, value: str) -> None:
             self.pushed.append((key, json.loads(value)))
+
+        async def incrby(self, key: str, value: int) -> None:
+            self.metrics[key] = self.metrics.get(key, 0) + int(value)
 
     calls = {"build": 0, "ask": 0}
 
@@ -375,8 +385,9 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
     first = DummyRequest(payload, query={"token": "abc"})
     response_first = asyncio.run(main._handle(first))
     assert response_first.status_code == 200
-    assert len(queue.pushed) == 1
-    assert "attachment" in queue.pushed[0][1]
+    outgoing_first = [entry for entry in queue.pushed if entry[0] == "outbox:send"]
+    assert len(outgoing_first) == 1
+    assert "attachment" in outgoing_first[0][1]
     assert calls == {"build": 0, "ask": 0}
 
     payload_second = {
@@ -388,9 +399,10 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
     second = DummyRequest(payload_second, query={"token": "abc"})
     response_second = asyncio.run(main._handle(second))
     assert response_second.status_code == 200
-    assert len(queue.pushed) == 2
+    outgoing_second = [entry for entry in queue.pushed if entry[0] == "outbox:send"]
+    assert len(outgoing_second) == 2
 
-    _, second_msg = queue.pushed[1]
+    _, second_msg = outgoing_second[1]
     assert "attachment" not in second_msg
     assert second_msg["text"] == "Ответ по запросу"
     assert calls == {"build": 1, "ask": 1}

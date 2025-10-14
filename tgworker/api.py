@@ -55,6 +55,7 @@ class PendingEntry:
     qr_login_obj: Any | None = None
     png_bytes: bytes | None = None
     expires_at: float | None = None
+    expires_at_ms: int | None = None
     state: str = "idle"
     last_error: str | None = None
     qr_id: str | None = None
@@ -67,6 +68,7 @@ class PendingEntry:
 
 class QRStartRequest(BaseModel):
     tenant: int = Field(..., ge=1)
+    force: bool = False
 
 
 class StartRequest(BaseModel):
@@ -198,15 +200,38 @@ def create_app() -> FastAPI:
         entry.state = new_state
         entry.authorized = new_state == "authorized"
 
-    def _entry_payload(entry: PendingEntry, *, include_png: bool = False) -> dict[str, Any]:
+    def _state_name(entry: PendingEntry) -> str:
+        if entry.authorized:
+            return "authorized"
+        if entry.state == "need_2fa":
+            return "need_2fa"
+        return "need_qr"
+
+    def _entry_payload(
+        entry: PendingEntry,
+        *,
+        stats: Optional[dict[str, Any]] = None,
+        include_png: bool = False,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "ok": entry.state != "failed",
             "tenant": entry.tenant,
             "authorized": entry.authorized,
-            "state": entry.state,
-            "expires_at": entry.expires_at,
+            "state": _state_name(entry),
+            "raw_state": entry.state,
+            "needs_2fa": entry.state == "need_2fa",
+            "qr_id": entry.qr_id,
+            "expires_at": entry.expires_at_ms,
             "last_error": entry.last_error,
         }
+        if stats:
+            payload.update(
+                {
+                    "authorized_count": int(stats.get("authorized", 0) or 0),
+                    "waiting_count": int(stats.get("waiting", 0) or 0),
+                    "needs_2fa_count": int(stats.get("needs_2fa", 0) or 0),
+                }
+            )
         if include_png and entry.png_bytes:
             payload["qr_png"] = base64.b64encode(entry.png_bytes).decode("ascii")
         return payload
@@ -234,14 +259,25 @@ def create_app() -> FastAPI:
         entry.qr_id = new_qr_id
         entry.qr_login_obj = flow.qr_login_obj
 
-        expires_at = snapshot.qr_valid_until
-        if expires_at is not None:
-            entry.expires_at = _ms_to_seconds(expires_at)
+        expires_ms = snapshot.qr_valid_until
+        if expires_ms is not None:
+            try:
+                entry.expires_at_ms = int(float(expires_ms))
+            except Exception:
+                entry.expires_at_ms = None
         elif flow.qr_expires_at is not None:
             try:
-                entry.expires_at = float(flow.qr_expires_at)
+                value = float(flow.qr_expires_at)
+                if value < 10_000_000_000:
+                    value *= 1000.0
+                entry.expires_at_ms = int(value)
             except Exception:
-                entry.expires_at = None
+                entry.expires_at_ms = None
+        else:
+            entry.expires_at_ms = None
+
+        if entry.expires_at_ms is not None:
+            entry.expires_at = _ms_to_seconds(entry.expires_at_ms)
         else:
             entry.expires_at = None
 
@@ -301,28 +337,43 @@ def create_app() -> FastAPI:
         if cfg.api_id <= 0 or not cfg.api_hash:
             raise HTTPException(status_code=503, detail="telegram_credentials_missing")
 
+    def _safe_stats_snapshot() -> dict[str, int]:
+        try:
+            snapshot = manager.stats_snapshot()
+            if isinstance(snapshot, dict):
+                return snapshot
+        except Exception:
+            logger.warning("event=stats_snapshot_failed", exc_info=True)
+        return {"authorized": 0, "waiting": 0, "needs_2fa": 0}
+
     @app.post("/qr/start")
     async def qr_start(payload: QRStartRequest):
         tenant = payload.tenant
+        force_login = bool(getattr(payload, "force", False))
         lock = _tenant_lock(tenant)
         async with lock:
             entry = await _refresh_pending(tenant)
             if entry.authorized:
-                body = {"ok": False, "error": "already_authorized", "state": entry.state}
+                body = _entry_payload(entry, stats=_safe_stats_snapshot())
+                body.update({"error": "already_authorized"})
                 return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
-            if entry.state == "need_2fa":
-                return JSONResponse(
-                    _entry_payload(entry), headers=dict(NO_STORE_HEADERS)
-                )
-            if entry.state == "waiting_qr" and not entry.is_expired() and entry.png_bytes:
-                return JSONResponse(
-                    _entry_payload(entry, include_png=True),
-                    headers=dict(NO_STORE_HEADERS),
-                )
 
-            snapshot = await manager.start_session(tenant, force=True)
-            entry = await _refresh_pending(tenant, snapshot=snapshot)
-            if entry.state == "waiting_qr" and entry.png_bytes is None and entry.qr_id:
+            if entry.state == "need_2fa":
+                body = _entry_payload(entry, stats=_safe_stats_snapshot())
+                return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
+
+            should_start = force_login
+            if not should_start:
+                if entry.state != "waiting_qr" or entry.qr_id is None:
+                    should_start = True
+                elif entry.is_expired():
+                    should_start = True
+
+            if should_start:
+                snapshot = await manager.start_session(tenant, force=force_login)
+                entry = await _refresh_pending(tenant, snapshot=snapshot)
+
+            if entry.state == "waiting_qr" and entry.qr_id and entry.png_bytes is None:
                 try:
                     entry.png_bytes = manager.get_qr_png(entry.qr_id, tenant=tenant)
                 except QRExpiredError:
@@ -334,24 +385,27 @@ def create_app() -> FastAPI:
                     _apply_state(entry, "failed", reason="qr_expired")
                 except QRNotFoundError:
                     entry.png_bytes = None
-            pending_registry[tenant] = entry
-            if entry.state == "failed" and entry.last_error == "qr_expired":
-                body = _entry_payload(entry)
-                body.update({"ok": False, "error": "qr_expired"})
-                return JSONResponse(body, status_code=410, headers=dict(NO_STORE_HEADERS))
-            return JSONResponse(
-                _entry_payload(entry, include_png=True), headers=dict(NO_STORE_HEADERS)
-            )
 
-    @app.get("/qr.png")
-    async def qr_png(tenant: int = Query(..., ge=1)):
+            pending_registry[tenant] = entry
+
+            if entry.state == "failed" and entry.last_error == "qr_expired":
+                body = _entry_payload(entry, stats=_safe_stats_snapshot())
+                body.update({"error": "qr_expired"})
+                return JSONResponse(body, status_code=410, headers=dict(NO_STORE_HEADERS))
+
+            body = _entry_payload(entry, stats=_safe_stats_snapshot(), include_png=False)
+            return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
+
+    @app.get("/qr/png")
+    async def qr_png(
+        tenant: int = Query(..., ge=1), qr_id: str = Query(..., min_length=1)
+    ):
         lock = _tenant_lock(tenant)
         async with lock:
             entry = await _refresh_pending(tenant)
-            if entry.state != "waiting_qr":
-                body = {"ok": False, "error": "qr_unavailable", "state": entry.state}
-                return JSONResponse(body, status_code=404, headers=dict(NO_STORE_HEADERS))
-            if entry.is_expired():
+            if entry.qr_id and entry.qr_id != qr_id:
+                entry.png_bytes = None
+            if entry.expires_at and entry.is_expired():
                 if not entry._expired_recorded:
                     TG_QR_EXPIRED_TOTAL.inc()
                     entry._expired_recorded = True
@@ -360,36 +414,34 @@ def create_app() -> FastAPI:
                 pending_registry[tenant] = entry
                 _apply_state(entry, "failed", reason="qr_expired")
                 return JSONResponse(
-                    {"ok": False, "error": "qr_expired"},
+                    {"error": "qr_expired"},
                     status_code=410,
                     headers=dict(NO_STORE_HEADERS),
                 )
-            blob = entry.png_bytes
-            if blob is None and entry.qr_id:
-                try:
-                    blob = manager.get_qr_png(entry.qr_id, tenant=tenant)
-                    entry.png_bytes = blob
-                except QRExpiredError:
-                    if not entry._expired_recorded:
-                        TG_QR_EXPIRED_TOTAL.inc()
-                        entry._expired_recorded = True
-                    entry.last_error = "qr_expired"
-                    entry.png_bytes = None
-                    pending_registry[tenant] = entry
-                    _apply_state(entry, "failed", reason="qr_expired")
-                    return JSONResponse(
-                        {"ok": False, "error": "qr_expired"},
-                        status_code=410,
-                        headers=dict(NO_STORE_HEADERS),
-                    )
-                except QRNotFoundError:
-                    blob = None
-            if not blob:
+            try:
+                blob = manager.get_qr_png(qr_id, tenant=tenant)
+            except QRExpiredError:
+                if not entry._expired_recorded:
+                    TG_QR_EXPIRED_TOTAL.inc()
+                    entry._expired_recorded = True
+                entry.last_error = "qr_expired"
+                entry.png_bytes = None
+                pending_registry[tenant] = entry
+                _apply_state(entry, "failed", reason="qr_expired")
                 return JSONResponse(
-                    {"ok": False, "error": "qr_not_found"},
+                    {"error": "qr_expired"},
+                    status_code=410,
+                    headers=dict(NO_STORE_HEADERS),
+                )
+            except QRNotFoundError:
+                return JSONResponse(
+                    {"error": "qr_not_found"},
                     status_code=404,
                     headers=dict(NO_STORE_HEADERS),
                 )
+
+            entry.qr_id = qr_id
+            entry.png_bytes = blob
             pending_registry[tenant] = entry
             return Response(content=blob, media_type="image/png", headers=dict(NO_STORE_HEADERS))
 
@@ -469,7 +521,8 @@ def create_app() -> FastAPI:
         lock = _tenant_lock(tenant)
         async with lock:
             entry = await _refresh_pending(tenant)
-            return JSONResponse(_entry_payload(entry), headers=dict(NO_STORE_HEADERS))
+            body = _entry_payload(entry, stats=_safe_stats_snapshot())
+            return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
@@ -707,12 +760,12 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        snapshot = manager.stats_snapshot()
+        stats = _safe_stats_snapshot()
         return {
-            "authorized_count": snapshot["authorized"],
-            "waiting_count": snapshot["waiting"],
-            "needs_2fa": snapshot["needs_2fa"],
-            "message_in_total": manager.delivered_incoming_total(),
+            "ok": True,
+            "authorized_count": int(stats.get("authorized", 0) or 0),
+            "waiting_count": int(stats.get("waiting", 0) or 0),
+            "needs_2fa": int(stats.get("needs_2fa", 0) or 0),
         }
 
     @app.get("/metrics")

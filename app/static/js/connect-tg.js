@@ -64,7 +64,8 @@
     let startInFlight = false;
     let authorized = false;
     let inTwoFA = false;
-    let lastQrId = '';
+    let lastQrSrc = '';
+    let lastQrIdentifier = '';
     let lastStatusValue = '';
 
     function truthyFlag(value) {
@@ -198,7 +199,7 @@
     function showQrImage(identifier) {
       const normalized = typeof identifier === 'string' ? identifier.trim() : String(identifier || '').trim();
       if (!normalized) {
-        lastQrId = '';
+        lastQrSrc = '';
         clearQrImage();
         setPlaceholder('QR генерируется…');
         return;
@@ -213,8 +214,8 @@
         targetSrc = buildQrSrc(normalized);
       }
 
-      if (targetSrc !== lastQrId && qrImage) {
-        lastQrId = targetSrc;
+      if (targetSrc !== lastQrSrc && qrImage) {
+        lastQrSrc = targetSrc;
         qrImage.src = targetSrc;
       }
       if (qrImage) {
@@ -261,7 +262,8 @@
       inTwoFA = false;
       updateControls();
       hideTwofa();
-      lastQrId = '';
+      lastQrSrc = '';
+      lastQrIdentifier = '';
       clearQrImage();
       showQrBlock();
       setPlaceholder('Срок ожидания 2FA истёк. Нажмите «Обновить QR».');
@@ -270,21 +272,24 @@
 
     function processStatus(payload) {
       const data = payload && typeof payload === 'object' ? payload : {};
-      const statusValue = typeof data.status === 'string' ? data.status : '';
-      lastStatusValue = statusValue;
+      const stateRaw = typeof data.state === 'string' ? data.state.trim().toLowerCase() : '';
+      const rawStateValue = typeof data.raw_state === 'string' ? data.raw_state.trim() : '';
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
+      const errorCode = typeof data.error === 'string' ? data.error : '';
       const qrIdValue = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
       const qrUrlValue = data.qr_url !== undefined && data.qr_url !== null ? String(data.qr_url) : '';
       const normalizedQrId = qrIdValue.trim();
       const normalizedQrUrl = qrUrlValue.trim();
       const twofaPending = truthyFlag(data.twofa_pending);
-      const needsTwofa =
-        statusValue === 'needs_2fa' || truthyFlag(data.needs_2fa) || twofaPending;
-      const twofaTimeout = statusValue === 'twofa_timeout' || lastError === 'twofa_timeout';
-      const errorCode = typeof data.error === 'string' ? data.error : '';
+      const needsTwofa = stateRaw === 'need_2fa' || truthyFlag(data.needs_2fa) || twofaPending;
+      const authorizedFlag = stateRaw === 'authorized' || truthyFlag(data.authorized);
+      const twofaTimeout = lastError === 'twofa_timeout' || errorCode === 'twofa_timeout';
       let nextDelay = POLL_INTERVAL;
 
-      if (statusValue === 'authorized') {
+      const stateValue = authorizedFlag ? 'authorized' : needsTwofa ? 'need_2fa' : 'need_qr';
+      lastStatusValue = stateValue || (rawStateValue ? rawStateValue.toLowerCase() : '');
+
+      if (authorizedFlag) {
         authorized = true;
         inTwoFA = false;
         hideTwofa();
@@ -300,7 +305,8 @@
         inTwoFA = true;
         updateControls();
         hideQrBlock();
-        lastQrId = '';
+        lastQrSrc = '';
+        lastQrIdentifier = '';
         clearQrImage();
         const message =
           lastError === 'invalid_2fa_password' ? 'Неверный пароль. Попробуйте ещё раз.' : '';
@@ -320,46 +326,37 @@
       hideTwofa();
       showQrBlock();
 
-      if (statusValue === 'waiting_qr') {
-        const imageSource = normalizedQrUrl || normalizedQrId;
-        if (imageSource) {
-          showQrImage(imageSource);
-          setPlaceholder('');
-        } else {
-          lastQrId = '';
-          clearQrImage();
-          setPlaceholder('QR генерируется…');
-        }
-        setStatus('Ждём сканирования', 'muted');
-        return nextDelay;
+      if (normalizedQrId) {
+        lastQrIdentifier = normalizedQrId;
       }
 
-      if (normalizedQrUrl || normalizedQrId) {
-        showQrImage(normalizedQrUrl || normalizedQrId);
+      const imageSource = normalizedQrUrl || normalizedQrId;
+      if (imageSource) {
+        showQrImage(imageSource);
+        setPlaceholder('');
       } else {
-        lastQrId = '';
+        lastQrSrc = '';
+        lastQrIdentifier = '';
         clearQrImage();
         setPlaceholder('QR генерируется…');
       }
 
-      if (statusValue === 'qr_expired' || statusValue === 'qr_login_timeout') {
-        lastQrId = '';
+      if (lastError === 'qr_expired' || errorCode === 'qr_expired') {
+        lastQrSrc = '';
+        lastQrIdentifier = '';
         clearQrImage();
         setPlaceholder('QR истёк. Нажмите «Обновить QR».');
         setStatus('QR истёк. Нажмите «Обновить QR».', 'alert');
-      } else if (statusValue === 'disconnected') {
-        setPlaceholder('Сессия отключена. Нажмите «Обновить QR».');
-        setStatus('Сессия отключена. Нажмите «Обновить QR».', 'alert');
-      } else if (statusValue) {
-        setStatus(`Статус: ${statusValue}`, 'muted');
-      } else if (lastError) {
-        setStatus(`Ошибка: ${lastError}`, 'alert');
-      } else if (errorCode) {
-        setStatus(`Ошибка: ${errorCode}`, 'alert');
-      } else {
-        setStatus('Ожидаем статус…', 'muted');
+        return Math.max(POLL_INTERVAL, 4000);
       }
 
+      if (rawStateValue && rawStateValue.toLowerCase() === 'disconnected') {
+        setPlaceholder('Сессия отключена. Нажмите «Обновить QR».');
+        setStatus('Сессия отключена. Нажмите «Обновить QR».', 'alert');
+        return nextDelay;
+      }
+
+      setStatus('Ждём сканирования', 'muted');
       return nextDelay;
     }
 
@@ -427,7 +424,8 @@
       stopPolling();
       if (!authorized) {
         if (force) {
-          lastQrId = '';
+          lastQrSrc = '';
+          lastQrIdentifier = '';
         }
         clearQrImage();
         showQrBlock();
@@ -500,7 +498,8 @@
         }
         hideTwofa();
         updateControls();
-        lastQrId = '';
+        lastQrSrc = '';
+        lastQrIdentifier = '';
         clearQrImage();
         showQrBlock();
         setPlaceholder('Запрашиваем новый QR…');
@@ -511,7 +510,8 @@
     if (qrImage) {
       qrImage.addEventListener('error', () => {
         if (!authorized) {
-          lastQrId = '';
+          lastQrSrc = '';
+          lastQrIdentifier = '';
           clearQrImage();
           setPlaceholder('Не удалось загрузить QR. Нажмите «Обновить QR».');
         }
@@ -660,7 +660,7 @@
       } catch (err) {
         console.error('[tg-connect] initial status error', err);
       } finally {
-        if (!authorized && !inTwoFA && !lastQrId && lastStatusValue !== 'waiting_qr') {
+        if (!authorized && !inTwoFA && !lastQrSrc && lastStatusValue !== 'need_qr') {
           startSession(false);
         }
       }

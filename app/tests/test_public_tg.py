@@ -72,11 +72,10 @@ def test_tg_start_returns_qr_metadata(monkeypatch):
         return httpx.Response(
             200,
             json={
-                "ok": True,
-                "state": "waiting_qr",
+                "state": "need_qr",
                 "authorized": False,
+                "qr_id": "abc123",
                 "expires_at": 1700000000,
-                "last_error": None,
             },
         )
 
@@ -89,9 +88,11 @@ def test_tg_start_returns_qr_metadata(monkeypatch):
     assert response.headers.get("cache-control") == "no-store, no-cache, must-revalidate"
     assert response.headers.get("x-telegram-upstream-status") == "200"
     payload = response.json()
-    assert payload["state"] == "waiting_qr"
+    assert payload["state"] == "need_qr"
     assert payload["authorized"] is False
-    assert payload["qr_url"] == "/pub/tg/qr.png?tenant=11&k=public-key"
+    assert payload["qr_id"] == "abc123"
+    assert payload["qr_url"].startswith("/pub/tg/qr.png")
+    assert "qr_id=abc123" in payload["qr_url"]
     assert payload["expires_at"] == 1700000000
     assert captured == {"path": "/qr/start", "payload": {"tenant": 11}, "timeout": 5.0}
 
@@ -100,7 +101,15 @@ def test_tg_start_renders_html(monkeypatch):
     app = _base_app(monkeypatch)
 
     async def _fake_start(path: str, payload: dict, timeout: float = 5.0):
-        return httpx.Response(200, json={"state": "waiting_qr", "authorized": False})
+        return httpx.Response(
+            200,
+            json={
+                "state": "need_qr",
+                "authorized": False,
+                "qr_id": "abc123",
+                "expires_at": 1700000000,
+            },
+        )
 
     monkeypatch.setattr(public_module.C, "tg_post", _fake_start)
 
@@ -113,7 +122,8 @@ def test_tg_start_renders_html(monkeypatch):
 
     assert response.status_code == 200
     assert "<img" in response.text
-    assert "/pub/tg/qr.png?tenant=2&k=public-key" in response.text
+    assert "/pub/tg/qr.png" in response.text
+    assert "qr_id=abc123" in response.text
     assert response.headers.get("content-type") == "text/html; charset=utf-8"
 
 
@@ -159,7 +169,15 @@ def test_tg_status_success(monkeypatch):
         captured["path"] = path
         captured["payload"] = payload
         captured["timeout"] = timeout
-        return httpx.Response(200, json={"state": "need_2fa", "authorized": False, "needs_2fa": True})
+        return httpx.Response(
+            200,
+            json={
+                "state": "need_2fa",
+                "authorized": False,
+                "needs_2fa": True,
+                "qr_id": "abc123",
+            },
+        )
 
     monkeypatch.setattr(public_module.C, "tg_get", _fake_status)
 
@@ -171,6 +189,8 @@ def test_tg_status_success(monkeypatch):
     assert payload["authorized"] is False
     assert payload["state"] == "need_2fa"
     assert payload["needs_2fa"] is True
+    assert payload["qr_url"].startswith("/pub/tg/qr.png")
+    assert "qr_id=abc123" in payload["qr_url"]
     assert captured == {"path": "/status", "payload": {"tenant": 9}, "timeout": 5.0}
 
 
@@ -203,14 +223,17 @@ def test_tg_qr_png_streams(monkeypatch):
     monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
 
     client = TestClient(app)
-    response = client.get("/pub/tg/qr.png", params={"tenant": 12, "k": "public-key"})
+    response = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 12, "k": "public-key", "qr_id": "abc123"},
+    )
 
     assert response.status_code == 200
     assert response.content == b"png-bytes"
     assert response.headers.get("content-type") == "image/png"
     assert captured == {
-        "path": "/qr.png",
-        "payload": {"tenant": 12},
+        "path": "/qr/png",
+        "payload": {"tenant": 12, "qr_id": "abc123"},
         "timeout": 5.0,
         "stream": True,
     }
@@ -225,7 +248,10 @@ def test_tg_qr_png_expired(monkeypatch):
     monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
 
     client = TestClient(app)
-    response = client.get("/pub/tg/qr.png", params={"tenant": 6, "k": "public-key"})
+    response = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 6, "k": "public-key", "qr_id": "abc123"},
+    )
 
     assert response.status_code == 410
     assert response.json() == {"error": "qr_expired"}
@@ -240,7 +266,10 @@ def test_tg_qr_png_not_found(monkeypatch):
     monkeypatch.setattr(public_module.C, "tg_get", _fake_qr)
 
     client = TestClient(app)
-    response = client.get("/pub/tg/qr.png", params={"tenant": 7, "k": "public-key"})
+    response = client.get(
+        "/pub/tg/qr.png",
+        params={"tenant": 7, "k": "public-key", "qr_id": "abc123"},
+    )
 
     assert response.status_code == 404
     assert response.json() == {"error": "qr_not_found"}

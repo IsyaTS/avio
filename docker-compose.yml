@@ -164,7 +164,7 @@ services:
     restart: unless-stopped
     expose: ["9000"]
     healthcheck:
-      test: ["CMD","curl","-fsS","http://localhost:9000/health"]
+      test: ["CMD","curl","-fsS","http://localhost:9000/openapi.json"]
       interval: 30s
       timeout: 5s
       retries: 3

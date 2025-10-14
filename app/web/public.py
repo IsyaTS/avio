@@ -200,11 +200,15 @@ def _password_attempt_key(tenant_id: int, token: str) -> str:
     return f"tenant:{int(tenant_id)}:twofa_attempts:{digest}"
 
 
-def _build_public_tg_qr_url(tenant_id: int, key: str | None) -> str:
+def _build_public_tg_qr_url(
+    tenant_id: int, key: str | None, qr_id: str | None = None
+) -> str:
     parts: list[tuple[str, str]] = [("tenant", str(tenant_id))]
     normalized_key = _normalize_public_token(key)
     if normalized_key:
         parts.append(("k", normalized_key))
+    if qr_id:
+        parts.append(("qr_id", qr_id))
     return f"/pub/tg/qr.png?{urlencode(parts)}"
 
 
@@ -1078,7 +1082,6 @@ async def tg_start(
     k: str | None = None,
 ):
     route = "/pub/tg/start"
-    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
         request,
         tenant,
@@ -1100,43 +1103,68 @@ async def tg_start(
         return _unauthorized_response(route, tenant_id)
 
     key_value = request.query_params.get("k") or key_candidate
+    force_flag = _parse_force_flag(request.query_params.get("force"))
+    payload: dict[str, Any] = {"tenant": tenant_id}
+    if force_flag:
+        payload["force"] = True
 
-    try:
-        upstream = await C.tg_post("/qr/start", {"tenant": tenant_id}, timeout=5.0)
-    except httpx.HTTPError as exc:
-        return _tg_unavailable_response(route, tenant_id, exc)
-    except Exception as exc:
-        return _tg_unavailable_response(route, tenant_id, exc)
+    attempts = 0
+    upstream: httpx.Response | None = None
+    while attempts < 2:
+        attempts += 1
+        try:
+            upstream = await C.tg_post("/qr/start", payload, timeout=5.0)
+        except httpx.HTTPError as exc:
+            return _tg_unavailable_response(route, tenant_id, exc, force=force_flag)
+        except Exception as exc:
+            return _tg_unavailable_response(route, tenant_id, exc, force=force_flag)
+        if upstream.status_code == 405 and attempts == 1:
+            # Some legacy deployments might still require a POST retry
+            continue
+        break
+
+    if upstream is None:
+        return _tg_unavailable_response(route, tenant_id, "no_response", force=force_flag)
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
     body_bytes = bytes(getattr(upstream, "content", b"") or b"")
     headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
 
     try:
-        payload = upstream.json()
+        payload_json = upstream.json()
     except ValueError:
-        payload = {}
+        payload_json = {}
 
-    error_code = str(payload.get("error") or "").strip()
-    state_value = str(payload.get("state") or payload.get("status") or "").strip()
-    last_error = payload.get("last_error")
+    error_code = str(payload_json.get("error") or "").strip()
+    state_value = str(payload_json.get("state") or payload_json.get("raw_state") or "").strip()
+    last_error = payload_json.get("last_error")
 
-    if status_code == 409 and error_code == "already_authorized":
+    if status_code == 409 and (error_code == "already_authorized" or state_value == "authorized"):
         response = {
             "error": "already_authorized",
-            "state": state_value or "authorized",
+            "state": "authorized",
             "authorized": True,
         }
-        _log_tg_proxy(route, tenant_id, 409, body_bytes, error="already_authorized")
+        _log_tg_proxy(route, tenant_id, 409, body_bytes, error="already_authorized", force=force_flag)
         headers["Content-Type"] = "application/json"
         return JSONResponse(response, status_code=409, headers=headers)
 
-    if error_code in {"qr_expired", "failed"} or state_value == "failed" or status_code == 410:
-        failure = error_code or (last_error or "failed")
-        response = {"error": failure, "state": state_value or "failed"}
+    if status_code == 404:
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="endpoint_not_found", force=force_flag)
+        headers["Content-Type"] = "application/json"
+        return JSONResponse({"error": "endpoint_not_found"}, status_code=502, headers=headers)
+
+    if status_code == 405:
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="method_not_allowed", force=force_flag)
+        headers["Content-Type"] = "application/json"
+        return JSONResponse({"error": "method_not_allowed"}, status_code=502, headers=headers)
+
+    if status_code == 410 or error_code == "qr_expired":
+        failure = "qr_expired"
+        response = {"error": failure, "state": state_value or "need_qr"}
         if last_error:
             response["last_error"] = last_error
-        _log_tg_proxy(route, tenant_id, 502, body_bytes, error=failure)
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=failure, force=force_flag)
         headers["Content-Type"] = "application/json"
         return JSONResponse(response, status_code=502, headers=headers)
 
@@ -1145,44 +1173,56 @@ async def tg_start(
         response = {"error": failure}
         if last_error and failure != last_error:
             response["last_error"] = last_error
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=failure)
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=failure, force=force_flag)
         headers["Content-Type"] = "application/json"
         return JSONResponse(response, status_code=502, headers=headers)
 
-    qr_url = _build_public_tg_qr_url(tenant_id, key_value)
+    qr_id = str(payload_json.get("qr_id") or "").strip()
+    qr_url = _build_public_tg_qr_url(tenant_id, key_value, qr_id or None)
+    expires_at = payload_json.get("expires_at")
+    needs_twofa = bool(payload_json.get("needs_2fa")) or state_value == "need_2fa"
+    authorized = bool(payload_json.get("authorized")) or state_value == "authorized"
+    state_mapped = "authorized" if authorized else "need_2fa" if needs_twofa else "need_qr"
+
+    if state_mapped == "need_qr" and not qr_id:
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="qr_id_missing", force=force_flag)
+        headers["Content-Type"] = "application/json"
+        return JSONResponse({"error": "qr_unavailable"}, status_code=502, headers=headers)
+
     response_payload: dict[str, Any] = {
-        "ok": bool(payload.get("ok", True)),
-        "authorized": bool(payload.get("authorized")),
-        "state": state_value or ("authorized" if payload.get("authorized") else "waiting_qr"),
-        "expires_at": payload.get("expires_at"),
-        "last_error": last_error,
+        "qr_id": qr_id,
+        "expires_at": expires_at,
         "qr_url": qr_url,
+        "state": state_mapped,
+        "authorized": authorized,
+        "needs_2fa": needs_twofa,
     }
-    if payload.get("qr_png"):
-        response_payload["qr_png"] = payload["qr_png"]
+
+    for key_name in ("authorized_count", "waiting_count", "needs_2fa", "needs_2fa_count"):
+        if key_name in payload_json:
+            response_payload[key_name] = payload_json[key_name]
+    if last_error:
+        response_payload["last_error"] = last_error
 
     accept = (request.headers.get("accept") or "").lower()
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
+    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None, force=force_flag)
 
     if "text/html" in accept and "application/json" not in accept:
-        expires_fragment = ""
-        if response_payload.get("expires_at"):
-            expires_fragment = f"<p>Действителен до: {response_payload['expires_at']}</p>"
-        state_fragment = ""
-        if response_payload.get("state"):
-            state_fragment = f"<p>Статус: {response_payload['state']}</p>"
-        html_body = "".join(
-            [
-                "<!DOCTYPE html>",
-                "<html lang=\"ru\"><head><meta charset=\"utf-8\"><title>Telegram QR</title></head><body>",
-                state_fragment,
-                expires_fragment,
-                f"<p><a href=\"{qr_url}\">Скачать QR-код</a></p>",
-                f"<img src=\"{qr_url}\" alt=\"Telegram QR\" style=\"max-width:320px;height:auto;\" />",
-                "</body></html>",
-            ]
-        )
-        return Response(html_body, media_type="text/html", headers=headers)
+        fragments = [
+            "<!DOCTYPE html>",
+            "<html lang=\"ru\"><head><meta charset=\"utf-8\"><title>Telegram QR</title></head><body>",
+        ]
+        if state_mapped:
+            fragments.append(f"<p>Статус: {state_mapped}</p>")
+        if expires_at:
+            fragments.append(f"<p>Действителен до: {expires_at}</p>")
+        if qr_url:
+            fragments.append(f"<p><a href=\"{qr_url}\">Скачать QR-код</a></p>")
+            fragments.append(
+                f"<img src=\"{qr_url}\" alt=\"Telegram QR\" style=\"max-width:320px;height:auto;\" />"
+            )
+        fragments.append("</body></html>")
+        return Response("".join(fragments), media_type="text/html", headers=headers)
 
     headers["Content-Type"] = "application/json"
     return JSONResponse(response_payload, headers=headers)
@@ -1357,7 +1397,6 @@ async def tg_restart(
 @router.get("/pub/tg/status")
 async def tg_status(request: Request, tenant: int | str | None = None, k: str | None = None):
     route = "/pub/tg/status"
-    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
         request,
         tenant,
@@ -1409,16 +1448,23 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         headers["Content-Type"] = "application/json"
         return JSONResponse({"error": error_code}, status_code=502, headers=headers)
 
-    state_value = str(payload.get("state") or payload.get("status") or "").strip()
+    key_value = request.query_params.get("k") or key_candidate
+    state_value = str(payload.get("state") or payload.get("raw_state") or "").strip()
     needs_twofa = bool(payload.get("needs_2fa") or state_value == "need_2fa")
-    response_payload = {
-        "authorized": bool(payload.get("authorized")),
-        "state": state_value,
-        "needs_2fa": needs_twofa,
-        "expires_at": payload.get("expires_at"),
-        "last_error": payload.get("last_error"),
-        "ok": bool(payload.get("ok", True)),
-    }
+    authorized = bool(payload.get("authorized") or state_value == "authorized")
+    qr_id = str(payload.get("qr_id") or "").strip()
+    qr_url = _build_public_tg_qr_url(tenant_id, key_value, qr_id or None) if qr_id else None
+
+    response_payload: dict[str, Any] = dict(payload)
+    response_payload.update(
+        {
+            "state": "authorized" if authorized else "need_2fa" if needs_twofa else "need_qr",
+            "authorized": authorized,
+            "needs_2fa": needs_twofa,
+        }
+    )
+    if qr_url:
+        response_payload["qr_url"] = qr_url
     _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
     headers["Content-Type"] = "application/json"
     return JSONResponse(response_payload, headers=headers)
@@ -1432,7 +1478,6 @@ async def tg_qr_png(
     k: str | None = None,
 ):
     route = "/pub/tg/qr.png"
-    _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(
         request,
         tenant,
@@ -1453,10 +1498,15 @@ async def tg_qr_png(
     ):
         return _unauthorized_response(route, tenant_id)
 
+    qr_identifier = _resolve_qr_identifier(qr_id)
+    if not qr_identifier:
+        _log_tg_proxy(route, tenant_id, 400, None, error="missing_qr_id")
+        return JSONResponse({"error": "missing_qr_id"}, status_code=400, headers=_no_store_headers())
+
     try:
         upstream = await C.tg_get(
-            "/qr.png",
-            {"tenant": tenant_id},
+            "/qr/png",
+            {"tenant": tenant_id, "qr_id": qr_identifier},
             timeout=5.0,
             stream=True,
         )
@@ -1470,50 +1520,23 @@ async def tg_qr_png(
     headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
 
     if status_code == 200:
+        proxied_headers = _proxy_headers(upstream.headers, status_code)
+        proxied_headers.pop("Content-Type", None)
+        proxied_headers["X-Telegram-Upstream-Status"] = str(status_code)
         _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-        media_type = upstream.headers.get("Content-Type") or "image/png"
-        headers["Content-Type"] = media_type
-        return Response(content=body_bytes, media_type=media_type, headers=headers)
+        return Response(content=body_bytes, media_type="image/png", headers=proxied_headers)
 
-    parsed: Any | None
-    try:
-        parsed = upstream.json()
-    except ValueError:
-        parsed = None
-
-    detail = None
-    if isinstance(parsed, dict):
-        detail = _stringify_detail(parsed.get("detail")) or _stringify_detail(parsed.get("error"))
-    if not detail:
-        detail = _stringify_detail(body_bytes)
-
-    if status_code == 410 or (detail and "qr_expired" in detail):
-        _log_tg_proxy(route, tenant_id, 410, body_bytes, error="qr_expired")
-        headers["Content-Type"] = "application/json"
+    if status_code == 410:
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="qr_expired")
         return JSONResponse({"error": "qr_expired"}, status_code=410, headers=headers)
 
     if status_code == 404:
-        error_code = "qr_not_found"
-        if isinstance(parsed, dict):
-            error_code = str(parsed.get("error") or "qr_not_found")
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=error_code)
-        headers["Content-Type"] = "application/json"
-        return JSONResponse({"error": error_code}, status_code=404, headers=headers)
+        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="qr_not_found")
+        return JSONResponse({"error": "qr_not_found"}, status_code=404, headers=headers)
 
-    if status_code in {401, 403}:
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="forbidden")
-        headers["Content-Type"] = "application/json"
-        return JSONResponse({"error": "forbidden"}, status_code=status_code, headers=headers)
-
-    if status_code <= 0 or status_code >= 500:
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="tg_unavailable")
-        headers["Content-Type"] = "application/json"
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
-
-    error_text = detail or "qr_unavailable"
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=error_text)
-    headers["Content-Type"] = "application/json"
-    return JSONResponse({"error": error_text}, status_code=502, headers=headers)
+    detail = _extract_json_detail(body_bytes) or _stringify_detail(body_bytes) or f"status_{status_code}"
+    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail)
+    return JSONResponse({"error": detail}, status_code=502, headers=headers)
 
 
 @router.get("/pub/tg/qr.txt")
