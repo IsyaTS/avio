@@ -69,6 +69,7 @@ def session_file_path(tenant: int) -> Path:
 QR_LOGIN_TIMEOUT = 120.0
 NEEDS_2FA_TTL = 90.0
 PASSWORD_FLOOD_BACKOFF = 60.0
+INCOMING_DEDUP_TTL = 300.0
 
 
 SESSIONS_AUTHORIZED = Gauge(
@@ -256,6 +257,7 @@ class TelegramSessionManager:
         self._started = False
         self._delivered_incoming: int = 0
         self._self_ids: Dict[int, Any] = {}
+        self._incoming_dedup: Dict[int, Dict[int, float]] = {}
         self._bootstrap_task: Optional[asyncio.Task[None]] = None
         self._bootstrap_ready = asyncio.Event()
         self._bootstrap_ready.set()
@@ -1447,6 +1449,19 @@ class TelegramSessionManager:
 
         try:
             message = event.message
+            message_id = getattr(message, "id", None)
+            if isinstance(message_id, int):
+                cache = self._incoming_dedup.setdefault(tenant, {})
+                now_ts = time.time()
+                stale_ids = [mid for mid, ts in cache.items() if now_ts - ts > INCOMING_DEDUP_TTL]
+                for mid in stale_ids:
+                    cache.pop(mid, None)
+                if message_id in cache:
+                    LOGGER.debug(
+                        "stage=incoming_dedup_skip tenant_id=%s message_id=%s", tenant, message_id
+                    )
+                    return
+                cache[message_id] = now_ts
             sender = await event.get_sender()
             username = getattr(sender, "username", None) or getattr(event.chat, "username", None)
 
@@ -1521,7 +1536,11 @@ class TelegramSessionManager:
             delivered = await self._send_webhook(normalized)
             if delivered:
                 self._delivered_incoming += 1
-            MESSAGE_IN_COUNTER.labels("telegram").inc()
+                MESSAGE_IN_COUNTER.labels("telegram").inc()
+            else:
+                cache = self._incoming_dedup.get(tenant)
+                if cache and isinstance(message_id, int):
+                    cache.pop(message_id, None)
             LOGGER.info(
                 "event=message_in stage=incoming tenant_id=%s from_id=%s to_id=%s",  # noqa: G004
                 tenant,
@@ -1581,33 +1600,63 @@ class TelegramSessionManager:
                 payload_bytes = orjson.dumps(payload)
             else:
                 payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            response = await self._http.post(
-                self._webhook_url,
-                content=payload_bytes,
-                headers=headers,
-            )
-            LOGGER.info(
-                "stage=webhook_response tenant_id=%s status=%s",
-                message.tenant,
-                response.status_code,
-            )
-            if 200 <= response.status_code < 300:
-                return True
-            reason = f"status_{response.status_code}"
-            SEND_FAIL_COUNTER.labels("telegram", reason).inc()
-            LOGGER.warning(
-                "event=message_in_forward_fail stage=webhook_status tenant_id=%s status=%s",
-                message.tenant,
-                response.status_code,
-            )
-        except httpx.HTTPError as exc:
+            for attempt in range(3):
+                try:
+                    LOGGER.info(
+                        "event=webhook_push stage=request tenant_id=%s attempt=%s",
+                        message.tenant,
+                        attempt + 1,
+                    )
+                    response = await self._http.post(
+                        self._webhook_url,
+                        content=payload_bytes,
+                        headers=headers,
+                        timeout=10.0,
+                    )
+                except httpx.TimeoutException:
+                    LOGGER.warning(
+                        "event=webhook_push stage=timeout tenant_id=%s attempt=%s",
+                        message.tenant,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
+                    continue
+                except httpx.HTTPError as exc:
+                    EVENT_ERRORS.labels("webhook").inc()
+                    SEND_FAIL_COUNTER.labels("telegram", "http_error").inc()
+                    LOGGER.exception(
+                        "event=webhook_push stage=exception tenant_id=%s attempt=%s",
+                        message.tenant,
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
+                    continue
+
+                LOGGER.info(
+                    "event=webhook_push stage=response tenant_id=%s status=%s attempt=%s",
+                    message.tenant,
+                    response.status_code,
+                    attempt + 1,
+                )
+                if 200 <= response.status_code < 300:
+                    return True
+                reason = f"status_{response.status_code}"
+                SEND_FAIL_COUNTER.labels("telegram", reason).inc()
+                if response.status_code not in {429} and response.status_code < 500:
+                    break
+                await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
+        except Exception:
             EVENT_ERRORS.labels("webhook").inc()
-            SEND_FAIL_COUNTER.labels("telegram", "http_error").inc()
+            SEND_FAIL_COUNTER.labels("telegram", "exception").inc()
             LOGGER.exception(
-                "event=message_in_forward_fail stage=webhook_error tenant_id=%s",
+                "event=webhook_push stage=exception tenant_id=%s",
                 message.tenant,
-                exc_info=True,
             )
+        LOGGER.error(
+            "event=webhook_push stage=failed tenant_id=%s",
+            message.tenant,
+        )
         return False
 
     async def get_status(self, tenant: int) -> SessionState:

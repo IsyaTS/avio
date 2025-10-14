@@ -12,6 +12,11 @@ MESSAGE_OUT_COUNTER = Counter(
     "Normalized outgoing messages",
     labelnames=("channel",),
 )
+DB_ERRORS_COUNTER = Counter(
+    "db_errors_total",
+    "Database errors grouped by operation",
+    labelnames=("operation",),
+)
 SEND_FAIL_COUNTER = Counter(
     "send_fail_total",
     "Failed send attempts",
@@ -21,5 +26,6 @@ SEND_FAIL_COUNTER = Counter(
 __all__ = [
     "MESSAGE_IN_COUNTER",
     "MESSAGE_OUT_COUNTER",
+    "DB_ERRORS_COUNTER",
     "SEND_FAIL_COUNTER",
 ]

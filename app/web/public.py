@@ -65,9 +65,9 @@ from redis import exceptions as redis_ex
 from config import tg_worker_url
 
 from app.core import client as C
-from app.metrics import MESSAGE_IN_COUNTER
-from app.lib.transport_utils import dump_message_in
+from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.schemas import MessageIn
+from app.db import insert_message_in, upsert_lead
 from . import common as common
 from .ui import templates
 
@@ -80,8 +80,6 @@ _deprecated_hits: dict[str, float] = {}
 wa_logger.propagate = False
 
 TG_WORKER_BASE = tg_worker_url()
-INBOX_MESSAGE_KEY = "inbox:message_in"
-
 if not hasattr(C, "valid_key"):
     setattr(C, "valid_key", common.valid_key)
 
@@ -628,37 +626,146 @@ def _process_pdf(
 router = APIRouter()
 
 
+def _coerce_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return 0
+
+
+def _find_username(value: Any) -> str | None:
+    if isinstance(value, dict):
+        if isinstance(value.get("username"), str) and value["username"].strip():
+            return value["username"].strip()
+        for nested in value.values():
+            result = _find_username(nested)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for entry in value:
+            result = _find_username(entry)
+            if result:
+                return result
+    return None
+
+
+def _auto_reply_enabled(tenant: int) -> bool:
+    try:
+        cfg = common.read_tenant_config(tenant)
+    except Exception:
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    behavior = cfg.get("behavior")
+    if not isinstance(behavior, dict):
+        return False
+    if bool(behavior.get("auto_reply_enabled")):
+        return True
+    return bool(behavior.get("auto_reply"))
+
+
 @router.post("/webhook/provider")
-async def provider_webhook(message: MessageIn) -> JSONResponse:
+async def provider_webhook(message: MessageIn, request: Request) -> JSONResponse:
+    admin_header = request.headers.get("X-Admin-Token", "")
+    expected_token = getattr(settings, "ADMIN_TOKEN", "") or ""
+    if not admin_header or admin_header != expected_token:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
     logger.info(
         "event=webhook_received channel=%s tenant=%s ts=%s",
         message.channel,
         message.tenant,
         message.ts,
     )
-    try:
-        client = common.redis_client()
-    except Exception as exc:
-        logger.error("stage=redis_connect_fail event=message_in error=%s", exc)
-        raise HTTPException(status_code=503, detail="redis_unavailable") from exc
 
-    payload_json = dump_message_in(message)
+    tenant = int(message.tenant)
+    channel = (message.channel or "").lower()
+    if channel != "telegram":
+        logger.warning(
+            "event=webhook_unsupported_channel tenant=%s channel=%s", tenant, message.channel
+        )
+        return JSONResponse({"ok": False, "error": "unsupported_channel"}, status_code=400)
+    telegram_user_id = 0
+    telegram_username: str | None = None
+
+    if channel == "telegram":
+        telegram_user_id = _coerce_int(message.from_id)
+        if not telegram_user_id:
+            telegram_user_id = _coerce_int(message.provider_raw.get("from_id")) if isinstance(message.provider_raw, dict) else 0
+        telegram_username = _find_username(message.provider_raw)
+    lead_hint = telegram_user_id if telegram_user_id else _coerce_int(message.from_id)
+
     try:
-        client.lpush(INBOX_MESSAGE_KEY, payload_json)
-    except redis_ex.RedisError as exc:
-        logger.error("stage=redis_write_fail event=message_in error=%s", exc)
-        raise HTTPException(status_code=503, detail="redis_write_failed") from exc
+        lead_id = await upsert_lead(
+            lead_hint,
+            channel=channel or "telegram",
+            tenant_id=tenant,
+            telegram_user_id=telegram_user_id if telegram_user_id > 0 else None,
+            telegram_username=telegram_username,
+        )
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("upsert_lead").inc()
+        logger.exception("event=message_in_lead_upsert_fail tenant=%s", tenant)
+        raise HTTPException(status_code=500, detail="db_error") from exc
+
+    text_value = message.text or ""
+    try:
+        await insert_message_in(
+            lead_id,
+            text_value,
+            status="received",
+            tenant_id=tenant,
+            telegram_user_id=telegram_user_id if telegram_user_id > 0 else None,
+        )
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("insert_message_in").inc()
+        logger.exception("event=message_in_store_fail tenant=%s", tenant)
+        raise HTTPException(status_code=500, detail="db_error") from exc
 
     MESSAGE_IN_COUNTER.labels(message.channel).inc()
     message_in_logger.info(
         "event=message_in channel=%s tenant=%s from=%s to=%s attachments=%s",
         message.channel,
-        message.tenant,
+        tenant,
         message.from_id,
         message.to,
         len(message.attachments),
     )
-    return JSONResponse({"ok": True})
+
+    enqueue_auto = False
+    try:
+        enqueue_auto = _auto_reply_enabled(tenant)
+    except Exception:
+        enqueue_auto = False
+
+    if enqueue_auto:
+        try:
+            client = common.redis_client()
+        except Exception as exc:
+            logger.error("stage=redis_connect_fail event=enqueue_outbox error=%s", exc)
+            raise HTTPException(status_code=503, detail="redis_unavailable") from exc
+
+        queue_payload = {
+            "lead_id": lead_id,
+            "tenant_id": tenant,
+            "tenant": tenant,
+            "provider": channel,
+            "ch": channel,
+            "event": "incoming",
+            "incoming_text": text_value,
+        }
+        try:
+            client.lpush("outbox:send", json.dumps(queue_payload, ensure_ascii=False))
+        except redis_ex.RedisError as exc:
+            logger.error("stage=redis_write_fail event=enqueue_outbox error=%s", exc)
+            raise HTTPException(status_code=503, detail="redis_write_failed") from exc
+        logger.info(
+            "event=enqueue_outbox queue=outbox:send tenant=%s lead_id=%s", tenant, lead_id
+        )
+
+    return JSONResponse({"ok": True, "lead_id": lead_id})
 
 
 @router.get("/connect/wa")
