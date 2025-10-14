@@ -39,7 +39,8 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 | `TELEGRAM_API_HASH` | hash приложения Telegram |
 | `PUBLIC_KEY` | публичный ключ для доступа к `/pub/tg/*` |
 | `ADMIN_TOKEN` | админ-токен для приватных RPC эндпоинтов |
-| `APP_BASE_URL` | внешний URL API (используется для обратных вызовов) |
+| `APP_BASE_URL` | внешний URL API (используется для обратных вызовов, по умолчанию `http://app:8000`) |
+| `TGWORKER_BASE_URL` | внутренний URL Telegram worker (по умолчанию `http://tgworker:9000`) |
 | `TG_SESSIONS_DIR` | каталог для хранения `.session` файлов (общий с `app`) |
 
 Том сессий Telegram должен быть примонтирован к контейнерам `app` и `tgworker`, чтобы авторизация сохранялась между перезапусками.
@@ -122,6 +123,7 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 ```
 
 Каждое валидное входящее событие складывается в Redis по ключу `inbox:message_in` (LPUSH), что позволяет независимо подтверждать доставку.
+Все поля типа datetime в телеграм-вебхуке сериализуются в формате ISO 8601 (UTC) либо в миллисекундах эпохи, чтобы не зависеть от часового пояса контейнеров.
 
 ### Ключи доступа
 

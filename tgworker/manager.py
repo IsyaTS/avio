@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import io
 import logging
@@ -8,10 +9,11 @@ import math
 import os
 import secrets
 import time
-from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, asdict
+from datetime import date, datetime, time as time_type, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import httpx
 import qrcode
@@ -59,6 +61,51 @@ AUTHORIZED_DISCONNECTS = Counter(
     "Authorized Telegram sessions transitioning to disconnected without manual logout",
     labelnames=("reason",),
 )
+
+
+def _ensure_datetime_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return _ensure_datetime_iso(value)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, time_type):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump())
+        except Exception:
+            return _json_safe(dict(value))  # type: ignore[arg-type]
+    if hasattr(value, "dict"):
+        try:
+            return _json_safe(value.dict())  # type: ignore[call-arg]
+        except Exception:
+            pass
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, set):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe(item) for item in value]
+    return str(value)
 
 
 class QRNotFoundError(Exception):
@@ -150,8 +197,17 @@ class TelegramSessionManager:
         self._api_hash = api_hash
         self._sessions_dir = sessions_dir
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        legacy_dir = Path("/app/data/tg-sessions")
+        if legacy_dir.exists() and legacy_dir.resolve() != self._sessions_dir.resolve():
+            LOGGER.warning(
+                "stage=session_dir_legacy_detected active=%s legacy=%s",
+                self._sessions_dir,
+                legacy_dir,
+            )
+        LOGGER.info("stage=session_dir_resolved path=%s", self._sessions_dir)
         self._webhook_url = webhook_url.rstrip("/")
         self._webhook_token = (webhook_token or "").strip() or None
+        self._admin_token = (os.getenv("ADMIN_TOKEN") or "").strip() or None
         self._device_model = device_model
         self._system_version = system_version
         self._app_version = app_version
@@ -1385,6 +1441,8 @@ class TelegramSessionManager:
             else:
                 ts_unix = int(time.time())
 
+            provider_raw = _json_safe(message.to_dict())
+
             normalized = MessageIn(
                 tenant=tenant,
                 channel="telegram",
@@ -1393,7 +1451,7 @@ class TelegramSessionManager:
                 text=message.message or "",
                 attachments=attachments,
                 ts=ts_unix,
-                provider_raw=message.to_dict(),
+                provider_raw=provider_raw,
             )
             delivered = await self._send_webhook(normalized)
             if delivered:
@@ -1442,11 +1500,22 @@ class TelegramSessionManager:
         headers = {"Content-Type": "application/json"}
         if self._webhook_token:
             headers["X-Webhook-Token"] = self._webhook_token
+        if self._admin_token:
+            headers["X-Admin-Token"] = self._admin_token
         try:
+            payload = _json_safe(message_in_asdict(message))
+            LOGGER.info(
+                "stage=webhook_request tenant_id=%s url=%s", message.tenant, self._webhook_url
+            )
             response = await self._http.post(
                 self._webhook_url,
-                json=message_in_asdict(message),
+                json=payload,
                 headers=headers,
+            )
+            LOGGER.info(
+                "stage=webhook_response tenant_id=%s status=%s",
+                message.tenant,
+                response.status_code,
             )
             if 200 <= response.status_code < 300:
                 return True

@@ -610,6 +610,12 @@ router = APIRouter()
 
 @router.post("/webhook/provider")
 async def provider_webhook(message: MessageIn) -> JSONResponse:
+    logger.info(
+        "event=webhook_received channel=%s tenant=%s ts=%s",
+        message.channel,
+        message.tenant,
+        message.ts,
+    )
     try:
         client = common.redis_client()
     except Exception as exc:
