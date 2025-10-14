@@ -144,6 +144,8 @@ services:
       - APP_WEBHOOK=http://app:8000/webhook/provider
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_QR_TTL=${TELEGRAM_QR_TTL:-120}
+      - TELEGRAM_QR_POLL_INTERVAL=${TELEGRAM_QR_POLL_INTERVAL:-1s}
       - PUBLIC_KEY=${PUBLIC_KEY}
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - APP_BASE_URL=${APP_BASE_URL:-https://api.avio.website}

@@ -413,7 +413,7 @@ try {
     logoutUrl: urls.tg_logout || `/pub/tg/logout`,
     qrUrl: urls.tg_qr_png || urls.tg_qr || `/pub/tg/qr.png`,
     qrTxtUrl: urls.tg_qr_txt || `/pub/tg/qr.txt`,
-    passwordUrl: urls.tg_password || `/pub/tg/password`,
+    passwordUrl: urls.tg_2fa_url || urls.tg_password || `/pub/tg/2fa`,
   };
 
   const dom = {

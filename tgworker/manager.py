@@ -127,6 +127,19 @@ class TwoFASubmitResult:
         return 200 <= int(self.status_code) < 300
 
 
+@dataclass(slots=True)
+class LoginFlowStateSnapshot:
+    tenant_id: int
+    status: str
+    qr_id: Optional[str]
+    qr_login_obj: Any | None
+    qr_png: Optional[bytes]
+    qr_expires_at: Optional[float]
+    last_error: Optional[str]
+    needs_2fa: bool
+    twofa_pending: bool
+
+
 class TelegramSessionManager:
     """Manage tenant-scoped TelegramClient instances and QR flows."""
 
@@ -144,6 +157,8 @@ class TelegramSessionManager:
         system_lang_code: str,
         webhook_token: str | None = None,
         http_timeout: float = 10.0,
+        qr_ttl: float,
+        qr_poll_interval: float,
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
@@ -170,6 +185,8 @@ class TelegramSessionManager:
         self._bootstrap_task: Optional[asyncio.Task[None]] = None
         self._bootstrap_ready = asyncio.Event()
         self._bootstrap_ready.set()
+        self._qr_ttl = max(float(qr_ttl), 1.0)
+        self._qr_poll_interval = max(float(qr_poll_interval), 0.1)
 
     async def start(self, *, background: bool = False) -> None:
         if self._started:
@@ -704,7 +721,7 @@ class TelegramSessionManager:
                     png = self._build_qr_png(qr_login.url)
                     qr_id = secrets.token_urlsafe(16)
 
-                    qr_expires_at = time.time() + 180.0
+                    qr_expires_at = time.time() + self._qr_ttl
                     expires_raw = getattr(qr_login, "expires", None)
                     if isinstance(expires_raw, (int, float)):
                         qr_expires_at = float(expires_raw)
@@ -788,9 +805,9 @@ class TelegramSessionManager:
 
     async def _poll_login_loop(self, tenant: int, client: TelegramClient, state: SessionState, qr_login) -> None:
         qr_id = state.qr_id
-        valid_until = state.qr_expires_at or (time.time() + QR_LOGIN_TIMEOUT)
-        deadline = valid_until if valid_until else time.time() + QR_LOGIN_TIMEOUT
-        poll_step = 5.0
+        valid_until = state.qr_expires_at or (time.time() + self._qr_ttl)
+        deadline = valid_until if valid_until else time.time() + self._qr_ttl
+        poll_step = self._qr_poll_interval
         try:
             while True:
                 now = time.time()
@@ -1905,6 +1922,34 @@ class TelegramSessionManager:
             "waiting": waiting,
             "needs_2fa": needs_2fa,
         }
+
+    async def login_flow_state(self, tenant: int) -> LoginFlowStateSnapshot:
+        await self.wait_until_ready()
+        async with self._lock:
+            state = self._states.get(tenant)
+            if not state:
+                return LoginFlowStateSnapshot(
+                    tenant_id=tenant,
+                    status="idle",
+                    qr_id=None,
+                    qr_login_obj=None,
+                    qr_png=None,
+                    qr_expires_at=None,
+                    last_error=None,
+                    needs_2fa=False,
+                    twofa_pending=False,
+                )
+            return LoginFlowStateSnapshot(
+                tenant_id=tenant,
+                status=state.status,
+                qr_id=state.qr_id,
+                qr_login_obj=state.qr_login,
+                qr_png=state.qr_png,
+                qr_expires_at=state.qr_expires_at,
+                last_error=state.last_error,
+                needs_2fa=bool(state.needs_2fa or state.awaiting_password),
+                twofa_pending=bool(state.twofa_pending),
+            )
 
     def _update_metrics(self) -> None:
         snapshot = self.stats_snapshot()

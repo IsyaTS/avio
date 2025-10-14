@@ -9,6 +9,7 @@ from .manager import (
     SessionState,
     TelegramSessionManager,
     TwoFASubmitResult,
+    LoginFlowStateSnapshot,
 )
 
 
@@ -104,6 +105,8 @@ class SessionManager:
         lang_code: str,
         system_lang_code: str,
         webhook_token: Optional[str] = None,
+        qr_ttl: float,
+        qr_poll_interval: float,
     ) -> None:
         self._manager = TelegramSessionManager(
             api_id=api_id,
@@ -116,6 +119,8 @@ class SessionManager:
             lang_code=lang_code,
             system_lang_code=system_lang_code,
             webhook_token=webhook_token,
+            qr_ttl=qr_ttl,
+            qr_poll_interval=qr_poll_interval,
         )
 
     async def start(self) -> None:
@@ -158,6 +163,9 @@ class SessionManager:
     def get_qr_url(self, qr_id: str) -> str:
         return self._manager.get_qr_url(qr_id)
 
+    async def login_flow_state(self, tenant_id: int):
+        return await self._manager.login_flow_state(tenant_id)
+
     async def send_message(
         self,
         tenant: int,
@@ -186,4 +194,5 @@ __all__ = [
     "QRExpiredError",
     "QRNotFoundError",
     "TwoFASubmitResult",
+    "LoginFlowStateSnapshot",
 ]

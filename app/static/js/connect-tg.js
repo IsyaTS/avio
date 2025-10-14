@@ -21,7 +21,8 @@
     const startUrlBase = urls.tg_start_url || urls.tg_start || urls.start || '/pub/tg/start';
     const statusUrlBase = urls.tg_status_url || urls.tg_status || urls.status || '/pub/tg/status';
     const qrUrlBase = urls.tg_qr_png || urls.qr || '/pub/tg/qr.png';
-    const passwordUrlBase = urls.tg_password || urls.password || '/pub/tg/password';
+    const passwordUrlBase =
+      urls.tg_2fa_url || urls.tg_password || urls.password || '/pub/tg/2fa';
 
     const tenant = tenantValue === undefined || tenantValue === null ? '' : String(tenantValue).trim();
     const key =
@@ -194,17 +195,27 @@
       }
     }
 
-    function showQrImage(qrId) {
-      const normalized = typeof qrId === 'string' ? qrId.trim() : String(qrId || '').trim();
+    function showQrImage(identifier) {
+      const normalized = typeof identifier === 'string' ? identifier.trim() : String(identifier || '').trim();
       if (!normalized) {
         lastQrId = '';
         clearQrImage();
         setPlaceholder('QR генерируется…');
         return;
       }
-      if (normalized !== lastQrId && qrImage) {
-        lastQrId = normalized;
-        qrImage.src = buildQrSrc(normalized);
+
+      let targetSrc = normalized;
+      const lower = normalized.toLowerCase();
+      const looksLikeUrl = lower.startsWith('http://') || lower.startsWith('https://') || normalized.startsWith('/');
+      if (looksLikeUrl) {
+        targetSrc = buildUrl(normalized, { t: Date.now() }, { includeTenant: false, includeKey: false });
+      } else {
+        targetSrc = buildQrSrc(normalized);
+      }
+
+      if (targetSrc !== lastQrId && qrImage) {
+        lastQrId = targetSrc;
+        qrImage.src = targetSrc;
       }
       if (qrImage) {
         qrImage.style.display = '';
@@ -263,7 +274,9 @@
       lastStatusValue = statusValue;
       const lastError = typeof data.last_error === 'string' ? data.last_error : '';
       const qrIdValue = data.qr_id !== undefined && data.qr_id !== null ? String(data.qr_id) : '';
+      const qrUrlValue = data.qr_url !== undefined && data.qr_url !== null ? String(data.qr_url) : '';
       const normalizedQrId = qrIdValue.trim();
+      const normalizedQrUrl = qrUrlValue.trim();
       const twofaPending = truthyFlag(data.twofa_pending);
       const needsTwofa =
         statusValue === 'needs_2fa' || truthyFlag(data.needs_2fa) || twofaPending;
@@ -308,8 +321,9 @@
       showQrBlock();
 
       if (statusValue === 'waiting_qr') {
-        if (normalizedQrId) {
-          showQrImage(normalizedQrId);
+        const imageSource = normalizedQrUrl || normalizedQrId;
+        if (imageSource) {
+          showQrImage(imageSource);
           setPlaceholder('');
         } else {
           lastQrId = '';
@@ -320,8 +334,8 @@
         return nextDelay;
       }
 
-      if (normalizedQrId) {
-        showQrImage(normalizedQrId);
+      if (normalizedQrUrl || normalizedQrId) {
+        showQrImage(normalizedQrUrl || normalizedQrId);
       } else {
         lastQrId = '';
         clearQrImage();
