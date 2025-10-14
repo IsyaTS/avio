@@ -82,6 +82,8 @@ class TelegramConfig:
     app_version: str
     lang_code: str
     system_lang_code: str
+    qr_ttl: float
+    qr_poll_interval: float
 
 
 def _resolve_sessions_dir(raw: str | None) -> Path:
@@ -96,6 +98,20 @@ def _resolve_sessions_dir(raw: str | None) -> Path:
 
 
 @lru_cache(maxsize=1)
+def _parse_duration(raw: str | None, *, default: float) -> float:
+    if not raw:
+        return default
+    cleaned = raw.strip().lower()
+    if not cleaned:
+        return default
+    if cleaned.endswith("s"):
+        cleaned = cleaned[:-1]
+    try:
+        return float(cleaned)
+    except ValueError:
+        return default
+
+
 def telegram_config() -> TelegramConfig:
     api_id = TELEGRAM_API_ID
     api_hash = TELEGRAM_API_HASH
@@ -106,6 +122,11 @@ def telegram_config() -> TelegramConfig:
     app_version = os.getenv("TG_APP_VERSION", "1.0").strip() or "1.0"
     lang = os.getenv("TG_LANG", "ru").strip() or "ru"
 
+    qr_ttl = _parse_duration(os.getenv("TELEGRAM_QR_TTL"), default=120.0)
+    qr_poll_interval = _parse_duration(
+        os.getenv("TELEGRAM_QR_POLL_INTERVAL"), default=1.0
+    )
+
     return TelegramConfig(
         api_id=api_id,
         api_hash=api_hash,
@@ -115,6 +136,8 @@ def telegram_config() -> TelegramConfig:
         app_version=app_version,
         lang_code=lang,
         system_lang_code=lang,
+        qr_ttl=qr_ttl,
+        qr_poll_interval=qr_poll_interval,
     )
 
 

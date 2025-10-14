@@ -68,6 +68,8 @@ async def test_submit_password_retries_without_logout_other_sessions(
             app_version="1.0",
             lang_code="en",
             system_lang_code="en",
+            qr_ttl=120.0,
+            qr_poll_interval=1.0,
         )
 
         tenant_id = 101

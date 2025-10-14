@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 import os
-from typing import Optional
+import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from config import telegram_config
 from app.schemas import TransportMessage
@@ -17,10 +21,52 @@ from .session_manager import (
     QRNotFoundError,
     SessionManager,
     TwoFASubmitResult,
+    LoginFlowStateSnapshot,
+    SessionSnapshot,
 )
 
 
 logger = logging.getLogger("tgworker.api")
+
+
+TG_QR_START_TOTAL = Counter(
+    "tg_qr_start_total", "Total number of QR login sessions initiated"
+)
+TG_QR_EXPIRED_TOTAL = Counter(
+    "tg_qr_expired_total",
+    "Total number of Telegram QR codes that expired before authorization",
+)
+TG_2FA_REQUIRED_TOTAL = Counter(
+    "tg_2fa_required_total", "Total number of login flows that required 2FA"
+)
+TG_LOGIN_SUCCESS_TOTAL = Counter(
+    "tg_login_success_total", "Total number of successful Telegram authorizations"
+)
+TG_LOGIN_FAIL_TOTAL = Counter(
+    "tg_login_fail_total",
+    "Total number of failed Telegram authorizations",
+    ["reason"],
+)
+
+
+@dataclass(slots=True)
+class PendingEntry:
+    tenant: int
+    qr_login_obj: Any | None = None
+    png_bytes: bytes | None = None
+    expires_at: float | None = None
+    state: str = "idle"
+    last_error: str | None = None
+    qr_id: str | None = None
+    authorized: bool = False
+    _expired_recorded: bool = False
+
+    def is_expired(self) -> bool:
+        return self.expires_at is not None and self.expires_at <= time.time()
+
+
+class QRStartRequest(BaseModel):
+    tenant: int = Field(..., ge=1)
 
 
 class StartRequest(BaseModel):
@@ -38,6 +84,11 @@ class LogoutRequest(BaseModel):
 
 class PasswordRequest(BaseModel):
     tenant_id: int = Field(..., ge=1)
+    password: SecretStr
+
+
+class TwoFARequest(BaseModel):
+    tenant: int = Field(..., ge=1)
     password: SecretStr
 
 
@@ -70,16 +121,171 @@ def create_app() -> FastAPI:
         lang_code=cfg.lang_code,
         system_lang_code=cfg.system_lang_code,
         webhook_token=webhook_token,
+        qr_ttl=cfg.qr_ttl,
+        qr_poll_interval=cfg.qr_poll_interval,
     )
 
     app = FastAPI(title="tgworker")
     app.state.session_manager = manager
+    pending_registry: dict[int, PendingEntry] = {}
+    tenant_locks: dict[int, asyncio.Lock] = {}
+    app.state.pending_registry = pending_registry
+    app.state.pending_locks = tenant_locks
 
     NO_STORE_HEADERS = {
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache",
         "Expires": "0",
     }
+
+    def _tenant_lock(tenant: int) -> asyncio.Lock:
+        lock = tenant_locks.get(tenant)
+        if lock is None:
+            lock = asyncio.Lock()
+            tenant_locks[tenant] = lock
+        return lock
+
+    def _ms_to_seconds(value: Optional[int]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value) / 1000.0
+        except Exception:
+            return None
+
+    def _derive_state(snapshot: SessionSnapshot, flow: LoginFlowStateSnapshot) -> str:
+        statuses = {snapshot.status or "disconnected", flow.status or "disconnected"}
+        if "authorized" in statuses:
+            return "authorized"
+        if (
+            snapshot.needs_2fa
+            or snapshot.twofa_pending
+            or flow.needs_2fa
+            or flow.twofa_pending
+            or "needs_2fa" in statuses
+        ):
+            return "need_2fa"
+        if "waiting_qr" in statuses and (snapshot.qr_id or flow.qr_id):
+            return "waiting_qr"
+        if snapshot.last_error or flow.last_error:
+            return "failed"
+        return "idle"
+
+    def _apply_state(entry: PendingEntry, new_state: str, *, reason: Optional[str]) -> None:
+        previous = entry.state
+        if previous != new_state:
+            if reason:
+                logger.info(
+                    "event=login_flow tenant=%s state=%s reason=%s",
+                    entry.tenant,
+                    new_state,
+                    reason,
+                )
+            else:
+                logger.info(
+                    "event=login_flow tenant=%s state=%s",
+                    entry.tenant,
+                    new_state,
+                )
+            if new_state == "waiting_qr":
+                TG_QR_START_TOTAL.inc()
+            elif new_state == "need_2fa":
+                TG_2FA_REQUIRED_TOTAL.inc()
+            elif new_state == "authorized":
+                TG_LOGIN_SUCCESS_TOTAL.inc()
+            elif new_state == "failed":
+                TG_LOGIN_FAIL_TOTAL.labels(reason or entry.last_error or "unknown").inc()
+        entry.state = new_state
+        entry.authorized = new_state == "authorized"
+
+    def _entry_payload(entry: PendingEntry, *, include_png: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": entry.state != "failed",
+            "tenant": entry.tenant,
+            "authorized": entry.authorized,
+            "state": entry.state,
+            "expires_at": entry.expires_at,
+            "last_error": entry.last_error,
+        }
+        if include_png and entry.png_bytes:
+            payload["qr_png"] = base64.b64encode(entry.png_bytes).decode("ascii")
+        return payload
+
+    async def _refresh_pending(
+        tenant: int,
+        *,
+        snapshot: Optional[SessionSnapshot] = None,
+        flow: Optional[LoginFlowStateSnapshot] = None,
+    ) -> PendingEntry:
+        entry = pending_registry.get(tenant)
+        if entry is None:
+            entry = PendingEntry(tenant=tenant)
+            pending_registry[tenant] = entry
+
+        if snapshot is None:
+            snapshot = await manager.get_status(tenant)
+        if flow is None:
+            flow = await manager.login_flow_state(tenant)
+
+        new_qr_id = snapshot.qr_id or flow.qr_id
+        if new_qr_id != entry.qr_id:
+            entry._expired_recorded = False
+            entry.png_bytes = None
+        entry.qr_id = new_qr_id
+        entry.qr_login_obj = flow.qr_login_obj
+
+        expires_at = snapshot.qr_valid_until
+        if expires_at is not None:
+            entry.expires_at = _ms_to_seconds(expires_at)
+        elif flow.qr_expires_at is not None:
+            try:
+                entry.expires_at = float(flow.qr_expires_at)
+            except Exception:
+                entry.expires_at = None
+        else:
+            entry.expires_at = None
+
+        entry.last_error = snapshot.last_error or flow.last_error
+
+        derived_state = _derive_state(snapshot, flow)
+
+        if derived_state == "waiting_qr":
+            entry.last_error = None
+            if entry.qr_id:
+                png_blob = flow.qr_png or entry.png_bytes
+                if png_blob is None:
+                    try:
+                        png_blob = manager.get_qr_png(entry.qr_id, tenant=tenant)
+                    except QRExpiredError:
+                        if not entry._expired_recorded:
+                            TG_QR_EXPIRED_TOTAL.inc()
+                            entry._expired_recorded = True
+                        entry.last_error = "qr_expired"
+                        entry.png_bytes = None
+                        _apply_state(entry, "failed", reason="qr_expired")
+                        pending_registry[tenant] = entry
+                        return entry
+                    except QRNotFoundError:
+                        png_blob = None
+                entry.png_bytes = png_blob
+        else:
+            if derived_state == "authorized":
+                entry.last_error = None
+            entry.png_bytes = None
+
+        _apply_state(entry, derived_state, reason=entry.last_error if derived_state == "failed" else None)
+
+        if entry.state == "waiting_qr" and entry.is_expired():
+            entry.last_error = "qr_expired"
+            if not entry._expired_recorded:
+                TG_QR_EXPIRED_TOTAL.inc()
+                entry._expired_recorded = True
+            entry.png_bytes = None
+            entry.qr_login_obj = None
+            _apply_state(entry, "failed", reason="qr_expired")
+
+        pending_registry[tenant] = entry
+        return entry
 
     @app.on_event("startup")
     async def _startup() -> None:  # pragma: no cover - wiring
@@ -94,6 +300,176 @@ def create_app() -> FastAPI:
     def require_credentials() -> None:
         if cfg.api_id <= 0 or not cfg.api_hash:
             raise HTTPException(status_code=503, detail="telegram_credentials_missing")
+
+    @app.post("/qr/start")
+    async def qr_start(payload: QRStartRequest):
+        tenant = payload.tenant
+        lock = _tenant_lock(tenant)
+        async with lock:
+            entry = await _refresh_pending(tenant)
+            if entry.authorized:
+                body = {"ok": False, "error": "already_authorized", "state": entry.state}
+                return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
+            if entry.state == "need_2fa":
+                return JSONResponse(
+                    _entry_payload(entry), headers=dict(NO_STORE_HEADERS)
+                )
+            if entry.state == "waiting_qr" and not entry.is_expired() and entry.png_bytes:
+                return JSONResponse(
+                    _entry_payload(entry, include_png=True),
+                    headers=dict(NO_STORE_HEADERS),
+                )
+
+            snapshot = await manager.start_session(tenant, force=True)
+            entry = await _refresh_pending(tenant, snapshot=snapshot)
+            if entry.state == "waiting_qr" and entry.png_bytes is None and entry.qr_id:
+                try:
+                    entry.png_bytes = manager.get_qr_png(entry.qr_id, tenant=tenant)
+                except QRExpiredError:
+                    if not entry._expired_recorded:
+                        TG_QR_EXPIRED_TOTAL.inc()
+                        entry._expired_recorded = True
+                    entry.last_error = "qr_expired"
+                    entry.png_bytes = None
+                    _apply_state(entry, "failed", reason="qr_expired")
+                except QRNotFoundError:
+                    entry.png_bytes = None
+            pending_registry[tenant] = entry
+            if entry.state == "failed" and entry.last_error == "qr_expired":
+                body = _entry_payload(entry)
+                body.update({"ok": False, "error": "qr_expired"})
+                return JSONResponse(body, status_code=410, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                _entry_payload(entry, include_png=True), headers=dict(NO_STORE_HEADERS)
+            )
+
+    @app.get("/qr.png")
+    async def qr_png(tenant: int = Query(..., ge=1)):
+        lock = _tenant_lock(tenant)
+        async with lock:
+            entry = await _refresh_pending(tenant)
+            if entry.state != "waiting_qr":
+                body = {"ok": False, "error": "qr_unavailable", "state": entry.state}
+                return JSONResponse(body, status_code=404, headers=dict(NO_STORE_HEADERS))
+            if entry.is_expired():
+                if not entry._expired_recorded:
+                    TG_QR_EXPIRED_TOTAL.inc()
+                    entry._expired_recorded = True
+                entry.last_error = "qr_expired"
+                entry.png_bytes = None
+                pending_registry[tenant] = entry
+                _apply_state(entry, "failed", reason="qr_expired")
+                return JSONResponse(
+                    {"ok": False, "error": "qr_expired"},
+                    status_code=410,
+                    headers=dict(NO_STORE_HEADERS),
+                )
+            blob = entry.png_bytes
+            if blob is None and entry.qr_id:
+                try:
+                    blob = manager.get_qr_png(entry.qr_id, tenant=tenant)
+                    entry.png_bytes = blob
+                except QRExpiredError:
+                    if not entry._expired_recorded:
+                        TG_QR_EXPIRED_TOTAL.inc()
+                        entry._expired_recorded = True
+                    entry.last_error = "qr_expired"
+                    entry.png_bytes = None
+                    pending_registry[tenant] = entry
+                    _apply_state(entry, "failed", reason="qr_expired")
+                    return JSONResponse(
+                        {"ok": False, "error": "qr_expired"},
+                        status_code=410,
+                        headers=dict(NO_STORE_HEADERS),
+                    )
+                except QRNotFoundError:
+                    blob = None
+            if not blob:
+                return JSONResponse(
+                    {"ok": False, "error": "qr_not_found"},
+                    status_code=404,
+                    headers=dict(NO_STORE_HEADERS),
+                )
+            pending_registry[tenant] = entry
+            return Response(content=blob, media_type="image/png", headers=dict(NO_STORE_HEADERS))
+
+    @app.post("/2fa")
+    async def submit_twofa(payload: TwoFARequest):
+        tenant = payload.tenant
+        lock = _tenant_lock(tenant)
+        async with lock:
+            entry = await _refresh_pending(tenant)
+            if entry.state != "need_2fa":
+                body = {"ok": False, "error": "not_waiting_2fa", "state": entry.state}
+                return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
+
+            result = await manager.submit_password(
+                tenant, payload.password.get_secret_value()
+            )
+            headers = dict(NO_STORE_HEADERS)
+            if result.headers:
+                headers.update(result.headers)
+            status_code = int(result.status_code)
+            body = dict(result.body or {})
+            error = str(body.get("error") or "").strip()
+
+            if status_code == 200 and not error:
+                entry = await _refresh_pending(tenant)
+                return JSONResponse(_entry_payload(entry), headers=headers)
+
+            if error in {"password_invalid", "bad_password"} or status_code == 401:
+                TG_LOGIN_FAIL_TOTAL.labels("bad_password").inc()
+                response = {"ok": False, "error": "bad_password"}
+                detail = body.get("detail")
+                if detail:
+                    response["detail"] = detail
+                return JSONResponse(response, status_code=401, headers=headers)
+
+            if error == "srp_invalid":
+                TG_LOGIN_FAIL_TOTAL.labels("srp_invalid").inc()
+                response = {"ok": False, "error": error}
+                detail = body.get("detail")
+                if detail:
+                    response["detail"] = detail
+                return JSONResponse(response, status_code=409, headers=headers)
+
+            if error in {"phone_password_flood", "flood_wait"}:
+                TG_LOGIN_FAIL_TOTAL.labels(error).inc()
+                response = {"ok": False, "error": error}
+                if "retry_after" in body:
+                    response["retry_after"] = body["retry_after"]
+                detail = body.get("detail")
+                if detail:
+                    response["detail"] = detail
+                snapshot = await manager.get_status(tenant)
+                if snapshot.twofa_backoff_until is not None:
+                    response["backoff_until"] = int(snapshot.twofa_backoff_until)
+                return JSONResponse(response, status_code=429, headers=headers)
+
+            if error:
+                TG_LOGIN_FAIL_TOTAL.labels(error).inc()
+                return JSONResponse(
+                    {"ok": False, "error": error},
+                    status_code=status_code or 500,
+                    headers=headers,
+                )
+
+            logger.error(
+                "event=login_flow tenant=%s state=need_2fa reason=password_exception",
+                tenant,
+            )
+            return JSONResponse(
+                {"ok": False, "error": "password_exception"},
+                status_code=status_code or 500,
+                headers=headers,
+            )
+
+    @app.get("/status")
+    async def status(tenant: int = Query(..., ge=1)):
+        lock = _tenant_lock(tenant)
+        async with lock:
+            entry = await _refresh_pending(tenant)
+            return JSONResponse(_entry_payload(entry), headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
@@ -274,25 +650,30 @@ def create_app() -> FastAPI:
 
     @app.post("/send")
     async def send_message(payload: TransportMessage, _: None = Depends(require_credentials)):
+        headers = dict(NO_STORE_HEADERS)
+
+        def _error(status: int, message: str) -> JSONResponse:
+            return JSONResponse({"ok": False, "error": message}, status_code=status, headers=headers)
+
         if payload.channel and payload.channel not in {"telegram"}:
-            raise HTTPException(status_code=400, detail="channel_mismatch")
+            return _error(400, "channel_mismatch")
         if not payload.has_content:
-            raise HTTPException(status_code=400, detail="empty_message")
+            return _error(400, "empty_message")
 
         target = payload.to
         peer_id: Optional[int] = None
         if isinstance(target, str) and target.strip().lower() == "me":
             self_peer = await manager.resolve_self_peer(payload.tenant)
             if self_peer is None:
-                raise HTTPException(status_code=409, detail="self_unavailable")
+                return _error(409, "self_unavailable")
             peer_id = self_peer
         else:
             try:
                 peer_id = int(target)
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="invalid_to") from None
+                return _error(400, "invalid_to")
             if peer_id <= 0:
-                raise HTTPException(status_code=400, detail="invalid_to")
+                return _error(400, "invalid_to")
 
         attachments = [
             {
@@ -318,10 +699,11 @@ def create_app() -> FastAPI:
                 reply_to=payload.meta.get("reply_to") if isinstance(payload.meta, dict) else None,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return _error(400, str(exc))
         except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"ok": True}
+            return _error(409, str(exc))
+
+        return JSONResponse({"ok": True}, headers=headers)
 
     @app.get("/health")
     async def health():

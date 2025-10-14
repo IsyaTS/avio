@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tgworker.api import create_app
-from tgworker.manager import TwoFASubmitResult
+from tgworker.manager import LoginFlowStateSnapshot, TwoFASubmitResult
 
 
 @pytest.fixture
@@ -40,6 +40,20 @@ def tgworker_client(monkeypatch):
         async def get_status(self, tenant_id: int):
             assert tenant_id == 1
             return self.snapshot
+
+        async def login_flow_state(self, tenant_id: int):
+            assert tenant_id == 1
+            return LoginFlowStateSnapshot(
+                tenant_id=tenant_id,
+                status="idle",
+                qr_id=None,
+                qr_login_obj=None,
+                qr_png=None,
+                qr_expires_at=None,
+                last_error=None,
+                needs_2fa=False,
+                twofa_pending=False,
+            )
 
     dummy = DummyManager()
     monkeypatch.setattr("tgworker.api.SessionManager", lambda *args, **kwargs: dummy)
