@@ -380,6 +380,7 @@ async def send_telegram(
             break
 
         parsed_error: Optional[str] = None
+        forbidden_peer = False
         try:
             parsed = json.loads(last_body) if last_body else {}
         except json.JSONDecodeError:
@@ -388,6 +389,8 @@ async def send_telegram(
             raw_error = parsed.get("error")
             if raw_error:
                 parsed_error = str(raw_error)
+                if parsed_error == "forbidden_peer_type":
+                    forbidden_peer = True
             if parsed_error == "send_failed":
                 details = parsed.get("details")
                 error_type = ""
@@ -402,6 +405,12 @@ async def send_telegram(
                 )
 
         if last_status in {401, 403}:
+            if forbidden_peer:
+                last_error = parsed_error or "forbidden_peer_type"
+                log(
+                    f"[worker] telegram unauthorized_peer peer={peer_id or username or target}"
+                )
+                break
             if unauthorized_checked:
                 break
             authorized = await _wait_until_authorized(int(tenant_id))
@@ -436,7 +445,7 @@ async def send_telegram(
     return last_status, last_body
 
 # ==== Core send ====
-async def do_send(item: dict) -> tuple[str, str]:
+async def do_send(item: dict) -> tuple[str, str, str, int]:
     channel = (item.get("ch") or item.get("provider") or "").lower() or "whatsapp"
     text = (item.get("text") or "").strip()
     lead_id = int(item.get("lead_id") or 0)
@@ -468,19 +477,19 @@ async def do_send(item: dict) -> tuple[str, str]:
         log(
             f"event=send_result status=skipped reason=empty channel={channel} lead_id={lead_id}"
         )
-        return ("skipped", "empty")
+        return ("skipped", "empty", "", 0)
 
     if not OUTBOX_ENABLED:
         log(
             f"event=send_result status=skipped reason=outbox_disabled channel={channel} lead_id={lead_id}"
         )
-        return ("skipped", "outbox_disabled")
+        return ("skipped", "outbox_disabled", "", 0)
 
     if not _WHITELIST_PRESENT:
         log(
             f"event=send_result status=skipped reason=whitelist_empty channel={channel} lead_id={lead_id}"
         )
-        return ("skipped", "whitelist")
+        return ("skipped", "whitelist", "", 0)
 
     if not _whitelist_allows(
         telegram_user_id=telegram_user_id,
@@ -492,7 +501,7 @@ async def do_send(item: dict) -> tuple[str, str]:
             f"channel={channel} lead_id={lead_id} telegram_user_id={telegram_user_id} "
             f"username={username} raw_to={raw_to}"
         )
-        return ("skipped", "whitelist")
+        return ("skipped", "whitelist", "", 0)
 
     try:
         lead_known = await lead_exists(lead_id, tenant_id=tenant)
@@ -502,19 +511,19 @@ async def do_send(item: dict) -> tuple[str, str]:
             "event=send_result status=skipped reason=db_error operation=lead_exists "
             f"channel={channel} lead_id={lead_id} error={exc}"
         )
-        return ("error", "db_error")
+        return ("skipped", "db_error", "", 0)
 
     if not lead_known:
         log(
             f"event=send_result status=skipped reason=err:no_lead channel={channel} lead_id={lead_id}"
         )
-        return ("skipped", "err:no_lead")
+        return ("skipped", "err:no_lead", "", 0)
 
     if not SEND:
         log(
             f"event=send_result status=dry-run reason=send_disabled channel={channel} lead_id={lead_id}"
         )
-        return ("dry-run", f"provider={channel}")
+        return ("skipped", "dry-run", "", 0)
 
     log(f"event=send_attempt channel={channel} lead_id={lead_id} tenant={tenant}")
 
@@ -544,19 +553,26 @@ async def do_send(item: dict) -> tuple[str, str]:
 
     if 200 <= st < 300:
         status = "sent"
-    elif st == 422:
-        status = "err:validation"
+        reason = "ok"
     elif st in {401, 403}:
-        status = "err:unauthorized"
+        status = "unauthorized"
+        reason = f"status_{st}"
+    elif st == 422:
+        status = "skipped"
+        reason = "validation"
     elif st == 0:
-        status = "err:network"
+        status = "skipped"
+        reason = "network"
     else:
-        status = f"err:{st}"
-    log(f"event=send_result status={status} channel={channel} lead_id={lead_id} code={st}")
-    return (status, body)
+        status = "skipped"
+        reason = f"status_{st}"
+    log(
+        f"event=send_result status={status} reason={reason} channel={channel} lead_id={lead_id} code={st}"
+    )
+    return (status, reason, body, st)
 
 # ==== Writer ====
-async def write_result(item: dict, status: str):
+async def write_result(item: dict, status: str, status_code: int, reason: str):
     lead_id = int(item.get("lead_id") or 0)
     tenant_id = int(item.get("tenant_id") or os.getenv("TENANT_ID", "1"))
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else None
@@ -584,12 +600,14 @@ async def write_result(item: dict, status: str):
             tenant_id=tenant_id,
             telegram_user_id=telegram_user_id,
             telegram_username=username,
+            peer_id=telegram_user_id,
         )
     except Exception as exc:
         log(
             "event=send_result status=skipped reason=lead_upsert_error "
             f"channel={channel_name} lead_id={lead_id} tenant={tenant_id} error={exc}"
         )
+        return
 
     lead_ref = resolved_lead_id or lead_id
     lead_available = False
@@ -608,26 +626,27 @@ async def write_result(item: dict, status: str):
             f"channel={channel_name} lead_id={lead_id} tenant={tenant_id}"
         )
 
-    if lead_available:
-        sent_status = "sent" if status.startswith("sent") else status
-        try:
-            await insert_message_out(
-                lead_ref,
-                text,
-                None,
-                status=sent_status,
-                tenant_id=tenant_id,
-                channel=channel_name,
-                telegram_user_id=telegram_user_id,
-                telegram_username=username,
-            )
-        except Exception as exc:
-            log(f"[worker] insert_message_out err: {exc}")
-    else:
+    if not lead_available:
         log(
             "event=send_result status=skipped reason=lead_missing_for_message "
             f"channel={channel_name} lead_id={lead_ref} tenant={tenant_id}"
         )
+        return
+
+    sent_status = "sent"
+    try:
+        await insert_message_out(
+            lead_ref,
+            text,
+            None,
+            status=sent_status,
+            tenant_id=tenant_id,
+            channel=channel_name,
+            telegram_user_id=telegram_user_id,
+            telegram_username=username,
+        )
+    except Exception as exc:
+        log(f"[worker] insert_message_out err: {exc}")
 
     out = {
         "lead_id": lead_id,
@@ -665,17 +684,18 @@ async def process_queue():
                 log(f"[worker] json decode err: {raw_item[:200]}")
                 continue
 
-            status, body = await do_send(item)
+            status, reason, body, code = await do_send(item)
             channel = (item.get("ch") or item.get("provider") or "").lower()
             log(
-                f"[worker] send ch={channel or '-'} status={status} body={body[:200]}"
+                f"[worker] send ch={channel or '-'} status={status} reason={reason} code={code} body={body[:200]}"
             )
             if channel == "telegram":
                 try:
                     await r.incrby("metrics:telegram:outgoing", 1)
                 except Exception:
                     pass
-            await write_result(item, status)
+            if status == "sent":
+                await write_result(item, status, code, reason)
 
         except Exception as e:
             try:

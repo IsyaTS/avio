@@ -33,6 +33,7 @@ def app_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _DummyRedis
     monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: True)
     monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
     monkeypatch.setattr(main, "_r", redis_stub)
+    main._transport_clients.clear()
     if hasattr(main, "_webhooks_mod"):
         monkeypatch.setattr(main._webhooks_mod, "_redis_queue", redis_stub)
         monkeypatch.setattr(
@@ -162,6 +163,6 @@ def test_app_send_to_me_not_authorized(monkeypatch: pytest.MonkeyPatch, app_clie
 
     payload = {"tenant": 1, "channel": "telegram", "to": "me", "text": "ping"}
     response = client.post("/send", json=payload)
-    assert response.status_code == 409
+    assert response.status_code == 401
     body = response.json()
-    assert body.get("detail") == '{"error": "not_authorized"}'
+    assert body.get("detail") == "unauthorized"

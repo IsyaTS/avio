@@ -150,6 +150,23 @@ _init_logging()
 _access_logger = logging.getLogger("app.access")
 transport_logger = logging.getLogger("app.transport")
 
+_transport_clients: dict[str, httpx.AsyncClient] = {}
+
+
+def _transport_client(channel: str) -> httpx.AsyncClient:
+    key = (channel or "").lower()
+    client = _transport_clients.get(key)
+    admin_token = getattr(settings, "ADMIN_TOKEN", "") or ""
+    if client is None or client.is_closed:
+        headers: dict[str, str] = {}
+        if key == "telegram":
+            headers["X-Admin-Token"] = admin_token
+        client = httpx.AsyncClient(timeout=httpx.Timeout(12.0), headers=headers)
+        _transport_clients[key] = client
+    elif key == "telegram":
+        client.headers.update({"X-Admin-Token": admin_token})
+    return client
+
 app = FastAPI(title="avio-api")
 static_dir = ROOT / "static"
 if static_dir.exists():
@@ -166,7 +183,12 @@ async def metrics_endpoint() -> Response:
 
 
 @app.post("/send")
-async def send_transport_message(message: TransportMessage) -> JSONResponse:
+async def send_transport_message(request: Request, message: TransportMessage) -> JSONResponse:
+    admin_token = getattr(settings, "ADMIN_TOKEN", "") or ""
+    header_token = (request.headers.get("X-Admin-Token") or "").strip()
+    if admin_token and header_token != admin_token:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
     if not message.has_content:
         raise HTTPException(status_code=400, detail="empty_message")
 
@@ -181,9 +203,14 @@ async def send_transport_message(message: TransportMessage) -> JSONResponse:
         message.tenant,
         endpoint,
     )
+    peer_value = payload.get("to")
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            response = await client.post(endpoint, json=payload)
+        client = _transport_client(message.channel)
+        response = await client.post(
+            endpoint,
+            json=payload,
+            timeout=httpx.Timeout(12.0),
+        )
     except httpx.HTTPError as exc:
         SEND_FAIL_COUNTER.labels(message.channel, "http_error").inc()
         transport_logger.error(
@@ -193,6 +220,14 @@ async def send_transport_message(message: TransportMessage) -> JSONResponse:
             exc,
         )
         raise HTTPException(status_code=502, detail="worker_unreachable") from exc
+
+    transport_logger.info(
+        "event=message_out stage=dispatch_response channel=%s tenant=%s status=%s peer=%s",
+        message.channel,
+        message.tenant,
+        response.status_code,
+        peer_value or "-",
+    )
 
     if (
         response.status_code == 409
