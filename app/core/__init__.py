@@ -118,7 +118,8 @@ class Settings:
     WA_PREFETCH_START = _env_bool("WA_PREFETCH_START", True)
 
     # Админка
-    ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "sueta").strip()
+    ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "").strip()
+    TGWORKER_BASE_URL = (os.getenv("TGWORKER_BASE_URL") or "http://tgworker:9000").strip().rstrip("/")
     PUBLIC_KEY    = _resolve_public_key(ADMIN_TOKEN)
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
 
