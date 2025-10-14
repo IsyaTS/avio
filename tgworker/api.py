@@ -11,6 +11,7 @@ from typing import Any, Optional
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr, ValidationError
+from telethon.errors import RPCError
 try:  # pragma: no cover - pydantic v1/v2 compatibility
     from pydantic import ConfigDict
 except ImportError:  # pragma: no cover - pydantic v1
@@ -219,6 +220,7 @@ def create_app() -> FastAPI:
         api_id=cfg.api_id,
         api_hash=cfg.api_hash,
         webhook_url=webhook_url,
+        sessions_dir=cfg.sessions_dir,
         device_model=cfg.device_model,
         system_version=cfg.system_version,
         app_version=cfg.app_version,
@@ -948,8 +950,8 @@ def create_app() -> FastAPI:
         if isinstance(payload.meta, dict):
             reply_to_value = payload.meta.get("reply_to")
 
-        try:
-            result = await manager.send_message(
+        async def _send_once() -> dict[str, Any]:
+            return await manager.send_message(
                 tenant=payload.tenant,
                 text=payload.text,
                 peer_id=peer_entity,
@@ -958,19 +960,79 @@ def create_app() -> FastAPI:
                 attachments=attachments,
                 reply_to=reply_to_value,
             )
+
+        def _extract_error(result: dict[str, Any] | None) -> str:
+            if isinstance(result, dict) and "error" in result:
+                raw_error = result.get("error")
+                if raw_error is not None:
+                    return str(raw_error).strip()
+            return ""
+
+        def _rpc_error_response(exc: RPCError) -> JSONResponse:
+            error_type = exc.__class__.__name__
+            peer_hint: Any = payload.to
+            detail: dict[str, Any] = {
+                "type": error_type,
+                "peer_id": peer_hint,
+            }
+            message = str(exc).strip()
+            if message:
+                detail["message"] = message
+            logger.error(
+                "event=send_message_rpc_error route=/send tenant=%s type=%s peer=%s",
+                payload.tenant,
+                error_type,
+                peer_hint,
+            )
+            return JSONResponse(
+                {"error": "send_failed", "details": detail},
+                status_code=500,
+                headers=headers,
+            )
+
+        try:
+            result = await _send_once()
         except ValueError as exc:
             return _error(400, str(exc))
+        except RPCError as exc:
+            return _rpc_error_response(exc)
         except Exception:
             logger.exception(
                 "event=send_message_failed route=/send tenant=%s", payload.tenant
             )
             return _error(500, "send_failed")
 
-        error_value = ""
-        if isinstance(result, dict) and "error" in result:
-            raw_error = result.get("error")
-            if raw_error is not None:
-                error_value = str(raw_error).strip()
+        error_value = _extract_error(result)
+
+        if error_value == "authkey_unregistered":
+            logger.warning(
+                "event=authkey_unregistered_autoretry route=/send tenant=%s", payload.tenant
+            )
+            try:
+                await manager.start_session(payload.tenant, force=True)
+            except Exception:
+                logger.exception(
+                    "event=authkey_restart_failed route=/send tenant=%s", payload.tenant
+                )
+                headers["X-Reauth"] = "1"
+                headers["Cache-Control"] = NO_STORE_HEADERS.get("Cache-Control", "no-store")
+                headers["Pragma"] = NO_STORE_HEADERS.get("Pragma", "no-cache")
+                headers["Expires"] = NO_STORE_HEADERS.get("Expires", "0")
+                return JSONResponse(
+                    {"error": "relogin_required"},
+                    status_code=409,
+                    headers=headers,
+                )
+            try:
+                result = await _send_once()
+            except RPCError as exc:
+                return _rpc_error_response(exc)
+            except Exception:
+                logger.exception(
+                    "event=send_message_failed route=/send tenant=%s", payload.tenant
+                )
+                return _error(500, "send_failed")
+            error_value = _extract_error(result)
 
         if error_value:
             if error_value == "authkey_unregistered":
@@ -985,6 +1047,16 @@ def create_app() -> FastAPI:
                 )
             if error_value == "not_authorized":
                 return JSONResponse({"error": "not_authorized"}, status_code=401, headers=headers)
+            if error_value == "send_failed":
+                detail = {
+                    "type": "unknown",
+                    "peer_id": payload.to,
+                }
+                return JSONResponse(
+                    {"error": "send_failed", "details": detail},
+                    status_code=500,
+                    headers=headers,
+                )
             logger.error(
                 "event=send_message_unhandled_error route=/send tenant=%s error=%s",
                 payload.tenant,
