@@ -14,7 +14,7 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "leads",
-        sa.Column("lead_id", sa.BigInteger(), primary_key=True),
+        sa.Column("id", sa.BigInteger(), primary_key=True),
         sa.Column("title", sa.Text(), nullable=True),
         sa.Column("channel", sa.Text(), nullable=True),
         sa.Column("source_real_id", sa.Integer(), nullable=True),
@@ -31,17 +31,26 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("now()"),
         ),
+        sa.Column("telegram_user_id", sa.BigInteger(), nullable=True),
         sa.Column("telegram_username", sa.Text(), nullable=True),
     )
-    op.create_unique_constraint(
-        "uq_leads_tenant_lead",
+    op.create_index(
+        "idx_leads_tenant_updated_at",
         "leads",
-        ["tenant_id", "lead_id"],
+        ["tenant_id", "updated_at"],
+        postgresql_ops={"updated_at": "DESC"},
     )
     op.create_index(
-        "idx_leads_updated_at",
+        "idx_leads_tenant_username",
         "leads",
-        ["updated_at"],
+        ["tenant_id", "telegram_username"],
+    )
+    op.create_index(
+        "ux_leads_tenant_telegram_user",
+        "leads",
+        ["tenant_id", "telegram_user_id"],
+        unique=True,
+        postgresql_where=sa.text("telegram_user_id IS NOT NULL"),
     )
 
     op.create_table(
@@ -50,7 +59,7 @@ def upgrade() -> None:
         sa.Column(
             "lead_id",
             sa.BigInteger(),
-            sa.ForeignKey("leads.lead_id", ondelete="CASCADE"),
+            sa.ForeignKey("leads.id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column("direction", sa.SmallInteger(), nullable=False),
@@ -82,6 +91,7 @@ def downgrade() -> None:
     op.drop_index("idx_messages_tenant_created_at", table_name="messages")
     op.drop_index("idx_messages_lead_created", table_name="messages")
     op.drop_table("messages")
-    op.drop_index("idx_leads_updated_at", table_name="leads")
-    op.drop_constraint("uq_leads_tenant_lead", "leads", type_="unique")
+    op.drop_index("ux_leads_tenant_telegram_user", table_name="leads")
+    op.drop_index("idx_leads_tenant_username", table_name="leads")
+    op.drop_index("idx_leads_tenant_updated_at", table_name="leads")
     op.drop_table("leads")

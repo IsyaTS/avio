@@ -18,7 +18,14 @@ except Exception:  # pragma: no cover - fallback for bootstrap edge cases
 
     core_settings = SimpleNamespace(APP_VERSION="v21.0")  # type: ignore[assignment]
 
-from app.db import init_db, insert_message_out, upsert_lead, lead_exists
+from app.db import (
+    init_db,
+    insert_message_out,
+    upsert_lead,
+    lead_exists,
+    find_lead_by_telegram,
+    update_message_status,
+)
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
 
 # Guard against attribute absence when the worker boots before settings load
@@ -51,7 +58,8 @@ SEND       = (os.getenv("SEND_ENABLED","true").lower() == "true")
 TGWORKER_SEND_URL = f"{TGWORKER_BASE_URL}/send"
 TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
-OUTBOX_ENABLED = (os.getenv("OUTBOX_ENABLED", "false").strip().lower() == "true")
+_OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
+OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW == "true"
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 OUTBOX     = "outbox:send"
 DLQ        = "outbox:dlq"
@@ -361,8 +369,7 @@ async def send_telegram(
     headers: Dict[str, str] = {}
     if TG_WORKER_TOKEN:
         headers["X-Auth-Token"] = TG_WORKER_TOKEN
-    if ADMIN_TOKEN:
-        headers["X-Admin-Token"] = ADMIN_TOKEN
+    headers["X-Admin-Token"] = ADMIN_TOKEN
 
     payload_log = json.dumps(payload, ensure_ascii=False)
     log(f"[worker] telegram send payload={payload_log}")
@@ -473,11 +480,17 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         attachments.append(attachment)
     reply_to = item.get("reply_to") if isinstance(item.get("reply_to"), str) else None
 
-    if (not text and not attachment) or not lead_id:
+    if not text and not attachment:
         log(
             f"event=send_result status=skipped reason=empty channel={channel} lead_id={lead_id}"
         )
         return ("skipped", "empty", "", 0)
+
+    if lead_id <= 0 and (channel != "telegram" or telegram_user_id is None):
+        log(
+            f"event=send_result status=skipped reason=missing_lead channel={channel} lead_id={lead_id}"
+        )
+        return ("skipped", "missing_lead", "", 0)
 
     if not OUTBOX_ENABLED:
         log(
@@ -489,7 +502,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         log(
             f"event=send_result status=skipped reason=whitelist_empty channel={channel} lead_id={lead_id}"
         )
-        return ("skipped", "whitelist", "", 0)
+        return ("skipped", "whitelist_empty", "", 0)
 
     if not _whitelist_allows(
         telegram_user_id=telegram_user_id,
@@ -503,21 +516,22 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         )
         return ("skipped", "whitelist", "", 0)
 
-    try:
-        lead_known = await lead_exists(lead_id, tenant_id=tenant)
-    except Exception as exc:
-        DB_ERRORS_COUNTER.labels("lead_exists").inc()
-        log(
-            "event=send_result status=skipped reason=db_error operation=lead_exists "
-            f"channel={channel} lead_id={lead_id} error={exc}"
-        )
-        return ("skipped", "db_error", "", 0)
+    if channel != "telegram":
+        try:
+            lead_known = await lead_exists(lead_id, tenant_id=tenant)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("lead_exists").inc()
+            log(
+                "event=send_result status=skipped reason=db_error operation=lead_exists "
+                f"channel={channel} lead_id={lead_id} error={exc}"
+            )
+            return ("skipped", "db_error", "", 0)
 
-    if not lead_known:
-        log(
-            f"event=send_result status=skipped reason=err:no_lead channel={channel} lead_id={lead_id}"
-        )
-        return ("skipped", "err:no_lead", "", 0)
+        if not lead_known:
+            log(
+                f"event=send_result status=skipped reason=err:no_lead channel={channel} lead_id={lead_id}"
+            )
+            return ("skipped", "err:no_lead", "", 0)
 
     if not SEND:
         log(
@@ -525,7 +539,81 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         )
         return ("skipped", "dry-run", "", 0)
 
-    log(f"event=send_attempt channel={channel} lead_id={lead_id} tenant={tenant}")
+    message_db_id: Optional[int] = None
+    title_hint: Optional[str] = None
+    actual_lead_id = lead_id
+
+    if channel == "telegram":
+        if telegram_user_id is None:
+            log(
+                "event=send_result status=skipped reason=missing_peer "
+                f"channel={channel} lead_id={lead_id}"
+            )
+            return ("skipped", "missing_peer", "", 0)
+        try:
+            existing_lead_id = await find_lead_by_telegram(tenant, telegram_user_id)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("find_lead_by_telegram").inc()
+            log(
+                "event=send_result status=skipped reason=db_error operation=find_lead_by_telegram "
+                f"channel={channel} telegram_user_id={telegram_user_id} error={exc}"
+            )
+            return ("skipped", "db_error", "", 0)
+        if existing_lead_id is None:
+            log(
+                "event=send_result status=skipped reason=err:no_lead "
+                f"channel={channel} telegram_user_id={telegram_user_id}"
+            )
+            return ("skipped", "err:no_lead", "", 0)
+        normalized_username = _normalize_username(username)
+        if normalized_username:
+            title_hint = f"tg:{normalized_username}"
+        elif telegram_user_id is not None:
+            title_hint = f"tg:id {telegram_user_id}"
+        try:
+            resolved_lead = await upsert_lead(
+                existing_lead_id,
+                channel="telegram",
+                tenant_id=tenant,
+                telegram_user_id=telegram_user_id,
+                telegram_username=username,
+                title=title_hint,
+                peer_id=telegram_user_id,
+            )
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("upsert_lead").inc()
+            log(
+                "event=send_result status=skipped reason=db_error operation=upsert_lead "
+                f"channel={channel} lead_id={existing_lead_id} error={exc}"
+            )
+            return ("skipped", "db_error", "", 0)
+        actual_lead_id = resolved_lead or existing_lead_id
+        try:
+            message_db_id = await insert_message_out(
+                actual_lead_id,
+                text,
+                None,
+                status="queued",
+                tenant_id=tenant,
+                channel="telegram",
+                telegram_user_id=telegram_user_id,
+                telegram_username=username,
+                title=title_hint,
+            )
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("insert_message_out").inc()
+            log(
+                "event=send_result status=skipped reason=db_error operation=insert_message_out "
+                f"channel={channel} lead_id={actual_lead_id} error={exc}"
+            )
+            return ("skipped", "db_error", "", 0)
+        if message_db_id:
+            item["_message_db_id"] = message_db_id
+            item["_resolved_lead_id"] = actual_lead_id
+
+    log(
+        f"event=send_attempt channel={channel} lead_id={actual_lead_id} tenant={tenant}"
+    )
 
     if channel == "whatsapp":
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
@@ -566,8 +654,18 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     else:
         status = "skipped"
         reason = f"status_{st}"
+    if message_db_id:
+        new_status = "sent" if 200 <= st < 300 else "failed"
+        try:
+            await update_message_status(message_db_id, new_status)
+        except Exception as exc:
+            log(
+                "event=send_result status=warning reason=update_message_status_failed "
+                f"channel={channel} message_id={message_db_id} error={exc}"
+            )
+
     log(
-        f"event=send_result status={status} reason={reason} channel={channel} lead_id={lead_id} code={st}"
+        f"event=send_result status={status} reason={reason} channel={channel} lead_id={actual_lead_id} code={st}"
     )
     return (status, reason, body, st)
 
@@ -591,62 +689,71 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
     username = item.get("username") if isinstance(item.get("username"), str) else None
 
     channel_name = (item.get("ch") or item.get("provider") or "whatsapp")
-    resolved_lead_id: Optional[int] = None
-    try:
-        resolved_lead_id = await upsert_lead(
-            lead_id,
-            channel=channel_name,
-            source_real_id=None,
-            tenant_id=tenant_id,
-            telegram_user_id=telegram_user_id,
-            telegram_username=username,
-            peer_id=telegram_user_id,
-        )
-    except Exception as exc:
-        log(
-            "event=send_result status=skipped reason=lead_upsert_error "
-            f"channel={channel_name} lead_id={lead_id} tenant={tenant_id} error={exc}"
-        )
-        return
+    stored_message_id = item.get("_message_db_id")
+    resolved_lead_override = item.get("_resolved_lead_id")
+    if isinstance(resolved_lead_override, int) and resolved_lead_override > 0:
+        lead_id = resolved_lead_override
 
-    lead_ref = resolved_lead_id or lead_id
-    lead_available = False
-    if resolved_lead_id:
-        try:
-            lead_available = await lead_exists(resolved_lead_id, tenant_id=tenant_id)
-        except Exception as exc:
-            DB_ERRORS_COUNTER.labels("lead_exists").inc()
-            log(
-                "event=send_result status=skipped reason=lead_check_error "
-                f"channel={channel_name} lead_id={resolved_lead_id} tenant={tenant_id} error={exc}"
-            )
+    if channel_name == "telegram" and stored_message_id:
+        lead_ref = lead_id
     else:
-        log(
-            "event=send_result status=skipped reason=lead_upsert_missing "
-            f"channel={channel_name} lead_id={lead_id} tenant={tenant_id}"
-        )
+        resolved_lead_id: Optional[int] = None
+        try:
+            resolved_lead_id = await upsert_lead(
+                lead_id,
+                channel=channel_name,
+                source_real_id=None,
+                tenant_id=tenant_id,
+                telegram_user_id=telegram_user_id,
+                telegram_username=username,
+                peer_id=telegram_user_id,
+            )
+        except Exception as exc:
+            log(
+                "event=send_result status=skipped reason=lead_upsert_error "
+                f"channel={channel_name} lead_id={lead_id} tenant={tenant_id} error={exc}"
+            )
+            return
 
-    if not lead_available:
-        log(
-            "event=send_result status=skipped reason=lead_missing_for_message "
-            f"channel={channel_name} lead_id={lead_ref} tenant={tenant_id}"
-        )
-        return
+        lead_ref = resolved_lead_id or lead_id
+        lead_available = False
+        if resolved_lead_id:
+            try:
+                lead_available = await lead_exists(resolved_lead_id, tenant_id=tenant_id)
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("lead_exists").inc()
+                log(
+                    "event=send_result status=skipped reason=lead_check_error "
+                    f"channel={channel_name} lead_id={resolved_lead_id} tenant={tenant_id} error={exc}"
+                )
+        else:
+            log(
+                "event=send_result status=skipped reason=lead_upsert_missing "
+                f"channel={channel_name} lead_id={lead_id} tenant={tenant_id}"
+            )
 
+        if not lead_available:
+            log(
+                "event=send_result status=skipped reason=lead_missing_for_message "
+                f"channel={channel_name} lead_id={lead_ref} tenant={tenant_id}"
+            )
+            return
+
+        sent_status = "sent"
+        try:
+            await insert_message_out(
+                lead_ref,
+                text,
+                None,
+                status=sent_status,
+                tenant_id=tenant_id,
+                channel=channel_name,
+                telegram_user_id=telegram_user_id,
+                telegram_username=username,
+            )
+        except Exception as exc:
+            log(f"[worker] insert_message_out err: {exc}")
     sent_status = "sent"
-    try:
-        await insert_message_out(
-            lead_ref,
-            text,
-            None,
-            status=sent_status,
-            tenant_id=tenant_id,
-            channel=channel_name,
-            telegram_user_id=telegram_user_id,
-            telegram_username=username,
-        )
-    except Exception as exc:
-        log(f"[worker] insert_message_out err: {exc}")
 
     out = {
         "lead_id": lead_id,
