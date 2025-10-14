@@ -210,10 +210,12 @@ def test_pending_qr_timeout_marks_failed(monkeypatch, stub_manager):
     client = TestClient(app)
 
     client.post("/qr/start", json={"tenant": 2})
+    entry = app.state.pending_registry[2]
     manager.expire_qr(2)
     manager.now += 200
 
-    qr_response = client.get("/qr.png", params={"tenant": 2})
+    qr_id = entry.qr_id or ""
+    qr_response = client.get("/qr/png", params={"tenant": 2, "qr_id": qr_id})
     assert qr_response.status_code in (404, 410)
     entry = app.state.pending_registry[2]
     assert entry.state == "failed"

@@ -17,6 +17,7 @@ import httpx
 import qrcode
 from prometheus_client import Counter, Gauge
 from app.lib.transport_utils import message_in_asdict
+from app.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
 from app.schemas import Attachment, MessageIn
 from telethon import TelegramClient, events, functions
 from telethon.errors import BadRequestError, RPCError, SessionPasswordNeededError
@@ -57,21 +58,6 @@ AUTHORIZED_DISCONNECTS = Counter(
     "tgworker_authorized_disconnect_total",
     "Authorized Telegram sessions transitioning to disconnected without manual logout",
     labelnames=("reason",),
-)
-MESSAGE_IN_COUNTER = Counter(
-    "message_in_total",
-    "Normalized incoming messages",
-    labelnames=("channel",),
-)
-MESSAGE_OUT_COUNTER = Counter(
-    "message_out_total",
-    "Normalized outgoing messages",
-    labelnames=("channel",),
-)
-SEND_FAIL_COUNTER = Counter(
-    "send_fail_total",
-    "Failed send attempts",
-    labelnames=("channel", "reason"),
 )
 
 
@@ -1752,7 +1738,7 @@ class TelegramSessionManager:
                 exc,
             )
             raise
-        except Exception as exc:
+        except Exception:
             EVENT_ERRORS.labels("exception").inc()
             SEND_FAIL_COUNTER.labels("telegram", "exception").inc()
             LOGGER.exception(
