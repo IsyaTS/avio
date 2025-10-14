@@ -59,6 +59,15 @@ def _digits(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isdigit())
 
 
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
 def _ok(data: dict | None = None, status: int = 200) -> JSONResponse:
     payload = {"ok": True}
     if data:
@@ -128,7 +137,15 @@ def _resolve_catalog_attachment(
 async def process_incoming(body: dict, request: Request | None = None) -> JSONResponse:
     src = body.get("source") or {}
     provider = (src.get("type") or body.get("provider") or "whatsapp").lower()
-    tenant = int(src.get("tenant") or body.get("tenant_id") or os.getenv("TENANT_ID", "1"))
+    raw_tenant = src.get("tenant") or body.get("tenant_id") or os.getenv("TENANT_ID", "1")
+    tenant_candidate = _coerce_int(raw_tenant)
+    if tenant_candidate is None:
+        logger.warning(
+            "lead_upsert_err:invalid_tenant message_in_lead_upsert_fail tenant_raw=%s",
+            raw_tenant,
+        )
+        raise HTTPException(status_code=400, detail="invalid_tenant")
+    tenant = tenant_candidate
 
     msg = body.get("message") or {}
     raw_message_id = (
@@ -140,12 +157,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     )
     message_id = str(raw_message_id) if raw_message_id is not None else ""
     text = (msg.get("text") or msg.get("body") or body.get("text") or "").strip()
-    lead_id = body.get("leadId") or body.get("lead_id") or int(time.time() * 1000)
-    try:
-        lead_id = int(str(lead_id))
-    except Exception:
-        lead_id = int(time.time() * 1000)
-
     whatsapp_phone = ""
     telegram_user_id: int | None = None
     telegram_username = None
@@ -183,6 +194,27 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         from_id = msg.get("from") or msg.get("author") or body.get("from") or ""
         whatsapp_phone = _digits(from_id.split("@", 1)[0] if from_id else "")
 
+    lead_hint = _coerce_int(body.get("leadId") or body.get("lead_id"))
+    ts_fallback = int(time.time() * 1000)
+    lead_id_value = lead_hint
+    if provider == "telegram":
+        if telegram_user_id is not None:
+            lead_id_value = telegram_user_id
+        elif peer_id is not None:
+            lead_id_value = peer_id
+    if lead_id_value in (None, 0):
+        lead_id_value = ts_fallback
+    lead_id = int(lead_id_value)
+
+    channel = provider or "whatsapp"
+    logger.info(
+        "webhook_received channel=%s tenant=%s lead_id=%s message_id=%s",
+        channel,
+        tenant,
+        lead_id,
+        message_id or "",
+    )
+
     if not text and provider != "telegram":
         return _ok({"skipped": True, "reason": "no_text"})
 
@@ -193,7 +225,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         return _ok({"skipped": True, "reason": "duplicate"})
 
     stored_incoming = False
-    channel = provider or "whatsapp"
     ts_ms = int(time.time() * 1000)
     from_addr = ""
     to_addr = ""
@@ -250,15 +281,27 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     contact_id = 0
     try:
-        await upsert_lead(
+        resolved_lead = await upsert_lead(
             lead_id,
             channel=provider or "whatsapp",
             tenant_id=tenant,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
+            peer_id=peer_id,
         )
-    except Exception:
-        pass
+        logger.info(
+            "lead_upsert_ok tenant=%s lead_id=%s resolved=%s",
+            tenant,
+            lead_id,
+            resolved_lead,
+        )
+    except Exception as exc:
+        logger.warning(
+            "lead_upsert_err:db_error tenant=%s lead_id=%s message_in_lead_upsert_fail reason=%s",
+            tenant,
+            lead_id,
+            exc,
+        )
 
     try:
         contact_id = await resolve_or_create_contact(

@@ -137,6 +137,21 @@ def _tg_make_url(path: str) -> str:
     return f"{_tg_base_url()}{path}"
 
 
+_TG_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def _tg_admin_headers() -> dict[str, str]:
+    token = getattr(settings, "ADMIN_TOKEN", "") or ""
+    return {"X-Admin-Token": token}
+
+
+def _tg_client() -> httpx.AsyncClient:
+    global _TG_HTTP_CLIENT
+    if _TG_HTTP_CLIENT is None or _TG_HTTP_CLIENT.is_closed:
+        _TG_HTTP_CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    return _TG_HTTP_CLIENT
+
+
 async def _tg_call(
     method: str,
     path: str,
@@ -145,21 +160,21 @@ async def _tg_call(
     json: Mapping[str, Any] | None = None,
     timeout: float = 5,
     route: str | None = None,
+    peer: Any | None = None,
 ) -> tuple[int, httpx.Response]:
     url = _tg_make_url(path)
-    headers: dict[str, str] = {}
-    admin_token = getattr(settings, "ADMIN_TOKEN", "")
-    headers["X-Admin-Token"] = admin_token or ""
+    base_headers = _tg_admin_headers()
     request_kwargs: dict[str, Any] = {
         "params": dict(params or {}),
-        "headers": headers,
+        "headers": base_headers,
         "follow_redirects": False,
+        "timeout": httpx.Timeout(timeout),
     }
     if json is not None:
         request_kwargs["json"] = dict(json)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-            response = await client.request(method.upper(), url, **request_kwargs)
+        client = _tg_client()
+        response = await client.request(method.upper(), url, **request_kwargs)
     except httpx.HTTPError as exc:  # pragma: no cover - network failures
         detail = str(exc)
         logger.warning(
@@ -171,11 +186,18 @@ async def _tg_call(
         raise TgWorkerCallError(url, detail) from exc
 
     status_code = int(getattr(response, "status_code", 0) or 0)
-    log_args = (route or path, url, status_code)
+    peer_info = "-" if peer is None else str(peer)
+    log_args = (route or path, url, status_code, peer_info)
     if status_code == 401:
-        logger.warning("event=tg_proxy_response route=%s url=%s status=%s unauthorized", *log_args)
+        logger.warning(
+            "event=tg_proxy_response route=%s url=%s status=%s peer=%s unauthorized",
+            *log_args,
+        )
     else:
-        logger.info("event=tg_proxy_response route=%s url=%s status=%s", *log_args)
+        logger.info(
+            "event=tg_proxy_response route=%s url=%s status=%s peer=%s",
+            *log_args,
+        )
     return status_code, response
 
 
@@ -730,6 +752,7 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
             tenant_id=tenant,
             telegram_user_id=telegram_user_id if telegram_user_id > 0 else None,
             telegram_username=telegram_username,
+            peer_id=telegram_user_id if telegram_user_id > 0 else None,
         )
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("upsert_lead").inc()
