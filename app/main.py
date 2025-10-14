@@ -175,6 +175,12 @@ async def send_transport_message(message: TransportMessage) -> JSONResponse:
         raise HTTPException(status_code=400, detail="channel_unknown")
 
     payload = transport_message_asdict(message)
+    transport_logger.info(
+        "event=message_out stage=dispatch_request channel=%s tenant=%s endpoint=%s",
+        message.channel,
+        message.tenant,
+        endpoint,
+    )
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
             response = await client.post(endpoint, json=payload)

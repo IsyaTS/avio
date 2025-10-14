@@ -99,7 +99,12 @@ def _resolve_webhook_url() -> tuple[str, Optional[str]]:
     if explicit:
         url = explicit.rstrip("/")
     else:
-        base = os.getenv("TG_WEBHOOK_URL") or os.getenv("APP_INTERNAL_URL") or "http://app:8000"
+        base = (
+            os.getenv("TG_WEBHOOK_URL")
+            or os.getenv("APP_BASE_URL")
+            or os.getenv("APP_INTERNAL_URL")
+            or "http://app:8000"
+        )
         url = f"{base.rstrip('/')}/webhook/provider"
     token = os.getenv("WEBHOOK_SECRET") or None
     if token:
@@ -205,7 +210,9 @@ def create_app() -> FastAPI:
             return "authorized"
         if entry.state == "need_2fa":
             return "need_2fa"
-        if entry.state in {"waiting_qr", "waiting"}:
+        if entry.state == "waiting_qr":
+            return "need_qr"
+        if entry.state == "waiting":
             return "waiting"
         return "need_qr"
 

@@ -39,21 +39,33 @@ def test_pub_start_produces_qr_id(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)
     captured: dict[str, object] = {}
 
-    async def _fake_post(path: str, payload: dict, timeout: float = 5.0):
-        captured["path"] = path
-        captured["payload"] = payload
-        captured["timeout"] = timeout
-        return httpx.Response(
+    async def _fake_call(
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+        timeout: float = 5.0,
+    ):
+        captured.update({
+            "method": method,
+            "path": path,
+            "payload": json,
+            "params": params,
+            "timeout": timeout,
+        })
+        return 200, httpx.Response(
             200,
             json={
                 "state": "need_qr",
                 "authorized": False,
                 "qr_id": "abc123",
+                "qr_url": "https://example.test/pub/tg/qr.png?qr_id=abc123",
                 "expires_at": 1700000000,
             },
         )
 
-    monkeypatch.setattr(public_module.C, "tg_post", _fake_post)
+    monkeypatch.setattr(public_module, "_tg_call", _fake_call)
 
     client = TestClient(app)
     response = client.get("/pub/tg/start", params={"tenant": 1, "k": "public-key"})
@@ -62,23 +74,43 @@ def test_pub_start_produces_qr_id(monkeypatch: pytest.MonkeyPatch):
     payload = response.json()
     assert payload["qr_id"] == "abc123"
     assert payload["qr_url"].endswith("qr_id=abc123")
-    assert captured == {"path": "/qr/start", "payload": {"tenant": 1}, "timeout": 5.0}
+    assert captured == {
+        "method": "POST",
+        "path": "/qr/start",
+        "payload": {"tenant": 1},
+        "params": None,
+        "timeout": 5.0,
+    }
 
 
 def test_pub_qr_png_proxy(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)
     captured: dict[str, object] = {}
 
-    async def _fake_get(
-        path: str, payload: dict | None = None, timeout: float = 5.0, stream: bool = False
+    async def _fake_call(
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+        timeout: float = 5.0,
     ):
-        captured["path"] = path
-        captured["payload"] = payload
-        captured["timeout"] = timeout
-        captured["stream"] = stream
-        return httpx.Response(200, content=b"png-bytes", headers={"Content-Type": "image/png"})
+        captured.update(
+            {
+                "method": method,
+                "path": path,
+                "params": params,
+                "payload": json,
+                "timeout": timeout,
+            }
+        )
+        return 200, httpx.Response(
+            200,
+            content=b"png-bytes",
+            headers={"Content-Type": "image/png"},
+        )
 
-    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
+    monkeypatch.setattr(public_module, "_tg_call", _fake_call)
 
     client = TestClient(app)
     response = client.get(
@@ -90,25 +122,36 @@ def test_pub_qr_png_proxy(monkeypatch: pytest.MonkeyPatch):
     assert response.content == b"png-bytes"
     assert response.headers.get("content-type") == "image/png"
     assert captured == {
+        "method": "GET",
         "path": "/qr/png",
-        "payload": {"tenant": 2, "qr_id": "abc123"},
+        "payload": None,
+        "params": {"tenant": 2, "qr_id": "abc123"},
         "timeout": 5.0,
-        "stream": True,
     }
 
 
 def test_pub_status_proxy(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)
 
-    async def _fake_get(
-        path: str, payload: dict | None = None, timeout: float = 5.0, stream: bool = False
+    async def _fake_call(
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+        timeout: float = 5.0,
     ):
-        return httpx.Response(
+        return 200, httpx.Response(
             200,
-            json={"state": "need_qr", "authorized": False, "qr_id": "abc123"},
+            json={
+                "state": "need_qr",
+                "authorized": False,
+                "qr_id": "abc123",
+                "qr_url": "https://example.test/pub/tg/qr.png?qr_id=abc123",
+            },
         )
 
-    monkeypatch.setattr(public_module.C, "tg_get", _fake_get)
+    monkeypatch.setattr(public_module, "_tg_call", _fake_call)
 
     client = TestClient(app)
     response = client.get("/pub/tg/status", params={"tenant": 4, "k": "public-key"})
