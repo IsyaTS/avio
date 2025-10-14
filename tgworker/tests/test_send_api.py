@@ -14,6 +14,7 @@ from tgworker.manager import NotAuthorizedError
 def tgworker_app(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TELEGRAM_API_ID", "1")
     monkeypatch.setenv("TELEGRAM_API_HASH", "hash")
+    monkeypatch.setattr("tgworker.api.ADMIN_TOKEN", "test-token")
     monkeypatch.setattr(
         "tgworker.api.telegram_config",
         lambda: SimpleNamespace(
@@ -109,6 +110,7 @@ def test_send_defaults_channel(tgworker_app):
     response = client.post(
         "/send",
         json={"tenant": 1, "channel": "telegram", "to": 123456, "text": "ping"},
+        headers={"X-Admin-Token": "test-token"},
     )
     assert response.status_code == 200
     payload = response.json()
@@ -123,6 +125,7 @@ def test_send_to_me_resolves_self_peer(tgworker_app):
     response = client.post(
         "/send",
         json={"tenant": 1, "channel": "telegram", "to": "me", "text": "hello"},
+        headers={"X-Admin-Token": "test-token"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -136,6 +139,7 @@ def test_send_to_me_not_authorized(tgworker_app):
     response = client.post(
         "/send",
         json={"tenant": 1, "channel": "telegram", "to": "me", "text": "hello"},
+        headers={"X-Admin-Token": "test-token"},
     )
     assert response.status_code == 409
     assert response.json() == {"error": "not_authorized"}
@@ -143,8 +147,16 @@ def test_send_to_me_not_authorized(tgworker_app):
 
 def test_session_logout_aliases(tgworker_app):
     client, manager = tgworker_app
-    first = client.post("/session/logout", json={"tenant": 1})
-    second = client.post("/session/logout", json={"tenant_id": 2, "force": True})
+    first = client.post(
+        "/session/logout",
+        json={"tenant": 1},
+        headers={"X-Admin-Token": "test-token"},
+    )
+    second = client.post(
+        "/session/logout",
+        json={"tenant_id": 2, "force": True},
+        headers={"X-Admin-Token": "test-token"},
+    )
     assert first.status_code == 200
     assert second.status_code == 200
     assert manager.logout_calls == [(1, False), (2, True)]

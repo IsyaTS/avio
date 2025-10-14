@@ -90,4 +90,13 @@ class MessageIn(BaseModel):
     provider_raw: Dict[str, Any] = Field(default_factory=dict)
 
 
-__all__ = ["Attachment", "TransportMessage", "MessageIn"]
+class PingEvent(BaseModel):
+    """Minimal diagnostic ping event."""
+
+    event: str = Field(default="ping", pattern=r"^ping$")
+    tenant: int | None = Field(default=None, ge=1)
+    channel: str | None = Field(default=None, min_length=1)
+    ts: int | None = Field(default=None, ge=0)
+
+
+__all__ = ["Attachment", "TransportMessage", "MessageIn", "PingEvent"]

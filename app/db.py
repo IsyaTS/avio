@@ -360,12 +360,22 @@ async def upsert_lead(
     existing: Optional[Dict[str, Any]] = None
     if telegram_val > 0:
         existing = await _fetchrow(
-            "SELECT id, lead_id FROM leads WHERE tenant_id = $1 AND telegram_user_id = $2",
+            "SELECT lead_id, tenant_id FROM leads WHERE tenant_id = $1 AND telegram_user_id = $2",
             tenant_val,
             telegram_val,
         )
     if existing is None and lead_val > 0:
-        existing = await _fetchrow("SELECT id, lead_id FROM leads WHERE lead_id = $1", lead_val)
+        if tenant_val > 0:
+            existing = await _fetchrow(
+                "SELECT lead_id, tenant_id FROM leads WHERE tenant_id = $1 AND lead_id = $2",
+                tenant_val,
+                lead_val,
+            )
+        else:
+            existing = await _fetchrow(
+                "SELECT lead_id, tenant_id FROM leads WHERE lead_id = $1 LIMIT 1",
+                lead_val,
+            )
 
     if existing is not None:
         existing_lead = existing.get("lead_id")
@@ -374,6 +384,12 @@ async def upsert_lead(
         except Exception:
             existing_lead_val = 0
         new_lead_val = lead_val if lead_val > 0 else existing_lead_val
+        existing_tenant = existing.get("tenant_id")
+        try:
+            existing_tenant_val = int(existing_tenant) if existing_tenant is not None else 0
+        except Exception:
+            existing_tenant_val = 0
+        target_tenant = existing_tenant_val if existing_tenant_val > 0 else tenant_val
         await _exec(
             """
             UPDATE leads
@@ -388,15 +404,16 @@ async def upsert_lead(
                 telegram_username = COALESCE(NULLIF($6, ''), telegram_username),
                 lead_id = CASE WHEN $7 > 0 THEN $7 ELSE lead_id END,
                 updated_at = now()
-            WHERE id = $1;
+            WHERE tenant_id = $1 AND lead_id = $8;
         """,
-            existing["id"],
+            target_tenant,
             channel_val,
             source_real_id,
             tenant_val,
             telegram_val,
             username_val,
             new_lead_val,
+            existing_lead_val,
         )
         return new_lead_val or existing_lead_val
 
@@ -405,7 +422,7 @@ async def upsert_lead(
         """
         INSERT INTO leads(lead_id, channel, source_real_id, tenant_id, telegram_user_id, telegram_username)
         VALUES($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (lead_id)
+        ON CONFLICT (tenant_id, lead_id)
         DO UPDATE SET channel = EXCLUDED.channel,
                       source_real_id = COALESCE(EXCLUDED.source_real_id, leads.source_real_id),
                       tenant_id = CASE

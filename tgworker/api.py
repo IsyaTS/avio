@@ -246,6 +246,27 @@ def create_app() -> FastAPI:
         "Expires": "0",
     }
 
+    def _unauthorized_response(route: str, tenant: int | None = None) -> JSONResponse:
+        logger.warning("event=admin_token_invalid route=%s tenant=%s", route, tenant)
+        return JSONResponse(
+            {"error": "not_authorized"},
+            status_code=401,
+            headers=dict(NO_STORE_HEADERS),
+        )
+
+    def _enforce_admin(
+        request: Request,
+        route: str,
+        *,
+        tenant: int | None = None,
+    ) -> JSONResponse | None:
+        if not ADMIN_TOKEN:
+            return None
+        header = request.headers.get("X-Admin-Token", "").strip()
+        if not header or header != ADMIN_TOKEN:
+            return _unauthorized_response(route, tenant)
+        return None
+
     def _tenant_lock(tenant: int) -> asyncio.Lock:
         lock = tenant_locks.get(tenant)
         if lock is None:
@@ -633,8 +654,11 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/status")
-    async def status(tenant_params: TenantQuery = Depends()):
+    async def status(request: Request, tenant_params: TenantQuery = Depends()):
         tenant = tenant_params.tenant
+        unauthorized = _enforce_admin(request, "/status", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
         lock = _tenant_lock(tenant)
         async with lock:
             entry = await _refresh_pending(tenant)
@@ -642,7 +666,14 @@ def create_app() -> FastAPI:
             return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/start")
-    async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
+    async def start_session(
+        request: Request,
+        payload: StartRequest,
+        _: None = Depends(require_credentials),
+    ):
+        unauthorized = _enforce_admin(request, "/session/start", tenant=payload.tenant)
+        if unauthorized is not None:
+            return unauthorized
         if not payload.force:
             current = await manager.get_status(payload.tenant)
             if current.twofa_pending or current.needs_2fa:
@@ -652,7 +683,10 @@ def create_app() -> FastAPI:
         return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
     @app.post("/rpc/start")
-    async def rpc_start(payload: StartRequest):
+    async def rpc_start(request: Request, payload: StartRequest):
+        unauthorized = _enforce_admin(request, "/rpc/start", tenant=payload.tenant)
+        if unauthorized is not None:
+            return unauthorized
         snapshot = await manager.start_session(payload.tenant, force=payload.force)
         body = {
             "status": snapshot.status,
@@ -662,13 +696,23 @@ def create_app() -> FastAPI:
         return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
 
     @app.post("/session/restart")
-    async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
+    async def restart_session(
+        request: Request,
+        payload: RestartRequest,
+        _: None = Depends(require_credentials),
+    ):
+        unauthorized = _enforce_admin(request, "/session/restart", tenant=payload.tenant)
+        if unauthorized is not None:
+            return unauthorized
         snapshot = await manager.start_session(payload.tenant, force=True)
         return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
     @app.get("/session/status")
-    async def session_status(tenant_params: TenantQuery = Depends()):
+    async def session_status(request: Request, tenant_params: TenantQuery = Depends()):
         tenant = tenant_params.tenant
+        unauthorized = _enforce_admin(request, "/session/status", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
@@ -676,8 +720,11 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
 
     @app.get("/rpc/status")
-    async def rpc_status(tenant_params: TenantQuery = Depends()):
+    async def rpc_status(request: Request, tenant_params: TenantQuery = Depends()):
         tenant = tenant_params.tenant
+        unauthorized = _enforce_admin(request, "/rpc/status", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
@@ -686,9 +733,14 @@ def create_app() -> FastAPI:
 
     @app.get("/rpc/qr.png")
     async def rpc_qr_png(
-        tenant_params: TenantQuery = Depends(), qr_id: str = Query(..., min_length=1)
+        request: Request,
+        tenant_params: TenantQuery = Depends(),
+        qr_id: str = Query(..., min_length=1),
     ):
         tenant = tenant_params.tenant
+        unauthorized = _enforce_admin(request, "/rpc/qr.png", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
         try:
             blob = manager.get_qr_png(qr_id, tenant=tenant)
         except QRExpiredError:
@@ -707,7 +759,10 @@ def create_app() -> FastAPI:
         return Response(content=blob, media_type="image/png", headers=headers)
 
     @app.get("/session/qr/{qr_id}.png")
-    async def session_qr(qr_id: str):
+    async def session_qr(request: Request, qr_id: str):
+        unauthorized = _enforce_admin(request, "/session/qr.png")
+        if unauthorized is not None:
+            return unauthorized
         try:
             blob = manager.get_qr_png(qr_id)
         except QRExpiredError as exc:
@@ -718,7 +773,10 @@ def create_app() -> FastAPI:
         return Response(content=blob, media_type="image/png", headers=headers)
 
     @app.get("/session/qr/{qr_id}.txt")
-    async def session_qr_txt(qr_id: str):
+    async def session_qr_txt(request: Request, qr_id: str):
+        unauthorized = _enforce_admin(request, "/session/qr.txt")
+        if unauthorized is not None:
+            return unauthorized
         try:
             login_url = manager.get_qr_url(qr_id)
         except QRExpiredError as exc:
@@ -729,7 +787,10 @@ def create_app() -> FastAPI:
         return PlainTextResponse(login_url, headers=headers)
 
     @app.post("/session/logout")
-    async def session_logout(payload: LogoutRequest = Body(...)):
+    async def session_logout(request: Request, payload: LogoutRequest = Body(...)):
+        unauthorized = _enforce_admin(request, "/session/logout", tenant=payload.tenant)
+        if unauthorized is not None:
+            return unauthorized
         await manager.logout(payload.tenant, force=payload.force)
         return JSONResponse({"ok": True}, headers=dict(NO_STORE_HEADERS))
 
@@ -742,7 +803,10 @@ def create_app() -> FastAPI:
         return JSONResponse(body, status_code=status_code, headers=headers)
 
     @app.post("/session/password")
-    async def session_password(payload: PasswordRequest):
+    async def session_password(request: Request, payload: PasswordRequest):
+        unauthorized = _enforce_admin(request, "/session/password", tenant=payload.tenant)
+        if unauthorized is not None:
+            return unauthorized
         try:
             result = await manager.submit_password(
                 payload.tenant, payload.password.get_secret_value()
@@ -760,7 +824,10 @@ def create_app() -> FastAPI:
         return _password_response(result)
 
     @app.post("/rpc/twofa.submit")
-    async def rpc_twofa_submit(payload: PasswordRequest):
+    async def rpc_twofa_submit(request: Request, payload: PasswordRequest):
+        unauthorized = _enforce_admin(request, "/rpc/twofa.submit", tenant=payload.tenant)
+        if unauthorized is not None:
+            return unauthorized
         try:
             result = await manager.submit_password(
                 payload.tenant, payload.password.get_secret_value()
@@ -832,10 +899,14 @@ def create_app() -> FastAPI:
         _: None = Depends(require_credentials),
     ):
         headers = dict(NO_STORE_HEADERS)
-
-        admin_header = request.headers.get("X-Admin-Token", "").strip()
-        if not admin_header or admin_header != ADMIN_TOKEN:
-            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=headers)
+        tenant_hint: int | None = None
+        try:
+            tenant_hint = int(raw_payload.get("tenant"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            tenant_hint = None
+        unauthorized = _enforce_admin(request, "/send", tenant=tenant_hint)
+        if unauthorized is not None:
+            return unauthorized
 
         def _error(status: int, message: str) -> JSONResponse:
             return JSONResponse({"error": message}, status_code=status, headers=headers)
@@ -1106,6 +1177,11 @@ def create_app() -> FastAPI:
                     headers=headers,
                 )
             if error_value == "not_authorized":
+                logger.warning(
+                    "event=send_message_not_authorized route=/send tenant=%s peer=%s",
+                    payload.tenant,
+                    payload.to,
+                )
                 return JSONResponse({"error": "not_authorized"}, status_code=401, headers=headers)
             if error_value == "send_failed":
                 detail = {
