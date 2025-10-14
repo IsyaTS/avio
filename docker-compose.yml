@@ -27,6 +27,7 @@ services:
       TENANTS_DIR: /app/tenants
       TG_SESSIONS_DIR: /app/tg-sessions
       TG_WORKER_URL: http://tgworker:9000
+      TGWORKER_BASE_URL: http://tgworker:9000
       PUBLIC_KEY: ${PUBLIC_KEY}
       PYTHONPATH: /app
     depends_on: [redis, postgres]
@@ -164,7 +165,7 @@ services:
     restart: unless-stopped
     expose: ["9000"]
     healthcheck:
-      test: ["CMD","curl","-fsS","http://localhost:9000/openapi.json"]
+      test: ["CMD-SHELL","curl -f http://127.0.0.1:9000/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

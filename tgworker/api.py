@@ -205,6 +205,8 @@ def create_app() -> FastAPI:
             return "authorized"
         if entry.state == "need_2fa":
             return "need_2fa"
+        if entry.state in {"waiting_qr", "waiting"}:
+            return "waiting"
         return "need_qr"
 
     def _entry_payload(
