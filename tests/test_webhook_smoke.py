@@ -50,7 +50,12 @@ def test_webhook_smoke_and_outgoing(
     assert redis_stub.items, "webhook payload was not stored"
     key, raw_payload = redis_stub.items[0]
     assert key == public_module.INBOX_MESSAGE_KEY
-    json.loads(raw_payload)
+    stored_payload = json.loads(raw_payload)
+    assert isinstance(stored_payload["ts"], int)
+    provider_raw = stored_payload.get("provider_raw", {})
+    assert isinstance(provider_raw, dict)
+    assert provider_raw.get("date") == "2024-05-01T12:00:00Z"
+    assert provider_raw.get("nested", {}).get("edit_date") == "2024-05-01T12:05:00Z"
 
     captured: dict[str, Any] = {"calls": []}
 

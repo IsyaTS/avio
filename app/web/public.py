@@ -1119,6 +1119,9 @@ def _truthy_flag(value: Any) -> bool:
     return False
 
 
+WA_ENABLED = _truthy_flag(os.getenv("WA_ENABLED"))
+
+
 def _coerce_body_bytes(body: Any) -> bytes:
     if isinstance(body, (bytes, bytearray)):
         return bytes(body)
@@ -1134,6 +1137,8 @@ def _coerce_body_bytes(body: Any) -> bytes:
 
 @router.get("/pub/wa/qr.svg")
 def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
+    if not WA_ENABLED:
+        return JSONResponse({"error": "wa_disabled"}, status_code=503)
     ok = _ensure_valid_qr_request(tenant, k)
     if ok is None:
         return JSONResponse({"error": "invalid_key"}, status_code=401)
@@ -1632,6 +1637,8 @@ async def tg_logout(
 
 @router.get("/pub/wa/qr.png")
 def wa_qr_png(tenant: int | str | None = None, k: str | None = None):
+    if not WA_ENABLED:
+        return JSONResponse({"error": "wa_disabled"}, status_code=503)
     ok = _ensure_valid_qr_request(tenant, k)
     if ok is None:
         return JSONResponse({"error": "invalid_key"}, status_code=401)

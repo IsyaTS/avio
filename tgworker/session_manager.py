@@ -151,8 +151,8 @@ class SessionManager:
         state = await self._manager.hard_reset(tenant_id)
         return SessionSnapshot.from_state(state)
 
-    async def logout(self, tenant_id: int) -> None:
-        await self._manager.logout(tenant_id)
+    async def logout(self, tenant_id: int, *, force: bool = False) -> None:
+        await self._manager.logout(tenant_id, force=force)
 
     async def submit_password(self, tenant_id: int, password: str) -> TwoFASubmitResult:
         return await self._manager.submit_password(tenant_id, password)
@@ -176,8 +176,8 @@ class SessionManager:
         username: str | None = None,
         attachments: list[Dict[str, Any]] | None = None,
         reply_to: str | None = None,
-    ) -> None:
-        await self._manager.send_message(
+    ) -> dict[str, int | None]:
+        return await self._manager.send_message(
             tenant=tenant,
             text=text,
             peer_id=peer_id,

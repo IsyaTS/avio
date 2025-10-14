@@ -8,12 +8,25 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, ValidationError
+try:  # pragma: no cover - pydantic v1/v2 compatibility
+    from pydantic import ConfigDict
+except ImportError:  # pragma: no cover - pydantic v1
+    ConfigDict = None  # type: ignore[misc]
+try:  # pragma: no cover - optional validator APIs
+    from pydantic import model_validator
+except ImportError:  # pragma: no cover - pydantic v1
+    model_validator = None  # type: ignore[assignment]
+try:  # pragma: no cover - optional validator APIs
+    from pydantic import root_validator
+except ImportError:  # pragma: no cover - pydantic v2
+    root_validator = None  # type: ignore[assignment]
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 
 from config import telegram_config
+from app.lib.transport_utils import ensure_transport_message
 from app.schemas import TransportMessage
 
 from .session_manager import (
@@ -66,31 +79,93 @@ class PendingEntry:
         return self.expires_at is not None and self.expires_at <= time.time()
 
 
-class QRStartRequest(BaseModel):
+if ConfigDict is None:
+
+    class _TenantModel(BaseModel):
+        class Config:
+            allow_population_by_field_name = True
+            allow_population_by_alias = True
+
+        @classmethod
+        def _ensure_tenant(cls, values: dict[str, Any]) -> dict[str, Any]:
+            if "tenant" not in values and "tenant_id" in values:
+                values = dict(values)
+                values["tenant"] = values.pop("tenant_id")
+            return values
+
+        if model_validator is not None:  # pragma: no branch - prefer v2 API
+
+            @model_validator(mode="before")
+            def _alias_tenant(cls, values: Any) -> Any:
+                if isinstance(values, dict):
+                    return cls._ensure_tenant(values)
+                return values
+        elif root_validator is not None:  # pragma: no branch - fallback for v1
+
+            @root_validator(pre=True)
+            def _alias_tenant(cls, values: dict[str, Any]) -> dict[str, Any]:
+                return cls._ensure_tenant(values)
+
+else:  # pragma: no cover - executed only on pydantic v2
+
+    class _TenantModel(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
+
+        @classmethod
+        def _ensure_tenant(cls, values: dict[str, Any]) -> dict[str, Any]:
+            if isinstance(values, dict) and "tenant" not in values and "tenant_id" in values:
+                data = dict(values)
+                data["tenant"] = data.pop("tenant_id")
+                return data
+            return values
+
+        if model_validator is not None:  # pragma: no branch - optional
+
+            @model_validator(mode="before")
+            def _alias_tenant(cls, values: Any) -> Any:
+                if isinstance(values, dict):
+                    return cls._ensure_tenant(values)
+                return values
+        elif root_validator is not None:  # pragma: no branch - fallback
+
+            @root_validator(pre=True)
+            def _alias_tenant(cls, values: dict[str, Any]) -> dict[str, Any]:
+                return cls._ensure_tenant(values)
+
+
+class TenantBody(_TenantModel):
     tenant: int = Field(..., ge=1)
+
+
+class TenantForceBody(TenantBody):
     force: bool = False
 
 
-class StartRequest(BaseModel):
-    tenant_id: int = Field(..., ge=1)
+class TenantQuery(TenantBody):
+    pass
+
+
+class QRStartRequest(TenantForceBody):
+    pass
+
+
+class StartRequest(TenantForceBody):
+    pass
+
+
+class RestartRequest(TenantBody):
+    pass
+
+
+class LogoutRequest(TenantBody):
     force: bool = False
 
 
-class RestartRequest(BaseModel):
-    tenant_id: int = Field(..., ge=1)
-
-
-class LogoutRequest(BaseModel):
-    tenant_id: int = Field(..., ge=1)
-
-
-class PasswordRequest(BaseModel):
-    tenant_id: int = Field(..., ge=1)
+class PasswordRequest(TenantBody):
     password: SecretStr
 
 
-class TwoFARequest(BaseModel):
-    tenant: int = Field(..., ge=1)
+class TwoFARequest(TenantBody):
     password: SecretStr
 
 
@@ -407,8 +482,9 @@ def create_app() -> FastAPI:
 
     @app.get("/qr/png")
     async def qr_png(
-        tenant: int = Query(..., ge=1), qr_id: str = Query(..., min_length=1)
+        tenant_params: TenantQuery = Depends(), qr_id: str = Query(..., min_length=1)
     ):
+        tenant = tenant_params.tenant
         lock = _tenant_lock(tenant)
         async with lock:
             entry = await _refresh_pending(tenant)
@@ -526,7 +602,8 @@ def create_app() -> FastAPI:
             )
 
     @app.get("/status")
-    async def status(tenant: int = Query(..., ge=1)):
+    async def status(tenant_params: TenantQuery = Depends()):
+        tenant = tenant_params.tenant
         lock = _tenant_lock(tenant)
         async with lock:
             entry = await _refresh_pending(tenant)
@@ -536,16 +613,16 @@ def create_app() -> FastAPI:
     @app.post("/session/start")
     async def start_session(payload: StartRequest, _: None = Depends(require_credentials)):
         if not payload.force:
-            current = await manager.get_status(payload.tenant_id)
+            current = await manager.get_status(payload.tenant)
             if current.twofa_pending or current.needs_2fa:
                 return JSONResponse(current.to_payload(), headers=dict(NO_STORE_HEADERS))
 
-        snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
+        snapshot = await manager.start_session(payload.tenant, force=payload.force)
         return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
     @app.post("/rpc/start")
     async def rpc_start(payload: StartRequest):
-        snapshot = await manager.start_session(payload.tenant_id, force=payload.force)
+        snapshot = await manager.start_session(payload.tenant, force=payload.force)
         body = {
             "status": snapshot.status,
             "qr_id": snapshot.qr_id,
@@ -555,11 +632,12 @@ def create_app() -> FastAPI:
 
     @app.post("/session/restart")
     async def restart_session(payload: RestartRequest, _: None = Depends(require_credentials)):
-        snapshot = await manager.start_session(payload.tenant_id, force=True)
+        snapshot = await manager.start_session(payload.tenant, force=True)
         return JSONResponse(snapshot.to_payload(), headers=dict(NO_STORE_HEADERS))
 
     @app.get("/session/status")
-    async def session_status(tenant: int = Query(..., ge=1)):
+    async def session_status(tenant_params: TenantQuery = Depends()):
+        tenant = tenant_params.tenant
         session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
@@ -567,8 +645,9 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, headers=dict(NO_STORE_HEADERS))
 
     @app.get("/rpc/status")
-    async def rpc_status(tenant_id: int = Query(..., ge=1)):
-        session_snapshot = await manager.get_status(tenant_id)
+    async def rpc_status(tenant_params: TenantQuery = Depends()):
+        tenant = tenant_params.tenant
+        session_snapshot = await manager.get_status(tenant)
         stats = manager.stats_snapshot()
         payload = session_snapshot.to_payload()
         payload["stats"] = stats
@@ -576,8 +655,9 @@ def create_app() -> FastAPI:
 
     @app.get("/rpc/qr.png")
     async def rpc_qr_png(
-        tenant: int = Query(..., ge=1), qr_id: str = Query(..., min_length=1)
+        tenant_params: TenantQuery = Depends(), qr_id: str = Query(..., min_length=1)
     ):
+        tenant = tenant_params.tenant
         try:
             blob = manager.get_qr_png(qr_id, tenant=tenant)
         except QRExpiredError:
@@ -618,8 +698,8 @@ def create_app() -> FastAPI:
         return PlainTextResponse(login_url, headers=headers)
 
     @app.post("/session/logout")
-    async def session_logout(payload: LogoutRequest):
-        await manager.logout(payload.tenant_id)
+    async def session_logout(payload: LogoutRequest = Body(...)):
+        await manager.logout(payload.tenant, force=payload.force)
         return JSONResponse({"ok": True}, headers=dict(NO_STORE_HEADERS))
 
     def _password_response(result: TwoFASubmitResult) -> JSONResponse:
@@ -634,11 +714,12 @@ def create_app() -> FastAPI:
     async def session_password(payload: PasswordRequest):
         try:
             result = await manager.submit_password(
-                payload.tenant_id, payload.password.get_secret_value()
+                payload.tenant, payload.password.get_secret_value()
             )
         except Exception:
             logger.exception(
-                "stage=password_failed event=password_exception endpoint=session_password"
+                "stage=password_failed event=password_exception route=/session/password tenant=%s",
+                payload.tenant,
             )
             return JSONResponse(
                 {"error": "password_exception"},
@@ -651,11 +732,12 @@ def create_app() -> FastAPI:
     async def rpc_twofa_submit(payload: PasswordRequest):
         try:
             result = await manager.submit_password(
-                payload.tenant_id, payload.password.get_secret_value()
+                payload.tenant, payload.password.get_secret_value()
             )
         except Exception:
             logger.exception(
-                "stage=password_failed event=password_exception endpoint=rpc_twofa_submit"
+                "stage=password_failed event=password_exception route=/rpc/twofa.submit tenant=%s",
+                payload.tenant,
             )
             return JSONResponse(
                 {"error": "password_exception"},
@@ -671,7 +753,7 @@ def create_app() -> FastAPI:
         error = str(body.get("error") or "").strip()
 
         if status_code == 200 and not error:
-            snapshot = await manager.get_status(payload.tenant_id)
+            snapshot = await manager.get_status(payload.tenant)
             return JSONResponse(snapshot.to_payload(), status_code=200, headers=headers)
 
         if error == "password_invalid":
@@ -689,7 +771,7 @@ def create_app() -> FastAPI:
             return JSONResponse(response_body, status_code=409, headers=headers)
 
         if error in {"phone_password_flood", "flood_wait"}:
-            snapshot = await manager.get_status(payload.tenant_id)
+            snapshot = await manager.get_status(payload.tenant)
             response_body = {"error": error}
             retry_after = body.get("retry_after")
             if retry_after is not None:
@@ -704,18 +786,28 @@ def create_app() -> FastAPI:
 
         if error:
             logger.error(
-                "stage=rpc_twofa_submit_error event=%s tenant_id=%s", error, payload.tenant_id
+                "stage=rpc_twofa_submit_error event=%s tenant_id=%s",
+                error,
+                payload.tenant,
             )
             return JSONResponse({"error": error}, status_code=500, headers=headers)
 
         return JSONResponse(body or {"error": "password_exception"}, status_code=500, headers=headers)
 
     @app.post("/send")
-    async def send_message(payload: TransportMessage, _: None = Depends(require_credentials)):
+    async def send_message(
+        raw_payload: dict[str, Any] = Body(...),
+        _: None = Depends(require_credentials),
+    ):
         headers = dict(NO_STORE_HEADERS)
 
         def _error(status: int, message: str) -> JSONResponse:
             return JSONResponse({"ok": False, "error": message}, status_code=status, headers=headers)
+
+        try:
+            payload = ensure_transport_message(raw_payload, default_channel="telegram")
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
         if payload.channel and payload.channel not in {"telegram"}:
             return _error(400, "channel_mismatch")
@@ -751,7 +843,7 @@ def create_app() -> FastAPI:
         ]
 
         try:
-            await manager.send_message(
+            result = await manager.send_message(
                 tenant=payload.tenant,
                 text=payload.text,
                 peer_id=peer_id,
@@ -764,8 +856,25 @@ def create_app() -> FastAPI:
             return _error(400, str(exc))
         except RuntimeError as exc:
             return _error(409, str(exc))
+        except Exception:
+            logger.exception(
+                "event=send_message_failed route=/send tenant=%s", payload.tenant
+            )
+            return _error(500, "send_failed")
 
-        return JSONResponse({"ok": True}, headers=headers)
+        response_payload: dict[str, Any] = {"ok": True}
+        if isinstance(result, dict):
+            peer_value = result.get("peer_id")
+            if isinstance(peer_value, int):
+                response_payload["peer_id"] = peer_value
+            message_id = result.get("message_id")
+            if message_id is not None:
+                try:
+                    response_payload["message_id"] = int(message_id)
+                except (TypeError, ValueError):
+                    pass
+
+        return JSONResponse(response_payload, headers=headers)
 
     @app.get("/health")
     async def health():
