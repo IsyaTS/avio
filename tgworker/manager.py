@@ -46,6 +46,13 @@ except ImportError:  # pragma: no cover - pyrogram not installed
 
 LOGGER = logging.getLogger("tgworker")
 
+SESSION_DIR = Path("/app/tg-sessions")
+LEGACY_DIR = Path("/app/data/tg-sessions")
+
+
+def session_file_path(tenant: int) -> Path:
+    return SESSION_DIR / f"{tenant}.session"
+
 
 QR_LOGIN_TIMEOUT = 120.0
 NEEDS_2FA_TTL = 90.0
@@ -197,7 +204,7 @@ class TelegramSessionManager:
         self,
         api_id: int,
         api_hash: str,
-        sessions_dir: Path,
+        sessions_dir: Path | None,
         webhook_url: str,
         *,
         device_model: str,
@@ -212,15 +219,8 @@ class TelegramSessionManager:
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
-        self._sessions_dir = sessions_dir
+        self._sessions_dir = SESSION_DIR
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        legacy_dir = Path("/app/data/tg-sessions")
-        if legacy_dir.exists() and legacy_dir.resolve() != self._sessions_dir.resolve():
-            LOGGER.warning(
-                "stage=session_dir_legacy_detected active=%s legacy=%s",
-                self._sessions_dir,
-                legacy_dir,
-            )
         LOGGER.info("stage=session_dir_resolved path=%s", self._sessions_dir)
         self._webhook_url = webhook_url.rstrip("/")
         self._webhook_token = (webhook_token or "").strip() or None
@@ -266,12 +266,41 @@ class TelegramSessionManager:
 
     async def _run_bootstrap(self) -> None:
         try:
+            self._migrate_legacy_sessions()
             await self._bootstrap_existing_sessions()
         except Exception:
             LOGGER.exception("stage=bootstrap_failed_unhandled")
         finally:
             self._bootstrap_task = None
             self._bootstrap_ready.set()
+
+    def _migrate_legacy_sessions(self) -> None:
+        if not LEGACY_DIR.exists():
+            return
+        for legacy_path in sorted(LEGACY_DIR.glob("*.session")):
+            tenant = self._tenant_from_path(legacy_path)
+            if tenant is not None:
+                target_path = session_file_path(tenant)
+            else:
+                target_path = SESSION_DIR / legacy_path.name
+            if target_path.exists():
+                continue
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                legacy_path.replace(target_path)
+                tenant = tenant if tenant is not None else self._tenant_from_path(target_path)
+                LOGGER.info(
+                    "stage=session_migrated tenant_id=%s source=%s dest=%s",
+                    tenant if tenant is not None else "unknown",
+                    legacy_path,
+                    target_path,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "stage=session_migrate_failed source=%s dest=%s",
+                    legacy_path,
+                    target_path,
+                )
 
     @staticmethod
     def _qr_valid_until_ms(expires_at: Optional[float]) -> Optional[int]:
@@ -486,7 +515,7 @@ class TelegramSessionManager:
         self._update_metrics()
 
     def _build_client(self, tenant: int) -> TelegramClient:
-        session_path = self._sessions_dir / f"{tenant}.session"
+        session_path = session_file_path(tenant)
         self._ensure_session_permissions(session_path)
         return TelegramClient(
             str(session_path),
@@ -549,7 +578,7 @@ class TelegramSessionManager:
             self._expire_qr_locked(tenant, state, reason=reason, set_error=False)
         removed_session_file = False
         if remove_session_file:
-            path = self._sessions_dir / f"{tenant}.session"
+            path = session_file_path(tenant)
             try:
                 path.unlink()
                 removed_session_file = True
@@ -620,7 +649,7 @@ class TelegramSessionManager:
                 result_state = state
                 need_new_qr = False
             else:
-                session_path = self._sessions_dir / f"{tenant}.session"
+                session_path = session_file_path(tenant)
                 if not force and session_path.exists():
                     client = self._clients.get(tenant)
                     if client is None:
@@ -1344,7 +1373,7 @@ class TelegramSessionManager:
             if session_obj is not None:
                 session_obj.save()
 
-        self._ensure_session_permissions(self._sessions_dir / f"{tenant}.session")
+        self._ensure_session_permissions(session_file_path(tenant))
         LOGGER.info(
             "stage=password_ok event=password_ok tenant_id=%s detail=password_ok",
             tenant,
@@ -1673,7 +1702,7 @@ class TelegramSessionManager:
             self._states[tenant] = state
             self._update_metrics()
             if remove_session:
-                session_path = self._sessions_dir / f"{tenant}.session"
+                session_path = session_file_path(tenant)
 
         if task_to_cancel:
             task_to_cancel.cancel()
@@ -1719,7 +1748,12 @@ class TelegramSessionManager:
         )
 
     async def _handle_authkey_unregistered(
-        self, tenant: int, client: TelegramClient, *, source: str
+        self,
+        tenant: int,
+        client: TelegramClient,
+        *,
+        source: str,
+        remove_session: bool = False,
     ) -> None:
         EVENT_ERRORS.labels("authkey_unregistered").inc()
         removed = await self._soft_disconnect(
@@ -1727,7 +1761,7 @@ class TelegramSessionManager:
             client=client,
             error="authkey_unregistered",
             allow_restart=True,
-            remove_session=False,
+            remove_session=remove_session,
         )
         LOGGER.warning(
             "stage=authkey_unregistered tenant_id=%s source=%s removed_session_file=%s",
@@ -1750,6 +1784,10 @@ class TelegramSessionManager:
             removed,
         )
 
+    async def get_client(self, tenant: int) -> Optional[TelegramClient]:
+        await self.wait_until_ready()
+        return await self._ensure_authorized_client(tenant)
+
     async def send_message(
         self,
         tenant: int,
@@ -1759,11 +1797,23 @@ class TelegramSessionManager:
         username: str | None = None,
         attachments: Optional[list[Dict[str, Any]]] = None,
         reply_to: str | None = None,
-    ) -> dict[str, int | None]:
+    ) -> dict[str, Any]:
         await self.wait_until_ready()
         client = await self._ensure_authorized_client(tenant)
         if client is None:
-            raise RuntimeError("session_not_authorized")
+            return {"error": "not_authorized"}
+
+        try:
+            if not await client.is_user_authorized():
+                return {"error": "not_authorized"}
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant,
+                client,
+                source="send_message_precheck",
+                remove_session=True,
+            )
+            return {"error": "authkey_unregistered"}
 
         entity: Any | None = None
         if peer_id is not None:
@@ -1883,6 +1933,14 @@ class TelegramSessionManager:
                 tenant,
                 target_hint,
             )
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant,
+                client,
+                source="send_message",
+                remove_session=True,
+            )
+            return {"error": "authkey_unregistered"}
         except RPCError as exc:
             EVENT_ERRORS.labels("rpc_error").inc()
             SEND_FAIL_COUNTER.labels("telegram", "rpc_error").inc()
@@ -1906,11 +1964,11 @@ class TelegramSessionManager:
         return {
             "peer_id": int(resolved_peer_id) if resolved_peer_id is not None else None,
             "message_id": int(last_message_id) if last_message_id is not None else None,
+            "error": None,
         }
 
     async def resolve_self_peer(self, tenant: int) -> Any:
-        await self.wait_until_ready()
-        client = await self._ensure_authorized_client(tenant)
+        client = await self.get_client(tenant)
         if client is None:
             raise NotAuthorizedError("session_not_authorized")
 

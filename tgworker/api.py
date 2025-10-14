@@ -218,7 +218,6 @@ def create_app() -> FastAPI:
     manager = SessionManager(
         api_id=cfg.api_id,
         api_hash=cfg.api_hash,
-        sessions_dir=cfg.sessions_dir,
         webhook_url=webhook_url,
         device_model=cfg.device_model,
         system_version=cfg.system_version,
@@ -961,15 +960,37 @@ def create_app() -> FastAPI:
             )
         except ValueError as exc:
             return _error(400, str(exc))
-        except NotAuthorizedError:
-            return _error(409, "not_authorized")
-        except RuntimeError as exc:
-            return _error(409, str(exc))
         except Exception:
             logger.exception(
                 "event=send_message_failed route=/send tenant=%s", payload.tenant
             )
             return _error(500, "send_failed")
+
+        error_value = ""
+        if isinstance(result, dict) and "error" in result:
+            raw_error = result.get("error")
+            if raw_error is not None:
+                error_value = str(raw_error).strip()
+
+        if error_value:
+            if error_value == "authkey_unregistered":
+                headers["X-Reauth"] = "1"
+                headers["Cache-Control"] = NO_STORE_HEADERS.get("Cache-Control", "no-store")
+                headers["Pragma"] = NO_STORE_HEADERS.get("Pragma", "no-cache")
+                headers["Expires"] = NO_STORE_HEADERS.get("Expires", "0")
+                return JSONResponse(
+                    {"error": "relogin_required"},
+                    status_code=409,
+                    headers=headers,
+                )
+            if error_value == "not_authorized":
+                return JSONResponse({"error": "not_authorized"}, status_code=401, headers=headers)
+            logger.error(
+                "event=send_message_unhandled_error route=/send tenant=%s error=%s",
+                payload.tenant,
+                error_value,
+            )
+            return JSONResponse({"error": "send_failed"}, status_code=500, headers=headers)
 
         response_payload: dict[str, Any] = {"ok": True}
         if isinstance(result, dict):

@@ -194,6 +194,27 @@ async def send_transport_message(message: TransportMessage) -> JSONResponse:
         )
         raise HTTPException(status_code=502, detail="worker_unreachable") from exc
 
+    if (
+        response.status_code == 409
+        and response.headers.get("X-Reauth", "").strip() == "1"
+    ):
+        transport_logger.warning(
+            "event=message_out stage=dispatch_reauth channel=%s tenant=%s", 
+            message.channel,
+            message.tenant,
+        )
+        reauth_headers = {
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Reauth": "1",
+        }
+        return JSONResponse(
+            {"ok": False, "state": "need_qr", "error": "relogin_required"},
+            status_code=409,
+            headers=reauth_headers,
+        )
+
     if not (200 <= response.status_code < 300):
         reason = f"status_{response.status_code}"
         SEND_FAIL_COUNTER.labels(message.channel, reason).inc()

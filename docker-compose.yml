@@ -43,19 +43,33 @@ services:
     ports:
     - "0.0.0.0:8000:8000"
   worker:
-    healthcheck:
-      test: ["CMD-SHELL","exit 0"]
-      interval: 30s
-      timeout: 5s
-      retries: 1
     image: avio/app:local
     env_file: .env
     environment:
-      - TENANTS_DIR=/app/tenants
-    depends_on: [redis, postgres, waweb]
+      TENANTS_DIR: /app/tenants
+      PYTHONPATH: /app
+      TG_WORKER_URL: http://tgworker:9000
+      TGWORKER_BASE_URL: http://tgworker:9000
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_started
     working_dir: /app
     command: ["python","-m","app.worker"]
-    restart: unless-stopped
+    restart: on-failure
+    healthcheck:
+      test: [
+        "CMD-SHELL",
+        "python -c 'import socket; socket.create_connection((\"redis\", 6379), 5)'",
+      ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
     volumes:
       - ./data:/data

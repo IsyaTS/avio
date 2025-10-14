@@ -11,6 +11,7 @@ from .manager import (
     TwoFASubmitResult,
     LoginFlowStateSnapshot,
     NotAuthorizedError,
+    SESSION_DIR,
 )
 
 
@@ -97,7 +98,6 @@ class SessionManager:
         self,
         api_id: int,
         api_hash: str,
-        sessions_dir,
         webhook_url: str,
         *,
         device_model: str,
@@ -112,7 +112,7 @@ class SessionManager:
         self._manager = TelegramSessionManager(
             api_id=api_id,
             api_hash=api_hash,
-            sessions_dir=sessions_dir,
+            sessions_dir=SESSION_DIR,
             webhook_url=webhook_url,
             device_model=device_model,
             system_version=system_version,
@@ -177,7 +177,7 @@ class SessionManager:
         username: str | None = None,
         attachments: list[Dict[str, Any]] | None = None,
         reply_to: str | None = None,
-    ) -> dict[str, int | None]:
+    ) -> dict[str, Any]:
         return await self._manager.send_message(
             tenant=tenant,
             text=text,
@@ -189,6 +189,16 @@ class SessionManager:
         )
 
     async def resolve_self_peer(self, tenant_id: int) -> Any:
+        client = await self._manager.get_client(tenant_id)
+        if client is None:
+            raise NotAuthorizedError("session_not_authorized")
+        try:
+            from telethon import TelegramClient  # type: ignore
+            from telethon.tl.types import InputPeerSelf  # type: ignore
+        except Exception:
+            return await self._manager.resolve_self_peer(tenant_id)
+        if isinstance(client, TelegramClient):
+            return InputPeerSelf()
         return await self._manager.resolve_self_peer(tenant_id)
 
 
