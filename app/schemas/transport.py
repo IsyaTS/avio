@@ -82,11 +82,11 @@ class MessageIn(BaseModel):
 
     tenant: int = Field(..., ge=1)
     channel: str = Field(..., pattern=r"^(telegram|whatsapp)$")
-    from_id: Union[int, str]
-    to: Union[int, str]
-    text: str = Field(default="")
+    from_id: int | str | None = None
+    to: int | str | None = None
+    text: str | None = None
     attachments: List[Attachment] = Field(default_factory=list)
-    ts: int = Field(..., ge=0)
+    ts: int | None = None
     provider_raw: Dict[str, Any] = Field(default_factory=dict)
 
 

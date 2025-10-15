@@ -645,9 +645,11 @@ async def insert_message_in(
         return 0
     tenant_val = int(tenant_id or 0)
     try:
-        telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
+        telegram_val = int(telegram_user_id) if telegram_user_id is not None else None
     except Exception:
-        telegram_val = 0
+        telegram_val = None
+    if telegram_val is not None and telegram_val <= 0:
+        telegram_val = None
     row = await _fetchrow(
         """
         INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
@@ -691,9 +693,11 @@ async def insert_message_out(
         return 0
     tenant_val = int(tenant_id or 0)
     try:
-        telegram_val = int(telegram_user_id) if telegram_user_id is not None else 0
+        telegram_val = int(telegram_user_id) if telegram_user_id is not None else None
     except Exception:
-        telegram_val = 0
+        telegram_val = None
+    if telegram_val is not None and telegram_val <= 0:
+        telegram_val = None
     row = await _fetchrow(
         """
         INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)

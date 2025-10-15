@@ -57,6 +57,18 @@ def test_leads_schema_after_upgrade() -> None:
         assert "telegram_user_id" in columns
         assert "telegram_username" in columns
 
+        default_expr = connection.execute(
+            sa.text(
+                """
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_name = 'leads' AND column_name = 'id'
+                """
+            )
+        ).scalar_one_or_none()
+
+        assert default_expr and "nextval" in default_expr
+
         index_defs = connection.execute(
             sa.text(
                 """
@@ -72,5 +84,53 @@ def test_leads_schema_after_upgrade() -> None:
             and "WHERE ((telegram_user_id IS NOT NULL))" in index
             for index in index_defs
         )
+
+        message_columns = connection.execute(
+            sa.text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'messages'
+                ORDER BY ordinal_position
+                """
+            )
+        ).scalars().all()
+        assert "telegram_user_id" in message_columns
+
+        message_indexes = connection.execute(
+            sa.text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema() AND tablename = 'messages'
+                """
+            )
+        ).scalars().all()
+        assert any(
+            "idx_messages_tenant_telegram_user" in index for index in message_indexes
+        )
+
+        contact_columns = connection.execute(
+            sa.text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'contacts'
+                ORDER BY ordinal_position
+                """
+            )
+        ).scalars().all()
+        assert "telegram_user_id" in contact_columns
+
+        contact_indexes = connection.execute(
+            sa.text(
+                """
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE schemaname = current_schema() AND tablename = 'contacts'
+                """
+            )
+        ).scalars().all()
+        assert any("idx_contacts_telegram_user" in index for index in contact_indexes)
 
         command.downgrade(config, "base")

@@ -14,7 +14,12 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 security = HTTPBasic()
 
-DB = os.getenv("OPS_DB_URL") or os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or "postgresql://postgres:postgres@postgres:5432/postgres"
+DB = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("OPS_DB_URL")
+    or os.getenv("POSTGRES_URL")
+    or "postgresql://postgres:postgres@postgres:5432/postgres"
+)
 REDIS_URL = os.getenv("REDIS_URL","redis://redis:6379/0")
 OPS_USER = os.getenv("OPS_USER","admin")
 OPS_PASS = os.getenv("OPS_PASS","admin")

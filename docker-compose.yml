@@ -143,6 +143,7 @@ services:
     environment:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - OPS_DB_URL=${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}
+      - DATABASE_URL=${DATABASE_URL:-${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}}
       - OPS_USER=${OPS_USER:-admin}
       - OPS_PASS=${OPS_PASS:-admin}
     depends_on: [redis, postgres]

@@ -722,11 +722,15 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         )
         return JSONResponse({"ok": True, "event": "ping"})
 
+    ts_candidate = _coerce_int(message.ts)
+    if ts_candidate is None:
+        ts_candidate = int(time.time() * 1000)
+    ts_ms = ts_candidate
     logger.info(
         "event=webhook_received channel=%s tenant=%s ts=%s",
         message.channel,
         message.tenant,
-        message.ts,
+        ts_ms,
     )
 
     tenant = int(message.tenant)
@@ -779,6 +783,44 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         )
         raise HTTPException(status_code=400, detail="invalid_lead")
 
+    text_value = (message.text or "").strip()
+    message_id = ""
+    generated_from_hint = False
+    if isinstance(message.provider_raw, dict):
+        raw_message_id = message.provider_raw.get("message_id") or message.provider_raw.get("id")
+        if raw_message_id:
+            message_id = str(raw_message_id)
+    if not message_id:
+        fallback = lead_hint if lead_hint is not None else ts_ms
+        message_id = str(fallback)
+        generated_from_hint = True
+
+    inbox_event = {
+        "event": "messages.incoming",
+        "tenant": tenant,
+        "lead_id": lead_hint,
+        "message_id": message_id,
+        "channel": channel or "telegram",
+        "text": text_value,
+        "ts": ts_ms,
+        "provider_raw": message.provider_raw or {},
+    }
+    if telegram_user_id is not None:
+        inbox_event["telegram_user_id"] = telegram_user_id
+    if telegram_username:
+        inbox_event["username"] = telegram_username
+    if peer_id is not None:
+        inbox_event["peer_id"] = peer_id
+
+    log_payload = dict(inbox_event)
+    log_payload["attachments"] = len(message.attachments or [])
+    logger.info(
+        "event=webhook_normalized channel=%s tenant=%s payload=%s",
+        channel,
+        tenant,
+        log_payload,
+    )
+
     try:
         lead_id = await upsert_lead(
             lead_hint,
@@ -794,25 +836,10 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         logger.exception("event=message_in_lead_upsert_fail tenant=%s", tenant)
         raise HTTPException(status_code=500, detail="lead_upsert_failed")
 
-    text_value = message.text or ""
-    message_id = ""
-    if isinstance(message.provider_raw, dict):
-        raw_message_id = message.provider_raw.get("message_id") or message.provider_raw.get("id")
-        if raw_message_id:
-            message_id = str(raw_message_id)
-    if not message_id:
-        fallback = lead_id or lead_hint or int(time.time() * 1000)
-        message_id = str(fallback)
-    inbox_event = {
-        "event": "messages.incoming",
-        "tenant": tenant,
-        "lead_id": lead_hint,
-        "message_id": message_id,
-        "channel": channel or "telegram",
-        "text": text_value,
-        "ts": int(time.time() * 1000),
-        "provider_raw": message.provider_raw or {},
-    }
+    if generated_from_hint and lead_id and lead_id != lead_hint:
+        message_id = str(lead_id)
+        inbox_event["message_id"] = message_id
+    inbox_event["lead_id"] = lead_id
     try:
         client = common.redis_client()
     except Exception:

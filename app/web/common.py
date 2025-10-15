@@ -64,6 +64,10 @@ TG_WORKER_URL = tg_worker_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
 
+def _admin_token() -> str:
+    return (getattr(settings, "ADMIN_TOKEN", "") or os.getenv("ADMIN_TOKEN") or "").strip()
+
+
 def _build_tg_url(path: str) -> str:
     if not path:
         return TG_WORKER_URL
@@ -212,6 +216,9 @@ async def tg_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if TG_WORKER_TOKEN:
         headers["X-Auth-Token"] = TG_WORKER_TOKEN
+    admin_token = _admin_token()
+    if admin_token:
+        headers["X-Admin-Token"] = admin_token
     async with httpx.AsyncClient(timeout=timeout) as client:
         return await client.post(url, json=data, headers=headers)
 
@@ -228,6 +235,9 @@ def tg_http(
         req.add_header("Content-Type", "application/json; charset=utf-8")
     if TG_WORKER_TOKEN:
         req.add_header("X-Auth-Token", TG_WORKER_TOKEN)
+    admin_token = _admin_token()
+    if admin_token:
+        req.add_header("X-Admin-Token", admin_token)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
