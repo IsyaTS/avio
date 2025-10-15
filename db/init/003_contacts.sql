@@ -14,7 +14,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_telegram_user ON contacts(telegram_user_
 
 -- Связка лидов из любых каналов с одним контактом
 CREATE TABLE IF NOT EXISTS lead_contacts (
-  lead_id     BIGINT PRIMARY KEY,
+  lead_id     BIGINT PRIMARY KEY REFERENCES leads(id) ON DELETE CASCADE,
   contact_id  BIGINT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
   linked_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -20,11 +20,12 @@ _logger = logging.getLogger("alembic.env")
 
 
 def _require_database_url() -> str:
-    url = os.getenv("DATABASE_URL")
-    if not url:
+    try:
+        url = os.environ["DATABASE_URL"]
+    except KeyError as exc:  # pragma: no cover - defensive guardrail
         message = "DATABASE_URL environment variable is required for Alembic migrations"
         _logger.error(message)
-        raise RuntimeError(message)
+        raise RuntimeError(message) from exc
 
     config.set_main_option("sqlalchemy.url", url)
     return url
