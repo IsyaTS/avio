@@ -17,14 +17,14 @@ _logger = logging.getLogger("alembic.env")
 
 
 def _set_sqlalchemy_url() -> str:
-    explicit_url = os.getenv("DATABASE_URL") or os.getenv("OPS_DB_URL")
+    explicit_url = os.getenv("DATABASE_URL")
     if explicit_url:
         config.set_main_option("sqlalchemy.url", explicit_url)
         return explicit_url
 
     user = os.getenv("POSTGRES_USER")
     password = os.getenv("POSTGRES_PASSWORD")
-    database = os.getenv("POSTGRES_DB")
+    database = os.getenv("POSTGRES_DB") or os.getenv("POSTGRES_DATABASE")
     host = os.getenv("POSTGRES_HOST") or os.getenv("POSTGRES_SERVER") or "postgres"
     port = os.getenv("POSTGRES_PORT") or "5432"
 
@@ -32,10 +32,6 @@ def _set_sqlalchemy_url() -> str:
         dsn = f"postgresql://{user}:{password}@{host}:{port}/{database}"
         config.set_main_option("sqlalchemy.url", dsn)
         return dsn
-
-    existing = config.get_main_option("sqlalchemy.url")
-    if existing:
-        return existing
 
     message = (
         "DATABASE_URL or POSTGRES_* environment variables must be provided "

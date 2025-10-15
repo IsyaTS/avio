@@ -186,7 +186,14 @@ async def _log_alembic_revision_on_startup() -> None:
         return
     try:
         revision = await revision_getter()  # type: ignore[misc]
-    except Exception:
+    except Exception as exc:  # pragma: no cover - startup logging
+        asyncpg_module = getattr(module, "asyncpg", None)
+        undefined_table_error = getattr(asyncpg_module, "UndefinedTableError", None)
+        if undefined_table_error and isinstance(exc, undefined_table_error):
+            logger.info(
+                "alembic_revision=unavailable (alembic_version table missing)"
+            )
+            return
         logger.exception("failed to query Alembic revision")
         return
     if revision:

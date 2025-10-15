@@ -1,5 +1,7 @@
 import os, datetime as dt, logging
 import humanize, psycopg, redis
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import ArgumentError
 from fastapi import FastAPI, Depends, Request, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -14,12 +16,33 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 security = HTTPBasic()
 
-DB = (
-    os.getenv("DATABASE_URL")
-    or os.getenv("OPS_DB_URL")
-    or os.getenv("POSTGRES_URL")
-    or "postgresql://postgres:postgres@postgres:5432/postgres"
-)
+def _load_database_url() -> str:
+    return (
+        os.getenv("DATABASE_URL")
+        or os.getenv("POSTGRES_URL")
+        or "postgresql://postgres:postgres@postgres:5432/postgres"
+    )
+
+
+def _normalize_psycopg_dsn(raw: str) -> str:
+    if not raw:
+        return raw
+    try:
+        url = make_url(raw)
+    except (ArgumentError, ValueError):
+        if raw.startswith("postgresql+") and "://" in raw:
+            scheme, remainder = raw.split("://", 1)
+            base_scheme = scheme.split("+", 1)[0]
+            return f"{base_scheme}://{remainder}"
+        return raw
+    driver = url.drivername or ""
+    if "+" in driver:
+        url = url.set(drivername=driver.split("+", 1)[0])
+    return url.render_as_string(hide_password=False)
+
+
+DB = _load_database_url()
+DB_SYNC_DSN = _normalize_psycopg_dsn(DB)
 REDIS_URL = os.getenv("REDIS_URL","redis://redis:6379/0")
 OPS_USER = os.getenv("OPS_USER","admin")
 OPS_PASS = os.getenv("OPS_PASS","admin")
@@ -30,10 +53,15 @@ _alembic_logger = logging.getLogger("ops.alembic")
 @app.on_event("startup")
 def _log_alembic_revision() -> None:
     try:
-        with psycopg.connect(DB) as conn:
+        with psycopg.connect(DB_SYNC_DSN) as conn:
             cur = conn.cursor()
             cur.execute("SELECT version_num FROM alembic_version LIMIT 1")
             row = cur.fetchone()
+    except psycopg.errors.UndefinedTable:
+        _alembic_logger.info(
+            "alembic_revision=unavailable (alembic_version table missing)"
+        )
+        return
     except Exception:
         _alembic_logger.exception("failed to query Alembic revision")
         return
@@ -149,7 +177,7 @@ def kpis(cur, meta, d0, d1):
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, ok: bool = Depends(auth)):
     d0,d1 = today_bounds()
-    with psycopg.connect(DB) as conn:
+    with psycopg.connect(DB_SYNC_DSN) as conn:
         cur = conn.cursor()
         meta = discover(cur)
         stats = kpis(cur, meta, d0, d1)
@@ -191,7 +219,7 @@ def index(request: Request, ok: bool = Depends(auth)):
 
 @app.get("/lead/{lead_id}", response_class=HTMLResponse)
 def lead_view(lead_id: int, request: Request, ok: bool = Depends(auth)):
-    with psycopg.connect(DB) as conn:
+    with psycopg.connect(DB_SYNC_DSN) as conn:
         cur = conn.cursor()
         meta = discover(cur)
         lead, ts, inc_expr = meta["lead"], meta["ts"], meta["inc_expr"]
@@ -222,7 +250,7 @@ def lead_view(lead_id: int, request: Request, ok: bool = Depends(auth)):
 @app.get("/api/summary")
 def api_summary(ok: bool = Depends(auth)):
     d0,d1 = today_bounds()
-    with psycopg.connect(DB) as conn:
+    with psycopg.connect(DB_SYNC_DSN) as conn:
         cur = conn.cursor()
         meta = discover(cur)
         stats = kpis(cur, meta, d0, d1)

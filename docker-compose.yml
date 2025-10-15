@@ -26,6 +26,7 @@ services:
     environment:
       TENANTS_DIR: /app/tenants
       TG_SESSIONS_DIR: /app/tg-sessions
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
       TG_WORKER_URL: http://tgworker:9000
       TGWORKER_BASE_URL: http://tgworker:9000
       WA_ENABLED: "false"
@@ -144,8 +145,7 @@ services:
     env_file: .env
     environment:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - OPS_DB_URL=${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}
-      - DATABASE_URL=${DATABASE_URL:-${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_DB=${POSTGRES_DB:-postgres}
