@@ -644,12 +644,14 @@ async def insert_message_in(
         _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id)
         return 0
     tenant_val = int(tenant_id or 0)
-    try:
-        telegram_val = int(telegram_user_id) if telegram_user_id is not None else None
-    except Exception:
-        telegram_val = None
-    if telegram_val is not None and telegram_val <= 0:
-        telegram_val = None
+    telegram_val = 0
+    if telegram_user_id is not None:
+        try:
+            telegram_val = int(telegram_user_id)
+        except Exception:
+            telegram_val = 0
+    if telegram_val <= 0:
+        telegram_val = 0
     row = await _fetchrow(
         """
         INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
@@ -692,12 +694,14 @@ async def insert_message_out(
         _offline_append_message(lead_ref, text, direction=1, tenant_id=tenant_id)
         return 0
     tenant_val = int(tenant_id or 0)
-    try:
-        telegram_val = int(telegram_user_id) if telegram_user_id is not None else None
-    except Exception:
-        telegram_val = None
-    if telegram_val is not None and telegram_val <= 0:
-        telegram_val = None
+    telegram_val = 0
+    if telegram_user_id is not None:
+        try:
+            telegram_val = int(telegram_user_id)
+        except Exception:
+            telegram_val = 0
+    if telegram_val <= 0:
+        telegram_val = 0
     row = await _fetchrow(
         """
         INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)

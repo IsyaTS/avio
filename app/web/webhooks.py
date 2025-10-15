@@ -289,19 +289,27 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             telegram_username=telegram_username,
             peer_id=peer_id,
         )
-        logger.info(
-            "lead_upsert_ok tenant=%s lead_id=%s resolved=%s",
-            tenant,
-            lead_id,
-            resolved_lead,
-        )
     except Exception as exc:
-        logger.warning(
-            "lead_upsert_err:db_error tenant=%s lead_id=%s message_in_lead_upsert_fail reason=%s",
+        logger.exception(
+            "lead_upsert_err:db_error tenant=%s lead_id=%s message_in_lead_upsert_fail",
             tenant,
             lead_id,
-            exc,
         )
+        raise HTTPException(status_code=500, detail="lead_upsert_failed") from exc
+
+    if resolved_lead:
+        try:
+            lead_id = int(resolved_lead)
+        except Exception:
+            pass
+        else:
+            normalized_event["lead_id"] = lead_id
+    logger.info(
+        "lead_upsert_ok tenant=%s lead_id=%s resolved=%s",
+        tenant,
+        lead_id,
+        resolved_lead,
+    )
 
     try:
         contact_id = await resolve_or_create_contact(

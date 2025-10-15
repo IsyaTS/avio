@@ -22,7 +22,7 @@ if sa is None or command is None or Config is None:  # pragma: no cover
 
 
 def _alembic_config(database_url: str) -> Config:
-    cfg_path = Path(__file__).resolve().parents[1] / "ops" / "alembic.ini"
+    cfg_path = Path(__file__).resolve().parents[1] / "app" / "ops" / "alembic.ini"
     config = Config(str(cfg_path))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
@@ -56,6 +56,7 @@ def test_leads_schema_after_upgrade() -> None:
         assert "id" in columns
         assert "telegram_user_id" in columns
         assert "telegram_username" in columns
+        assert "lead_id" not in columns
 
         default_expr = connection.execute(
             sa.text(
@@ -96,6 +97,28 @@ def test_leads_schema_after_upgrade() -> None:
             )
         ).scalars().all()
         assert "telegram_user_id" in message_columns
+
+        nullable_flag = connection.execute(
+            sa.text(
+                """
+                SELECT is_nullable
+                FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'telegram_user_id'
+                """
+            )
+        ).scalar_one_or_none()
+        assert nullable_flag == "NO"
+
+        default_expr = connection.execute(
+            sa.text(
+                """
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'telegram_user_id'
+                """
+            )
+        ).scalar_one_or_none()
+        assert default_expr in (None, "")
 
         message_indexes = connection.execute(
             sa.text(
