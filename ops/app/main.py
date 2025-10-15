@@ -1,4 +1,4 @@
-import os, datetime as dt
+import os, datetime as dt, logging
 import humanize, psycopg, redis
 from fastapi import FastAPI, Depends, Request, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -24,6 +24,24 @@ REDIS_URL = os.getenv("REDIS_URL","redis://redis:6379/0")
 OPS_USER = os.getenv("OPS_USER","admin")
 OPS_PASS = os.getenv("OPS_PASS","admin")
 r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+_alembic_logger = logging.getLogger("ops.alembic")
+
+
+@app.on_event("startup")
+def _log_alembic_revision() -> None:
+    try:
+        with psycopg.connect(DB) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT version_num FROM alembic_version LIMIT 1")
+            row = cur.fetchone()
+    except Exception:
+        _alembic_logger.exception("failed to query Alembic revision")
+        return
+    if row and row[0]:
+        _alembic_logger.info("alembic_revision=%s", row[0])
+    else:
+        _alembic_logger.warning("alembic_revision=unavailable")
+
 
 def auth(creds: HTTPBasicCredentials = Depends(security)):
     if not (creds.username == OPS_USER and creds.password == OPS_PASS):

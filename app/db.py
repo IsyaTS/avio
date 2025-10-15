@@ -116,6 +116,23 @@ async def _fetch(sql: str, *args):
         return await con.fetch(sql, *args)
 
 
+async def current_alembic_revision() -> Optional[str]:
+    pool = await _ensure_pool()
+    if not pool:
+        return None
+    async with pool.acquire() as con:
+        row = await con.fetchrow("SELECT version_num FROM alembic_version LIMIT 1")
+    if not row:
+        return None
+    value = row[0]
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        value = getter("version_num", value)
+    if value is None:
+        return None
+    return str(value)
+
+
 def _offline_enabled() -> bool:
     """Return True only when offline fixtures are allowed (tests)."""
     return _is_testing_env() and (asyncpg is None or _pool is None)

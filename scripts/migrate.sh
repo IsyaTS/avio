@@ -12,7 +12,7 @@ COMPOSE_CMD=${COMPOSE_CMD:-docker compose}
 
 ${COMPOSE_CMD} run --rm -e DATABASE_URL="$DATABASE_URL" ops sh -c '
   set -e
-  alembic upgrade head
+  alembic -c app/ops/alembic.ini upgrade head
   python - <<"PY"
 import os
 import psycopg
