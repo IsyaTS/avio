@@ -8,7 +8,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import MetaData, pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncEngine, async_engine_from_config
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 config = context.config
 
@@ -31,19 +31,6 @@ def _require_database_url() -> str:
     return url
 
 
-def run_migrations_offline() -> None:
-    url = _require_database_url()
-    context.configure(
-        url=url,
-        target_metadata=metadata,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
-    )
-
-    with context.begin_transaction():
-        context.run_migrations()
-
-
 def _run_sync_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=metadata)
 
@@ -53,12 +40,8 @@ def _run_sync_migrations(connection: Connection) -> None:
 
 async def run_migrations_online() -> None:
     dsn = _require_database_url()
-    configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = dsn
-
-    connectable: AsyncEngine = async_engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
+    connectable: AsyncEngine = create_async_engine(
+        dsn,
         poolclass=pool.NullPool,
     )
 
@@ -68,7 +51,4 @@ async def run_migrations_online() -> None:
     await connectable.dispose()
 
 
-if context.is_offline_mode():
-    run_migrations_offline()
-else:
-    asyncio.run(run_migrations_online())
+asyncio.run(run_migrations_online())
