@@ -4,6 +4,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 from app import main
 from app.web import public as public_module
@@ -112,6 +113,47 @@ def test_webhook_smoke_and_outgoing(
 
     sent_payload = captured["calls"][0]["json"]
     json.dumps(sent_payload)
+
+
+@pytest.mark.anyio
+async def test_webhook_upsert_failure_does_not_queue_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis_stub = _DummyRedis()
+    if hasattr(main, "_webhooks_mod"):
+        monkeypatch.setattr(main._webhooks_mod, "_redis_queue", redis_stub)
+    monkeypatch.setattr(main, "_r", redis_stub, raising=False)
+
+    called: dict[str, bool] = {"flag": False}
+
+    async def _failing_upsert(*args: Any, **kwargs: Any) -> int:
+        called["flag"] = True
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(main, "upsert_lead", _failing_upsert, raising=False)
+    if hasattr(main, "_webhooks_mod"):
+        monkeypatch.setattr(main._webhooks_mod, "upsert_lead", _failing_upsert, raising=False)
+    try:
+        import app.web.webhooks as webhooks_module
+
+        monkeypatch.setattr(webhooks_module, "upsert_lead", _failing_upsert, raising=False)
+    except ImportError:
+        pass
+
+    payload = {
+        "tenant": 1,
+        "channel": "telegram",
+        "from_id": 12345,
+        "text": "fail me",
+        "attachments": [],
+        "ts": 1_700_000_100,
+    }
+    with pytest.raises(HTTPException) as exc:
+        await main._webhooks_mod.process_incoming(payload, None)
+
+    assert called["flag"], "upsert_lead was not invoked"
+    assert exc.value.status_code == 500
+    assert not any(key == "outbox:send" for key, _ in redis_stub.items)
 
 
 def test_app_send_to_me(monkeypatch: pytest.MonkeyPatch, app_client):

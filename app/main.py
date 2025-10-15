@@ -92,13 +92,14 @@ import importlib.util as _importlib_util
 ROOT = pathlib.Path(__file__).resolve().parent
 
 try:  # рабочие БД-хелперы; при отсутствии БД заменяются заглушками
-    from .db import (
-        resolve_or_create_contact,
-        link_lead_contact,
-        insert_message_in,
-        upsert_lead,
-    )
+    from . import db as db_module  # type: ignore
+    resolve_or_create_contact = db_module.resolve_or_create_contact
+    link_lead_contact = db_module.link_lead_contact
+    insert_message_in = db_module.insert_message_in
+    upsert_lead = db_module.upsert_lead
 except ImportError:  # pragma: no cover - фоллбек для окружений без БД
+    db_module = None  # type: ignore[assignment]
+
     async def resolve_or_create_contact(**_: object) -> int:  # type: ignore[override]
         return 0
 
@@ -174,6 +175,29 @@ if static_dir.exists():
 webhook = APIRouter()
 
 register_transport_validation(app)
+
+
+async def _log_alembic_revision_on_startup() -> None:
+    logger = logging.getLogger("app.alembic")
+    module = globals().get("db_module")
+    revision_getter = getattr(module, "current_alembic_revision", None)
+    if revision_getter is None:
+        logger.info("alembic_revision=unavailable (db module missing)")
+        return
+    try:
+        revision = await revision_getter()  # type: ignore[misc]
+    except Exception:
+        logger.exception("failed to query Alembic revision")
+        return
+    if revision:
+        logger.info("alembic_revision=%s", revision)
+    else:
+        logger.warning("alembic_revision=unavailable")
+
+
+@app.on_event("startup")
+async def _startup_log_revision() -> None:
+    await _log_alembic_revision_on_startup()
 
 
 @app.get("/metrics")

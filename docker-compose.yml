@@ -146,6 +146,11 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - OPS_DB_URL=${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}
       - DATABASE_URL=${DATABASE_URL:-${OPS_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postgres}}}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
       - OPS_USER=${OPS_USER:-admin}
       - OPS_PASS=${OPS_PASS:-admin}
       - PYTHONPATH=/app
@@ -154,7 +159,10 @@ services:
     ports: ["127.0.0.1:18080:8000"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "alembic -c app/ops/alembic.ini current >/dev/null 2>&1"]
+      test: [
+        "CMD-SHELL",
+        "alembic -c app/ops/alembic.ini current | grep -q '(head)'"
+      ]
       interval: 30s
       timeout: 5s
       retries: 3
