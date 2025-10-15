@@ -312,14 +312,26 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         if contact_id:
             await link_lead_contact(lead_id, contact_id)
             if text:
-                await insert_message_in(lead_id, text, status="received", tenant_id=tenant)
+                await insert_message_in(
+                    lead_id,
+                    text,
+                    status="received",
+                    tenant_id=tenant,
+                    telegram_user_id=telegram_user_id,
+                )
                 stored_incoming = True
     except Exception:
         pass
 
     if text and not stored_incoming:
         try:
-            await insert_message_in(lead_id, text, status="received", tenant_id=tenant)
+            await insert_message_in(
+                lead_id,
+                text,
+                status="received",
+                tenant_id=tenant,
+                telegram_user_id=telegram_user_id,
+            )
         except Exception:
             pass
 

@@ -56,7 +56,7 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 
 ### Database migrations
 
-- Выполните `make migrate`, чтобы применить Alembic-миграции и вывести структуру таблиц `leads` и `messages` для верификации. Перед запуском установите переменную окружения `DATABASE_URL`.
+- Выполните `make migrate`, чтобы через контейнер `ops` применить Alembic-миграции и вывести структуру таблиц `leads`, `messages` и список колонок `contacts`. Перед запуском установите переменную окружения `DATABASE_URL`.
 
 ## Telegram Login Flow
 

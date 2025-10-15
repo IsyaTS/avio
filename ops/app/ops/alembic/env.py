@@ -14,7 +14,7 @@ if config.config_file_name is not None:
 metadata = MetaData()
 
 def _database_url() -> str:
-    env_url = os.getenv("OPS_DB_URL") or os.getenv("DATABASE_URL")
+    env_url = os.getenv("DATABASE_URL") or os.getenv("OPS_DB_URL")
     if env_url:
         return env_url
     return config.get_main_option("sqlalchemy.url")

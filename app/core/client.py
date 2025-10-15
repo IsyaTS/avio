@@ -7,6 +7,11 @@ import httpx
 
 from config import tg_worker_url
 
+try:  # pragma: no cover - fallback for early imports
+    from app.core import settings as core_settings  # type: ignore
+except Exception:  # pragma: no cover
+    core_settings = None  # type: ignore[assignment]
+
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 
 
@@ -62,13 +67,30 @@ def _resolve_url(path: str) -> str:
     return f"{_base_url()}{path}"
 
 
+def _admin_token() -> str:
+    if core_settings is not None:
+        token = getattr(core_settings, "ADMIN_TOKEN", "") or ""
+        if token:
+            return token.strip()
+    return (os.getenv("ADMIN_TOKEN") or "").strip()
+
+
+def _client_headers() -> dict[str, str]:
+    token = _admin_token()
+    if token:
+        return {"X-Admin-Token": token}
+    return {}
+
+
 async def tg_post(
     path: str,
     payload: Mapping[str, Any] | None = None,
     *,
     timeout: float = 5.0,
 ) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=_normalize_timeout(timeout)) as client:
+    async with httpx.AsyncClient(
+        timeout=_normalize_timeout(timeout), headers=_client_headers()
+    ) as client:
         return await client.post(_resolve_url(path), json=payload)
 
 
@@ -80,7 +102,9 @@ async def tg_get(
     stream: bool = False,
 ) -> httpx.Response:
     params = None if payload is None else dict(payload)
-    async with httpx.AsyncClient(timeout=_normalize_timeout(timeout)) as client:
+    async with httpx.AsyncClient(
+        timeout=_normalize_timeout(timeout), headers=_client_headers()
+    ) as client:
         url = _resolve_url(path)
         if stream:
             async with client.stream("GET", url, params=params) as response:
