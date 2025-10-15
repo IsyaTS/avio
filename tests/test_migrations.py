@@ -139,7 +139,7 @@ def test_leads_schema_after_upgrade() -> None:
                 """
             )
         ).scalar_one_or_none()
-        assert default_expr in (None, "")
+        assert default_expr and "0" in default_expr
 
         message_indexes = connection.execute(
             sa.text(
@@ -152,6 +152,10 @@ def test_leads_schema_after_upgrade() -> None:
         ).scalars().all()
         assert any(
             "idx_messages_tenant_telegram_user" in index for index in message_indexes
+        )
+        assert any(
+            "idx_messages_tenant_created_at" in index and "DESC" in index
+            for index in message_indexes
         )
 
         contact_columns = connection.execute(

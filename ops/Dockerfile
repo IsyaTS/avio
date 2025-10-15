@@ -6,11 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY ops/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm -f /tmp/requirements.txt
+COPY ops/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r ./requirements.txt && rm -f ./requirements.txt
 
-COPY . /app
-COPY ops/alembic.ini /app/ops/alembic.ini
+COPY ops /app/ops
 RUN chmod +x /app/ops/entrypoint.sh
 
 EXPOSE 8000

@@ -32,10 +32,8 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-ALTER TABLE messages ALTER COLUMN telegram_user_id DROP DEFAULT;
-
 CREATE INDEX IF NOT EXISTS idx_messages_lead_created ON messages(lead_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_tenant_created_at ON messages(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_created_at ON messages(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_telegram_user ON messages(tenant_id, telegram_user_id);
 
 -- Outbox (для отправок и идемпотентности)
