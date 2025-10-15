@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -19,15 +18,17 @@ metadata = MetaData()
 _logger = logging.getLogger("alembic.env")
 
 
-def _require_database_url() -> str:
-    try:
-        url = os.environ["DATABASE_URL"]
-    except KeyError as exc:  # pragma: no cover - defensive guardrail
-        message = "DATABASE_URL environment variable is required for Alembic migrations"
-        _logger.error(message)
-        raise RuntimeError(message) from exc
+def _configure_url() -> str:
+    options = context.get_x_argument(as_dictionary=True)
+    if "sqlalchemy.url" in options:
+        config.set_main_option("sqlalchemy.url", options["sqlalchemy.url"])
 
-    config.set_main_option("sqlalchemy.url", url)
+    url = config.get_main_option("sqlalchemy.url")
+    if not url or url == "postgresql://placeholder":
+        message = "sqlalchemy.url must be provided via -x sqlalchemy.url=..."
+        _logger.error(message)
+        raise RuntimeError(message)
+
     return url
 
 
@@ -39,9 +40,10 @@ def _run_sync_migrations(connection: Connection) -> None:
 
 
 async def run_migrations_online() -> None:
-    dsn = _require_database_url()
+    url = _configure_url()
     connectable: AsyncEngine = create_async_engine(
-        dsn,
+        url,
+        future=True,
         poolclass=pool.NullPool,
     )
 
