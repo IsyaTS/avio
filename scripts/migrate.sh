@@ -12,12 +12,32 @@ COMPOSE_CMD=${COMPOSE_CMD:-docker compose}
 
 ${COMPOSE_CMD} run --rm -e DATABASE_URL="$DATABASE_URL" ops sh -c '
   set -e
-  alembic -c app/ops/alembic.ini upgrade head
+  alembic -c ops/alembic.ini upgrade head
   python - <<"PY"
 import os
 import psycopg
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import ArgumentError
 
-dsn = os.environ["DATABASE_URL"]
+
+def _normalize_dsn(raw: str) -> str:
+    try:
+        url = make_url(raw)
+    except (ArgumentError, ValueError):
+        if raw.startswith("postgresql+") and "://" in raw:
+            scheme, remainder = raw.split("://", 1)
+            scheme = scheme.split("+", 1)[0]
+            return f"{scheme}://{remainder}"
+        return raw
+
+    driver = url.drivername or ""
+    if "+" in driver:
+        url = url.set(drivername=driver.split("+", 1)[0])
+    return url.render_as_string(hide_password=False)
+
+
+dsn = _normalize_dsn(os.environ["DATABASE_URL"])
+
 with psycopg.connect(dsn) as conn:
     cur = conn.cursor()
     for table in ("leads", "messages"):

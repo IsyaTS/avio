@@ -7,8 +7,12 @@ import os
 import pytest
 try:
     import sqlalchemy as sa
+    from sqlalchemy.engine.url import make_url
+    from sqlalchemy.exc import ArgumentError
 except ImportError:  # pragma: no cover - optional dependency for local checks
     sa = None  # type: ignore[assignment]
+    make_url = None  # type: ignore[assignment]
+    ArgumentError = None  # type: ignore[assignment]
 
 try:
     from alembic import command
@@ -21,9 +25,26 @@ if sa is None or command is None or Config is None:  # pragma: no cover
     pytestmark = pytest.mark.skip("alembic or sqlalchemy is not available")
 
 
+def _sync_database_url(raw: str) -> str:
+    try:
+        url = make_url(raw)
+    except (ArgumentError, ValueError):
+        if raw.startswith("postgresql+") and "://" in raw:
+            scheme, remainder = raw.split("://", 1)
+            scheme = scheme.split("+", 1)[0]
+            return f"{scheme}://{remainder}"
+        return raw
+
+    driver = url.drivername or ""
+    if "+" in driver:
+        url = url.set(drivername=driver.split("+", 1)[0])
+    return url.render_as_string(hide_password=False)
+
+
 def _alembic_config(database_url: str) -> Config:
-    cfg_path = Path(__file__).resolve().parents[1] / "app" / "ops" / "alembic.ini"
+    cfg_path = Path(__file__).resolve().parents[1] / "ops" / "alembic.ini"
     config = Config(str(cfg_path))
+    os.environ["DATABASE_URL"] = database_url
     config.set_main_option("sqlalchemy.url", database_url)
     return config
 
@@ -34,7 +55,7 @@ def _alembic_config(database_url: str) -> Config:
 )
 def test_leads_schema_after_upgrade() -> None:
     database_url = os.environ["TEST_DATABASE_URL"]
-    engine = sa.create_engine(database_url)
+    engine = sa.create_engine(_sync_database_url(database_url))
     config = _alembic_config(database_url)
 
     with engine.begin() as connection:

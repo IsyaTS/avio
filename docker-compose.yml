@@ -161,7 +161,7 @@ services:
     healthcheck:
       test: [
         "CMD-SHELL",
-        "alembic -c app/ops/alembic.ini current | grep -q '(head)'"
+        "alembic -c ops/alembic.ini current | grep -q '(head)'"
       ]
       interval: 30s
       timeout: 5s
