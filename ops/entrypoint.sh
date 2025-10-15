@@ -1,5 +1,5 @@
-#!/bin/sh
-set -euo pipefail
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
 ALEMBIC_DIR="ops/alembic"
 ALEMBIC_CFG="ops/alembic.ini"
@@ -18,7 +18,7 @@ for var in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_HOST POSTGRES_PORT POSTGRES_
 done
 
 DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB"
-DATABASE_URL_SQLA="${DATABASE_URL/postgresql:/postgresql+asyncpg:}"
+DATABASE_URL_SQLA="$(printf '%s' "$DATABASE_URL" | sed -e 's/^postgresql:/postgresql+asyncpg:/')"
 
 export ALEMBIC_CFG
 export DATABASE_URL
@@ -30,7 +30,7 @@ run_psql() {
 
 run_alembic() {
   echo "[ops] running: alembic $*" >&2
-  alembic -c "$ALEMBIC_CFG" -x "sqlalchemy.url=$DATABASE_URL_SQLA" "$@"
+  alembic -c "$ALEMBIC_CFG" -x sqlalchemy.url="$DATABASE_URL_SQLA" "$@"
 }
 
 echo "[ops] waiting for database connection" >&2
