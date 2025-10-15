@@ -32,8 +32,15 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 VERSIONS_DIR = pathlib.Path("ops/alembic/versions")
 
 
+def _normalize_asyncpg_dsn(dsn: str) -> str:
+    prefix = "postgresql+asyncpg://"
+    if dsn.startswith(prefix):
+        return "postgresql://" + dsn[len(prefix):]
+    return dsn
+
+
 async def _introspect() -> tuple[bool, bool]:
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(_normalize_asyncpg_dsn(DATABASE_URL))
     try:
         query = """
         SELECT table_name FROM information_schema.tables
@@ -43,6 +50,27 @@ async def _introspect() -> tuple[bool, bool]:
         return "alembic_version" in tables, "leads" in tables
     finally:
         await conn.close()
+
+
+async def _fetch_current_revision() -> str | None:
+    conn = await asyncpg.connect(_normalize_asyncpg_dsn(DATABASE_URL))
+    try:
+        try:
+            row = await conn.fetchrow(
+                "SELECT version_num FROM alembic_version ORDER BY version_num DESC LIMIT 1"
+            )
+        except asyncpg.UndefinedTableError:
+            return None
+    finally:
+        await conn.close()
+
+    if not row:
+        return None
+    value = row[0]
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        value = getter("version_num", value)
+    return str(value) if value is not None else None
 
 
 def _find_first_revision() -> str:
@@ -86,13 +114,7 @@ async def main() -> None:
     print("[ops] upgrading database to head", file=sys.stderr)
     run_alembic("upgrade", "head")
 
-    current = subprocess.run(
-        ["alembic", "-c", ALEMBIC_CFG, "current"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    current_revision = current.stdout.strip()
+    current_revision = await _fetch_current_revision()
     if current_revision:
         print(f"[ops] alembic current revision: {current_revision}", file=sys.stderr)
     else:
