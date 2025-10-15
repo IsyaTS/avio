@@ -20,7 +20,7 @@ def _load_database_url() -> str:
     return (
         os.getenv("DATABASE_URL")
         or os.getenv("POSTGRES_URL")
-        or "postgresql://postgres:postgres@postgres:5432/postgres"
+        or "postgresql+asyncpg://postgres:postgres@postgres:5432/postgres"
     )
 
 

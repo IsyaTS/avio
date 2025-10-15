@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
-ALEMBIC_DIR="app/ops/alembic"
-ALEMBIC_CFG="app/ops/alembic.ini"
+ALEMBIC_DIR="ops/alembic"
+ALEMBIC_CFG="ops/alembic.ini"
 if [ ! -d "$ALEMBIC_DIR" ]; then
   echo "[ops] error: migrations directory '$ALEMBIC_DIR' not found" >&2
   exit 1
