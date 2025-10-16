@@ -797,7 +797,8 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         )
         raise HTTPException(status_code=400, detail="invalid_lead")
 
-    text_value = (message.text or "").strip()
+    raw_text_value = message.text if message.text is not None else ""
+    text_value = str(raw_text_value).strip()
     if not text_value:
         attachment_count = len(message.attachments or [])
         logger.info(
@@ -895,10 +896,30 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         logger.exception("event=message_in_lead_upsert_fail tenant=%s", tenant)
         raise HTTPException(status_code=500, detail="lead_upsert_failed")
 
-    if generated_from_hint and lead_id and lead_id != lead_hint:
+    lead_id_value: int | None = None
+    if lead_id is not None:
+        try:
+            lead_id_value = int(lead_id)
+        except Exception:
+            lead_id_value = None
+    if lead_id_value is None and telegram_user_id is not None:
+        lead_id_value = int(telegram_user_id)
+    if lead_id_value is None and lead_hint is not None:
+        try:
+            lead_id_value = int(lead_hint)
+        except Exception:
+            lead_id_value = None
+    if lead_id_value is None:
+        lead_id_value = 0
+
+    if generated_from_hint and lead_id_value and lead_hint is not None and lead_id_value != lead_hint:
         message_id = str(lead_id)
         inbox_event["message_id"] = message_id
-    inbox_event["lead_id"] = lead_id
+    inbox_event["lead_id"] = lead_id_value
+    inbox_event["tenant"] = int(tenant)
+    inbox_event["text"] = text_value
+    inbox_event["message_id"] = str(message_id)
+    lead_id = lead_id_value
     try:
         client = common.redis_client()
     except Exception:
@@ -913,8 +934,8 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
             logger.info(
                 "event=incoming_enqueued channel=telegram tenant=%s lead_id=%s message_id=%s queue=%s",
                 tenant,
-                lead_id,
-                message_id,
+                lead_id_value,
+                str(message_id),
                 INCOMING_QUEUE_KEY,
             )
         except redis_ex.RedisError:
@@ -928,7 +949,7 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
 
     try:
         await insert_message_in(
-            lead_id,
+            lead_id_value,
             text_value,
             status="received",
             tenant_id=tenant,
