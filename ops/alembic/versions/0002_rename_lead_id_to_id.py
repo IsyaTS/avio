@@ -106,6 +106,17 @@ def upgrade() -> None:
             nullable=False,
         )
 
+    if table_exists("leads") and table_exists("lead_contacts"):
+        op.execute(
+            """
+            INSERT INTO leads (id, channel, created_at)
+            SELECT DISTINCT lc.lead_id, 'whatsapp', NOW()
+            FROM lead_contacts AS lc
+            WHERE lc.lead_id IS NOT NULL
+              AND lc.lead_id NOT IN (SELECT id FROM leads)
+            """
+        )
+
     for table_name, constraint_name in (
         ("messages", "messages_lead_id_fkey"),
         ("outbox", "outbox_lead_id_fkey"),
