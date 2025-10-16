@@ -44,7 +44,7 @@ APP_VERSION = os.getenv("APP_VERSION", _default_version)
 
 # ==== ENV ====
 REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
-WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088").rstrip("/")
+WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
 # Match waweb INTERNAL_SYNC_TOKEN resolution (WA_WEB_TOKEN or WEBHOOK_SECRET)
 WA_INTERNAL_TOKEN = (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 TGWORKER_BASE_URL = (

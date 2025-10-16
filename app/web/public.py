@@ -17,7 +17,7 @@ import uuid
 import asyncio
 from typing import Any, Iterable, Mapping
 
-from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException
+from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response
 import httpx
 import urllib.request
@@ -1068,10 +1068,14 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
 
 
 @router.get("/pub/wa/status")
-async def wa_status(tenant: int, k: str):
+async def wa_status(
+    request: Request,
+    tenant: int = Query(..., description="Tenant identifier"),
+    k: str = Query(..., description="PUBLIC_KEY access token"),
+):
     tenant = int(tenant)
-    if not common.valid_key(tenant, k):
-        return JSONResponse({"ok": False, "error": "invalid_key"}, status_code=401)
+    if _ensure_public_key(k, request) is None:
+        return _invalid_key_response()
     try:
         webhook = common.webhook_url()
         payload = {"tenant_id": int(tenant), "webhook_url": webhook}
@@ -1206,11 +1210,8 @@ def _ensure_valid_qr_request(raw_tenant: int | str | None, raw_key: str | None) 
         tenant_id = _coerce_tenant(raw_tenant)
     except ValueError:
         return None
-    if not raw_key:
-        return None
-    key = str(raw_key)
-    validator = getattr(C, "valid_key", common.valid_key)
-    if not validator(tenant_id, key):
+    key = _ensure_public_key(raw_key)
+    if key is None:
         return None
     return tenant_id, key
 
@@ -1304,6 +1305,62 @@ def _normalize_public_token(value: str | None) -> str:
     return str(value).strip()
 
 
+def _expected_public_key_value() -> str:
+    env_public = _normalize_public_token(os.getenv("PUBLIC_KEY"))
+    if env_public:
+        return env_public
+
+    env_admin = _normalize_public_token(os.getenv("ADMIN_TOKEN"))
+    if env_admin:
+        return env_admin
+
+    return _normalize_public_token(getattr(settings, "ADMIN_TOKEN", ""))
+
+
+def _resolve_public_key_candidate(
+    key_candidate: str | None,
+    request: Request | None = None,
+    *,
+    query_param_only: bool = False,
+) -> str:
+    candidate = _normalize_public_token(key_candidate)
+    if request is None:
+        return candidate
+
+    if query_param_only:
+        return _normalize_public_token(request.query_params.get("k"))
+
+    if not candidate:
+        return _normalize_public_token(request.query_params.get("k"))
+
+    return candidate
+
+
+def _ensure_public_key(
+    key_candidate: str | None,
+    request: Request | None = None,
+    *,
+    query_param_only: bool = False,
+) -> str | None:
+    candidate = _resolve_public_key_candidate(
+        key_candidate,
+        request,
+        query_param_only=query_param_only,
+    )
+    expected = _expected_public_key_value()
+    if expected and candidate and candidate == expected:
+        return candidate
+    return None
+
+
+def _invalid_key_response() -> JSONResponse:
+    return JSONResponse(
+        {"error": "invalid_key"},
+        status_code=401,
+        headers=_no_store_headers(),
+    )
+
+
 def _resolve_qr_identifier(primary: str | None, legacy: str | None = None) -> str:
     candidate = primary if primary is not None else legacy
     if candidate is None:
@@ -1322,20 +1379,16 @@ def _has_public_tg_access(
     *,
     allow_admin: bool = True,
     query_param_only: bool = False,
-) -> bool:
+) -> tuple[bool, str | None]:
     if allow_admin and _admin_token_valid(request):
-        return True
-    expected = _normalize_public_token(getattr(settings, "PUBLIC_KEY", ""))
-    provided = _normalize_public_token(key_candidate)
-    if query_param_only and request is not None:
-        provided = _normalize_public_token(request.query_params.get("k"))
-    elif not provided and request is not None:
-        provided = _normalize_public_token(request.query_params.get("k"))
+        return True, "admin"
 
-    if expected:
-        return provided == expected
-
-    return False
+    resolved = _ensure_public_key(
+        key_candidate,
+        request,
+        query_param_only=query_param_only,
+    )
+    return (resolved is not None, resolved)
 
 
 def _invalid_tenant_response(
@@ -1355,7 +1408,7 @@ def _unauthorized_response(
     force: bool | None = None,
 ) -> JSONResponse:
     _log_tg_proxy(route, tenant_id, 401, None, error="unauthorized", force=force)
-    return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_no_store_headers())
+    return _invalid_key_response()
 
 
 def _tg_unavailable_response(
@@ -1469,12 +1522,15 @@ def _coerce_body_bytes(body: Any) -> bytes:
 
 
 @router.get("/pub/wa/qr.svg")
-def wa_qr_svg(tenant: int | str | None = None, k: str | None = None):
+def wa_qr_svg(
+    tenant: int = Query(..., description="Tenant identifier"),
+    k: str = Query(..., description="PUBLIC_KEY access token"),
+):
     if not WA_ENABLED:
         return JSONResponse({"error": "wa_disabled"}, status_code=503)
     ok = _ensure_valid_qr_request(tenant, k)
     if ok is None:
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+        return _invalid_key_response()
     tenant_id, _ = ok
     return _proxy_qr_with_fallbacks(tenant_id)
 
@@ -1498,15 +1554,16 @@ async def tg_start(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(
+    allowed, validated_key = _has_public_tg_access(
         request,
         key_candidate,
         allow_admin=False,
         query_param_only=True,
-    ):
+    )
+    if not allowed:
         return _unauthorized_response(route, tenant_id)
 
-    _log_public_tg_request(route, tenant_id, key_candidate)
+    _log_public_tg_request(route, tenant_id, validated_key)
 
     fallback_paths = ["/qr/start", "/rpc/start", "/session/start"]
     payload = {"tenant": tenant_id}
@@ -1569,10 +1626,15 @@ async def _handle_tg_twofa(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(request, key_candidate, allow_admin=False):
+    allowed, validated_key = _has_public_tg_access(
+        request,
+        key_candidate,
+        allow_admin=False,
+    )
+    if not allowed:
         return _unauthorized_response(route, tenant_id)
 
-    _log_public_tg_request(route, tenant_id, key_candidate)
+    _log_public_tg_request(route, tenant_id, validated_key)
 
     client_token = _client_identifier(request)
 
@@ -1729,7 +1791,8 @@ async def tg_restart(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate, force=True)
 
-    if not _has_public_tg_access(request, key_candidate):
+    allowed, _ = _has_public_tg_access(request, key_candidate)
+    if not allowed:
         return _unauthorized_response(route, tenant_id, force=True)
 
     try:
@@ -1760,15 +1823,16 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(
+    allowed, validated_key = _has_public_tg_access(
         request,
         key_candidate,
         allow_admin=False,
         query_param_only=True,
-    ):
+    )
+    if not allowed:
         return _unauthorized_response(route, tenant_id)
 
-    _log_public_tg_request(route, tenant_id, key_candidate)
+    _log_public_tg_request(route, tenant_id, validated_key)
 
     fallback_paths = ["/status", "/rpc/status", "/session/status"]
     params = {"tenant": tenant_id}
@@ -1826,12 +1890,13 @@ async def tg_qr_png(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(
+    allowed, validated_key = _has_public_tg_access(
         request,
         key_candidate,
         allow_admin=False,
         query_param_only=True,
-    ):
+    )
+    if not allowed:
         return _unauthorized_response(route, tenant_id)
 
     qr_identifier = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
@@ -1883,7 +1948,8 @@ async def tg_qr_png(
 @router.get("/pub/tg/qr.txt")
 def tg_qr_txt(request: Request, qr_id: str | None = None, k: str | None = None, key: str | None = None):
     key_candidate = k or key or request.query_params.get("k") or request.query_params.get("key")
-    if not _has_public_tg_access(request, key_candidate):
+    allowed, _ = _has_public_tg_access(request, key_candidate)
+    if not allowed:
         return _unauthorized_response("/pub/tg/qr.txt", None)
     qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
     if not qr_value:
@@ -1957,7 +2023,8 @@ async def tg_logout(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    if not _has_public_tg_access(request, key_candidate):
+    allowed, _ = _has_public_tg_access(request, key_candidate)
+    if not allowed:
         return _unauthorized_response(route, tenant_id)
 
     try:
@@ -1975,43 +2042,34 @@ async def tg_logout(
 
 
 @router.get("/pub/wa/qr.png")
-def wa_qr_png(tenant: int | str | None = None, k: str | None = None):
+def wa_qr_png(
+    tenant: int = Query(..., description="Tenant identifier"),
+    k: str = Query(..., description="PUBLIC_KEY access token"),
+):
     if not WA_ENABLED:
         return JSONResponse({"error": "wa_disabled"}, status_code=503)
     ok = _ensure_valid_qr_request(tenant, k)
     if ok is None:
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+        return _invalid_key_response()
     tenant_id, _ = ok
     return _proxy_qr_with_fallbacks(tenant_id)
 
 
 @router.post("/pub/wa/restart")
-async def wa_restart(request: Request, tenant: int | None = None, k: str | None = None):
+async def wa_restart(
+    request: Request,
+    tenant: int = Query(..., description="Tenant identifier"),
+    k: str = Query(..., description="PUBLIC_KEY access token"),
+):
     """Force-restart waweb session to issue a fresh QR.
 
     Security: requires a valid public access key `k` for the tenant.
     """
 
-    payload: dict[str, Any] = {}
-    if tenant is None or not k:
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+    tenant_id = int(tenant)
 
-    raw_tenant = tenant if tenant is not None else payload.get("tenant")
-    raw_key = k or payload.get("k") or payload.get("key")
-
-    if raw_tenant is None or raw_key is None:
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
-
-    tenant_id = int(raw_tenant)
-    key = str(raw_key)
-
-    if not common.valid_key(tenant_id, key):
-        return JSONResponse({"error": "invalid_key"}, status_code=401)
+    if _ensure_public_key(k, request) is None:
+        return _invalid_key_response()
 
     wa_logger.info("wa_restart click tenant=%s", tenant_id)
 

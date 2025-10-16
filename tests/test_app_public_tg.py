@@ -18,7 +18,6 @@ def _build_app(monkeypatch: pytest.MonkeyPatch, public_key: str = "public-key") 
 
     app.include_router(dummy)
 
-    monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: True)
     monkeypatch.setattr(public_module.common, "ensure_tenant_files", lambda tenant: None)
     monkeypatch.setattr(
         public_module.common,
@@ -28,8 +27,11 @@ def _build_app(monkeypatch: pytest.MonkeyPatch, public_key: str = "public-key") 
     monkeypatch.setattr(public_module.common, "read_persona", lambda tenant: "Persona\nLine2")
     monkeypatch.setattr(public_module.common, "public_base_url", lambda request=None: "https://example.test")
     monkeypatch.setattr(public_module.common, "public_url", lambda request, url: str(url))
+    monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: key == public_key)
     monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
     monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", public_key)
+    monkeypatch.setenv("ADMIN_TOKEN", "admin-token")
+    monkeypatch.setenv("PUBLIC_KEY", public_key)
     public_module._LOCAL_PASSWORD_ATTEMPTS.clear()
 
     return app

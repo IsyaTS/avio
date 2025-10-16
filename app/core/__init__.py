@@ -116,7 +116,7 @@ class Settings:
     APP_INTERNAL_URL = os.getenv("APP_INTERNAL_URL", "http://app:8000").rstrip("/")
 
     # waweb
-    WA_WEB_URL    = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088").rstrip("/")
+    WA_WEB_URL    = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
     WA_PREFETCH_START = _env_bool("WA_PREFETCH_START", True)
 
     # Админка

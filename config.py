@@ -39,6 +39,8 @@ class _CoreSettingsProxy:
 
 
 DEFAULT_TG_WORKER_URL = "http://tgworker:9000"
+DEFAULT_WA_WEB_URL = "http://waweb:9001"
+DEFAULT_APP_INTERNAL_URL = "http://app:8000"
 
 
 def _coerce_int(value: str | None, default: int = 0) -> int:
@@ -62,9 +64,30 @@ def _normalize_worker_url(raw: str | None) -> str:
 TG_WORKER_URL = _normalize_worker_url(os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL"))
 
 
+def _normalize_wa_url(raw: str | None) -> str:
+    if not raw:
+        return DEFAULT_WA_WEB_URL
+    cleaned = raw.strip()
+    if not cleaned:
+        return DEFAULT_WA_WEB_URL
+    return cleaned.rstrip("/") or DEFAULT_WA_WEB_URL
+
+
+def _normalize_internal_url(raw: str | None) -> str:
+    if not raw:
+        return DEFAULT_APP_INTERNAL_URL
+    cleaned = raw.strip()
+    if not cleaned:
+        return DEFAULT_APP_INTERNAL_URL
+    return cleaned.rstrip("/") or DEFAULT_APP_INTERNAL_URL
+
+
 TELEGRAM_API_ID = _coerce_int(os.getenv("TELEGRAM_API_ID"))
 TELEGRAM_API_HASH = (os.getenv("TELEGRAM_API_HASH") or "").strip()
 PUBLIC_KEY = (os.getenv("PUBLIC_KEY") or "").strip()
+PUBLIC_KEY_REQUIRED_FOR_PUBLIC_ENDPOINTS = True
+WA_WEB_URL = _normalize_wa_url(os.getenv("WA_WEB_URL"))
+APP_INTERNAL_URL = _normalize_internal_url(os.getenv("APP_INTERNAL_URL"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +169,7 @@ def tg_worker_url() -> str:
 
 CHANNEL_ENDPOINTS = {
     "telegram": f"{tg_worker_url()}/send",
-    "whatsapp": "http://waweb:9001/send",
+    "whatsapp": f"{WA_WEB_URL}/send",
 }
 
 
@@ -157,7 +180,10 @@ __all__ = [
     "TELEGRAM_API_ID",
     "TELEGRAM_API_HASH",
     "PUBLIC_KEY",
+    "PUBLIC_KEY_REQUIRED_FOR_PUBLIC_ENDPOINTS",
     "CHANNEL_ENDPOINTS",
+    "WA_WEB_URL",
+    "APP_INTERNAL_URL",
     "telegram_config",
     "tg_worker_url",
     "settings",

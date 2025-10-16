@@ -19,7 +19,6 @@ def _base_app(monkeypatch, public_key: str = "public-key") -> FastAPI:
 
     app.include_router(dummy)
 
-    monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: True)
     monkeypatch.setattr(public_module.common, "ensure_tenant_files", lambda tenant: None)
     monkeypatch.setattr(
         public_module.common,
@@ -29,9 +28,12 @@ def _base_app(monkeypatch, public_key: str = "public-key") -> FastAPI:
     monkeypatch.setattr(public_module.common, "read_persona", lambda tenant: "Persona\nLine2")
     monkeypatch.setattr(public_module.common, "public_base_url", lambda request=None: "https://example.test")
     monkeypatch.setattr(public_module.common, "public_url", lambda request, url: str(url))
+    monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: key == public_key)
     monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
     monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", public_key)
     monkeypatch.setattr(public_module.settings, "TGWORKER_BASE_URL", "http://tgworker:9000")
+    monkeypatch.setenv("ADMIN_TOKEN", "admin-token")
+    monkeypatch.setenv("PUBLIC_KEY", public_key)
     public_module._LOCAL_PASSWORD_ATTEMPTS.clear()
 
     return app
@@ -48,7 +50,7 @@ def test_connect_tg_renders(monkeypatch):
     app = _base_app(monkeypatch)
     client = TestClient(app)
 
-    response = client.get("/connect/tg", params={"tenant": 7, "k": "abc123"})
+    response = client.get("/connect/tg", params={"tenant": 7, "k": "public-key"})
 
     assert response.status_code == 200
     body = response.text
