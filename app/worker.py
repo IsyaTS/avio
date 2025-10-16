@@ -40,14 +40,14 @@ WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:8088") or "http://waweb:8088
 # Match waweb INTERNAL_SYNC_TOKEN resolution (WA_WEB_TOKEN or WEBHOOK_SECRET)
 WA_INTERNAL_TOKEN = (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 TGWORKER_BASE_URL = (
-    os.getenv("TGWORKER_BASE_URL")
+    os.getenv("TGWORKER_URL")
+    or os.getenv("TGWORKER_BASE_URL")
     or os.getenv("TG_WORKER_URL")
-    or os.getenv("TGWORKER_URL")
     or ""
 ).strip()
 if not TGWORKER_BASE_URL:
-    raise RuntimeError("TGWORKER_BASE_URL is not configured")
-TGWORKER_BASE_URL = TGWORKER_BASE_URL.rstrip("/")
+    TGWORKER_BASE_URL = "http://tgworker:9000"
+TGWORKER_BASE_URL = TGWORKER_BASE_URL.rstrip("/") or "http://tgworker:9000"
 APP_BASE_URL = (
     os.getenv("APP_BASE_URL")
     or os.getenv("APP_INTERNAL_URL")
@@ -60,7 +60,7 @@ TGWORKER_SEND_URL = f"{TGWORKER_BASE_URL}/send"
 TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
-OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW == "true"
+OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW not in {"0", "false"}
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 QUEUES = [OUTBOX_QUEUE_KEY]
 
@@ -510,8 +510,10 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         return ("skipped", "missing_lead", "", 0)
 
     if not OUTBOX_ENABLED:
+        env_hint = _OUTBOX_ENABLED_RAW or "1"
         log(
-            f"event=send_result status=skipped reason=outbox_disabled channel={channel} lead_id={lead_id}"
+            "event=send_result status=skipped reason=outbox_disabled "
+            f"channel={channel} lead_id={lead_id} outbox_enabled_env={env_hint}"
         )
         return ("skipped", "outbox_disabled", "", 0)
 
@@ -631,10 +633,6 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         if message_db_id:
             item["_message_db_id"] = message_db_id
             item["_resolved_lead_id"] = actual_lead_id
-
-    log(
-        f"event=send_attempt channel={channel} lead_id={actual_lead_id} tenant={tenant}"
-    )
 
     if channel == "whatsapp":
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
@@ -791,9 +789,9 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
         "version": APP_VERSION,
         "ch": item.get("ch") or item.get("provider") or "whatsapp",
     }
-    await r.rpush("outbox", json.dumps(out, ensure_ascii=False))
+    await r.rpush(OUTBOX_QUEUE_KEY, json.dumps(out, ensure_ascii=False))
     log(
-        f"event=enqueue_outbox queue=outbox lead_id={lead_id} channel={out['ch']} status={sent_status}"
+        f"event=enqueue_outbox queue={OUTBOX_QUEUE_KEY} lead_id={lead_id} channel={out['ch']} status={sent_status}"
     )
     log(f"[worker] reply -> lead {lead_id}: {text[:160]} ({sent_status})")
 
@@ -820,7 +818,14 @@ async def process_queue():
                 log(f"[worker] json decode err: {raw_item[:200]}")
                 continue
 
-            channel = _resolve_channel(item)
+            raw_channel = item.get("provider") or item.get("ch") or item.get("channel")
+            channel = ""
+            if isinstance(raw_channel, str):
+                channel = raw_channel.strip().lower()
+            elif raw_channel is not None:
+                channel = str(raw_channel).strip().lower()
+            if not channel:
+                channel = _resolve_channel(item)
             tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
             try:
                 tenant_id = int(tenant_raw)
@@ -829,7 +834,7 @@ async def process_queue():
             lead_candidate = _coerce_int(item.get("lead_id"))
             lead_for_log = lead_candidate if lead_candidate is not None else 0
             log(
-                f"event=send_attempt ch={channel} tenant={tenant_id} lead_id={lead_for_log}"
+                f"event=send_attempt ch={channel or '-'} tenant={tenant_id} lead_id={lead_for_log}"
             )
 
             status, reason, body, code = await do_send(item)
@@ -838,12 +843,12 @@ async def process_queue():
             )
             if status == "sent":
                 log(
-                    f"event=send_success ch={channel} tenant={tenant_id} lead_id={lead_for_log}"
+                    f"event=send_success ch={channel or '-'} tenant={tenant_id} lead_id={lead_for_log} reason={reason} code={code}"
                 )
             else:
                 log(
                     "event=send_failed "
-                    f"ch={channel} tenant={tenant_id} lead_id={lead_for_log} reason={reason or status} code={code}"
+                    f"ch={channel or '-'} tenant={tenant_id} lead_id={lead_for_log} reason={reason or status} code={code}"
                 )
             if channel == "telegram":
                 try:
