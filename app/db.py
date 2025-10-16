@@ -362,6 +362,7 @@ async def upsert_lead(
         tenant_val = 0
 
     channel_val = (channel or "avito").strip() or "avito"
+    _ = telegram_username  # leads no longer persist usernames; parameter kept for compatibility
 
     def _normalize_int(value: Optional[int]) -> Optional[int]:
         try:
@@ -376,14 +377,14 @@ async def upsert_lead(
     peer_val = _normalize_int(peer_id)
     lead_val = _normalize_int(lead_id)
 
-    if lead_val is None:
-        lead_val = telegram_val or peer_val
+    if telegram_val is not None:
+        lead_val = telegram_val
+    elif lead_val is None:
+        lead_val = peer_val
 
     if source_real_id is None and peer_val is not None:
         source_real_id = peer_val
 
-    username_val = (telegram_username or "").strip()
-    username_param = username_val or None
     title_val = (title or "").strip() or None
 
     existing: Optional[Dict[str, Any]] = None
@@ -393,12 +394,10 @@ async def upsert_lead(
             SELECT id, tenant_id
             FROM leads
             WHERE tenant_id = $1
-              AND channel = $2
-              AND telegram_user_id = $3
+              AND telegram_user_id = $2
             LIMIT 1;
             """,
             tenant_val,
-            channel_val,
             telegram_val,
         )
     if existing is None and lead_val is not None:
@@ -446,8 +445,7 @@ async def upsert_lead(
                 source_real_id = COALESCE($3, source_real_id),
                 tenant_id = CASE WHEN $4 > 0 THEN $4 ELSE tenant_id END,
                 telegram_user_id = CASE WHEN $5 IS NOT NULL THEN $5 ELSE telegram_user_id END,
-                telegram_username = COALESCE(NULLIF($6, ''), telegram_username),
-            title = COALESCE(NULLIF($7, ''), title),
+                title = COALESCE(NULLIF($6, ''), title),
                 updated_at = now()
             WHERE id = $1;
             """,
@@ -456,7 +454,6 @@ async def upsert_lead(
             source_real_id,
             tenant_update,
             telegram_val,
-            username_val,
             title_val or "",
         )
         return target_id or existing_id_val
@@ -466,8 +463,8 @@ async def upsert_lead(
 
     row = await _fetchrow(
         """
-        INSERT INTO leads(id, title, channel, source_real_id, tenant_id, telegram_user_id, telegram_username)
-        VALUES($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO leads(id, title, channel, source_real_id, tenant_id, telegram_user_id)
+        VALUES($1, $2, $3, $4, $5, $6)
         ON CONFLICT (id)
         DO UPDATE SET channel = EXCLUDED.channel,
                       source_real_id = COALESCE(EXCLUDED.source_real_id, leads.source_real_id),
@@ -476,7 +473,6 @@ async def upsert_lead(
                           ELSE leads.tenant_id
                       END,
                       telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, leads.telegram_user_id),
-                      telegram_username = COALESCE(EXCLUDED.telegram_username, leads.telegram_username),
                       title = COALESCE(EXCLUDED.title, leads.title),
                       updated_at = now()
         RETURNING id;
@@ -487,7 +483,6 @@ async def upsert_lead(
         source_real_id,
         tenant_val,
         telegram_val,
-        username_param,
     )
     if row and "id" in row and row["id"] is not None:
         try:
@@ -549,10 +544,6 @@ async def resolve_or_create_contact(
             contact_id = row["id"]
     if contact_id is None and telegram_user_id:
         row = await _fetchrow("SELECT id FROM contacts WHERE telegram_user_id=$1", telegram_user_id)
-        if row:
-            contact_id = row["id"]
-    if contact_id is None and telegram_username:
-        row = await _fetchrow("SELECT id FROM contacts WHERE telegram_username=$1", telegram_username)
         if row:
             contact_id = row["id"]
 
@@ -770,17 +761,16 @@ async def find_lead_by_telegram(
         return None
     if telegram_val <= 0:
         return None
+    _ = channel  # channel retained for compatibility; lookup relies on tenant/user identifiers
     row = await _fetchrow(
         """
         SELECT id
         FROM leads
         WHERE tenant_id = $1
-          AND channel = $2
-          AND telegram_user_id = $3
+          AND telegram_user_id = $2
         LIMIT 1;
     """,
         tenant_val,
-        channel,
         telegram_val,
     )
     if row and "id" in row and row["id"] is not None:

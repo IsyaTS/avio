@@ -13,11 +13,9 @@ CREATE TABLE IF NOT EXISTS leads (
 
 CREATE INDEX IF NOT EXISTS idx_leads_tenant_updated_at
   ON leads(tenant_id, updated_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_tenant_telegram
+CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_tenant_telegram_user
   ON leads(tenant_id, telegram_user_id)
   WHERE telegram_user_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_leads_tenant_username
-  ON leads(tenant_id, telegram_username);
 
 -- Сообщения
 CREATE TABLE IF NOT EXISTS messages (
