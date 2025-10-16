@@ -49,6 +49,12 @@ if [ "$has_alembic_table" = "f" ] && [ "$has_legacy_lead_id" = "t" ]; then
   run_alembic stamp 0001_initial_schema
 fi
 
+echo "[ops] alembic history (verbose)" >&2
+run_alembic history --verbose
+
+echo "[ops] alembic heads" >&2
+run_alembic heads
+
 echo "[ops] upgrading database to head" >&2
 run_alembic upgrade head
 
