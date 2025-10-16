@@ -98,6 +98,8 @@ async def _exec(sql: str, *args) -> int:
     pool = await _ensure_pool()
     if not pool:
         return 0
+    if _log.isEnabledFor(logging.DEBUG):
+        _log.debug("sql_exec query=%s params=%s", sql, args)
     async with pool.acquire() as con:
         return await con.execute(sql, *args)  # type: ignore[return-value]
 
@@ -105,6 +107,8 @@ async def _fetchrow(sql: str, *args):
     pool = await _ensure_pool()
     if not pool:
         return None
+    if _log.isEnabledFor(logging.DEBUG):
+        _log.debug("sql_fetchrow query=%s params=%s", sql, args)
     async with pool.acquire() as con:
         return await con.fetchrow(sql, *args)
 
@@ -385,6 +389,8 @@ async def upsert_lead(
     if source_real_id is None and peer_val is not None:
         source_real_id = peer_val
 
+    source_val = _normalize_int(source_real_id)
+
     title_val = (title or "").strip() or None
 
     existing: Optional[Dict[str, Any]] = None
@@ -412,7 +418,7 @@ async def upsert_lead(
             lead_val,
             tenant_val,
         )
-    if existing is None and source_real_id is not None:
+    if existing is None and source_val is not None:
         existing = await _fetchrow(
             """
             SELECT id, tenant_id
@@ -421,7 +427,7 @@ async def upsert_lead(
               AND ($2 = 0 OR tenant_id = $2)
             LIMIT 1;
             """,
-            source_real_id,
+            source_val,
             tenant_val,
         )
 
@@ -438,24 +444,42 @@ async def upsert_lead(
         except Exception:
             existing_tenant_val = 0
         tenant_update = existing_tenant_val if existing_tenant_val > 0 else tenant_val
-        await _exec(
-            """
-            UPDATE leads
-            SET channel = CASE WHEN $2 <> '' THEN $2 ELSE channel END,
-                source_real_id = COALESCE($3, source_real_id),
-                tenant_id = CASE WHEN $4 > 0 THEN $4 ELSE tenant_id END,
-                telegram_user_id = CASE WHEN $5 IS NOT NULL THEN $5 ELSE telegram_user_id END,
-                title = COALESCE(NULLIF($6, ''), title),
-                updated_at = now()
-            WHERE id = $1;
-            """,
-            existing_id_val,
-            channel_val,
-            source_real_id,
-            tenant_update,
-            telegram_val,
-            title_val or "",
-        )
+        if telegram_val is not None:
+            await _exec(
+                """
+                UPDATE leads
+                SET channel = CASE WHEN $2::text <> '' THEN $2::text ELSE channel END,
+                    source_real_id = COALESCE($3::int, source_real_id),
+                    tenant_id = CASE WHEN $4::int > 0 THEN $4::int ELSE tenant_id END,
+                    telegram_user_id = $5::bigint,
+                    title = COALESCE(NULLIF($6::text, ''), title),
+                    updated_at = now()
+                WHERE id = $1::bigint;
+                """,
+                existing_id_val,
+                channel_val,
+                source_val,
+                tenant_update,
+                telegram_val,
+                title_val,
+            )
+        else:
+            await _exec(
+                """
+                UPDATE leads
+                SET channel = CASE WHEN $2::text <> '' THEN $2::text ELSE channel END,
+                    source_real_id = COALESCE($3::int, source_real_id),
+                    tenant_id = CASE WHEN $4::int > 0 THEN $4::int ELSE tenant_id END,
+                    title = COALESCE(NULLIF($5::text, ''), title),
+                    updated_at = now()
+                WHERE id = $1::bigint;
+                """,
+                existing_id_val,
+                channel_val,
+                source_val,
+                tenant_update,
+                title_val,
+            )
         return target_id or existing_id_val
 
     if lead_val is None:
@@ -464,7 +488,7 @@ async def upsert_lead(
     row = await _fetchrow(
         """
         INSERT INTO leads(id, title, channel, source_real_id, tenant_id, telegram_user_id)
-        VALUES($1, $2, $3, $4, $5, $6)
+        VALUES($1::bigint, $2::text, $3::text, $4::int, $5::int, $6::bigint)
         ON CONFLICT (id)
         DO UPDATE SET channel = EXCLUDED.channel,
                       source_real_id = COALESCE(EXCLUDED.source_real_id, leads.source_real_id),
@@ -480,7 +504,7 @@ async def upsert_lead(
         lead_val,
         title_val,
         channel_val,
-        source_real_id,
+        source_val,
         tenant_val,
         telegram_val,
     )
@@ -748,14 +772,21 @@ async def insert_message_out(
     *,
     title: Optional[str] = None,
 ) -> int:
+    upsert_kwargs = {
+        "channel": channel or "whatsapp",
+        "tenant_id": tenant_id,
+        "telegram_username": telegram_username,
+        "title": title,
+        "peer_id": telegram_user_id,
+    }
+    if telegram_user_id is not None:
+        try:
+            upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
+        except Exception:
+            pass
     resolved_lead_id = await upsert_lead(
         lead_id,
-        channel=channel or "whatsapp",
-        tenant_id=tenant_id,
-        telegram_user_id=telegram_user_id,
-        telegram_username=telegram_username,
-        title=title,
-        peer_id=telegram_user_id,
+        **upsert_kwargs,
     )
     lead_ref = resolved_lead_id or lead_id
     if _offline_enabled():
