@@ -5,7 +5,7 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "1cba7f2d4e90"
+revision = "0001_initial_schema"
 down_revision = None
 branch_labels = None
 depends_on = None

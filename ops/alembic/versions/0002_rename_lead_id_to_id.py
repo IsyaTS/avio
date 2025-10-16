@@ -5,8 +5,8 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "8d42a7c9f103"
-down_revision = "1cba7f2d4e90"
+revision = "0002_rename_lead_id_to_id"
+down_revision = "0001_initial_schema"
 branch_labels = None
 depends_on = None
 
