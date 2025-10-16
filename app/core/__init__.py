@@ -118,6 +118,18 @@ class Settings:
     # waweb
     WA_WEB_URL    = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
     WA_PREFETCH_START = _env_bool("WA_PREFETCH_START", True)
+    try:
+        WA_QR_FETCH_ATTEMPTS = int(os.getenv("WA_QR_FETCH_ATTEMPTS", "3"))
+    except ValueError:
+        WA_QR_FETCH_ATTEMPTS = 3
+    if WA_QR_FETCH_ATTEMPTS < 1:
+        WA_QR_FETCH_ATTEMPTS = 1
+    try:
+        WA_QR_FETCH_RETRY_DELAY = float(os.getenv("WA_QR_FETCH_RETRY_DELAY", "0.7"))
+    except ValueError:
+        WA_QR_FETCH_RETRY_DELAY = 0.7
+    if WA_QR_FETCH_RETRY_DELAY < 0:
+        WA_QR_FETCH_RETRY_DELAY = 0.0
 
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "").strip()

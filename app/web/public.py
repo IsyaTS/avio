@@ -1169,27 +1169,45 @@ def _proxy_qr_with_fallbacks(tenant: int) -> Response:
         except Exception:
             wa_logger.info("qr_prefetch_start_failed")
 
-    cache_bust = int(time.time() * 1000)
-    candidates = _build_qr_candidates(tenant, cache_bust)
+    attempts_raw = getattr(settings, "WA_QR_FETCH_ATTEMPTS", 1) or 1
+    try:
+        attempts = max(1, int(attempts_raw))
+    except (TypeError, ValueError):
+        attempts = 1
+    delay_raw = getattr(settings, "WA_QR_FETCH_RETRY_DELAY", 0.0) or 0.0
+    try:
+        retry_delay = max(0.0, float(delay_raw))
+    except (TypeError, ValueError):
+        retry_delay = 0.0
 
     last_status = 0
     last_stage = ""
     last_body_present = False
     last_content_type = ""
-    for url, stage in candidates:
-        wa_logger.info("qr_fetch url=%s stage=%s", url, stage)
-        status, ctype, body = _fetch_qr_bytes(url)
-        last_status, last_stage = status, stage
-        last_body_present = bool(body)
-        last_content_type = (ctype or "").lower()
-        wa_logger.info("upstream status=%s stage=%s", status, stage)
-        if int(status or 0) == 200 and last_content_type.startswith("image/") and body:
-            headers = {
-                "Cache-Control": "no-store",
-                "X-Debug-Stage": f"served_qr:{stage}",
-            }
-            wa_logger.info("return=200 len=%s ctype=%s stage=%s", len(body or b""), ctype, stage)
-            return StreamingResponse(io.BytesIO(body), media_type=ctype, headers=headers)
+
+    for attempt in range(attempts):
+        cache_bust = int(time.time() * 1000)
+        candidates = _build_qr_candidates(tenant, cache_bust)
+        for url, stage in candidates:
+            wa_logger.info("qr_fetch url=%s stage=%s attempt=%s", url, stage, attempt + 1)
+            status, ctype, body = _fetch_qr_bytes(url)
+            last_status, last_stage = status, stage
+            last_body_present = bool(body)
+            last_content_type = (ctype or "").lower()
+            wa_logger.info("upstream status=%s stage=%s attempt=%s", status, stage, attempt + 1)
+            if int(status or 0) == 200 and last_content_type.startswith("image/") and body:
+                headers = {
+                    "Cache-Control": "no-store",
+                    "X-Debug-Stage": f"served_qr:{stage}",
+                }
+                wa_logger.info("return=200 len=%s ctype=%s stage=%s attempt=%s", len(body or b""), ctype, stage, attempt + 1)
+                return StreamingResponse(io.BytesIO(body), media_type=ctype, headers=headers)
+        if attempt + 1 < attempts and retry_delay:
+            wa_logger.info("qr_fetch_retry sleep=%s attempt=%s", retry_delay, attempt + 1)
+            try:
+                time.sleep(retry_delay)
+            except Exception:
+                wa_logger.info("qr_fetch_retry_sleep_failed attempt=%s", attempt + 1)
 
     headers = _no_store_headers()
     headers["Cache-Control"] = "no-store"
