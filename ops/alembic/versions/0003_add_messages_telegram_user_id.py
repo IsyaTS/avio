@@ -5,7 +5,7 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0003_add_messages_telegram_user_id"
+revision = "3fd5fd74a3f9"
 down_revision = "0002_rename_lead_id_to_id"
 branch_labels = None
 depends_on = None
