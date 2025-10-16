@@ -281,13 +281,17 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     contact_id = 0
     try:
+        upsert_kwargs = {
+            "channel": provider or "whatsapp",
+            "tenant_id": tenant,
+            "telegram_username": telegram_username,
+            "peer_id": peer_id,
+        }
+        if telegram_user_id is not None:
+            upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
         resolved_lead = await upsert_lead(
             lead_id,
-            channel=provider or "whatsapp",
-            tenant_id=tenant,
-            telegram_user_id=telegram_user_id,
-            telegram_username=telegram_username,
-            peer_id=peer_id,
+            **upsert_kwargs,
         )
     except Exception as exc:
         logger.exception(

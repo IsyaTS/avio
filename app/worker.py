@@ -571,14 +571,18 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         elif telegram_user_id is not None:
             title_hint = f"tg:id {telegram_user_id}"
         try:
+            upsert_kwargs = {
+                "channel": "telegram",
+                "tenant_id": tenant,
+                "telegram_username": username,
+                "title": title_hint,
+                "peer_id": telegram_user_id,
+            }
+            if telegram_user_id is not None:
+                upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
             resolved_lead = await upsert_lead(
                 existing_lead_id,
-                channel="telegram",
-                tenant_id=tenant,
-                telegram_user_id=telegram_user_id,
-                telegram_username=username,
-                title=title_hint,
-                peer_id=telegram_user_id,
+                **upsert_kwargs,
             )
         except Exception as exc:
             DB_ERRORS_COUNTER.labels("upsert_lead").inc()
@@ -699,14 +703,18 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
     else:
         resolved_lead_id: Optional[int] = None
         try:
+            upsert_kwargs = {
+                "channel": channel_name,
+                "source_real_id": None,
+                "tenant_id": tenant_id,
+                "telegram_username": username,
+                "peer_id": telegram_user_id,
+            }
+            if telegram_user_id is not None:
+                upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
             resolved_lead_id = await upsert_lead(
                 lead_id,
-                channel=channel_name,
-                source_real_id=None,
-                tenant_id=tenant_id,
-                telegram_user_id=telegram_user_id,
-                telegram_username=username,
-                peer_id=telegram_user_id,
+                **upsert_kwargs,
             )
         except Exception as exc:
             log(

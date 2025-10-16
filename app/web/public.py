@@ -862,14 +862,18 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
     )
 
     try:
+        upsert_kwargs = {
+            "channel": channel or "telegram",
+            "tenant_id": tenant,
+            "telegram_username": telegram_username,
+            "peer_id": peer_id,
+            "title": title_hint,
+        }
+        if telegram_user_id is not None:
+            upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
         lead_id = await upsert_lead(
             lead_hint,
-            channel=channel or "telegram",
-            tenant_id=tenant,
-            telegram_user_id=telegram_user_id,
-            telegram_username=telegram_username,
-            peer_id=peer_id,
-            title=title_hint,
+            **upsert_kwargs,
         )
     except Exception:
         DB_ERRORS_COUNTER.labels("upsert_lead").inc()
