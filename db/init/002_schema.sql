@@ -45,11 +45,13 @@ CREATE TABLE IF NOT EXISTS outbox (
   last_error     TEXT,
   scheduled_at   TIMESTAMPTZ,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   sent_at        TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_outbox_lead_dedup ON outbox(lead_id, dedup_hash);
 CREATE INDEX IF NOT EXISTS idx_outbox_status_created ON outbox(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_status_updated ON outbox(status, updated_at DESC);
 
 -- Кэш источников (realId) поверх Redis
 CREATE TABLE IF NOT EXISTS source_cache (

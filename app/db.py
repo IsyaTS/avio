@@ -696,7 +696,7 @@ async def take_outbox_batch(limit: int = 10) -> list[Dict[str, Any]]:
                     SELECT o.id
                     FROM outbox o
                     WHERE o.status IN ('queued', 'retry')
-                    ORDER BY o.created_at
+                    ORDER BY o.updated_at DESC
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
                 ),
