@@ -131,12 +131,6 @@ def upgrade() -> None:
             ON leads(tenant_id, updated_at DESC)
             """
         )
-        op.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_leads_tenant_username
-            ON leads(tenant_id, telegram_username)
-            """
-        )
 
 
 def downgrade() -> None:
