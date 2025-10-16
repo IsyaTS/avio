@@ -5,7 +5,7 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0002_rename_lead_id_to_id"
+revision = "8d7d0f3b0f3a"
 down_revision = "0001_initial_schema"
 branch_labels = None
 depends_on = None
@@ -87,6 +87,17 @@ def upgrade() -> None:
               AND lc.lead_id NOT IN (SELECT id FROM leads)
             """
         )
+
+        if column_exists("lead_contacts", "lead_id"):
+            op.execute(
+                """
+                DELETE FROM lead_contacts AS lc
+                WHERE lc.lead_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM leads AS l WHERE l.id = lc.lead_id
+                  )
+                """
+            )
 
     for table_name, constraint_name in (
         ("messages", "messages_lead_id_fkey"),
