@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     from app.web import common as C  # type: ignore
 
 from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
-from app.common import OUTBOX_QUEUE_KEY
+from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
 
 
 logger = logging.getLogger("app.web.webhooks")
@@ -137,7 +137,13 @@ def _resolve_catalog_attachment(
 
 async def process_incoming(body: dict, request: Request | None = None) -> JSONResponse:
     src = body.get("source") or {}
-    provider = (src.get("type") or body.get("provider") or "whatsapp").lower()
+    provider = (
+        src.get("type")
+        or body.get("provider")
+        or body.get("channel")
+        or body.get("ch")
+        or "whatsapp"
+    ).lower()
     raw_tenant = src.get("tenant") or body.get("tenant_id") or os.getenv("TENANT_ID", "1")
     tenant_candidate = _coerce_int(raw_tenant)
     if tenant_candidate is None:
@@ -414,11 +420,26 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             pass
         return _ok({"queued": True, "leadId": lead_id})
 
-    try:
-        msgs = await build_llm_messages(refer_id, text or "", provider, tenant=tenant)
-        reply = await ask_llm(msgs, tenant=tenant, contact_id=refer_id, channel=provider)
-    except Exception:
-        reply = "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
+    fallback_reply = (
+        "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
+    )
+    reply: str | None = None
+    if smart_reply_enabled(tenant):
+        try:
+            msgs = await build_llm_messages(refer_id, text or "", provider, tenant=tenant)
+            reply = await ask_llm(msgs, tenant=tenant, contact_id=refer_id, channel=provider)
+        except Exception:
+            reply = fallback_reply
+    else:
+        logger.info(
+            "event=smart_reply_disabled tenant=%s channel=%s lead_id=%s",
+            tenant,
+            provider,
+            lead_id,
+        )
+
+    if not reply:
+        return _ok({"queued": False, "leadId": lead_id, "smartReply": False})
 
     resolved_provider = provider or "whatsapp"
     out: Dict[str, Any] = {
@@ -444,6 +465,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         out["to"] = whatsapp_phone
 
     await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(out, ensure_ascii=False))
+    if provider == "telegram":
+        logger.info(
+            "event=smart_reply_enqueued channel=telegram tenant=%s lead_id=%s message_id=%s",
+            tenant,
+            lead_id,
+            message_id or "",
+        )
 
     behavior = behavior or {}
     always_full = bool(behavior.get("always_full_catalog")) if behavior else False

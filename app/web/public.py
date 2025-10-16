@@ -69,7 +69,6 @@ from app.core import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.schemas import MessageIn, PingEvent
 from app.db import insert_message_in, upsert_lead
-from app.common import OUTBOX_QUEUE_KEY
 from . import common as common
 try:  # pragma: no cover - optional webhooks import
     from . import webhooks as webhook_module  # type: ignore
@@ -721,32 +720,6 @@ def _find_username(value: Any) -> str | None:
     return None
 
 
-def _resolve_auto_reply_settings(tenant: int) -> tuple[bool, str]:
-    try:
-        cfg = common.read_tenant_config(tenant)
-    except Exception:
-        return False, ""
-    if not isinstance(cfg, dict):
-        return False, ""
-    behavior = cfg.get("behavior")
-    if not isinstance(behavior, dict):
-        return False, ""
-    enabled = bool(behavior.get("auto_reply")) or bool(behavior.get("auto_reply_enabled"))
-    text_raw = behavior.get("auto_reply_text")
-    if isinstance(text_raw, str):
-        text_value = text_raw
-    elif text_raw is None:
-        text_value = ""
-    else:
-        text_value = str(text_raw)
-    return enabled, text_value
-
-
-def _auto_reply_enabled(tenant: int) -> bool:
-    enabled, _ = _resolve_auto_reply_settings(tenant)
-    return enabled
-
-
 @router.post("/webhook/provider")
 async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> JSONResponse:
     admin_header = request.headers.get("X-Admin-Token", "")
@@ -836,15 +809,48 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         message_id = str(fallback)
         generated_from_hint = True
 
+    attachments_data: list[dict[str, Any]] = []
+    for attachment in message.attachments or []:
+        try:
+            if hasattr(attachment, "model_dump"):
+                attachments_data.append(attachment.model_dump(by_alias=True))
+            else:
+                attachments_data.append(attachment.dict(by_alias=True))
+        except Exception:
+            logger.debug(
+                "event=webhook_attachment_normalize_failed tenant=%s lead_id=%s", tenant, lead_hint,
+                exc_info=True,
+            )
+
+    resolved_channel = channel or "telegram"
+    from_addr = ""
+    to_addr = ""
+    if message.from_id is not None:
+        from_addr = str(message.from_id)
+    elif telegram_user_id is not None:
+        from_addr = str(telegram_user_id)
+    if message.to is not None:
+        to_addr = str(message.to)
+    elif peer_id is not None:
+        to_addr = str(peer_id)
+    elif telegram_user_id is not None:
+        to_addr = str(telegram_user_id)
+
     inbox_event = {
         "event": "messages.incoming",
         "tenant": tenant,
         "lead_id": lead_hint,
         "message_id": message_id,
-        "channel": channel or "telegram",
+        "channel": resolved_channel,
+        "ch": resolved_channel,
+        "provider": resolved_channel,
         "text": text_value,
+        "attachments": attachments_data,
         "ts": ts_ms,
         "provider_raw": message.provider_raw or {},
+        "from": from_addr,
+        "to": to_addr,
+        "source": {"type": resolved_channel, "tenant": tenant},
     }
     if telegram_user_id is not None:
         inbox_event["telegram_user_id"] = telegram_user_id
@@ -926,94 +932,6 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         message.to,
         len(message.attachments),
     )
-
-    auto_enabled, auto_text = _resolve_auto_reply_settings(tenant)
-    if auto_enabled:
-        reply_text = (auto_text or "").strip()
-        if not reply_text:
-            logger.debug(
-                "event=auto_reply_skip reason=empty_text tenant=%s lead_id=%s", tenant, lead_id
-            )
-        elif telegram_user_id is None:
-            logger.warning(
-                "event=auto_reply_skip reason=missing_telegram_user tenant=%s lead_id=%s", tenant, lead_id
-            )
-        elif not lead_id:
-            logger.warning(
-                "event=auto_reply_skip reason=missing_lead tenant=%s", tenant
-            )
-        else:
-            try:
-                telegram_id_value = int(telegram_user_id)
-            except Exception:
-                logger.warning(
-                    "event=auto_reply_skip reason=invalid_telegram_user tenant=%s lead_id=%s value=%s",
-                    tenant,
-                    lead_id,
-                    telegram_user_id,
-                )
-                telegram_id_value = None
-            if telegram_id_value is None:
-                logger.warning(
-                    "event=auto_reply_skip reason=invalid_telegram_user tenant=%s lead_id=%s",
-                    tenant,
-                    lead_id,
-                )
-            else:
-                job = {
-                    "provider": "telegram",
-                    "ch": "telegram",
-                    "tenant": int(tenant),
-                    "tenant_id": int(tenant),
-                    "lead_id": int(lead_id),
-                    "text": reply_text,
-                    "telegram_user_id": telegram_id_value,
-                    "to": str(telegram_id_value),
-                }
-                if telegram_username:
-                    job["username"] = telegram_username
-                try:
-                    client = client or common.redis_client()
-                except Exception:
-                    client = None
-                if client is None:
-                    logger.error(
-                        "event=auto_reply_enqueue_failed reason=redis_unavailable tenant=%s lead_id=%s",
-                        tenant,
-                        lead_id,
-                    )
-                else:
-                    payload = json.dumps(job, ensure_ascii=False)
-                    try:
-                        result = client.lpush(OUTBOX_QUEUE_KEY, payload)
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except redis_ex.RedisError:
-                        logger.exception(
-                            "event=auto_reply_enqueue_failed tenant=%s lead_id=%s", tenant, lead_id
-                        )
-                    except Exception:
-                        logger.exception(
-                            "event=auto_reply_enqueue_failed tenant=%s lead_id=%s", tenant, lead_id
-                        )
-                    else:
-                        safe_payload = {
-                            "tenant": int(tenant),
-                            "lead_id": int(lead_id),
-                            "channel": "telegram",
-                            "text_len": len(reply_text),
-                            "has_username": bool(telegram_username),
-                        }
-                        logger.info(
-                            "event=auto_reply_enqueue queue=%s payload=%s",
-                            OUTBOX_QUEUE_KEY,
-                            safe_payload,
-                        )
-                        logger.info(
-                            "event=auto_reply_enqueued tenant=%s lead_id=%s channel=telegram",
-                            tenant,
-                            lead_id,
-                        )
 
     return JSONResponse({"ok": True, "lead_id": lead_id})
 

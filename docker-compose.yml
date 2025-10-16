@@ -34,6 +34,8 @@ services:
       PUBLIC_KEY: ${PUBLIC_KEY}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}
+      SMART_REPLY_ENABLED: ${SMART_REPLY_ENABLED:-1}
+      AI_ENABLED: ${AI_ENABLED:-1}
       TENANT: ${TENANT:-1}
       OUTBOX_DB_WORKER: "0"
       PYTHONPATH: /app
@@ -63,6 +65,9 @@ services:
       OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-*}
       APP_BASE_URL: ${APP_BASE_URL:-http://app:8000}
       TENANT: ${TENANT:-1}
+      SMART_REPLY_ENABLED: ${SMART_REPLY_ENABLED:-1}
+      AI_ENABLED: ${AI_ENABLED:-1}
+      INBOX_ENABLED: ${INBOX_ENABLED:-1}
     depends_on:
       app:
         condition: service_started
