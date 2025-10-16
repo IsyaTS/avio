@@ -1,0 +1,3 @@
+behavior:
+  auto_reply: true
+  auto_reply_text: "Спасибо! Мы свяжемся с вами в ближайшее время."

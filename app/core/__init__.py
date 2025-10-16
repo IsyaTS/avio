@@ -1,8 +1,9 @@
 from __future__ import annotations
 import os, json, re, csv, asyncio, pathlib, time, random, hashlib, logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Mapping
 from dataclasses import dataclass, field
 import urllib.request, urllib.error
+import yaml
 
 # Redis (асинхронный клиент можно использовать при необходимости)
 import redis.asyncio as redis_async
@@ -79,9 +80,10 @@ def _resolve_tenants_dir() -> pathlib.Path:
 
 
 TENANTS_DIR = _resolve_tenants_dir()
+TENANT_CONFIG_DIR = ROOT_DIR / "config" / "tenants"
 
 # Lightweight in-memory caches (mtime-based invalidation)
-_TENANT_CONFIG_CACHE: Dict[int, Tuple[float, dict]] = {}
+_TENANT_CONFIG_CACHE: Dict[int, Tuple[float, float, dict]] = {}
 _TENANT_PERSONA_CACHE: Dict[int, Tuple[float, str]] = {}
 # Key: (tenant or None, tuple of (path, mtime, size)) -> parsed, normalized items
 _CATALOG_CACHE: Dict[Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]], List[Dict[str, Any]]] = {}
@@ -681,23 +683,100 @@ def ensure_tenant_files(tenant: int) -> pathlib.Path:
     return td
 
 
+def _merge_dicts(base: Mapping[str, Any] | dict, overlay: Mapping[str, Any] | dict) -> dict:
+    result = dict(base or {})
+    for key, value in dict(overlay or {}).items():
+        base_value = result.get(key)
+        if isinstance(base_value, dict) and isinstance(value, dict):
+            result[key] = _merge_dicts(base_value, value)
+        else:
+            result[key] = value
+    return result
+
+
+def _load_external_tenant_config(tenant: int) -> tuple[float, dict]:
+    directory = TENANT_CONFIG_DIR
+    if not directory.exists():
+        return 0.0, {}
+    tenant_str = str(int(tenant))
+    candidates = (
+        directory / f"{tenant_str}.yaml",
+        directory / f"{tenant_str}.yml",
+        directory / f"{tenant_str}.json",
+    )
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        try:
+            if path.suffix.lower() == ".json":
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            else:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = yaml.safe_load(fh)  # type: ignore[arg-type]
+        except Exception:
+            logger.warning("failed to load tenant override path=%s", path, exc_info=True)
+            return mtime, {}
+        if isinstance(data, dict):
+            return mtime, data
+        logger.warning("tenant override not a mapping path=%s", path)
+        return mtime, {}
+    return 0.0, {}
+
+
+def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(cfg or {})
+    behavior_raw = normalized.get("behavior")
+    behavior: dict[str, Any] = {}
+    if isinstance(behavior_raw, dict):
+        behavior.update(behavior_raw)
+
+    auto_flag = behavior.get("auto_reply")
+    if auto_flag is None:
+        auto_flag = behavior.get("auto_reply_enabled")
+    behavior["auto_reply"] = bool(auto_flag)
+    behavior["auto_reply_enabled"] = behavior["auto_reply"]
+
+    text_raw = behavior.get("auto_reply_text")
+    if isinstance(text_raw, str):
+        text_value = text_raw
+    elif text_raw is None:
+        text_value = ""
+    else:
+        text_value = str(text_raw)
+    behavior["auto_reply_text"] = text_value
+
+    normalized["behavior"] = behavior
+    return normalized
+
+
 def read_tenant_config(tenant: int) -> dict:
     ensure_tenant_files(tenant)
     path = tenant_dir(tenant) / "tenant.json"
     try:
-        mtime = path.stat().st_mtime
-        cached = _TENANT_CONFIG_CACHE.get(int(tenant))
-        if cached and cached[0] == mtime:
-            return cached[1]
+        primary_mtime = path.stat().st_mtime
     except Exception:
-        mtime = 0.0
-    with open(path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    try:
-        _TENANT_CONFIG_CACHE[int(tenant)] = (mtime, data)
-    except Exception:
-        pass
-    return data
+        primary_mtime = 0.0
+
+    overlay_mtime, overlay_cfg = _load_external_tenant_config(tenant)
+    cached = _TENANT_CONFIG_CACHE.get(int(tenant))
+    if cached and cached[0] == primary_mtime and cached[1] == overlay_mtime:
+        return cached[2]
+
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    else:
+        data = {}
+
+    merged = _merge_dicts(data, overlay_cfg)
+    normalized = _normalize_tenant_config(merged)
+    _TENANT_CONFIG_CACHE[int(tenant)] = (primary_mtime, overlay_mtime, normalized)
+    return normalized
 
 
 def write_tenant_config(tenant: int, cfg: dict) -> None:
@@ -707,7 +786,13 @@ def write_tenant_config(tenant: int, cfg: dict) -> None:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
     try:
         mtime = path.stat().st_mtime
-        _TENANT_CONFIG_CACHE[int(tenant)] = (mtime, cfg)
+    except Exception:
+        mtime = 0.0
+    overlay_mtime, overlay_cfg = _load_external_tenant_config(tenant)
+    merged = _merge_dicts(cfg, overlay_cfg)
+    normalized = _normalize_tenant_config(merged)
+    try:
+        _TENANT_CONFIG_CACHE[int(tenant)] = (mtime, overlay_mtime, normalized)
     except Exception:
         _TENANT_CONFIG_CACHE.pop(int(tenant), None)
 
