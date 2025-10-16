@@ -68,7 +68,7 @@ from config import tg_worker_url
 from app.core import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.schemas import MessageIn, PingEvent
-from app.db import insert_message_in, upsert_lead
+from app.db import insert_message_in, upsert_lead, ensure_outbox_queued
 from . import common as common
 try:  # pragma: no cover - optional webhooks import
     from . import webhooks as webhook_module  # type: ignore
@@ -720,19 +720,30 @@ def _find_username(value: Any) -> str | None:
     return None
 
 
-def _auto_reply_enabled(tenant: int) -> bool:
+def _resolve_auto_reply_settings(tenant: int) -> tuple[bool, str]:
     try:
         cfg = common.read_tenant_config(tenant)
     except Exception:
-        return False
+        return False, ""
     if not isinstance(cfg, dict):
-        return False
+        return False, ""
     behavior = cfg.get("behavior")
     if not isinstance(behavior, dict):
-        return False
-    if bool(behavior.get("auto_reply_enabled")):
-        return True
-    return bool(behavior.get("auto_reply"))
+        return False, ""
+    enabled = bool(behavior.get("auto_reply")) or bool(behavior.get("auto_reply_enabled"))
+    text_raw = behavior.get("auto_reply_text")
+    if isinstance(text_raw, str):
+        text_value = text_raw
+    elif text_raw is None:
+        text_value = ""
+    else:
+        text_value = str(text_raw)
+    return enabled, text_value
+
+
+def _auto_reply_enabled(tenant: int) -> bool:
+    enabled, _ = _resolve_auto_reply_settings(tenant)
+    return enabled
 
 
 @router.post("/webhook/provider")
@@ -911,36 +922,37 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         len(message.attachments),
     )
 
-    enqueue_auto = False
-    try:
-        enqueue_auto = _auto_reply_enabled(tenant)
-    except Exception:
-        enqueue_auto = False
-
-    if enqueue_auto:
-        try:
-            client = common.redis_client()
-        except Exception as exc:
-            logger.error("stage=redis_connect_fail event=enqueue_outbox error=%s", exc)
-            raise HTTPException(status_code=503, detail="redis_unavailable") from exc
-
-        queue_payload = {
-            "lead_id": lead_id,
-            "tenant_id": tenant,
-            "tenant": tenant,
-            "provider": channel,
-            "ch": channel,
-            "event": "incoming",
-            "incoming_text": text_value,
-        }
-        try:
-            client.lpush("outbox:send", json.dumps(queue_payload, ensure_ascii=False))
-        except redis_ex.RedisError as exc:
-            logger.error("stage=redis_write_fail event=enqueue_outbox error=%s", exc)
-            raise HTTPException(status_code=503, detail="redis_write_failed") from exc
-        logger.info(
-            "event=enqueue_outbox queue=outbox:send tenant=%s lead_id=%s", tenant, lead_id
-        )
+    auto_enabled, auto_text = _resolve_auto_reply_settings(tenant)
+    if auto_enabled:
+        reply_text = (auto_text or "").strip()
+        if not reply_text:
+            logger.debug(
+                "event=auto_reply_skip reason=empty_text tenant=%s lead_id=%s", tenant, lead_id
+            )
+        elif telegram_user_id is None:
+            logger.warning(
+                "event=auto_reply_skip reason=missing_telegram_user tenant=%s lead_id=%s", tenant, lead_id
+            )
+        elif not lead_id:
+            logger.warning(
+                "event=auto_reply_skip reason=missing_lead tenant=%s", tenant
+            )
+        else:
+            try:
+                await ensure_outbox_queued(
+                    lead_id,
+                    reply_text,
+                    tenant_id=tenant,
+                )
+            except Exception:
+                DB_ERRORS_COUNTER.labels("ensure_outbox_queued").inc()
+                logger.exception(
+                    "event=auto_reply_enqueue_failed tenant=%s lead_id=%s", tenant, lead_id
+                )
+            else:
+                logger.info(
+                    "event=auto_reply_enqueued tenant=%s lead_id=%s channel=telegram", tenant, lead_id
+                )
 
     return JSONResponse({"ok": True, "lead_id": lead_id})
 

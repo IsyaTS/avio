@@ -89,6 +89,8 @@ process_incoming = _webhooks_mod.process_incoming  # type: ignore[attr-defined]
 
 import importlib.util as _importlib_util
 
+from app import outbox_worker
+
 ROOT = pathlib.Path(__file__).resolve().parent
 
 try:  # рабочие БД-хелперы; при отсутствии БД заменяются заглушками
@@ -205,6 +207,26 @@ async def _log_alembic_revision_on_startup() -> None:
 @app.on_event("startup")
 async def _startup_log_revision() -> None:
     await _log_alembic_revision_on_startup()
+
+
+@app.on_event("startup")
+async def _startup_outbox_worker() -> None:
+    try:
+        await outbox_worker.start()
+    except Exception:
+        logging.getLogger("app.outbox_worker").exception(
+            "event=outbox_worker_start_failed"
+        )
+
+
+@app.on_event("shutdown")
+async def _shutdown_outbox_worker() -> None:
+    try:
+        await outbox_worker.stop()
+    except Exception:
+        logging.getLogger("app.outbox_worker").exception(
+            "event=outbox_worker_stop_failed"
+        )
 
 
 @app.get("/metrics")

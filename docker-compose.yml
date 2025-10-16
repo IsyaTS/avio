@@ -30,6 +30,7 @@ services:
       TG_WORKER_URL: http://tgworker:9000
       TGWORKER_BASE_URL: http://tgworker:9000
       WA_ENABLED: "false"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       PUBLIC_KEY: ${PUBLIC_KEY}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}

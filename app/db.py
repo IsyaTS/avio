@@ -600,14 +600,35 @@ async def get_contact_id_by_lead(lead_id: int) -> Optional[int]:
 
 # -------- Outbox --------
 
-async def ensure_outbox_queued(lead_id: int, text: str) -> str:
-    d = sha1(text)
-    await _exec("""
+async def ensure_outbox_queued(
+    lead_id: int,
+    text: str,
+    *,
+    tenant_id: Optional[int] = None,
+) -> str:
+    dedup = sha1(text)
+    try:
+        tenant_val = int(tenant_id) if tenant_id is not None else 0
+    except Exception:
+        tenant_val = 0
+    await _exec(
+        """
         INSERT INTO outbox(lead_id, text, dedup_hash, status)
-        VALUES($1, $2, $3, 'queued')
+        SELECT $1, $2, $3, 'queued'
+        WHERE EXISTS (
+            SELECT 1
+            FROM leads
+            WHERE id = $1
+              AND ($4 = 0 OR tenant_id = $4)
+        )
         ON CONFLICT (lead_id, dedup_hash) DO NOTHING;
-    """, lead_id, text, d)
-    return d
+        """,
+        lead_id,
+        text,
+        dedup,
+        tenant_val,
+    )
+    return dedup
 
 async def bump_attempt(lead_id: int, d: str, error: Optional[str] = None):
     await _exec("""
@@ -637,6 +658,45 @@ async def mark_failed(lead_id: int, d: str, error: str):
             updated_at = now()
         WHERE lead_id = $1 AND dedup_hash = $2;
     """, lead_id, d, error)
+
+
+async def take_outbox_batch(limit: int = 10) -> list[Dict[str, Any]]:
+    pool = await _ensure_pool()
+    if not pool:
+        return []
+    async with pool.acquire() as con:
+        async with con.transaction():
+            rows = await con.fetch(
+                """
+                WITH next AS (
+                    SELECT o.id
+                    FROM outbox o
+                    WHERE o.status IN ('queued', 'retry')
+                    ORDER BY o.created_at
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                ),
+                updated AS (
+                    UPDATE outbox o
+                    SET status = 'processing',
+                        updated_at = now()
+                    WHERE o.id IN (SELECT id FROM next)
+                    RETURNING o.id, o.lead_id, o.text, o.dedup_hash, o.attempts
+                )
+                SELECT u.id,
+                       u.lead_id,
+                       u.text,
+                       u.dedup_hash,
+                       u.attempts,
+                       l.tenant_id,
+                       l.telegram_user_id,
+                       l.channel
+                FROM updated u
+                JOIN leads l ON l.id = u.lead_id;
+                """,
+                limit,
+            )
+    return [dict(row) for row in rows]
 
 # -------- Messages --------
 
