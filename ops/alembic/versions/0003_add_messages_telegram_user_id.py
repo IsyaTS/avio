@@ -16,50 +16,77 @@ def upgrade() -> None:
     if bind is None:  # pragma: no cover - defensive
         raise RuntimeError("Database connection is required for this migration")
 
-    op.add_column(
-        "messages",
-        sa.Column("telegram_user_id", sa.BigInteger(), nullable=False, server_default="0"),
-    )
-    op.create_index(
-        "idx_messages_tenant_telegram_user",
-        "messages",
-        ["tenant_id", "telegram_user_id"],
-    )
-    op.alter_column(
-        "messages",
-        "telegram_user_id",
-        server_default=None,
-    )
+    inspector = sa.inspect(bind)
 
-    dialect = bind.dialect
-    has_contact_column = dialect.has_column(bind, "contacts", "telegram_user_id")
-    if not has_contact_column:
-        op.add_column("contacts", sa.Column("telegram_user_id", sa.BigInteger(), nullable=True))
-        op.create_index("idx_contacts_telegram_user", "contacts", ["telegram_user_id"])
-    else:
-        op.execute(
-            """
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_indexes
-                    WHERE schemaname = current_schema()
-                      AND tablename = 'contacts'
-                      AND indexname = 'idx_contacts_telegram_user'
-                ) THEN
-                    CREATE INDEX idx_contacts_telegram_user ON contacts(telegram_user_id);
-                END IF;
-            END;
-            $$;
-            """
-        )
+    if inspector.has_table("messages"):
+        message_columns = {column["name"] for column in inspector.get_columns("messages")}
+        added_message_column = False
+        if "telegram_user_id" not in message_columns:
+            op.add_column(
+                "messages",
+                sa.Column(
+                    "telegram_user_id", sa.BigInteger(), nullable=False, server_default="0"
+                ),
+            )
+            added_message_column = True
+            message_columns.add("telegram_user_id")
+
+        if "telegram_user_id" in message_columns:
+            message_indexes = {index["name"] for index in inspector.get_indexes("messages")}
+            if "idx_messages_tenant_telegram_user" not in message_indexes:
+                op.create_index(
+                    "idx_messages_tenant_telegram_user",
+                    "messages",
+                    ["tenant_id", "telegram_user_id"],
+                )
+
+            if added_message_column:
+                op.alter_column(
+                    "messages",
+                    "telegram_user_id",
+                    server_default=None,
+                )
+
+    if inspector.has_table("contacts"):
+        contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
+        if "telegram_user_id" not in contact_columns:
+            op.add_column(
+                "contacts",
+                sa.Column("telegram_user_id", sa.BigInteger(), nullable=True),
+            )
+            contact_columns.add("telegram_user_id")
+
+        if "telegram_user_id" in contact_columns:
+            contact_indexes = {index["name"] for index in inspector.get_indexes("contacts")}
+            if "idx_contacts_telegram_user" not in contact_indexes:
+                op.create_index(
+                    "idx_contacts_telegram_user", "contacts", ["telegram_user_id"]
+                )
 
 
 def downgrade() -> None:
-    op.drop_index("idx_messages_tenant_telegram_user", table_name="messages")
-    op.drop_column("messages", "telegram_user_id")
+    bind = op.get_bind()
+    if bind is None:  # pragma: no cover - defensive
+        raise RuntimeError("Database connection is required for this migration")
 
-    conn = op.get_bind()
-    if conn and conn.dialect.has_column(conn, "contacts", "telegram_user_id"):
-        op.drop_index("idx_contacts_telegram_user", table_name="contacts")
-        op.drop_column("contacts", "telegram_user_id")
+    inspector = sa.inspect(bind)
+
+    if inspector.has_table("messages"):
+        message_indexes = {index["name"] for index in inspector.get_indexes("messages")}
+        if "idx_messages_tenant_telegram_user" in message_indexes:
+            op.drop_index("idx_messages_tenant_telegram_user", table_name="messages")
+
+        message_columns = {column["name"] for column in inspector.get_columns("messages")}
+        if "telegram_user_id" in message_columns:
+            op.drop_column("messages", "telegram_user_id")
+
+    if inspector.has_table("contacts"):
+        contact_columns = {column["name"] for column in inspector.get_columns("contacts")}
+        if "telegram_user_id" in contact_columns:
+            contact_indexes = {
+                index["name"] for index in inspector.get_indexes("contacts")
+            }
+            if "idx_contacts_telegram_user" in contact_indexes:
+                op.drop_index("idx_contacts_telegram_user", table_name="contacts")
+
+            op.drop_column("contacts", "telegram_user_id")
