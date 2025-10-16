@@ -32,7 +32,9 @@ from app.common import (
     OUTBOX_DLQ_KEY,
     get_outbox_whitelist,
     normalize_username,
+    smart_reply_enabled,
 )
+from app.core import build_llm_messages, ask_llm
 
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
@@ -66,6 +68,17 @@ TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
 OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW not in {"0", "false"}
+_INBOX_ENABLED_RAW = (os.getenv("INBOX_ENABLED") or "").strip().lower()
+INBOX_ENABLED = _INBOX_ENABLED_RAW not in {"", "0", "false", "no", "off"}
+INCOMING_QUEUE_KEY = (
+    os.getenv("INCOMING_QUEUE_KEY")
+    or os.getenv("INBOX_QUEUE_KEY")
+    or "inbox:message_in"
+)
+try:
+    INBOX_BLOCK_TIMEOUT = max(1, int(os.getenv("INBOX_BLOCK_TIMEOUT", "5")))
+except Exception:
+    INBOX_BLOCK_TIMEOUT = 5
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 QUEUES = [OUTBOX_QUEUE_KEY]
 
@@ -189,6 +202,119 @@ def _normalize_attachments(blobs: Iterable[dict[str, Any]]) -> list[dict[str, An
         if item:
             normalized.append(item)
     return normalized
+
+
+async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
+    channel_raw = event.get("channel") or event.get("ch") or event.get("provider")
+    channel = ""
+    if isinstance(channel_raw, str):
+        channel = channel_raw.strip().lower()
+    elif channel_raw is not None:
+        channel = str(channel_raw).strip().lower()
+    if channel != "telegram":
+        return
+
+    text = (event.get("text") or "").strip()
+    lead_id = _coerce_int(event.get("lead_id")) or 0
+    tenant_raw = event.get("tenant") or event.get("tenant_id") or os.getenv("TENANT_ID", "1")
+    try:
+        tenant_id = int(tenant_raw)
+    except Exception:
+        tenant_id = int(os.getenv("TENANT_ID", "1"))
+
+    if not text:
+        log(
+            f"event=incoming_skip reason=no_text channel=telegram tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    if not smart_reply_enabled(tenant_id):
+        log(
+            f"event=smart_reply_disabled channel=telegram tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    contact_id = _coerce_int(event.get("contact_id"))
+    refer_id = contact_id if contact_id and contact_id > 0 else lead_id
+
+    try:
+        messages = await build_llm_messages(refer_id, text, "telegram", tenant=tenant_id)
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=build_messages error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    try:
+        reply = await ask_llm(
+            messages,
+            tenant=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="telegram",
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=ask_llm error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    reply_text = (reply or "").strip()
+    if not reply_text:
+        log(
+            f"event=smart_reply_empty channel=telegram tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    log(
+        f"event=smart_reply_generated channel=telegram tenant={tenant_id} lead_id={lead_id}"
+    )
+
+    telegram_user_id = event.get("telegram_user_id")
+    peer_id = event.get("peer_id")
+    username = event.get("username") if isinstance(event.get("username"), str) else None
+    to_value = event.get("to")
+    if not to_value:
+        if telegram_user_id not in (None, ""):
+            to_value = str(telegram_user_id)
+        elif peer_id not in (None, ""):
+            to_value = str(peer_id)
+
+    out_payload: Dict[str, Any] = {
+        "lead_id": lead_id,
+        "tenant": tenant_id,
+        "tenant_id": tenant_id,
+        "provider": "telegram",
+        "ch": "telegram",
+        "channel": "telegram",
+        "text": reply_text,
+        "attachments": [],
+    }
+    message_id = event.get("message_id")
+    if message_id:
+        out_payload["message_id"] = message_id
+    if to_value:
+        out_payload["to"] = to_value
+    if telegram_user_id not in (None, ""):
+        out_payload["telegram_user_id"] = telegram_user_id
+    if peer_id not in (None, ""):
+        out_payload["peer_id"] = peer_id
+    if username:
+        out_payload["username"] = username
+
+    try:
+        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
+    except Exception as exc:
+        log(
+            "event=smart_reply_enqueue_failed channel=telegram tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    log(
+        f"event=smart_reply_enqueued channel=telegram tenant={tenant_id} lead_id={lead_id}"
+    )
 
 
 def _resolve_telegram_to(
@@ -766,6 +892,54 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
 
 
 # ==== Loop ====
+async def process_incoming_queue() -> None:
+    log(
+        f"[worker] inbox loop start enabled={int(INBOX_ENABLED)} queue={INCOMING_QUEUE_KEY}"
+    )
+    if not INBOX_ENABLED:
+        return
+    while True:
+        try:
+            try:
+                popped = await r.brpop(INCOMING_QUEUE_KEY, timeout=INBOX_BLOCK_TIMEOUT)
+            except redis_ex.ConnectionError:
+                await asyncio.sleep(1.0)
+                continue
+
+            if not popped:
+                continue
+
+            _, raw_item = popped
+            try:
+                event = json.loads(raw_item)
+            except json.JSONDecodeError:
+                preview = raw_item[:160] if isinstance(raw_item, str) else str(raw_item)[:160]
+                log(
+                    f"event=incoming_parse_error queue={INCOMING_QUEUE_KEY} preview={preview}"
+                )
+                continue
+
+            if not isinstance(event, dict):
+                log(
+                    f"event=incoming_skip reason=invalid_payload queue={INCOMING_QUEUE_KEY}"
+                )
+                continue
+
+            try:
+                await _handle_incoming_event(event)
+            except Exception as exc:
+                channel_hint = event.get("channel") or event.get("ch") or event.get("provider") or "-"
+                log(
+                    "event=incoming_unhandled channel=%s error=%s"
+                    % (channel_hint, exc)
+                )
+                await asyncio.sleep(0)
+
+        except Exception as exc:
+            log(f"event=incoming_loop_error error={exc}")
+            await asyncio.sleep(0.5)
+
+
 async def process_queue():
     log(f"[worker] loop start, queues={QUEUES}")
     while True:
@@ -803,7 +977,7 @@ async def process_queue():
             lead_candidate = _coerce_int(item.get("lead_id"))
             lead_for_log = lead_candidate if lead_candidate is not None else 0
             log(
-                f"event=send_attempt ch={channel or '-'} tenant={tenant_id} lead_id={lead_for_log}"
+                f"event=send_attempt channel={channel or '-'} tenant={tenant_id} lead_id={lead_for_log}"
             )
 
             status, reason, body, code = await do_send(item)
@@ -812,12 +986,12 @@ async def process_queue():
             )
             if status == "sent":
                 log(
-                    f"event=send_success ch={channel or '-'} tenant={tenant_id} lead_id={lead_for_log} reason={reason} code={code}"
+                    f"event=send_success channel={channel or '-'} tenant={tenant_id} lead_id={lead_for_log} reason={reason} code={code}"
                 )
             else:
                 log(
                     "event=send_failed "
-                    f"ch={channel or '-'} tenant={tenant_id} lead_id={lead_for_log} reason={reason or status} code={code}"
+                    f"channel={channel or '-'} tenant={tenant_id} lead_id={lead_for_log} reason={reason or status} code={code}"
                 )
             if channel == "telegram":
                 try:
@@ -838,10 +1012,19 @@ async def process_queue():
 async def main():
     log(f"[worker] boot {APP_VERSION}")
     await init_db()
+    tasks = [
+        asyncio.create_task(process_queue(), name="outbox-loop"),
+    ]
+    if INBOX_ENABLED:
+        tasks.append(
+            asyncio.create_task(process_incoming_queue(), name="inbox-loop")
+        )
     try:
-        await process_queue()
+        await asyncio.gather(*tasks)
     except KeyboardInterrupt:
-        pass
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 if __name__ == "__main__":
     asyncio.run(main())

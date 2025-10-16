@@ -67,7 +67,8 @@ services:
       TENANT: ${TENANT:-1}
       SMART_REPLY_ENABLED: ${SMART_REPLY_ENABLED:-1}
       AI_ENABLED: ${AI_ENABLED:-1}
-      INBOX_ENABLED: ${INBOX_ENABLED:-1}
+      INBOX_ENABLED: 1
+      INCOMING_QUEUE_KEY: inbox:message_in
     depends_on:
       app:
         condition: service_started

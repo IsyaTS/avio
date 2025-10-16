@@ -97,7 +97,7 @@ PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
 _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 
-INBOX_MESSAGE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "messages:incoming")
+INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -798,6 +798,14 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         raise HTTPException(status_code=400, detail="invalid_lead")
 
     text_value = (message.text or "").strip()
+    if not text_value:
+        attachment_count = len(message.attachments or [])
+        logger.info(
+            "event=skip_no_text channel=telegram tenant=%s attachments=%s",
+            tenant,
+            attachment_count,
+        )
+        return JSONResponse({"ok": True, "skipped": True, "reason": "no_text"})
     message_id = ""
     generated_from_hint = False
     if isinstance(message.provider_raw, dict):
@@ -897,9 +905,18 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
         client = None
     if client is not None:
         try:
-            result = client.lpush(INBOX_MESSAGE_KEY, json.dumps(inbox_event, ensure_ascii=False))
+            result = client.lpush(
+                INCOMING_QUEUE_KEY, json.dumps(inbox_event, ensure_ascii=False)
+            )
             if asyncio.iscoroutine(result):
                 await result
+            logger.info(
+                "event=incoming_enqueued channel=telegram tenant=%s lead_id=%s message_id=%s queue=%s",
+                tenant,
+                lead_id,
+                message_id,
+                INCOMING_QUEUE_KEY,
+            )
         except redis_ex.RedisError:
             logger.debug(
                 "event=webhook_enqueue_failed tenant=%s lead_id=%s", tenant, lead_hint, exc_info=True

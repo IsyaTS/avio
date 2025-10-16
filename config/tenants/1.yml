@@ -1,3 +1,5 @@
 behavior:
   auto_reply: false
   auto_reply_text: "Спасибо! Мы свяжемся с вами в ближайшее время."
+  telegram:
+    auto_reply: false
