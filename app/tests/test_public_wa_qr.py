@@ -11,7 +11,13 @@ def _build_app(monkeypatch):
     return app
 
 
+def _configure_retry(monkeypatch, attempts=1, delay=0.0):
+    monkeypatch.setattr(public_module.settings, "WA_QR_FETCH_ATTEMPTS", attempts, raising=False)
+    monkeypatch.setattr(public_module.settings, "WA_QR_FETCH_RETRY_DELAY", delay, raising=False)
+
+
 def test_wa_qr_svg_calls_tenant_upstream_and_proxies_svg(monkeypatch):
+    _configure_retry(monkeypatch, attempts=1, delay=0.0)
     called = {}
 
     def _fake_fetch(url: str, timeout: float = 6.0):
@@ -45,6 +51,7 @@ def test_wa_qr_svg_calls_tenant_upstream_and_proxies_svg(monkeypatch):
 
 
 def test_wa_qr_svg_returns_204_on_404_or_empty_body(monkeypatch):
+    _configure_retry(monkeypatch, attempts=1, delay=0.0)
     # Case 1: 404 from upstream
     monkeypatch.setattr(public_module, "_fetch_qr_bytes", lambda url, timeout=6.0: (404, "text/plain", b""))
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
@@ -71,6 +78,7 @@ def test_wa_qr_svg_returns_204_on_404_or_empty_body(monkeypatch):
 
 
 def test_wa_qr_routes_reject_missing_query_args(monkeypatch):
+    _configure_retry(monkeypatch, attempts=1, delay=0.0)
     app = _build_app(monkeypatch)
     client = TestClient(app)
 
@@ -82,6 +90,7 @@ def test_wa_qr_routes_reject_missing_query_args(monkeypatch):
 
 
 def test_wa_status_accepts_tenant_valid_key(monkeypatch):
+    _configure_retry(monkeypatch, attempts=1, delay=0.0)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     valid_calls: list[tuple[int, str]] = []
@@ -121,3 +130,35 @@ def test_wa_status_accepts_tenant_valid_key(monkeypatch):
     assert resp.json() == {"ok": True, "ready": True, "connected": True, "qr": False, "last": 123}
     assert valid_calls == [(55, "tenant-55-key")]
     assert webhook_calls and webhook_calls[0][1]["tenant_id"] == 55
+
+
+def test_wa_qr_svg_retries_until_qr_available(monkeypatch):
+    # allow two attempts with no actual sleep
+    _configure_retry(monkeypatch, attempts=2, delay=0.0)
+    attempts: list[str] = []
+
+    def _fake_fetch(url: str, timeout: float = 6.0):
+        attempts.append(url)
+        if len(attempts) == 1:
+            return 404, "text/plain", b""
+        return 200, "image/svg+xml", b"<svg></svg>"
+
+    monkeypatch.setattr(public_module, "_fetch_qr_bytes", _fake_fetch)
+    monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
+
+    def _fake_valid_key(tenant_id: int, key: str) -> bool:
+        return tenant_id == 77 and key == "tenant-77-key"
+
+    monkeypatch.setattr(public_module.common, "valid_key", _fake_valid_key)
+    # prevent actual sleeping even if delay misconfigured
+    monkeypatch.setattr(public_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    resp = client.get("/pub/wa/qr.svg", params={"tenant": 77, "k": "tenant-77-key"})
+
+    assert resp.status_code == 200
+    assert any("/session/77/qr" in url for url in attempts)
+    # ensure we actually retried at least twice
+    assert len(attempts) >= 2
