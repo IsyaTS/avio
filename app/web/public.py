@@ -1073,19 +1073,20 @@ async def wa_status(
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
-    tenant = int(tenant)
-    if _ensure_public_key(k, request) is None:
+    ok = _ensure_valid_qr_request(tenant, k, request)
+    if ok is None:
         return _invalid_key_response()
+    tenant_id, _ = ok
     try:
         webhook = common.webhook_url()
-        payload = {"tenant_id": int(tenant), "webhook_url": webhook}
+        payload = {"tenant_id": int(tenant_id), "webhook_url": webhook}
         resp = await common.wa_post("/session/start", payload)
         status = int(getattr(resp, "status_code", 0) or 0)
         if status == 404:
-            await common.wa_post(f"/session/{int(tenant)}/start", payload)
+            await common.wa_post(f"/session/{int(tenant_id)}/start", payload)
     except Exception:
         pass
-    result = await _wa_status_impl(tenant)
+    result = await _wa_status_impl(int(tenant_id))
     return result
 
 
@@ -1205,15 +1206,28 @@ def _proxy_qr_with_fallbacks(tenant: int) -> Response:
     return JSONResponse({"error": "wa_unavailable"}, status_code=502, headers=headers)
 
 
-def _ensure_valid_qr_request(raw_tenant: int | str | None, raw_key: str | None) -> tuple[int, str] | None:
+def _ensure_valid_qr_request(
+    raw_tenant: int | str | None,
+    raw_key: str | None,
+    request: Request | None = None,
+) -> tuple[int, str] | None:
     try:
         tenant_id = _coerce_tenant(raw_tenant)
     except ValueError:
         return None
-    key = _ensure_public_key(raw_key)
-    if key is None:
+
+    candidate = _resolve_public_key_candidate(raw_key, request)
+    if not candidate:
         return None
-    return tenant_id, key
+
+    expected = _expected_public_key_value()
+    if expected and candidate == expected:
+        return tenant_id, candidate
+
+    if common.valid_key(tenant_id, candidate):
+        return tenant_id, candidate
+
+    return None
 
 
 async def _resolve_tenant_and_key(
@@ -1523,12 +1537,13 @@ def _coerce_body_bytes(body: Any) -> bytes:
 
 @router.get("/pub/wa/qr.svg")
 def wa_qr_svg(
+    request: Request,
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
     if not WA_ENABLED:
         return JSONResponse({"error": "wa_disabled"}, status_code=503)
-    ok = _ensure_valid_qr_request(tenant, k)
+    ok = _ensure_valid_qr_request(tenant, k, request)
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
@@ -2043,12 +2058,13 @@ async def tg_logout(
 
 @router.get("/pub/wa/qr.png")
 def wa_qr_png(
+    request: Request,
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
     if not WA_ENABLED:
         return JSONResponse({"error": "wa_disabled"}, status_code=503)
-    ok = _ensure_valid_qr_request(tenant, k)
+    ok = _ensure_valid_qr_request(tenant, k, request)
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
@@ -2066,10 +2082,10 @@ async def wa_restart(
     Security: requires a valid public access key `k` for the tenant.
     """
 
-    tenant_id = int(tenant)
-
-    if _ensure_public_key(k, request) is None:
+    ok = _ensure_valid_qr_request(tenant, k, request)
+    if ok is None:
         return _invalid_key_response()
+    tenant_id, _ = ok
 
     wa_logger.info("wa_restart click tenant=%s", tenant_id)
 
