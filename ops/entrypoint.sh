@@ -55,6 +55,22 @@ run_alembic history --verbose
 echo "[ops] alembic heads" >&2
 run_alembic heads
 
+current_output_file=$(mktemp)
+if run_alembic current >"$current_output_file" 2>&1; then
+  cat "$current_output_file"
+else
+  cat "$current_output_file" >&2
+  if grep -qi "Can't locate revision" "$current_output_file"; then
+    echo "[ops] stamping database with revision 0001_initial_schema before upgrade" >&2
+    run_alembic stamp 0001_initial_schema
+  else
+    echo "[ops] failed to determine current alembic revision" >&2
+    rm -f "$current_output_file"
+    exit 1
+  fi
+fi
+rm -f "$current_output_file"
+
 echo "[ops] upgrading database to head" >&2
 run_alembic upgrade head
 
