@@ -105,6 +105,8 @@
     const copyButton = document.getElementById('copy-link');
     const statusPanel = document.getElementById('status-panel');
     const query = `tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(key)}`;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let qrPollToken = 0;
 
     const showQr = () => {
         if (!qrImg) return;
@@ -167,23 +169,29 @@
         return false;
     };
 
-    const pollQR = async (timeoutMs = 30000, stepMs = 500) => {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            const success = await fetchQROnce();
-            if (success) {
-                return true;
-            }
-            await new Promise((resolve) => setTimeout(resolve, stepMs));
-        }
-        return false;
+    const cancelQrPolling = () => {
+        qrPollToken += 1;
     };
 
-    const requestQr = async () => {
-        const success = await pollQR(30000);
-        if (!success) {
-            setMessage('QR не готов');
-        }
+    const requestQr = () => {
+        const token = ++qrPollToken;
+
+        const loop = async () => {
+            let attempt = 0;
+            while (token === qrPollToken) {
+                const success = await fetchQROnce();
+                if (success) {
+                    return;
+                }
+                attempt += 1;
+                const delay = Math.min(500 + attempt * 250, 5000);
+                await sleep(delay);
+            }
+        };
+
+        return loop().catch((error) => {
+            console.debug('[wa-connect] qr loop error', error);
+        });
     };
 
     const updateStatus = (text, offline) => {
@@ -207,6 +215,7 @@
                 updateStatus('Подключено', false);
                 hideQr();
                 clearMessage();
+                cancelQrPolling();
             } else {
                 updateStatus(payload.qr ? 'Ожидает сканирования' : 'Ожидаем QR…', true);
             }
@@ -218,6 +227,7 @@
     if (refreshButton) {
         refreshButton.addEventListener('click', async (event) => {
             event.preventDefault();
+            cancelQrPolling();
             hideQr();
             setMessage('Обновляем QR…');
             try {
@@ -225,7 +235,7 @@
             } catch (error) {
                 setMessage('Не удалось перезапустить сессию');
             }
-            await requestQr();
+            requestQr();
             fetchStatus();
         });
     }
