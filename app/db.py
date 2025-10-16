@@ -871,6 +871,40 @@ async def find_lead_by_telegram(
             return None
     return None
 
+
+async def get_telegram_user_id_by_lead(lead_id: int) -> Optional[int]:
+    try:
+        lead_ref = int(lead_id)
+    except Exception:
+        return None
+    if lead_ref <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT telegram_user_id
+        FROM leads
+        WHERE id = $1
+        LIMIT 1;
+    """,
+        lead_ref,
+    )
+    if not row:
+        return None
+    value = None
+    if "telegram_user_id" in row and row["telegram_user_id"] is not None:
+        value = row["telegram_user_id"]
+    elif getattr(row, "get", None):  # pragma: no branch - defensive access
+        value = row.get("telegram_user_id")
+    if value is None:
+        return None
+    try:
+        coerced = int(value)
+    except Exception:
+        return None
+    if coerced <= 0:
+        return None
+    return coerced
+
 async def get_recent_dialog_by_contact(contact_id: int, limit: int = 40) -> List[Dict[str, Any]]:
     rows = await _fetch("""
         SELECT m.direction, m.text, m.created_at
