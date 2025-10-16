@@ -56,6 +56,15 @@ async def _process_entry(entry: Dict[str, Any]) -> None:
         await mark_failed(lead_id, dedup, "empty_text")
         return
 
+    if tenant_id <= 0:
+        logger.warning(
+            "event=outbox_skip reason=missing_tenant lead_id=%s tenant_raw=%s",
+            lead_id,
+            tenant_raw,
+        )
+        await mark_failed(lead_id, dedup, "missing_tenant")
+        return
+
     if telegram_user_id in (None, ""):
         logger.warning(
             "event=outbox_skip reason=missing_telegram_user tenant=%s lead_id=%s", tenant_id, lead_id
@@ -84,6 +93,7 @@ async def _process_entry(entry: Dict[str, Any]) -> None:
     )
 
     ok, status, error_text = await telegram_bot.send_message(
+        tenant_id=tenant_id,
         telegram_user_id=chat_id,
         text=text,
     )
@@ -177,9 +187,6 @@ async def _run_loop() -> None:
 async def start() -> None:
     global _task
     if _task and not _task.done():
-        return
-    if not telegram_bot.is_configured():
-        logger.warning("event=outbox_worker_skip reason=missing_bot_token")
         return
     loop = asyncio.get_running_loop()
     _task = loop.create_task(_run_loop(), name="outbox-worker")

@@ -1,8 +1,6 @@
-"""Telegram bot transport helpers."""
+"""Telegram worker transport helpers."""
 
 from __future__ import annotations
-
-"""Telegram bot transport helpers."""
 
 import asyncio
 import logging
@@ -11,21 +9,64 @@ from typing import Any, Tuple
 
 import httpx
 
+try:  # pragma: no cover - optional during bootstrap
+    from app.core import settings as core_settings  # type: ignore
+except Exception:  # pragma: no cover - fallback when settings unavailable
+    core_settings = None  # type: ignore[assignment]
+
 logger = logging.getLogger("app.providers.telegram_bot")
 
-_DEFAULT_TIMEOUT = float(os.getenv("TELEGRAM_BOT_TIMEOUT", "10"))
-_API_BASE_URL = (os.getenv("TELEGRAM_API_BASE_URL") or "https://api.telegram.org").rstrip("/")
+_DEFAULT_TIMEOUT = float(os.getenv("TGWORKER_TIMEOUT", "10"))
 
 _client_lock = asyncio.Lock()
 _client: httpx.AsyncClient | None = None
 
 
-def _bot_token() -> str:
-    return (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+def _resolve_base_url() -> str:
+    """Resolve TG worker base URL without enforcing Bot API tokens."""
+
+    for env_key in ("TGWORKER_BASE_URL", "TG_WORKER_URL", "TGWORKER_URL"):
+        raw = os.getenv(env_key)
+        if raw:
+            candidate = raw.strip()
+            if candidate:
+                return candidate.rstrip("/")
+
+    if core_settings is not None:
+        candidate = getattr(core_settings, "TGWORKER_BASE_URL", "") or ""
+        if candidate:
+            return str(candidate).strip().rstrip("/")
+
+    try:
+        from config import tg_worker_url  # type: ignore
+    except Exception:  # pragma: no cover - config import may fail in bootstrap
+        return ""
+
+    try:
+        base = tg_worker_url()
+    except Exception:  # pragma: no cover - defensive around dynamic config
+        return ""
+    return str(base).strip().rstrip("/")
+
+
+def _resolve_headers() -> dict[str, str]:
+    headers: dict[str, str] = {}
+    worker_token = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
+    if worker_token:
+        headers["X-Auth-Token"] = worker_token
+
+    admin_token = (os.getenv("ADMIN_TOKEN") or "").strip()
+    if not admin_token and core_settings is not None:
+        admin_token = str(getattr(core_settings, "ADMIN_TOKEN", "") or "").strip()
+    if admin_token:
+        headers["X-Admin-Token"] = admin_token
+    return headers
 
 
 def is_configured() -> bool:
-    return bool(_bot_token())
+    """Return True when TG worker URL is configured."""
+
+    return bool(_resolve_base_url())
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -37,70 +78,75 @@ async def _get_client() -> httpx.AsyncClient:
     return _client
 
 
-def _build_send_url(token: str) -> str:
-    return f"{_API_BASE_URL}/bot{token}/sendMessage"
-
-
 async def send_message(
+    *,
+    tenant_id: int,
     telegram_user_id: int,
     text: str,
-    *,
-    disable_web_page_preview: bool = True,
 ) -> Tuple[bool, int, str]:
-    """Send a message via Telegram Bot API.
+    """Send message via TG worker service.
 
-    Returns a tuple of (success, status_code, error_message).
+    Returns tuple of (success, status_code, error_message).
     """
 
-    token = _bot_token()
-    if not token:
-        logger.warning("event=telegram_bot_send_skip reason=missing_token")
-        return False, 0, "telegram_bot_token_missing"
+    if tenant_id <= 0:
+        logger.warning("event=tgworker_send_skip reason=invalid_tenant tenant=%s", tenant_id)
+        return False, 0, "invalid_tenant"
 
-    try:
-        chat_id = int(telegram_user_id)
-    except Exception:
-        logger.warning("event=telegram_bot_send_skip reason=invalid_chat_id value=%s", telegram_user_id)
-        return False, 0, "invalid_telegram_user_id"
+    base_url = _resolve_base_url()
+    if not base_url:
+        logger.warning("event=tgworker_send_skip reason=missing_base_url")
+        return False, 0, "tgworker_base_url_missing"
 
     payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": text,
+        "tenant": int(tenant_id),
+        "channel": "telegram",
+        "to": int(telegram_user_id),
     }
-    if disable_web_page_preview:
-        payload["disable_web_page_preview"] = True
+    text_value = (text or "").strip()
+    if text_value:
+        payload["text"] = text_value
 
-    url = _build_send_url(token)
+    headers = _resolve_headers()
+    send_url = f"{base_url}/send"
 
     try:
         client = await _get_client()
-        response = await client.post(url, json=payload)
+        response = await client.post(send_url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
-        logger.error("event=telegram_bot_send_error error=%s", exc)
+        logger.error("event=tgworker_send_error error=%s", exc)
         return False, 0, str(exc)
 
     status_code = response.status_code
-    if status_code != 200:
-        body_text = response.text
-        logger.warning(
-            "event=telegram_bot_send_fail status=%s body=%s", status_code, body_text[:200]
-        )
-        return False, status_code, body_text
+    if 200 <= status_code < 300:
+        return True, status_code, ""
 
+    error_text = ""
     try:
         body = response.json()
     except Exception:
-        logger.warning("event=telegram_bot_send_invalid_json status=%s", status_code)
-        return False, status_code, response.text
+        body = None
 
-    if not bool(body.get("ok")):
-        description = str(body.get("description") or response.text or "send_failed")
-        logger.warning(
-            "event=telegram_bot_send_api_error status=%s description=%s", status_code, description
-        )
-        return False, status_code, description
+    if isinstance(body, dict):
+        raw_error = body.get("error")
+        if isinstance(raw_error, str) and raw_error:
+            error_text = raw_error
+        elif raw_error is not None:
+            error_text = str(raw_error)
+        elif body.get("details"):
+            error_text = str(body.get("details"))
 
-    return True, status_code, ""
+    if not error_text:
+        error_text = response.text or "send_failed"
+
+    logger.warning(
+        "event=tgworker_send_fail status=%s error=%s tenant=%s chat_id=%s",
+        status_code,
+        error_text,
+        tenant_id,
+        telegram_user_id,
+    )
+    return False, status_code, error_text
 
 
 async def aclose() -> None:
