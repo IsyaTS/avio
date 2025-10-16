@@ -107,7 +107,7 @@ async def test_process_incoming_stores_message(monkeypatch: pytest.MonkeyPatch) 
     messages = [item for item in captured if item.get("kind") == "message"]
     assert messages, "insert_message_in was not called"
     assert messages[0]["telegram_user_id"] == 12345
-    assert any(key == "outbox:send" for key, _ in redis_stub.items)
+    assert not any(key == "outbox:send" for key, _ in redis_stub.items)
     assert any(key == webhooks.INCOMING_QUEUE_KEY for key, _ in redis_stub.items)
 
 

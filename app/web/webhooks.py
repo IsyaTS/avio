@@ -41,7 +41,7 @@ from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
 
 logger = logging.getLogger("app.web.webhooks")
 
-INCOMING_QUEUE_KEY = "messages:incoming"
+INCOMING_QUEUE_KEY = "inbox:message_in"
 INCOMING_DEDUP_TTL = 60 * 60 * 24  # 24 hours
 
 router = APIRouter()
@@ -386,7 +386,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         behavior = {}
         attachment, caption = None, ""
 
-    if attachment and not catalog_already_sent:
+    if attachment and not catalog_already_sent and provider != "telegram":
         catalog_text = (caption or "Каталог во вложении (PDF).").strip()
         resolved_provider = provider or "whatsapp"
         catalog_out: Dict[str, Any] = {
@@ -399,17 +399,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "message_id": message_id or str(lead_id),
             "attachments": [attachment] if attachment else [],
         }
-        if provider == "telegram":
-            if telegram_user_id:
-                catalog_out["peer_id"] = str(telegram_user_id)
-                catalog_out["telegram_user_id"] = telegram_user_id
-                catalog_out["to"] = str(telegram_user_id)
-            if telegram_username:
-                catalog_out["username"] = telegram_username
-            if peer_id and "to" not in catalog_out:
-                catalog_out["to"] = str(peer_id)
-        else:
-            catalog_out["to"] = whatsapp_phone
+        catalog_out["to"] = whatsapp_phone
         catalog_out["attachment"] = attachment
         await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(catalog_out, ensure_ascii=False))
         if cache_key:
@@ -441,6 +431,15 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if not reply:
         return _ok({"queued": False, "leadId": lead_id, "smartReply": False})
 
+    if provider == "telegram":
+        logger.info(
+            "event=smart_reply_deferred tenant=%s channel=%s lead_id=%s",
+            tenant,
+            provider,
+            lead_id,
+        )
+        return _ok({"queued": False, "leadId": lead_id, "smartReply": True})
+
     resolved_provider = provider or "whatsapp"
     out: Dict[str, Any] = {
         "lead_id": lead_id,
@@ -452,26 +451,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         "message_id": message_id or str(lead_id),
         "attachments": [],
     }
-    if provider == "telegram":
-        if telegram_user_id:
-            out["peer_id"] = str(telegram_user_id)
-            out["telegram_user_id"] = telegram_user_id
-            out["to"] = str(telegram_user_id)
-        if telegram_username:
-            out["username"] = telegram_username
-        if peer_id and "to" not in out:
-            out["to"] = str(peer_id)
-    else:
-        out["to"] = whatsapp_phone
+    out["to"] = whatsapp_phone
 
     await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(out, ensure_ascii=False))
-    if provider == "telegram":
-        logger.info(
-            "event=smart_reply_enqueued channel=telegram tenant=%s lead_id=%s message_id=%s",
-            tenant,
-            lead_id,
-            message_id or "",
-        )
 
     behavior = behavior or {}
     always_full = bool(behavior.get("always_full_catalog")) if behavior else False
@@ -495,18 +477,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     "tenant": int(tenant),
                     "message_id": message_id or str(lead_id),
                     "attachments": [],
+                    "to": whatsapp_phone,
                 }
-                if provider == "telegram":
-                    if telegram_user_id:
-                        page_out["peer_id"] = str(telegram_user_id)
-                        page_out["telegram_user_id"] = telegram_user_id
-                        page_out["to"] = str(telegram_user_id)
-                    if telegram_username:
-                        page_out["username"] = telegram_username
-                    if peer_id and "to" not in page_out:
-                        page_out["to"] = str(peer_id)
-                else:
-                    page_out["to"] = whatsapp_phone
                 await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(page_out, ensure_ascii=False))
             if cache_key:
                 _catalog_sent_cache[cache_key] = time.time()
