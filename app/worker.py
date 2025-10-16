@@ -27,7 +27,12 @@ from app.db import (
     update_message_status,
 )
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
-from app.common import OUTBOX_QUEUE_KEY, OUTBOX_DLQ_KEY
+from app.common import (
+    OUTBOX_QUEUE_KEY,
+    OUTBOX_DLQ_KEY,
+    get_outbox_whitelist,
+    normalize_username,
+)
 
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
@@ -82,39 +87,7 @@ def _coerce_int(value: Any) -> Optional[int]:
     return result
 
 
-def _normalize_username(value: str | None) -> str | None:
-    if not value:
-        return None
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if not cleaned.startswith("@"):
-        cleaned = f"@{cleaned.lstrip('@')}"
-    return cleaned
-
-
-_WHITELIST_RAW = os.getenv("OUTBOX_WHITELIST", "")
-_OUTBOX_WHITELIST_TOKENS = [
-    token.strip()
-    for token in re.split(r"[\s,]+", _WHITELIST_RAW)
-    if token and token.strip()
-]
-OUTBOX_WHITELIST_IDS: set[int] = set()
-OUTBOX_WHITELIST_USERNAMES: set[str] = set()
-for token in _OUTBOX_WHITELIST_TOKENS:
-    try:
-        OUTBOX_WHITELIST_IDS.add(int(token))
-        continue
-    except ValueError:
-        pass
-    normalized_token = _normalize_username(token)
-    if normalized_token:
-        lower = normalized_token.lower()
-        OUTBOX_WHITELIST_USERNAMES.add(lower)
-        OUTBOX_WHITELIST_USERNAMES.add(lower.lstrip("@"))
-
-OUTBOX_WHITELIST = frozenset(_OUTBOX_WHITELIST_TOKENS)
-_WHITELIST_PRESENT = bool(OUTBOX_WHITELIST_IDS or OUTBOX_WHITELIST_USERNAMES)
+OUTBOX_WHITELIST = get_outbox_whitelist()
 
 
 def _whitelist_allows(
@@ -123,8 +96,8 @@ def _whitelist_allows(
     username: Optional[str],
     raw_to: Any,
 ) -> bool:
-    if not _WHITELIST_PRESENT:
-        return False
+    if OUTBOX_WHITELIST.allow_all:
+        return True
 
     candidate_ids: set[int] = set()
     if telegram_user_id is not None:
@@ -133,20 +106,22 @@ def _whitelist_allows(
     if raw_id is not None:
         candidate_ids.add(raw_id)
     for candidate in candidate_ids:
-        if candidate in OUTBOX_WHITELIST_IDS:
+        if candidate in OUTBOX_WHITELIST.ids:
             return True
 
     candidate_names: set[str] = set()
-    normalized = _normalize_username(username)
+    normalized = normalize_username(username)
     if normalized:
-        candidate_names.add(normalized.lower())
-        candidate_names.add(normalized.lower().lstrip("@"))
+        lowered = normalized.lower()
+        candidate_names.add(lowered)
+        candidate_names.add(lowered.lstrip("@"))
     if isinstance(raw_to, str):
-        alt = _normalize_username(raw_to)
+        alt = normalize_username(raw_to)
         if alt:
-            candidate_names.add(alt.lower())
-            candidate_names.add(alt.lower().lstrip("@"))
-    return any(name in OUTBOX_WHITELIST_USERNAMES for name in candidate_names)
+            lowered_alt = alt.lower()
+            candidate_names.add(lowered_alt)
+            candidate_names.add(lowered_alt.lstrip("@"))
+    return any(name in OUTBOX_WHITELIST.usernames for name in candidate_names)
 
 
 def _resolve_channel(item: Mapping[str, Any]) -> str:
@@ -234,13 +209,13 @@ def _resolve_telegram_to(
             coerced = _coerce_int(candidate)
             if coerced is not None:
                 return coerced
-            return _normalize_username(candidate)
+            return normalize_username(candidate)
     elif raw_to is not None:
         coerced = _coerce_int(raw_to)
         if coerced is not None:
             return coerced
 
-    normalized_username = _normalize_username(username)
+    normalized_username = normalize_username(username)
     if normalized_username:
         return normalized_username
 
@@ -517,12 +492,6 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         )
         return ("skipped", "outbox_disabled", "", 0)
 
-    if not _WHITELIST_PRESENT:
-        log(
-            f"event=send_result status=skipped reason=whitelist_empty channel={channel} lead_id={lead_id}"
-        )
-        return ("skipped", "whitelist_empty", "", 0)
-
     if not _whitelist_allows(
         telegram_user_id=telegram_user_id,
         username=username,
@@ -584,7 +553,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                 f"channel={channel} telegram_user_id={telegram_user_id}"
             )
             return ("skipped", "err:no_lead", "", 0)
-        normalized_username = _normalize_username(username)
+        normalized_username = normalize_username(username)
         if normalized_username:
             title_hint = f"tg:{normalized_username}"
         elif telegram_user_id is not None:
