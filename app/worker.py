@@ -5,7 +5,7 @@ import json
 import asyncio
 import urllib.request
 import urllib.error
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlparse
 
 import redis.asyncio as redis
@@ -27,6 +27,7 @@ from app.db import (
     update_message_status,
 )
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
+from app.common import OUTBOX_QUEUE_KEY, OUTBOX_DLQ_KEY
 
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
@@ -61,9 +62,7 @@ ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
 OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW == "true"
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
-OUTBOX     = "outbox:send"
-DLQ        = "outbox:dlq"
-QUEUES = [OUTBOX]
+QUEUES = [OUTBOX_QUEUE_KEY]
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -148,6 +147,20 @@ def _whitelist_allows(
             candidate_names.add(alt.lower())
             candidate_names.add(alt.lower().lstrip("@"))
     return any(name in OUTBOX_WHITELIST_USERNAMES for name in candidate_names)
+
+
+def _resolve_channel(item: Mapping[str, Any]) -> str:
+    raw_channel = item.get("provider") or item.get("ch") or item.get("channel")
+    channel = ""
+    if isinstance(raw_channel, str):
+        channel = raw_channel.strip().lower()
+    elif raw_channel is not None:
+        channel = str(raw_channel).strip().lower()
+    if channel:
+        return channel
+    if item.get("telegram_user_id") is not None or item.get("peer_id") is not None:
+        return "telegram"
+    return "whatsapp"
 
 
 def _normalize_url(url: str) -> str:
@@ -453,7 +466,7 @@ async def send_telegram(
 
 # ==== Core send ====
 async def do_send(item: dict) -> tuple[str, str, str, int]:
-    channel = (item.get("ch") or item.get("provider") or "").lower() or "whatsapp"
+    channel = _resolve_channel(item)
     text = (item.get("text") or "").strip()
     lead_id = int(item.get("lead_id") or 0)
     phone = _digits(item.get("to") or "")
@@ -469,7 +482,11 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             telegram_user_id = int(raw_telegram)
         except Exception:
             telegram_user_id = None
-    tenant = int(item.get("tenant_id") or os.getenv("TENANT_ID", "1"))
+    tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
+    try:
+        tenant = int(tenant_raw)
+    except Exception:
+        tenant = int(os.getenv("TENANT_ID", "1"))
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else None
     raw_attachments = item.get("attachments") if isinstance(item.get("attachments"), list) else []
     attachments: list[dict[str, Any]] = []
@@ -676,7 +693,11 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
 # ==== Writer ====
 async def write_result(item: dict, status: str, status_code: int, reason: str):
     lead_id = int(item.get("lead_id") or 0)
-    tenant_id = int(item.get("tenant_id") or os.getenv("TENANT_ID", "1"))
+    tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
+    try:
+        tenant_id = int(tenant_raw)
+    except Exception:
+        tenant_id = int(os.getenv("TENANT_ID", "1"))
     attachment = item.get("attachment") if isinstance(item.get("attachment"), dict) else None
     text = (item.get("text") or "").strip()
     if not text and attachment:
@@ -692,7 +713,7 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
             telegram_user_id = None
     username = item.get("username") if isinstance(item.get("username"), str) else None
 
-    channel_name = (item.get("ch") or item.get("provider") or "whatsapp")
+    channel_name = _resolve_channel(item)
     stored_message_id = item.get("_message_db_id")
     resolved_lead_override = item.get("_resolved_lead_id")
     if isinstance(resolved_lead_override, int) and resolved_lead_override > 0:
@@ -799,11 +820,31 @@ async def process_queue():
                 log(f"[worker] json decode err: {raw_item[:200]}")
                 continue
 
+            channel = _resolve_channel(item)
+            tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
+            try:
+                tenant_id = int(tenant_raw)
+            except Exception:
+                tenant_id = int(os.getenv("TENANT_ID", "1"))
+            lead_candidate = _coerce_int(item.get("lead_id"))
+            lead_for_log = lead_candidate if lead_candidate is not None else 0
+            log(
+                f"event=send_attempt ch={channel} tenant={tenant_id} lead_id={lead_for_log}"
+            )
+
             status, reason, body, code = await do_send(item)
-            channel = (item.get("ch") or item.get("provider") or "").lower()
             log(
                 f"[worker] send ch={channel or '-'} status={status} reason={reason} code={code} body={body[:200]}"
             )
+            if status == "sent":
+                log(
+                    f"event=send_success ch={channel} tenant={tenant_id} lead_id={lead_for_log}"
+                )
+            else:
+                log(
+                    "event=send_failed "
+                    f"ch={channel} tenant={tenant_id} lead_id={lead_for_log} reason={reason or status} code={code}"
+                )
             if channel == "telegram":
                 try:
                     await r.incrby("metrics:telegram:outgoing", 1)
@@ -814,7 +855,7 @@ async def process_queue():
 
         except Exception as e:
             try:
-                await r.lpush(DLQ, json.dumps(item or {}, ensure_ascii=False))
+                await r.lpush(OUTBOX_DLQ_KEY, json.dumps(item or {}, ensure_ascii=False))
             except Exception:
                 pass
             log(f"[worker] err: {e}")
