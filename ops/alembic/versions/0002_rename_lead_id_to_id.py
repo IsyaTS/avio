@@ -5,8 +5,8 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0002_rename_lead_id_to_id"
-down_revision = "0001_initial_schema"
+revision = "8d42a7c9f103"
+down_revision = "1cba7f2d4e90"
 branch_labels = None
 depends_on = None
 
@@ -16,69 +16,40 @@ def upgrade() -> None:
     if bind is None:  # pragma: no cover - defensive guardrail
         raise RuntimeError("Database connection is required for this migration")
 
+    def get_inspector():
+        inspector = sa.inspect(bind)
+        inspector.clear_cache()
+        return inspector
+
     def table_exists(table_name: str) -> bool:
-        result = bind.execute(
-            sa.text(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = current_schema()
-                      AND table_name = :table_name
-                )
-                """
-            ),
-            {"table_name": table_name},
-        )
-        return bool(result.scalar())
+        return table_name in get_inspector().get_table_names()
 
     def column_exists(table_name: str, column_name: str) -> bool:
         if not table_exists(table_name):
             return False
-        result = bind.execute(
-            sa.text(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name = :table_name
-                      AND column_name = :column_name
-                )
-                """
-            ),
-            {"table_name": table_name, "column_name": column_name},
-        )
-        return bool(result.scalar())
+        columns = get_inspector().get_columns(table_name)
+        return any(column["name"] == column_name for column in columns)
 
-    def constraint_exists(table_name: str, constraint_name: str) -> bool:
+    def fk_exists(table_name: str, constraint_name: str) -> bool:
         if not table_exists(table_name):
             return False
-        result = bind.execute(
-            sa.text(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.table_constraints
-                    WHERE table_schema = current_schema()
-                      AND table_name = :table_name
-                      AND constraint_name = :constraint_name
-                      AND constraint_type = 'FOREIGN KEY'
-                )
-                """
-            ),
-            {"table_name": table_name, "constraint_name": constraint_name},
-        )
-        return bool(result.scalar())
+        foreign_keys = get_inspector().get_foreign_keys(table_name)
+        return any(fk["name"] == constraint_name for fk in foreign_keys)
+
+    def index_exists(table_name: str, index_name: str) -> bool:
+        if not table_exists(table_name):
+            return False
+        indexes = get_inspector().get_indexes(table_name)
+        return any(index["name"] == index_name for index in indexes)
 
     def drop_fk_if_exists(table_name: str, constraint_name: str) -> None:
-        if constraint_exists(table_name, constraint_name):
+        if fk_exists(table_name, constraint_name):
             op.drop_constraint(constraint_name, table_name=table_name, type_="foreignkey")
 
     def create_fk_if_missing(table_name: str, constraint_name: str) -> None:
         if not column_exists(table_name, "lead_id"):
             return
-        if not constraint_exists(table_name, constraint_name):
+        if not fk_exists(table_name, constraint_name):
             op.create_foreign_key(
                 constraint_name,
                 source_table=table_name,
@@ -124,29 +95,81 @@ def upgrade() -> None:
     ):
         create_fk_if_missing(table_name, constraint_name)
 
-    if table_exists("leads"):
-        op.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_leads_tenant_updated_at
-            ON leads(tenant_id, updated_at DESC)
-            """
+    if table_exists("leads") and index_exists("leads", "idx_leads_tenant_username"):
+        op.drop_index("idx_leads_tenant_username", table_name="leads")
+
+    if table_exists("leads") and not index_exists("leads", "idx_leads_tenant_updated_at"):
+        op.create_index(
+            "idx_leads_tenant_updated_at",
+            "leads",
+            ["tenant_id", "updated_at"],
+            postgresql_ops={"updated_at": "DESC"},
         )
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    if bind is None:  # pragma: no cover - defensive guardrail
+        raise RuntimeError("Database connection is required for this migration")
+
+    def get_inspector():
+        inspector = sa.inspect(bind)
+        inspector.clear_cache()
+        return inspector
+
+    def table_exists(table_name: str) -> bool:
+        return table_name in get_inspector().get_table_names()
+
+    def column_exists(table_name: str, column_name: str) -> bool:
+        if not table_exists(table_name):
+            return False
+        columns = get_inspector().get_columns(table_name)
+        return any(column["name"] == column_name for column in columns)
+
+    def fk_exists(table_name: str, constraint_name: str) -> bool:
+        if not table_exists(table_name):
+            return False
+        foreign_keys = get_inspector().get_foreign_keys(table_name)
+        return any(fk["name"] == constraint_name for fk in foreign_keys)
+
+    def index_exists(table_name: str, index_name: str) -> bool:
+        if not table_exists(table_name):
+            return False
+        indexes = get_inspector().get_indexes(table_name)
+        return any(index["name"] == index_name for index in indexes)
+
     for table_name, constraint in (
         ("messages", "messages_lead_id_fkey"),
         ("outbox", "outbox_lead_id_fkey"),
         ("lead_contacts", "lead_contacts_lead_id_fkey"),
     ):
-        op.drop_constraint(constraint, table_name=table_name, type_="foreignkey")
-        op.create_foreign_key(
-            constraint,
-            source_table=table_name,
-            referent_table="leads",
-            local_cols=["lead_id"],
-            remote_cols=["lead_id"],
-            ondelete="CASCADE",
-        )
+        if fk_exists(table_name, constraint):
+            op.drop_constraint(constraint, table_name=table_name, type_="foreignkey")
 
-    op.execute("ALTER TABLE leads RENAME COLUMN id TO lead_id")
+    if column_exists("leads", "id") and not column_exists("leads", "lead_id"):
+        op.execute("ALTER TABLE leads RENAME COLUMN id TO lead_id")
+
+    for table_name, constraint in (
+        ("messages", "messages_lead_id_fkey"),
+        ("outbox", "outbox_lead_id_fkey"),
+        ("lead_contacts", "lead_contacts_lead_id_fkey"),
+    ):
+        if column_exists(table_name, "lead_id") and not fk_exists(table_name, constraint):
+            op.create_foreign_key(
+                constraint,
+                source_table=table_name,
+                referent_table="leads",
+                local_cols=["lead_id"],
+                remote_cols=["lead_id"],
+                ondelete="CASCADE",
+            )
+
+    if table_exists("leads"):
+        columns = {column["name"] for column in get_inspector().get_columns("leads")}
+        if {"tenant_id", "telegram_username"}.issubset(columns):
+            if not index_exists("leads", "idx_leads_tenant_username"):
+                op.create_index(
+                    "idx_leads_tenant_username",
+                    "leads",
+                    ["tenant_id", "telegram_username"],
+                )

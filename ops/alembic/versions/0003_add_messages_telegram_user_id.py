@@ -6,7 +6,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "3fd5fd74a3f9"
-down_revision = "0002_rename_lead_id_to_id"
+down_revision = "8d42a7c9f103"
 branch_labels = None
 depends_on = None
 
