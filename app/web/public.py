@@ -68,7 +68,8 @@ from config import tg_worker_url
 from app.core import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.schemas import MessageIn, PingEvent
-from app.db import insert_message_in, upsert_lead, ensure_outbox_queued
+from app.db import insert_message_in, upsert_lead
+from app.common import OUTBOX_QUEUE_KEY
 from . import common as common
 try:  # pragma: no cover - optional webhooks import
     from . import webhooks as webhook_module  # type: ignore
@@ -943,20 +944,76 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
             )
         else:
             try:
-                await ensure_outbox_queued(
-                    lead_id,
-                    reply_text,
-                    tenant_id=tenant,
-                )
+                telegram_id_value = int(telegram_user_id)
             except Exception:
-                DB_ERRORS_COUNTER.labels("ensure_outbox_queued").inc()
-                logger.exception(
-                    "event=auto_reply_enqueue_failed tenant=%s lead_id=%s", tenant, lead_id
+                logger.warning(
+                    "event=auto_reply_skip reason=invalid_telegram_user tenant=%s lead_id=%s value=%s",
+                    tenant,
+                    lead_id,
+                    telegram_user_id,
+                )
+                telegram_id_value = None
+            if telegram_id_value is None:
+                logger.warning(
+                    "event=auto_reply_skip reason=invalid_telegram_user tenant=%s lead_id=%s",
+                    tenant,
+                    lead_id,
                 )
             else:
-                logger.info(
-                    "event=auto_reply_enqueued tenant=%s lead_id=%s channel=telegram", tenant, lead_id
-                )
+                job = {
+                    "provider": "telegram",
+                    "ch": "telegram",
+                    "tenant": int(tenant),
+                    "tenant_id": int(tenant),
+                    "lead_id": int(lead_id),
+                    "text": reply_text,
+                    "telegram_user_id": telegram_id_value,
+                    "to": str(telegram_id_value),
+                }
+                if telegram_username:
+                    job["username"] = telegram_username
+                try:
+                    client = client or common.redis_client()
+                except Exception:
+                    client = None
+                if client is None:
+                    logger.error(
+                        "event=auto_reply_enqueue_failed reason=redis_unavailable tenant=%s lead_id=%s",
+                        tenant,
+                        lead_id,
+                    )
+                else:
+                    payload = json.dumps(job, ensure_ascii=False)
+                    try:
+                        result = client.lpush(OUTBOX_QUEUE_KEY, payload)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except redis_ex.RedisError:
+                        logger.exception(
+                            "event=auto_reply_enqueue_failed tenant=%s lead_id=%s", tenant, lead_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "event=auto_reply_enqueue_failed tenant=%s lead_id=%s", tenant, lead_id
+                        )
+                    else:
+                        safe_payload = {
+                            "tenant": int(tenant),
+                            "lead_id": int(lead_id),
+                            "channel": "telegram",
+                            "text_len": len(reply_text),
+                            "has_username": bool(telegram_username),
+                        }
+                        logger.info(
+                            "event=auto_reply_enqueue queue=%s payload=%s",
+                            OUTBOX_QUEUE_KEY,
+                            safe_payload,
+                        )
+                        logger.info(
+                            "event=auto_reply_enqueued tenant=%s lead_id=%s channel=telegram",
+                            tenant,
+                            lead_id,
+                        )
 
     return JSONResponse({"ok": True, "lead_id": lead_id})
 

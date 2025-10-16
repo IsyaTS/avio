@@ -91,6 +91,12 @@ import importlib.util as _importlib_util
 
 from app import outbox_worker
 
+OUTBOX_DB_WORKER_ENABLED = (os.getenv("OUTBOX_DB_WORKER") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
 ROOT = pathlib.Path(__file__).resolve().parent
 
 try:  # рабочие БД-хелперы; при отсутствии БД заменяются заглушками
@@ -211,6 +217,11 @@ async def _startup_log_revision() -> None:
 
 @app.on_event("startup")
 async def _startup_outbox_worker() -> None:
+    if not OUTBOX_DB_WORKER_ENABLED:
+        logging.getLogger("app.outbox_worker").info(
+            "event=outbox_worker_disabled"
+        )
+        return
     try:
         await outbox_worker.start()
     except Exception:
@@ -221,6 +232,8 @@ async def _startup_outbox_worker() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown_outbox_worker() -> None:
+    if not OUTBOX_DB_WORKER_ENABLED:
+        return
     try:
         await outbox_worker.stop()
     except Exception:

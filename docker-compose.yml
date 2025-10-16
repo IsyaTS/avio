@@ -35,6 +35,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}
       TENANT: ${TENANT:-1}
+      OUTBOX_DB_WORKER: "0"
       PYTHONPATH: /app
     depends_on: [redis, postgres]
     working_dir: /app

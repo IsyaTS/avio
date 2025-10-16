@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover
     from app.web import common as C  # type: ignore
 
 from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
+from app.common import OUTBOX_QUEUE_KEY
 
 
 logger = logging.getLogger("app.web.webhooks")
@@ -381,12 +382,14 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     if attachment and not catalog_already_sent:
         catalog_text = (caption or "Каталог во вложении (PDF).").strip()
+        resolved_provider = provider or "whatsapp"
         catalog_out: Dict[str, Any] = {
             "lead_id": lead_id,
             "text": catalog_text,
-            "provider": provider or "whatsapp",
-            "tenant_id": tenant,
-            "tenant": tenant,
+            "provider": resolved_provider,
+            "ch": resolved_provider,
+            "tenant_id": int(tenant),
+            "tenant": int(tenant),
             "message_id": message_id or str(lead_id),
             "attachments": [attachment] if attachment else [],
         }
@@ -402,7 +405,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         else:
             catalog_out["to"] = whatsapp_phone
         catalog_out["attachment"] = attachment
-        await _redis_queue.lpush("outbox:send", json.dumps(catalog_out, ensure_ascii=False))
+        await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(catalog_out, ensure_ascii=False))
         if cache_key:
             _catalog_sent_cache[cache_key] = time.time()
         try:
@@ -417,12 +420,14 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     except Exception:
         reply = "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
 
+    resolved_provider = provider or "whatsapp"
     out: Dict[str, Any] = {
         "lead_id": lead_id,
         "text": reply,
-        "provider": provider or "whatsapp",
-        "tenant_id": tenant,
-        "tenant": tenant,
+        "provider": resolved_provider,
+        "ch": resolved_provider,
+        "tenant_id": int(tenant),
+        "tenant": int(tenant),
         "message_id": message_id or str(lead_id),
         "attachments": [],
     }
@@ -438,7 +443,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     else:
         out["to"] = whatsapp_phone
 
-    await _redis_queue.lpush("outbox:send", json.dumps(out, ensure_ascii=False))
+    await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(out, ensure_ascii=False))
 
     behavior = behavior or {}
     always_full = bool(behavior.get("always_full_catalog")) if behavior else False
@@ -456,9 +461,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 page_out = {
                     "lead_id": lead_id,
                     "text": page,
-                    "provider": provider or "whatsapp",
-                    "tenant_id": tenant,
-                    "tenant": tenant,
+                    "provider": resolved_provider,
+                    "ch": resolved_provider,
+                    "tenant_id": int(tenant),
+                    "tenant": int(tenant),
                     "message_id": message_id or str(lead_id),
                     "attachments": [],
                 }
@@ -473,7 +479,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                         page_out["to"] = str(peer_id)
                 else:
                     page_out["to"] = whatsapp_phone
-                await _redis_queue.lpush("outbox:send", json.dumps(page_out, ensure_ascii=False))
+                await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(page_out, ensure_ascii=False))
             if cache_key:
                 _catalog_sent_cache[cache_key] = time.time()
 
