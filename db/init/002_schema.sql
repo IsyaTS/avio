@@ -50,8 +50,10 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_outbox_lead_dedup ON outbox(lead_id, dedup_hash);
-CREATE INDEX IF NOT EXISTS idx_outbox_status_created ON outbox(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_outbox_status_updated ON outbox(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_outbox_status_created
+  ON outbox(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_status_updated
+  ON outbox(status, updated_at DESC);
 
 -- Кэш источников (realId) поверх Redis
 CREATE TABLE IF NOT EXISTS source_cache (
