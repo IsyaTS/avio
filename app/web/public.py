@@ -677,6 +677,33 @@ def _coerce_int(value: Any) -> int | None:
     return candidate
 
 
+def _find_telegram_user_id(value: Any) -> int | None:
+    candidate_keys = (
+        "telegram_user_id",
+        "telegramUserId",
+        "user_id",
+        "userId",
+        "from_id",
+        "fromId",
+    )
+    if isinstance(value, dict):
+        for key in candidate_keys:
+            if key in value:
+                candidate = _coerce_int(value.get(key))
+                if candidate and candidate > 0:
+                    return candidate
+        for nested in value.values():
+            result = _find_telegram_user_id(nested)
+            if result is not None:
+                return result
+    elif isinstance(value, list):
+        for entry in value:
+            result = _find_telegram_user_id(entry)
+            if result is not None:
+                return result
+    return None
+
+
 def _find_username(value: Any) -> str | None:
     if isinstance(value, dict):
         if isinstance(value.get("username"), str) and value["username"].strip():
@@ -746,12 +773,14 @@ async def provider_webhook(message: MessageIn | PingEvent, request: Request) -> 
 
     if channel == "telegram":
         raw_payload = message.provider_raw if isinstance(message.provider_raw, dict) else {}
+        telegram_user_id = _find_telegram_user_id(raw_payload)
         peer_id = _coerce_int(raw_payload.get("peer_id"))
         if peer_id is None:
             peer_id = _coerce_int(raw_payload.get("peerId"))
         if peer_id is not None and peer_id <= 0:
             peer_id = None
-        telegram_user_id = peer_id
+        if telegram_user_id is None and peer_id is not None:
+            telegram_user_id = peer_id
         if telegram_user_id is None:
             telegram_user_id = _coerce_int(message.from_id)
         if telegram_user_id is None:
