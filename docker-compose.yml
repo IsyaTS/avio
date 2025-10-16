@@ -60,7 +60,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: 1
-      OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-}
+      OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-*}
       APP_BASE_URL: ${APP_BASE_URL:-http://app:8000}
       TENANT: ${TENANT:-1}
     depends_on:
