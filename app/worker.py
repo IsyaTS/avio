@@ -24,6 +24,7 @@ from app.db import (
     upsert_lead,
     lead_exists,
     find_lead_by_telegram,
+    get_telegram_user_id_by_lead,
     update_message_status,
 )
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
@@ -351,13 +352,6 @@ async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
         f"event=smart_reply_generated channel=telegram tenant={tenant_id} lead_id={lead_id}"
     )
 
-    to_value = event.get("to")
-    if not to_value:
-        if telegram_user_id is not None:
-            to_value = str(telegram_user_id)
-        elif peer_id is not None:
-            to_value = str(peer_id)
-
     out_payload: Dict[str, Any] = {
         "lead_id": int(lead_id),
         "tenant": int(tenant_id),
@@ -370,8 +364,6 @@ async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
     }
     if message_id:
         out_payload["message_id"] = message_id
-    if to_value:
-        out_payload["to"] = str(to_value)
     if telegram_user_id is not None:
         out_payload["telegram_user_id"] = str(telegram_user_id)
     if peer_id is not None:
@@ -391,46 +383,6 @@ async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
     log(
         f"event=smart_reply_enqueued channel=telegram tenant={tenant_id} lead_id={lead_id}"
     )
-
-
-def _resolve_telegram_to(
-    raw_to: Any,
-    *,
-    peer_id: Optional[int],
-    telegram_user_id: Optional[int],
-    username: Optional[str],
-) -> Optional[int | str]:
-    if isinstance(raw_to, str):
-        candidate = raw_to.strip()
-        if candidate:
-            lowered = candidate.lower()
-            if lowered in {"me", "self"}:
-                return "me"
-            if candidate.startswith("@"):
-                return candidate
-            coerced = _coerce_int(candidate)
-            if coerced is not None:
-                return coerced
-            return normalize_username(candidate)
-    elif raw_to is not None:
-        coerced = _coerce_int(raw_to)
-        if coerced is not None:
-            return coerced
-
-    normalized_username = normalize_username(username)
-    if normalized_username:
-        return normalized_username
-
-    for candidate in (telegram_user_id, peer_id):
-        if candidate is None:
-            continue
-        coerced = _coerce_int(candidate)
-        if coerced is not None:
-            return coerced
-
-    return None
-
-
 def _http_json(
     method: str,
     url: str,
@@ -519,24 +471,15 @@ async def _wait_until_authorized(tenant_id: int, attempts: int = 3) -> bool:
 async def send_telegram(
     tenant_id: int,
     *,
+    chat_id: int,
     peer_id: int | None,
     telegram_user_id: int | None,
     username: str | None,
     text: str | None,
-    raw_to: Any,
     attachments: list[dict[str, Any]] | None = None,
     reply_to: str | None = None,
 ) -> tuple[int, str]:
-    target = _resolve_telegram_to(
-        raw_to,
-        peer_id=peer_id,
-        telegram_user_id=telegram_user_id,
-        username=username,
-    )
-    if target is None:
-        body = json.dumps({"error": "recipient_unresolved"}, ensure_ascii=False)
-        return 422, body
-
+    target = int(chat_id)
     normalized_attachments = _normalize_attachments(attachments or [])
     payload: Dict[str, Any] = {
         "tenant": int(tenant_id),
@@ -550,7 +493,8 @@ async def send_telegram(
         meta["peer_id"] = peer_id
     if meta:
         payload["meta"] = meta
-    text_value = (text or "").strip()
+    text_value = str(text) if text is not None else ""
+    text_value = text_value.strip()
     if text_value:
         payload["text"] = text_value
     if normalized_attachments:
@@ -562,6 +506,7 @@ async def send_telegram(
     headers["X-Admin-Token"] = ADMIN_TOKEN
 
     payload_log = json.dumps(payload, ensure_ascii=False)
+    log(f"[worker] telegram send target send_target={target}")
     log(f"[worker] telegram send payload={payload_log}")
 
     last_status, last_body = 0, ""
@@ -660,9 +605,12 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     telegram_user_id: Optional[int] = None
     if raw_telegram is not None:
         try:
-            telegram_user_id = int(raw_telegram)
+            candidate_id = int(raw_telegram)
         except Exception:
             telegram_user_id = None
+        else:
+            telegram_user_id = candidate_id if candidate_id > 0 else None
+    primary_telegram_user_id = telegram_user_id
     tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
     try:
         tenant = int(tenant_raw)
@@ -739,12 +687,44 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     actual_lead_id = lead_id
 
     if channel == "telegram":
-        if telegram_user_id is None:
+        from_candidate = _coerce_int(item.get("from"))
+        if from_candidate is not None and from_candidate <= 0:
+            from_candidate = None
+
+        db_lookup_result: Optional[int] = None
+        if primary_telegram_user_id is None and lead_id > 0:
+            try:
+                db_lookup_result = await get_telegram_user_id_by_lead(lead_id)
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("get_telegram_user_id_by_lead").inc()
+                log(
+                    "event=send_result status=skipped reason=db_error operation=get_telegram_user_id_by_lead "
+                    f"channel={channel} lead_id={lead_id} error={exc}"
+                )
+                return ("skipped", "db_error", "", 0)
+        chat_candidates: list[int] = []
+        if primary_telegram_user_id is not None and primary_telegram_user_id > 0:
+            chat_candidates.append(int(primary_telegram_user_id))
+        if db_lookup_result is not None and db_lookup_result > 0:
+            chat_candidates.append(int(db_lookup_result))
+        if from_candidate is not None and from_candidate > 0:
+            chat_candidates.append(int(from_candidate))
+
+        chat_id: Optional[int] = None
+        for candidate in chat_candidates:
+            if candidate > 0:
+                chat_id = int(candidate)
+                break
+
+        if chat_id is None or chat_id <= 0:
             log(
                 "event=send_result status=skipped reason=missing_peer "
                 f"channel={channel} lead_id={lead_id}"
             )
             return ("skipped", "missing_peer", "", 0)
+
+        telegram_user_id = chat_id
+
         resolved_lead_id: Optional[int] = lead_id if lead_id > 0 else None
         if resolved_lead_id is None:
             try:
@@ -763,7 +743,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         title_hint: Optional[str] = None
         if normalized_username:
             title_hint = f"tg:{normalized_username}"
-        elif telegram_user_id is not None:
+        else:
             title_hint = f"tg:id {telegram_user_id}"
 
         upsert_kwargs = {
@@ -807,7 +787,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
 
         actual_lead_id = resolved_lead_id
         log(
-            f"event=send_attempt channel=telegram tenant={tenant} lead_id={actual_lead_id}"
+            f"event=send_attempt channel=telegram tenant={tenant} lead_id={actual_lead_id} send_target={chat_id}"
         )
         try:
             message_db_id = await insert_message_out(
@@ -845,11 +825,11 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                 peer_id = None
         st, body = await send_telegram(
             tenant,
+            chat_id=int(chat_id),
             peer_id=peer_id,
             telegram_user_id=telegram_user_id,
             username=username,
             text=text or None,
-            raw_to=raw_to,
             attachments=attachments or None,
             reply_to=reply_to,
         )
