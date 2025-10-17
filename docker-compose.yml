@@ -63,6 +63,8 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: 1
       OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-*}
+      OUTBOX_QUEUE: outbox
+      OUT_QUEUES: outbox,outbox:send
       APP_BASE_URL: ${APP_BASE_URL:-http://app:8000}
       TENANT: ${TENANT:-1}
       SMART_REPLY_ENABLED: ${SMART_REPLY_ENABLED:-1}
