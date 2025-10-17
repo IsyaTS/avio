@@ -21,7 +21,7 @@ const APP_BASE_URL = (() => {
 })();
 const LAST_QR_META_PATH = path.join(STATE_DIR, 'last-qr.json');
 
-/** @type {{ tenant: string, ts: number, svg: string, png: string } | null } */
+/** @type {{ tenant: string, ts: number, svg: string, png: string, qrId: string | null } | null } */
 let lastQrCache = null;
 
 let messageInTotal = 0;
@@ -125,19 +125,27 @@ function loadLastQrFromDisk() {
     const ts = Number(parsed.ts || parsed.timestamp || 0) || 0;
     const svg = typeof parsed.qr_svg === 'string' ? parsed.qr_svg : '';
     const png = typeof parsed.qr_png === 'string' ? parsed.qr_png : '';
+    const qrIdRaw = parsed.qr_id ?? parsed.qrId ?? null;
+    let qrId = null;
+    if (typeof qrIdRaw === 'string' && qrIdRaw.trim()) qrId = qrIdRaw.trim();
+    else if (qrIdRaw !== null && qrIdRaw !== undefined) qrId = String(qrIdRaw);
+    if (!qrId && ts) qrId = String(ts);
     if (!svg) return null;
-    return { tenant, ts, svg, png };
+    return { tenant, ts, svg, png, qrId };
   } catch (_) {
     return null;
   }
 }
 
-function persistLastQr(tenant, svg, png, ts) {
+function persistLastQr(tenant, svg, png, ts, qrId) {
+  const resolvedTs = Number(ts || 0) || Date.now();
+  const resolvedQrId = qrId ? String(qrId) : String(resolvedTs);
   lastQrCache = {
     tenant: String(tenant || ''),
-    ts: Number(ts || 0) || Date.now(),
+    ts: resolvedTs,
     svg: typeof svg === 'string' ? svg : '',
     png: typeof png === 'string' ? png : '',
+    qrId: resolvedQrId,
   };
   try {
     ensureDir(STATE_DIR);
@@ -146,6 +154,7 @@ function persistLastQr(tenant, svg, png, ts) {
       ts: lastQrCache.ts,
       qr_svg: lastQrCache.svg,
       qr_png: lastQrCache.png,
+      qr_id: lastQrCache.qrId,
     };
     fs.writeFileSync(LAST_QR_META_PATH, JSON.stringify(payload));
   } catch (_) {}
@@ -162,6 +171,35 @@ function getLastQrSnapshot() {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sessionStatusPayload(tenant, session) {
+  const normalizedTenant = String(tenant || '');
+  const ready = !!(session && session.ready);
+  const hasQr = !!(session && session.qrSvg);
+  const lastEvent = session && session.lastEvent ? String(session.lastEvent) : null;
+  let qrId = session && session.qrId ? String(session.qrId) : null;
+  if (!qrId) {
+    const snapshot = getLastQrSnapshot();
+    if (snapshot && snapshot.qrId && snapshot.tenant === normalizedTenant) {
+      qrId = String(snapshot.qrId);
+    }
+  }
+  let state = null;
+  if (hasQr) state = 'qr';
+  else if (ready) state = 'ready';
+  else if (lastEvent) state = lastEvent;
+  const payload = {
+    ok: true,
+    tenant: normalizedTenant,
+    ready,
+    qr: hasQr,
+    last: lastEvent,
+    need_qr: !ready,
+  };
+  if (state) payload.state = state;
+  if (qrId) payload.qr_id = qrId;
+  return payload;
 }
 
 function requestJson(method, url, payload, extraHeaders) {
@@ -222,7 +260,7 @@ async function notifyTenantQr(tenant, svg, qrId, pngBase64, qrText) {
     provider: 'whatsapp',
     event: 'wa_qr',
     tenant: Number(tenant),
-    qr_id: qrId,
+    qr_id: typeof qrId === 'string' ? qrId : String(qrId || ''),
     svg,
   };
   if (pngBase64) payload.png_base64 = pngBase64;
@@ -469,8 +507,8 @@ function buildClient(tenant) {
     tenants[tenant].ready = false;
     tenants[tenant].lastEvent = 'qr';
     tenants[tenant].lastTs = now();
-    tenants[tenant].qrId = qrId;
-    if (svg || png) persistLastQr(tenant, svg, png, qrId);
+    tenants[tenant].qrId = String(qrId);
+    if (svg || png) persistLastQr(tenant, svg, png, qrId, qrId);
     try {
       await notifyTenantQr(tenant, svg, qrId, png || null, qr || '');
     } catch (_) {}
@@ -481,6 +519,7 @@ function buildClient(tenant) {
     tenants[tenant].lastEvent = 'authenticated';
     tenants[tenant].lastTs = now();
     tenants[tenant].qrPng = null;
+    tenants[tenant].qrId = null;
     log(tenant, 'authenticated');
     triggerTenantSync(tenant);
   });
@@ -488,6 +527,7 @@ function buildClient(tenant) {
     tenants[tenant].ready = false;
     tenants[tenant].qrSvg = null;
     tenants[tenant].qrPng = null;
+    tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'auth_failure';
     tenants[tenant].lastTs = now();
     log(tenant, 'auth_failure ' + (m||''));
@@ -496,6 +536,7 @@ function buildClient(tenant) {
     tenants[tenant].ready = true;
     tenants[tenant].qrSvg = null;
     tenants[tenant].qrPng = null;
+    tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'ready';
     tenants[tenant].lastTs = now();
     log(tenant, 'ready');
@@ -504,6 +545,7 @@ function buildClient(tenant) {
   c.on('disconnected', (reason) => {
     tenants[tenant].ready = false;
     tenants[tenant].qrPng = null;
+    tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
     log(tenant, 'disconnected ' + reason);
@@ -605,7 +647,7 @@ app.post('/session/start', (req, res) => {
   const hook = req.body?.webhook_url || req.body?.webhook || '';
   if (!t) return res.status(400).json({ ok:false, error:'no_tenant' });
   const s = ensureSession(t, hook);
-  return res.json({ ok:true, tenant:String(t), ready:!!s.ready, qr:!!s.qrSvg, last:s.lastEvent });
+  return res.json(sessionStatusPayload(t, s));
 });
 
 // Preferred explicit tenant start endpoint
@@ -615,7 +657,7 @@ app.post('/session/:tenant/start', (req, res) => {
   const hook = req.body?.webhook_url || req.body?.webhook || '';
   if (!t) return res.status(400).json({ ok:false, error:'no_tenant' });
   const s = ensureSession(t, hook);
-  return res.json({ ok:true, tenant:String(t), ready:!!s.ready, qr:!!s.qrSvg, last:s.lastEvent });
+  return res.json(sessionStatusPayload(t, s));
 });
 
 app.post('/session/:tenant/launch', (req, res) => {
@@ -631,7 +673,7 @@ app.get('/session/:tenant/status', (req, res) => {
   const t = String(req.params.tenant||'');
   const s = tenants[t];
   if (!s) return res.status(404).json({ ok:false, error:'no_session' });
-  return res.json({ ok:true, tenant:t, ready:!!s.ready, qr:!!s.qrSvg, last:s.lastEvent });
+  return res.json(sessionStatusPayload(t, s));
 });
 
 app.get('/session/qr.svg', (req, res) => {
@@ -650,13 +692,24 @@ app.get('/session/:tenant/qr.svg', (req, res) => {
   if (!authorized(req)) return res.status(401).type('image/svg+xml').send('');
   const t = String(req.params.tenant||'');
   const s = tenants[t];
-  if (!s || !s.qrSvg) {
+  let svg = s && s.qrSvg ? s.qrSvg : '';
+  if (!svg) {
+    const snapshot = getLastQrSnapshot();
+    if (snapshot && snapshot.svg && snapshot.tenant === t) {
+      svg = snapshot.svg;
+      if (s) {
+        s.qrSvg = svg;
+        s.qrId = snapshot.qrId ? String(snapshot.qrId) : s.qrId;
+      }
+    }
+  }
+  if (!svg) {
     try { console.log('[waweb]', 'qr_route_svg_404', 't='+t, 'ready='+(!!s&&!!s.ready)); } catch(_){}
     return res.status(404).type('image/svg+xml').send('');
   }
-  try { console.log('[waweb]', 'qr_route_svg_200', 't='+t, 'len='+(s.qrSvg?s.qrSvg.length:0)); } catch(_){}
+  try { console.log('[waweb]', 'qr_route_svg_200', 't='+t, 'len='+(svg?svg.length:0)); } catch(_){}
   res.setHeader('Cache-Control','no-store');
-  return res.type('image/svg+xml').send(s.qrSvg);
+  return res.type('image/svg+xml').send(svg);
 });
 
 app.get('/session/:tenant/qr.png', async (req, res) => {
@@ -757,7 +810,7 @@ app.post('/session/:tenant/restart', (req,res)=>{
   const t = String(req.params.tenant||'');
   const hook = req.body?.webhook_url || req.body?.webhook || '';
   const s = resetSession(t, hook);
-  return res.json({ ok:true, tenant:t, ready:!!s.ready, qr:!!s.qrSvg, last:s.lastEvent });
+  return res.json(sessionStatusPayload(t, s));
 });
 
 app.post('/session/restart', (req, res) => {
@@ -766,7 +819,7 @@ app.post('/session/restart', (req, res) => {
   const hook = req.body?.webhook_url || req.body?.webhook || '';
   if (!t) return res.status(400).json({ ok:false, error:'no_tenant' });
   const s = resetSession(t, hook);
-  return res.json({ ok:true, tenant:String(t), ready:!!s.ready, qr:!!s.qrSvg, last:s.lastEvent });
+  return res.json(sessionStatusPayload(t, s));
 });
 
 app.post('/session/:tenant/reset', (req,res)=>{

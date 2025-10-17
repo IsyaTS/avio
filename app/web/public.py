@@ -1085,25 +1085,18 @@ async def wa_status(
     tenant_id, validated_key = ok
 
     snapshot = await _wa_status_impl(int(tenant_id))
-    state_value = snapshot.get("state") if isinstance(snapshot, dict) else None
-    if state_value is not None:
-        state_value = str(state_value)
 
     qr_id_value, redis_failed = _get_last_qr_id(int(tenant_id))
     if redis_failed:
         wa_logger.info("wa_qr_cache_unavailable tenant=%s", tenant_id)
         qr_id_value = None
 
-    qr_url_value: str | None = None
-    if validated_key:
-        qr_url_value = _build_public_wa_qr_url(int(tenant_id), validated_key)
-
-    result = {
-        "ok": True,
-        "state": state_value,
-        "qr_id": qr_id_value,
-        "qr_url": qr_url_value,
-    }
+    result = _compose_public_wa_response(
+        int(tenant_id),
+        validated_key,
+        status_snapshot=snapshot,
+        qr_id_override=qr_id_value,
+    )
     return JSONResponse(result, headers=_no_store_headers())
 
 
@@ -1136,33 +1129,34 @@ async def wa_start(
     if not isinstance(response_data, dict):
         response_data = {}
 
-    state_value = response_data.get("state") or response_data.get("last")
-    if state_value is None:
-        snapshot = await _wa_status_impl(int(tenant_id))
-        state_value = snapshot.get("state") if isinstance(snapshot, dict) else None
-    if state_value is not None:
-        state_value = str(state_value)
-
     qr_id_value, redis_failed = _get_last_qr_id(int(tenant_id))
     if redis_failed:
         wa_logger.info("wa_qr_cache_unavailable tenant=%s", tenant_id)
         qr_id_value = None
+    elif not qr_id_value:
+        qr_id_value = _normalize_qr_id(response_data.get("qr_id") or response_data.get("qrId"))
 
-    qr_url_value: str | None = None
-    if validated_key:
-        qr_url_value = _build_public_wa_qr_url(int(tenant_id), validated_key)
+    status_snapshot = await _wa_status_impl(int(tenant_id))
+    if isinstance(status_snapshot, dict):
+        # allow WA status response to override qr_id if Redis miss
+        if not qr_id_value:
+            qr_id_value = _normalize_qr_id(
+                status_snapshot.get("qr_id")
+            )
 
-    result = {
-        "ok": True,
-        "state": state_value,
-        "qr_id": qr_id_value,
-        "qr_url": qr_url_value,
-    }
+    result = _compose_public_wa_response(
+        int(tenant_id),
+        validated_key,
+        status_snapshot=status_snapshot,
+        qr_id_override=qr_id_value,
+    )
     return JSONResponse(result, headers=_no_store_headers())
 
 
 async def _wa_status_impl(tenant: int) -> dict:
-    code, raw = common.http("GET", f"{common.WA_WEB_URL}/session/{int(tenant)}/status")
+    code, raw = common.http(
+        "GET", f"{common.WA_WEB_URL}/session/{int(tenant)}/status", timeout=3.0
+    )
     try:
         data = json.loads(raw)
     except Exception:
@@ -1170,18 +1164,19 @@ async def _wa_status_impl(tenant: int) -> dict:
     if not isinstance(data, dict):
         data = {}
 
-    state_value = data.get("state")
-    if state_value is None and data.get("last") is not None:
-        state_value = str(data.get("last"))
-    if state_value is None and data.get("ready") is not None:
-        state_value = "ready" if data.get("ready") else "init"
+    state_value, need_qr_flag = _derive_wa_state(data)
+    qr_id_value = _normalize_qr_id(data.get("qr_id") or data.get("qrId"))
 
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "state": state_value,
         "status_code": int(code or 0),
         "raw": data,
+        "need_qr": need_qr_flag,
     }
+    if qr_id_value is not None:
+        payload["qr_id"] = qr_id_value
+    return payload
 
 
 def _build_public_wa_qr_url(tenant: int, key: str, qr_id: str | None = None) -> str:
@@ -1189,6 +1184,105 @@ def _build_public_wa_qr_url(tenant: int, key: str, qr_id: str | None = None) -> 
     if qr_id:
         params["qr_id"] = str(qr_id)
     return f"/pub/wa/qr.svg?{urlencode(params, doseq=False)}"
+
+
+def _normalize_qr_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    candidate = value
+    if isinstance(candidate, (bytes, bytearray)):
+        try:
+            candidate = candidate.decode("utf-8", errors="ignore")
+        except Exception:
+            candidate = bytes(candidate).decode("utf-8", errors="ignore")
+    if isinstance(candidate, bool):
+        candidate = int(candidate)
+    if isinstance(candidate, (int,)):
+        return str(candidate)
+    if isinstance(candidate, float):
+        if not math.isfinite(candidate):
+            return None
+        if candidate.is_integer():
+            return str(int(candidate))
+        return str(int(candidate))
+    text = str(candidate).strip()
+    if not text:
+        return None
+    return text
+
+
+def _derive_wa_state(data: Mapping[str, Any] | None) -> tuple[str | None, bool]:
+    if not isinstance(data, Mapping):
+        return None, False
+    state_value = data.get("state")
+    if state_value is not None:
+        state_value = str(state_value)
+    ready_flag = _truthy_flag(data.get("ready"))
+    need_qr_flag = _truthy_flag(data.get("need_qr"))
+    qr_flag = _truthy_flag(data.get("qr"))
+    if state_value is None:
+        if ready_flag:
+            state_value = "ready"
+        elif need_qr_flag or qr_flag:
+            state_value = "qr"
+        elif data.get("last") is not None:
+            state_value = str(data.get("last"))
+    if not need_qr_flag:
+        need_qr_flag = not ready_flag and (qr_flag or state_value == "qr")
+    return state_value, need_qr_flag
+
+
+def _compose_public_wa_response(
+    tenant: int,
+    key: str | None,
+    *,
+    status_snapshot: Mapping[str, Any] | None = None,
+    qr_id_override: str | None = None,
+) -> dict[str, Any]:
+    state_value: str | None = None
+    need_qr_flag = False
+    qr_id_value = qr_id_override
+    raw_snapshot: Mapping[str, Any] | None = None
+
+    if isinstance(status_snapshot, Mapping):
+        raw_snapshot_candidate = status_snapshot.get("raw")
+        if isinstance(raw_snapshot_candidate, Mapping):
+            raw_snapshot = raw_snapshot_candidate
+        else:
+            raw_snapshot = status_snapshot
+        state_candidate = status_snapshot.get("state")
+        if state_candidate is not None:
+            state_value = str(state_candidate)
+        need_qr_flag = bool(status_snapshot.get("need_qr"))
+        if qr_id_value is None:
+            qr_id_value = _normalize_qr_id(status_snapshot.get("qr_id"))
+
+    derived_state, derived_need_qr = _derive_wa_state(raw_snapshot)
+    if state_value is None:
+        state_value = derived_state
+    if not need_qr_flag:
+        need_qr_flag = derived_need_qr
+    if qr_id_value is None and raw_snapshot is not None:
+        qr_id_value = _normalize_qr_id(
+            raw_snapshot.get("qr_id") or raw_snapshot.get("qrId")
+        )
+
+    if need_qr_flag and state_value != "qr":
+        state_value = "qr"
+    if state_value is not None:
+        state_value = str(state_value)
+
+    qr_url_value: str | None = None
+    if key:
+        qr_url_value = _build_public_wa_qr_url(int(tenant), key, qr_id_value)
+
+    return {
+        "ok": True,
+        "state": state_value,
+        "qr_id": qr_id_value,
+        "qr_url": qr_url_value,
+        "need_qr": need_qr_flag,
+    }
 
 def _fetch_qr_bytes(url: str, timeout: float = 6.0):
     req = urllib.request.Request(url, method="GET")
@@ -1340,7 +1434,8 @@ def _get_last_qr_id(tenant: int) -> tuple[str | None, bool]:
         return None, True
     if not value:
         return None, False
-    return str(value), False
+    normalized = _normalize_qr_id(value)
+    return normalized, False
 
 
 def _load_cached_qr_entry(tenant: int, qr_id: str) -> tuple[dict[str, Any] | None, bool]:
@@ -1427,7 +1522,12 @@ def _load_cached_svg(tenant: int, qr_id: str) -> tuple[str | None, bool]:
     except redis_ex.RedisError:
         return None, True
     if cached:
-        return str(cached), False
+        candidate = cached
+        if isinstance(candidate, (bytes, bytearray)):
+            candidate = bytes(candidate).decode("utf-8", errors="ignore")
+        candidate_str = str(candidate).strip()
+        if candidate_str:
+            return candidate_str, False
     entry, failed = _load_cached_qr_entry(tenant, qr_id)
     if failed:
         return None, True
@@ -1457,6 +1557,7 @@ def _fetch_svg_from_upstream(tenant: int) -> tuple[str | None, int]:
     status_code, body = common.http(
         "GET",
         f"{common.WA_WEB_URL}/session/{int(tenant)}/qr.svg",
+        timeout=2.5,
     )
     try:
         code = int(status_code or 0)
@@ -1898,33 +1999,6 @@ def _coerce_body_bytes(body: Any) -> bytes:
         return b""
 
 
-def _wa_channel_enabled(tenant: int) -> bool:
-    try:
-        if int(tenant) == 1:
-            return True
-    except Exception:
-        pass
-    try:
-        cfg = common.read_tenant_config(int(tenant))
-    except Exception:
-        return False
-
-    channels = cfg.get("channels") if isinstance(cfg, dict) else None
-    if isinstance(channels, dict):
-        whatsapp_cfg = channels.get("whatsapp")
-        if isinstance(whatsapp_cfg, dict):
-            if "enabled" in whatsapp_cfg:
-                return _truthy_flag(whatsapp_cfg.get("enabled"))
-            if "active" in whatsapp_cfg:
-                return _truthy_flag(whatsapp_cfg.get("active"))
-        elif isinstance(whatsapp_cfg, bool):
-            return whatsapp_cfg
-    elif isinstance(channels, list):
-        return "whatsapp" in {str(item).lower() for item in channels}
-
-    return False
-
-
 @router.get("/pub/wa/qr.svg")
 def wa_qr_svg(
     request: Request,
@@ -1942,14 +2016,18 @@ def wa_qr_svg(
     if not requested_id:
         requested_id, redis_failed = _get_last_qr_id(tenant_id)
     if redis_failed:
-        return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=_no_store_headers())
+        headers = _no_store_headers()
+        if requested_id:
+            headers["X-WA-QR-ID"] = str(requested_id)
+        return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
     if not requested_id:
         wa_logger.info("wa_qr_cache_miss tenant=%s reason=no_qr_id format=svg", tenant_id)
         return _qr_expired_response()
 
     svg_value, redis_failed = _load_cached_svg(tenant_id, requested_id)
     if redis_failed:
-        return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=_no_store_headers())
+        headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
+        return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
 
     if not svg_value:
         upstream_svg, upstream_status = _fetch_svg_from_upstream(int(tenant_id))
@@ -1961,6 +2039,12 @@ def wa_qr_svg(
                 {"qr_svg": svg_value},
                 include_last=True,
             )
+            wa_logger.info(
+                "wa_qr_cache_refill tenant=%s qr_id=%s status=%s",
+                tenant_id,
+                requested_id,
+                upstream_status,
+            )
         else:
             wa_logger.info(
                 "wa_qr_cache_miss tenant=%s qr_id=%s reason=upstream_%s",
@@ -1968,7 +2052,10 @@ def wa_qr_svg(
                 requested_id,
                 upstream_status or "unknown",
             )
-            return _qr_expired_response(requested_id)
+            if int(upstream_status or 0) == 404:
+                return _qr_expired_response(requested_id)
+            headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
+            return JSONResponse({"error": "wa_upstream_error"}, status_code=502, headers=headers)
 
     wa_logger.info("wa_qr_cache_hit tenant=%s qr_id=%s format=svg", tenant_id, requested_id)
     headers = _no_store_headers({"X-WA-QR-ID": requested_id})
@@ -2492,9 +2579,6 @@ def wa_qr_png(
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
-
-    if not _wa_channel_enabled(tenant_id):
-        return JSONResponse({"error": "wa_disabled"}, status_code=503)
 
     requested_id = (qr_id or "").strip()
     redis_failed = False

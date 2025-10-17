@@ -560,6 +560,10 @@ async def provider_webhook(request: Request) -> Response:
         svg_raw = payload.get("qr")
     if svg_raw is None:
         svg_raw = payload.get("data")
+    if svg_raw is None:
+        nested_payload = payload.get("payload")
+        if isinstance(nested_payload, dict):
+            svg_raw = nested_payload.get("svg")
     if tenant_candidate is None:
         raise HTTPException(status_code=400, detail="invalid_tenant")
     if qr_id_raw is None:
@@ -568,7 +572,8 @@ async def provider_webhook(request: Request) -> Response:
     tenant = int(tenant_candidate)
     qr_id = str(qr_id_raw).strip()
     svg = str(svg_raw or "").strip()
-    if not qr_id or not svg:
+    svg_lower = svg.lower()
+    if not qr_id or not svg or "<svg" not in svg_lower or "</svg" not in svg_lower:
         logger.warning("wa_qr_invalid tenant=%s qr_id=%s reason=no_svg", tenant, qr_id or "-")
         raise HTTPException(status_code=400, detail="invalid_svg")
 
