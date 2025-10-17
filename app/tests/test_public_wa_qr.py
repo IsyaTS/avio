@@ -130,10 +130,13 @@ def test_wa_status_accepts_tenant_valid_key(monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {
         "ok": True,
+        "tenant": 55,
         "ready": True,
         "connected": True,
         "qr": False,
         "last": 123,
+        "state": "ready",
+        "need_qr": False,
         "qr_id": "abc123",
         "qr_url": "/pub/wa/qr.svg?tenant=55&k=tenant-55-key&qr_id=abc123",
     }
@@ -282,7 +285,13 @@ def test_wa_start_returns_state(monkeypatch):
     payload = resp.json()
     assert payload == {
         "ok": True,
+        "tenant": 42,
+        "ready": False,
+        "connected": False,
+        "qr": True,
+        "last": "qr",
         "state": "qr",
+        "need_qr": True,
         "qr_id": "qr-42",
         "qr_url": "/pub/wa/qr.svg?tenant=42&k=tenant-42-key&qr_id=qr-42",
     }

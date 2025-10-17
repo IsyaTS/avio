@@ -105,8 +105,8 @@
     const copyButton = document.getElementById('copy-link');
     const statusPanel = document.getElementById('status-panel');
     const query = `tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(key)}`;
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    let qrPollToken = 0;
+    let statusTimer = null;
+    let lastQrUrl = null;
 
     const showQr = () => {
         if (!qrImg) return;
@@ -131,7 +131,38 @@
         qrMessage.style.display = 'none';
     };
 
-    const buildQrUrl = () => `/pub/wa/qr.svg?${query}&t=${Date.now()}`;
+    const scheduleStatusPoll = (delay) => {
+        if (statusTimer) {
+            clearTimeout(statusTimer);
+            statusTimer = null;
+        }
+        statusTimer = window.setTimeout(() => {
+            statusTimer = null;
+            fetchStatus().catch((error) => {
+                console.debug('[wa-connect] status poll error', error);
+            });
+        }, delay);
+    };
+
+    const updateStatus = (text, offline) => {
+        if (!statusPanel) return;
+        statusPanel.textContent = text;
+        statusPanel.classList.toggle('offline', !!offline);
+    };
+
+    const updateQrImage = (url) => {
+        if (!qrImg || !url) return;
+        const normalized = url.trim();
+        if (!normalized) return;
+        const base = normalized;
+        const bust = `${base}${base.includes('?') ? '&' : '?'}t=${Date.now()}`;
+        if (lastQrUrl !== base) {
+            lastQrUrl = base;
+        }
+        qrImg.src = bust;
+        showQr();
+        clearMessage();
+    };
 
     const restartSession = async () => {
         const url = `/pub/wa/restart?${query}`;
@@ -144,90 +175,62 @@
         }
     };
 
-    const fetchQROnce = async () => {
-        const url = buildQrUrl();
-        try {
-            const response = await fetch(url, { cache: 'no-store' });
-            const contentType = response.headers.get('Content-Type') || '';
-            console.debug('[wa-connect] qr resp', response.status, contentType);
-            if (response.status === 200 && /^image\//i.test(contentType)) {
-                if (qrImg) {
-                    qrImg.src = url;
-                    showQr();
-                }
-                clearMessage();
-                return true;
-            }
-            if (response.status === 204) {
-                hideQr();
-                setMessage('QR не готов');
-                return false;
-            }
-        } catch (error) {
-            console.debug('[wa-connect] qr resp', 'error', '');
-        }
-        return false;
-    };
-
-    const cancelQrPolling = () => {
-        qrPollToken += 1;
-    };
-
-    const requestQr = () => {
-        const token = ++qrPollToken;
-
-        const loop = async () => {
-            let attempt = 0;
-            while (token === qrPollToken) {
-                const success = await fetchQROnce();
-                if (success) {
-                    return;
-                }
-                attempt += 1;
-                const delay = Math.min(500 + attempt * 250, 5000);
-                await sleep(delay);
-            }
-        };
-
-        return loop().catch((error) => {
-            console.debug('[wa-connect] qr loop error', error);
-        });
-    };
-
-    const updateStatus = (text, offline) => {
-        if (!statusPanel) return;
-        statusPanel.textContent = text;
-        statusPanel.classList.toggle('offline', !!offline);
-    };
-
     const fetchStatus = async () => {
         if (!statusPanel) return;
+        if (statusTimer) {
+            clearTimeout(statusTimer);
+            statusTimer = null;
+        }
         const url = `/pub/wa/status?${query}`;
+        let nextDelay = 15000;
         try {
             const response = await fetch(url, { cache: 'no-store' });
             if (!response.ok) {
                 updateStatus('Статус недоступен', true);
+                setMessage('Не удалось получить статус');
+                scheduleStatusPoll(nextDelay);
                 return;
             }
             const payload = await response.json();
-            const connected = !!(payload.connected ?? payload.ready);
-            if (connected) {
+            const state = typeof payload.state === 'string' ? payload.state : null;
+            const needQr = !!payload.need_qr || state === 'qr';
+            const connected = !!(payload.ready || payload.connected || state === 'ready');
+            const qrUrlFromStatus = typeof payload.qr_url === 'string' ? payload.qr_url : null;
+
+            if (needQr) {
+                updateStatus('Ожидает сканирования', true);
+                if (qrUrlFromStatus) {
+                    updateQrImage(qrUrlFromStatus);
+                    nextDelay = 5000;
+                } else {
+                    hideQr();
+                    setMessage('QR не готов');
+                    nextDelay = 4000;
+                }
+            } else if (connected) {
                 updateStatus('Подключено', false);
                 hideQr();
                 clearMessage();
-                cancelQrPolling();
+                lastQrUrl = null;
+                nextDelay = 15000;
             } else {
-                updateStatus(payload.qr ? 'Ожидает сканирования' : 'Ожидаем QR…', true);
+                const fallbackState = state ? state : 'нет данных';
+                updateStatus(`Статус: ${fallbackState}`, true);
+                hideQr();
+                setMessage('Ожидаем подключение');
+                nextDelay = 8000;
             }
         } catch (error) {
             updateStatus('Статус недоступен', true);
+            setMessage('Не удалось получить статус');
         }
+        scheduleStatusPoll(nextDelay);
     };
 
     if (refreshButton) {
         refreshButton.addEventListener('click', async (event) => {
             event.preventDefault();
-            cancelQrPolling();
+            lastQrUrl = null;
             hideQr();
             setMessage('Обновляем QR…');
             try {
@@ -235,7 +238,6 @@
             } catch (error) {
                 setMessage('Не удалось перезапустить сессию');
             }
-            requestQr();
             fetchStatus();
         });
     }
@@ -252,9 +254,7 @@
     }
 
     window.addEventListener('load', () => {
-        requestQr();
         fetchStatus();
-        setInterval(fetchStatus, 15000);
     });
 })();
 </script>

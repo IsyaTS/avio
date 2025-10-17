@@ -16,6 +16,7 @@ import time
 import uuid
 import asyncio
 import base64
+import random
 from typing import Any, Iterable, Mapping
 
 import qrcode
@@ -101,11 +102,15 @@ PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
 _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 
-INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
+WA_QR_CACHE_TTL_MIN = 180  # seconds
+WA_QR_CACHE_TTL_MAX = 300  # seconds
 
-WA_QR_CACHE_TTL = 600  # seconds, must be >= 120 per public WA spec
-WA_QR_CACHE_MIN_TTL = 180
-WA_QR_EFFECTIVE_TTL = max(WA_QR_CACHE_TTL, WA_QR_CACHE_MIN_TTL)
+
+def _qr_cache_ttl() -> int:
+    return random.randint(WA_QR_CACHE_TTL_MIN, WA_QR_CACHE_TTL_MAX)
+
+
+INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -1169,6 +1174,11 @@ async def _wa_status_impl(tenant: int) -> dict:
     state_value, need_qr_flag = _derive_wa_state(data)
     qr_id_value = _normalize_qr_id(data.get("qr_id") or data.get("qrId"))
 
+    ready_flag = _truthy_flag(data.get("ready"))
+    connected_flag = _truthy_flag(data.get("connected"))
+    qr_flag = _truthy_flag(data.get("qr"))
+    last_value = data.get("last")
+
     payload: dict[str, Any] = {
         "ok": True,
         "state": state_value,
@@ -1176,6 +1186,18 @@ async def _wa_status_impl(tenant: int) -> dict:
         "raw": data,
         "need_qr": need_qr_flag,
     }
+    payload["ready"] = bool(data.get("ready")) if "ready" in data else ready_flag
+    payload["connected"] = (
+        bool(data.get("connected")) if "connected" in data else connected_flag or ready_flag
+    )
+    payload["qr"] = bool(data.get("qr")) if "qr" in data else qr_flag
+    if last_value is not None:
+        payload["last"] = last_value
+    if qr_id_value is None:
+        cached_id, redis_failed = _get_last_qr_id(int(tenant))
+        if not redis_failed and cached_id:
+            qr_id_value = cached_id
+
     if qr_id_value is not None:
         payload["qr_id"] = qr_id_value
     return payload
@@ -1246,6 +1268,8 @@ def _compose_public_wa_response(
     qr_id_value = qr_id_override
     raw_snapshot: Mapping[str, Any] | None = None
 
+    result: dict[str, Any] = {"ok": True}
+
     if isinstance(status_snapshot, Mapping):
         raw_snapshot_candidate = status_snapshot.get("raw")
         if isinstance(raw_snapshot_candidate, Mapping):
@@ -1258,6 +1282,14 @@ def _compose_public_wa_response(
         need_qr_flag = bool(status_snapshot.get("need_qr"))
         if qr_id_value is None:
             qr_id_value = _normalize_qr_id(status_snapshot.get("qr_id"))
+
+        for snapshot_key, value in status_snapshot.items():
+            if snapshot_key == "raw":
+                continue
+            if snapshot_key == "ok":
+                result["ok"] = bool(value)
+                continue
+            result[snapshot_key] = value
 
     derived_state, derived_need_qr = _derive_wa_state(raw_snapshot)
     if state_value is None:
@@ -1275,16 +1307,28 @@ def _compose_public_wa_response(
         state_value = str(state_value)
 
     qr_url_value: str | None = None
-    if key:
+    if key and qr_id_value:
         qr_url_value = _build_public_wa_qr_url(int(tenant), key, qr_id_value)
 
-    return {
-        "ok": True,
-        "state": state_value,
-        "qr_id": qr_id_value,
-        "qr_url": qr_url_value,
-        "need_qr": need_qr_flag,
-    }
+    result.setdefault("tenant", int(tenant))
+    if state_value is not None:
+        result["state"] = state_value
+    elif "state" in result and result["state"] is None:
+        result.pop("state", None)
+
+    result["need_qr"] = bool(need_qr_flag)
+
+    if qr_id_value is not None:
+        result["qr_id"] = qr_id_value
+    else:
+        result.pop("qr_id", None)
+
+    if qr_url_value is not None:
+        result["qr_url"] = qr_url_value
+    else:
+        result.pop("qr_url", None)
+
+    return result
 
 def _fetch_qr_bytes(url: str, timeout: float = 6.0):
     req = urllib.request.Request(url, method="GET")
@@ -1555,25 +1599,6 @@ def _load_cached_svg(tenant: int, qr_id: str) -> tuple[str | None, bool]:
     return None, False
 
 
-def _fetch_svg_from_upstream(tenant: int) -> tuple[str | None, int]:
-    status_code, body = common.http(
-        "GET",
-        f"{common.WA_WEB_URL}/session/{int(tenant)}/qr.svg",
-        timeout=2.5,
-    )
-    try:
-        code = int(status_code or 0)
-    except Exception:
-        code = 0
-    if code == 200 and isinstance(body, str):
-        candidate = body.strip()
-        if candidate:
-            lowered = candidate.lower()
-            if "<svg" in lowered and "</svg" in lowered:
-                return candidate, code
-    return None, code
-
-
 def _qr_expired_response(qr_id: str | None = None) -> JSONResponse:
     headers = _no_store_headers()
     if qr_id:
@@ -1674,7 +1699,7 @@ def _cache_qr_payload(
         client = common.redis_client()
         pipe = client.pipeline()
         wrote = False
-        ttl = WA_QR_EFFECTIVE_TTL
+        ttl = _qr_cache_ttl()
         if json_payload is not None:
             pipe.setex(f"wa:qr:{tenant}:{qr_id}", ttl, json_payload)
             wrote = True
@@ -2014,7 +2039,7 @@ def wa_qr_svg(
         return _invalid_key_response()
     tenant_id, _ = ok
 
-    requested_id = (qr_id or "").strip()
+    requested_id = _normalize_qr_id(qr_id) if qr_id is not None else None
     redis_failed = False
     if not requested_id:
         requested_id, redis_failed = _get_last_qr_id(tenant_id)
@@ -2024,7 +2049,6 @@ def wa_qr_svg(
             headers["X-WA-QR-ID"] = str(requested_id)
         return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
     if not requested_id:
-        wa_logger.info("wa_qr_cache_miss tenant=%s reason=no_qr_id format=svg", tenant_id)
         return _qr_expired_response()
 
     svg_value, redis_failed = _load_cached_svg(tenant_id, requested_id)
@@ -2033,35 +2057,9 @@ def wa_qr_svg(
         return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
 
     if not svg_value:
-        upstream_svg, upstream_status = _fetch_svg_from_upstream(int(tenant_id))
-        if upstream_svg:
-            svg_value = upstream_svg
-            _cache_qr_payload(
-                tenant_id,
-                requested_id,
-                {"qr_svg": svg_value},
-                include_last=True,
-            )
-            wa_logger.info(
-                "wa_qr_cache_refill tenant=%s qr_id=%s status=%s",
-                tenant_id,
-                requested_id,
-                upstream_status,
-            )
-        else:
-            wa_logger.info(
-                "wa_qr_cache_miss tenant=%s qr_id=%s reason=upstream_%s",
-                tenant_id,
-                requested_id,
-                upstream_status or "unknown",
-            )
-            if int(upstream_status or 0) == 404:
-                return _qr_expired_response(requested_id)
-            headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
-            return JSONResponse({"error": "wa_upstream_error"}, status_code=502, headers=headers)
+        return _qr_expired_response(requested_id)
 
-    wa_logger.info("wa_qr_cache_hit tenant=%s qr_id=%s format=svg", tenant_id, requested_id)
-    headers = _no_store_headers({"X-WA-QR-ID": requested_id})
+    headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
     return Response(content=svg_value, media_type="image/svg+xml", headers=headers)
 
 

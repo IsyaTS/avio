@@ -250,21 +250,29 @@ function truncateBody(body, limit = 200) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-async function notifyTenantQr(tenant, svg, qrId, pngBase64, qrText) {
+async function notifyTenantQr(tenant, svg, qrId) {
   if (!svg) {
     console.warn('[waweb]', `wa_qr_callback_skip tenant=${tenant} reason=no_svg`);
     return;
   }
   const url = `${APP_BASE_URL}/webhook/provider`;
+  const qrIdValue = (() => {
+    if (typeof qrId === 'string') {
+      const trimmed = qrId.trim();
+      if (trimmed) return trimmed;
+    } else if (qrId !== null && qrId !== undefined) {
+      const stringified = String(qrId);
+      if (stringified.trim()) return stringified.trim();
+    }
+    return String(Date.now());
+  })();
   const payload = {
     provider: 'whatsapp',
     event: 'wa_qr',
     tenant: Number(tenant),
-    qr_id: typeof qrId === 'string' ? qrId : String(qrId || ''),
+    qr_id: qrIdValue,
     svg,
   };
-  if (pngBase64) payload.png_base64 = pngBase64;
-  if (qrText) payload.txt = qrText;
   const headers = {};
   if (WEBHOOK_SECRET) headers['X-Webhook-Token'] = WEBHOOK_SECRET;
   else if (ADMIN_TOKEN) headers['X-Webhook-Token'] = ADMIN_TOKEN;
@@ -275,13 +283,16 @@ async function notifyTenantQr(tenant, svg, qrId, pngBase64, qrText) {
       if (statusCode === 204) {
         return;
       }
-      if (attempt < 3) {
-        console.warn('[waweb]', `wa_qr_callback_retry tenant=${tenant} status=${statusCode}`);
-        await wait(500 * attempt);
-        continue;
+      if (statusCode >= 400 && statusCode < 500) {
+        console.warn('[waweb]', `wa_qr_callback_invalid tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
+        return;
       }
-      console.warn('[waweb]', `wa_qr_callback_error tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
-      return;
+      if (attempt >= 3) {
+        console.warn('[waweb]', `wa_qr_callback_error tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
+        return;
+      }
+      console.warn('[waweb]', `wa_qr_callback_retry tenant=${tenant} status=${statusCode}`);
+      await wait(500 * attempt);
     } catch (err) {
       const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
       console.warn('[waweb]', `wa_qr_callback_exception tenant=${tenant} attempt=${attempt} reason=${reason}`);
@@ -510,7 +521,7 @@ function buildClient(tenant) {
     tenants[tenant].qrId = String(qrId);
     if (svg || png) persistLastQr(tenant, svg, png, qrId, qrId);
     try {
-      await notifyTenantQr(tenant, svg, qrId, png || null, qr || '');
+      await notifyTenantQr(tenant, svg, qrId);
     } catch (_) {}
     log(tenant, 'qr');
     triggerTenantSync(tenant);
