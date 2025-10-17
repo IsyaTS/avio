@@ -54,7 +54,11 @@ T = TypeVar("T")
 
 # --- redis & integrations ---
 _redis_client: redis.Redis | None = None
-WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
+WA_WEB_URL = (
+    os.getenv("WAWEB_BASE_URL")
+    or os.getenv("WA_WEB_URL")
+    or "http://waweb:9001"
+).rstrip("/")
 # Internal auth token that waweb expects in X-Auth-Token. It may be provided
 # via WA_WEB_TOKEN or WEBHOOK_SECRET depending on deployment. Use either.
 WA_INTERNAL_TOKEN = (

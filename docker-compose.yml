@@ -29,6 +29,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
       TG_WORKER_URL: http://tgworker:9000
       TGWORKER_BASE_URL: http://tgworker:9000
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WAWEB_BASE_URL: http://waweb:9001
       WA_ENABLED: "false"
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       PUBLIC_KEY: ${PUBLIC_KEY}
