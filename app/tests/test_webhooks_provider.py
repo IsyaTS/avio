@@ -10,7 +10,7 @@ class _DummyAsyncRedis:
     def __init__(self):
         self.store: dict[str, str] = {}
 
-    async def set(self, key: str, value: str):
+    async def set(self, key: str, value: str, **kwargs):  # pragma: no cover - helper
         self.store[key] = value
 
 
@@ -33,7 +33,7 @@ def test_provider_webhook_caches_qr(monkeypatch):
         "event": "wa_qr",
         "tenant": 7,
         "qr_id": "1234567890",
-        "qr": "hello-qr",
+        "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
     }
 
     resp = client.post(
@@ -46,7 +46,7 @@ def test_provider_webhook_caches_qr(monkeypatch):
     cached_entry = json.loads(dummy.store[f"wa:qr:7:1234567890"])
     assert cached_entry["tenant"] == 7
     assert cached_entry["qr_id"] == "1234567890"
-    assert cached_entry["qr_text"] == "hello-qr"
+    assert cached_entry["qr_svg"].startswith("<svg")
     assert cached_entry["provider"] == "whatsapp"
     assert cached_entry["event"] == "wa_qr"
     assert isinstance(cached_entry["updated_at"], int)
