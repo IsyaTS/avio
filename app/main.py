@@ -88,6 +88,8 @@ client_router = _client_mod.router  # type: ignore[attr-defined]
 webhooks_router = _webhooks_mod.router  # type: ignore[attr-defined]
 process_incoming = _webhooks_mod.process_incoming  # type: ignore[attr-defined]
 
+from app.internal.tenant import router as internal_tenant_router
+
 import importlib.util as _importlib_util
 
 from app import outbox_worker
@@ -562,26 +564,12 @@ async def internal_catalog_file(tenant: int, path: str, token: str = ""):
 app.include_router(admin_router)
 app.include_router(public_router)
 app.include_router(client_router)
+app.include_router(internal_tenant_router)
 app.include_router(webhook)
 app.include_router(webhooks_router)
 
 @app.get("/")
 def root(): return RedirectResponse(url="/admin")
-
-# Internal: ensure per-tenant files exist (called by waweb)
-@app.post("/internal/tenant/{tenant}/ensure")
-async def internal_tenant_ensure(tenant: int, request: Request):
-    # Authenticate using either header or query token
-    token_hdr = (request.headers.get("X-Auth-Token") or "").strip()
-    token_qs = (request.query_params.get("token") or "").strip()
-    allowed = (settings.WEBHOOK_SECRET or "") or (os.getenv("WA_WEB_TOKEN") or "")
-    if allowed and token_hdr != allowed and token_qs != allowed:
-        return _err("unauthorized", 401)
-    try:
-        C.ensure_tenant_files(int(tenant))
-        return _ok({"tenant": int(tenant)})
-    except Exception:
-        return _err("failed")
 
 @app.post("/internal/tenant/{tenant}/wa/qr")
 async def internal_tenant_wa_qr(tenant: int, request: Request):

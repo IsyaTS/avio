@@ -166,6 +166,55 @@ curl -X POST "http://127.0.0.1:8000/send" \
 Каждое валидное входящее событие складывается в Redis по ключу `inbox:message_in` (LPUSH), что позволяет независимо подтверждать доставку.
 Все поля типа datetime в телеграм-вебхуке сериализуются в формате ISO 8601 (UTC) либо в миллисекундах эпохи, чтобы не зависеть от часового пояса контейнеров.
 
+## Inbound WhatsApp
+
+### Provider token
+
+- Для аутентификации событий `waweb → app` используется `provider_token`, закреплённый за каждым tenant.
+- Генерация: `POST /internal/tenant/{tenant}/ensure` с заголовком `X-Auth-Token: ${WA_WEB_TOKEN}` (или `?token=`). Ответ:
+
+  ```json
+  {
+    "ok": true,
+    "tenant": 7,
+    "provider_token": "a1b2c3d4..."
+  }
+  ```
+
+- Токен сохраняется в таблицу `provider_tokens` и переиспользуется при повторных вызовах.
+- Админ-роут `/admin/keys/list?tenant=<id>` (с `X-Admin-Token`) возвращает текущий `provider_token` для выбранного tenant.
+
+### Контракт `/webhook/provider`
+
+- Аутентификация: токен передаётся в `?token=...` или заголовке `X-Provider-Token`.
+- Обязательное поле `tenant` в теле запроса.
+- Поддерживаемые события:
+  - `messages.incoming` — входящее сообщение WhatsApp.
+  - `qr` — свежий QR для авторизации.
+  - `ready` — сессия авторизована и готова принимать сообщения.
+- Схема события `messages.incoming`:
+
+  ```json
+  {
+    "event": "messages.incoming",
+    "tenant": 7,
+    "channel": "whatsapp",
+    "message_id": "ABCD123",
+    "from": "79991234567",
+    "from_jid": "79991234567@c.us",
+    "text": "Привет!",
+    "media": [
+      { "type": "image", "url": "whatsapp://7/ABCD", "name": "photo.jpg" }
+    ],
+    "ts": 1716748800
+  }
+  ```
+
+- События `qr` и `ready` также содержат `tenant`, `channel` и дополнительные поля (`qr_id`, `svg`, `state`, `ts`).
+- При валидации канал принудительно приводится к `whatsapp`, `from` очищается до цифр; некорректные тела возвращают `422`.
+- Принятые события попадают в Redis (`inbox:message_in`), логируются как `event=webhook_received channel=whatsapp ...`, а метрика `webhook_provider_total{status,channel}` фиксирует результат обработки.
+- На стороне `waweb` счётчик `wa_to_app_total{event,status}` отражает состояние отправок (`/metrics`).
+
 ### WhatsApp QR события
 
 `waweb` отправляет QR-коды авторизации в `POST /webhook/provider` с телом:
@@ -188,6 +237,8 @@ curl -X POST "http://127.0.0.1:8000/send" \
 - Тестирование канала: `POST /send` (app) и `POST /send` на `waweb` с `X-Auth-Token`.
 - Публичные WA-эндпойнты: `GET /pub/wa/status?k=<PUBLIC_KEY>&tenant=<TENANT>` и `POST /pub/wa/start`.
 - Скрипт `deploy/diag/wa.sh` автоматизирует health-check, проверку переменных `OUTBOX_*`, тестовые отправки (digits/JID) и сбор логов `app`/`waweb` за последние две минуты.
+- Получение provider_token: `curl -X POST "http://app:8000/internal/tenant/7/ensure" -H "X-Auth-Token: ${WA_WEB_TOKEN}"`.
+- Проверка webhook-аутентификации: `curl -X POST "http://app:8000/webhook/provider?token=${PROVIDER_TOKEN}" -H 'Content-Type: application/json' -d '{"event":"ready","tenant":7,"channel":"whatsapp"}'`.
 
 ### Ключи доступа
 
