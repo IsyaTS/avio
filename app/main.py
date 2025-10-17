@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 import logging
 from logging import StreamHandler
 import httpx
+from redis import exceptions as redis_ex
 
 project_root = pathlib.Path(__file__).resolve().parent.parent
 if __package__ in (None, ""):
@@ -149,7 +150,12 @@ def _init_logging():
 from config import CHANNEL_ENDPOINTS
 from app.schemas import TransportMessage
 from app.lib.transport_utils import transport_message_asdict
-from app.metrics import MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
+from app.metrics import (
+    MESSAGE_OUT_COUNTER,
+    SEND_FAIL_COUNTER,
+    WA_QR_CALLBACK_ERRORS_COUNTER,
+    WA_QR_RECEIVED_COUNTER,
+)
 from app.starlette_ext import register_transport_validation
 
 
@@ -158,6 +164,7 @@ _init_logging()
 # Module-level logger for request access
 _access_logger = logging.getLogger("app.access")
 transport_logger = logging.getLogger("app.transport")
+wa_logger = logging.getLogger("wa")
 
 _transport_clients: dict[str, httpx.AsyncClient] = {}
 
@@ -483,6 +490,71 @@ async def internal_tenant_ensure(tenant: int, request: Request):
         return _ok({"tenant": int(tenant)})
     except Exception:
         return _err("failed")
+
+@app.post("/internal/tenant/{tenant}/wa/qr")
+async def internal_tenant_wa_qr(tenant: int, request: Request):
+    admin_token = (request.headers.get("X-Admin-Token") or "").strip()
+    if not admin_token or admin_token != (settings.ADMIN_TOKEN or ""):
+        return _err("unauthorized", 401)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    tenant_value = payload.get("tenant", tenant)
+    try:
+        tenant_id = int(tenant_value)
+    except (TypeError, ValueError):
+        WA_QR_CALLBACK_ERRORS_COUNTER.labels(reason="invalid_tenant").inc()
+        wa_logger.warning("wa_qr_callback_invalid tenant=%s reason=invalid_tenant", tenant_value)
+        return _err("invalid_tenant", 400)
+
+    raw_svg = payload.get("qr_svg")
+    raw_png = payload.get("qr_png")
+    ts_raw = payload.get("ts")
+    ts_value = str(ts_raw or int(time.time()))
+
+    svg_value = raw_svg if isinstance(raw_svg, str) and raw_svg.strip() else ""
+    png_value = raw_png if isinstance(raw_png, str) and raw_png.strip() else ""
+
+    if not svg_value and not png_value:
+        WA_QR_CALLBACK_ERRORS_COUNTER.labels(reason="empty_payload").inc()
+        wa_logger.warning("wa_qr_callback_invalid tenant=%s reason=empty_payload", tenant_id)
+        return _err("invalid_payload", 400)
+
+    entry = {"tenant": tenant_id, "ts": ts_value}
+    if svg_value:
+        entry["qr_svg"] = svg_value
+    if png_value:
+        entry["qr_png"] = png_value
+
+    cache_key = f"wa:qr:{tenant_id}:{ts_value}"
+    last_key = f"wa:qr:last:{tenant_id}"
+
+    try:
+        client = C.redis_client()
+        client.setex(cache_key, 120, json.dumps(entry, ensure_ascii=False))
+        client.set(last_key, ts_value)
+    except redis_ex.RedisError as exc:
+        WA_QR_CALLBACK_ERRORS_COUNTER.labels(reason="redis").inc()
+        wa_logger.warning(
+            "wa_qr_callback_redis_error tenant=%s ts=%s detail=%s",
+            tenant_id,
+            ts_value,
+            exc,
+        )
+        return _err("redis_error", 500)
+    except Exception:
+        WA_QR_CALLBACK_ERRORS_COUNTER.labels(reason="unexpected").inc()
+        wa_logger.exception("wa_qr_callback_exception tenant=%s ts=%s", tenant_id, ts_value)
+        return _err("internal_error", 500)
+
+    WA_QR_RECEIVED_COUNTER.labels(tenant=str(tenant_id)).inc()
+    wa_logger.info("saved_wa_qr tenant=%s ts=%s", tenant_id, ts_value)
+    return _ok({"tenant": tenant_id, "ts": ts_value})
 
 # Basic health endpoint for Docker healthcheck
 @app.get("/health")
