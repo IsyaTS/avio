@@ -35,6 +35,12 @@ WA_QR_CALLBACK_ERRORS_COUNTER = Counter(
     labelnames=("reason",),
 )
 
+WEBHOOK_PROVIDER_COUNTER = Counter(
+    "webhook_provider_total",
+    "Provider webhook requests grouped by status and channel",
+    labelnames=("status", "channel"),
+)
+
 __all__ = [
     "MESSAGE_IN_COUNTER",
     "MESSAGE_OUT_COUNTER",
@@ -42,4 +48,5 @@ __all__ = [
     "SEND_FAIL_COUNTER",
     "WA_QR_RECEIVED_COUNTER",
     "WA_QR_CALLBACK_ERRORS_COUNTER",
+    "WEBHOOK_PROVIDER_COUNTER",
 ]

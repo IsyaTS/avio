@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
 from . import common as C
 from .ui import templates
+from app.repo import provider_tokens as provider_tokens_repo
 
 router = APIRouter()
 
@@ -75,10 +76,16 @@ def dashboard(request: Request, tenant: int = 1):
 
 
 @router.get("/admin/keys/list")
-def keys_list(tenant: int, request: Request):
+async def keys_list(tenant: int, request: Request):
     if not _auth_ok(request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    return {"ok": True, "items": C.list_keys(int(tenant))}
+    token_entry = await provider_tokens_repo.get_by_tenant(int(tenant))
+    provider_token = token_entry.token if token_entry else ""
+    return {
+        "ok": True,
+        "items": C.list_keys(int(tenant)),
+        "provider_token": provider_token,
+    }
 
 
 @router.post("/admin/keys/generate")

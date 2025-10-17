@@ -38,6 +38,8 @@ except ImportError:  # pragma: no cover
 
 from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
 from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
+from app.metrics import WEBHOOK_PROVIDER_COUNTER
+from app.repo import provider_tokens as provider_tokens_repo
 
 
 logger = logging.getLogger("app.web.webhooks")
@@ -501,6 +503,173 @@ def _extract_token(request: Request) -> str:
     return query_token or header_token
 
 
+def _extract_provider_token(request: Request) -> str:
+    query_token = (request.query_params.get("token") or "").strip()
+    if query_token:
+        return query_token
+    headers = getattr(request, "headers", {}) or {}
+    header_token = headers.get("X-Provider-Token") or headers.get("X-Webhook-Token") or ""
+    auth_header = headers.get("Authorization") or ""
+    value = str(header_token or auth_header or "").strip()
+    if value.lower().startswith("bearer "):
+        value = value[7:].strip()
+    return value
+
+
+def _sanitize_media_item(blob: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, raw_value in blob.items():
+        if isinstance(raw_value, (str, int, float, bool)) or raw_value is None:
+            sanitized[str(key)] = raw_value
+        else:
+            sanitized[str(key)] = str(raw_value)
+    return sanitized
+
+
+def _normalize_whatsapp_incoming(payload: dict[str, Any], tenant: int) -> dict[str, Any]:
+    channel_value = str(payload.get("channel") or payload.get("provider") or "whatsapp").strip().lower()
+    if channel_value and channel_value not in {"whatsapp", "wa"}:
+        raise ValueError("invalid_channel")
+
+    message_id_raw = payload.get("message_id") or payload.get("id")
+    message_id = str(message_id_raw).strip() if message_id_raw is not None else ""
+    if not message_id:
+        raise ValueError("missing_message_id")
+
+    sender_raw = (
+        payload.get("from")
+        or payload.get("from_id")
+        or payload.get("from_jid")
+        or payload.get("fromAddress")
+        or ""
+    )
+    sender_str = str(sender_raw).strip()
+    if not sender_str:
+        raise ValueError("missing_from")
+    sender_digits = _digits(sender_str)
+    if not sender_digits:
+        raise ValueError("invalid_from")
+    sender_jid = sender_str.lower()
+    if not sender_jid.endswith("@c.us"):
+        sender_jid = f"{sender_digits}@c.us"
+
+    text_raw = payload.get("text") or payload.get("body")
+    text = str(text_raw).strip() if isinstance(text_raw, str) else ""
+
+    raw_media = payload.get("media") or payload.get("attachments") or []
+    media: list[dict[str, Any]] = []
+    if isinstance(raw_media, list):
+        for item in raw_media:
+            if isinstance(item, dict):
+                media.append(_sanitize_media_item(item))
+
+    normalized: dict[str, Any] = {
+        "event": "messages.incoming",
+        "tenant": int(tenant),
+        "channel": "whatsapp",
+        "provider": "whatsapp",
+        "message_id": message_id,
+        "from": sender_digits,
+        "from_jid": sender_jid,
+        "from_raw": sender_str,
+    }
+
+    if text:
+        normalized["text"] = text
+    if media:
+        normalized["media"] = media
+
+    ts_value = payload.get("ts") or payload.get("timestamp")
+    if ts_value is not None:
+        normalized["ts"] = ts_value
+
+    for optional_key in ("to", "wa_id", "conversation_id"):
+        if optional_key in payload:
+            normalized[optional_key] = payload[optional_key]
+
+    return normalized
+
+
+async def _queue_incoming_event(event_payload: dict[str, Any]) -> None:
+    try:
+        serialized = json.dumps(event_payload, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_payload") from exc
+
+    try:
+        await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
+    except Exception as exc:  # pragma: no cover - Redis connectivity issues
+        logger.exception(
+            "webhook_provider_queue_failed tenant=%s", event_payload.get("tenant")
+        )
+        raise HTTPException(status_code=500, detail="queue_error") from exc
+
+
+async def _cache_whatsapp_qr(
+    payload: dict[str, Any], tenant: int, provider: str, event_name: str
+) -> Response:
+    qr_id_raw = (
+        payload.get("qr_id")
+        or payload.get("qrId")
+        or payload.get("id")
+        or payload.get("qr")
+    )
+    svg_raw = (
+        payload.get("svg")
+        or payload.get("qr")
+        or payload.get("data")
+    )
+    if svg_raw is None:
+        nested_payload = payload.get("payload")
+        if isinstance(nested_payload, dict):
+            svg_raw = nested_payload.get("svg")
+
+    try:
+        qr_id = str(qr_id_raw).strip() if qr_id_raw is not None else ""
+    except Exception:
+        qr_id = ""
+    if not qr_id:
+        raise HTTPException(status_code=422, detail="invalid_qr")
+
+    if not isinstance(svg_raw, str):
+        svg_value = ""
+    else:
+        svg_value = svg_raw.strip()
+    if not svg_value or not svg_value.lstrip().startswith("<svg"):
+        raise HTTPException(status_code=422, detail="invalid_qr")
+
+    ttl = random.randint(WA_QR_CACHE_TTL_MIN, WA_QR_CACHE_TTL_MAX)
+    cache_key = f"wa:qr:{tenant}:{qr_id}"
+    svg_key = f"{cache_key}:svg"
+    last_key = f"wa:qr:last:{tenant}"
+
+    entry = {
+        "tenant": int(tenant),
+        "qr_id": qr_id,
+        "qr_svg": svg_value,
+        "provider": provider,
+        "event": event_name,
+        "updated_at": int(time.time()),
+    }
+
+    try:
+        serialized_entry = json.dumps(entry, ensure_ascii=False)
+    except Exception:
+        serialized_entry = None
+
+    try:
+        await _redis_queue.set(svg_key, svg_value, ex=ttl)
+        await _redis_queue.set(last_key, qr_id, ex=ttl)
+        if serialized_entry is not None:
+            await _redis_queue.set(cache_key, serialized_entry, ex=ttl)
+    except Exception as exc:  # pragma: no cover - Redis failures
+        logger.exception("wa_qr_cache_write_failed tenant=%s qr_id=%s", tenant, qr_id)
+        raise HTTPException(status_code=500, detail="cache_error") from exc
+
+    logger.info("wa_qr_cached tenant=%s qr_id=%s ttl=%s", tenant, qr_id, ttl)
+    return Response(status_code=204)
+
+
 @router.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     token = _extract_token(request)
@@ -535,109 +704,107 @@ async def telegram_webhook(request: Request):
 
 @router.post("/webhook/provider")
 async def provider_webhook(request: Request) -> Response:
-    token = _extract_token(request)
-    secret = settings.WEBHOOK_SECRET or ""
-    if secret and token != secret:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
+    channel_label = "whatsapp"
     try:
         payload = await request.json()
     except json.JSONDecodeError:
+        WEBHOOK_PROVIDER_COUNTER.labels("invalid_json", channel_label).inc()
         raise HTTPException(status_code=400, detail="invalid_json")
     except Exception:
+        WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
         raise HTTPException(status_code=400, detail="invalid_payload")
 
     if not isinstance(payload, dict):
-        payload = {}
+        WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
+        raise HTTPException(status_code=422, detail="invalid_payload")
 
-    provider = str(payload.get("provider") or "").strip().lower()
-    event = str(payload.get("event") or "").strip().lower()
-    if provider != "whatsapp" or event != "wa_qr":
+    provider = str(payload.get("provider") or payload.get("channel") or channel_label).strip().lower()
+    if provider and provider not in {"whatsapp", "wa"}:
+        WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
         return Response(status_code=204)
 
-    tenant_candidate = _coerce_int(payload.get("tenant"))
-    qr_id_raw = payload.get("qr_id")
-    svg_raw = payload.get("svg")
-    if svg_raw is None:
-        svg_raw = payload.get("qr")
-    if svg_raw is None:
-        svg_raw = payload.get("data")
-    if svg_raw is None:
-        nested_payload = payload.get("payload")
-        if isinstance(nested_payload, dict):
-            svg_raw = nested_payload.get("svg")
-
-    invalid_reason = None
+    tenant_candidate = _coerce_int(payload.get("tenant") or payload.get("tenant_id"))
     if tenant_candidate is None:
-        invalid_reason = "invalid_tenant"
-    tenant = int(tenant_candidate) if tenant_candidate is not None else 0
+        WEBHOOK_PROVIDER_COUNTER.labels("invalid_tenant", channel_label).inc()
+        raise HTTPException(status_code=422, detail="invalid_tenant")
+    tenant = int(tenant_candidate)
 
-    qr_id: str | None = None
-    if invalid_reason is None:
-        if qr_id_raw is None:
-            invalid_reason = "missing_qr_id"
-        else:
-            try:
-                qr_id_candidate = str(qr_id_raw).strip()
-            except Exception:
-                qr_id_candidate = ""
-            if not qr_id_candidate:
-                invalid_reason = "empty_qr_id"
-            else:
-                qr_id = qr_id_candidate
+    token = _extract_provider_token(request)
+    if not token:
+        WEBHOOK_PROVIDER_COUNTER.labels("unauthorized", channel_label).inc()
+        raise HTTPException(status_code=401, detail="unauthorized")
 
-    svg_value: str | None = None
-    if invalid_reason is None:
-        if not isinstance(svg_raw, str):
-            svg_value = None
-        else:
-            svg_value = svg_raw.strip()
-        if not svg_value:
-            invalid_reason = "empty_svg"
-        elif not svg_value.lstrip().startswith("<svg"):
-            invalid_reason = "invalid_svg_markup"
+    stored = await provider_tokens_repo.get_by_tenant(tenant)
+    if not stored or stored.token != token:
+        WEBHOOK_PROVIDER_COUNTER.labels("unauthorized", channel_label).inc()
+        raise HTTPException(status_code=401, detail="unauthorized")
 
-    if invalid_reason:
-        logger.warning(
-            "wa_qr_invalid tenant=%s qr_id=%s reason=%s",
-            tenant_candidate if tenant_candidate is not None else "-",
-            qr_id_raw if qr_id_raw is not None else "-",
-            invalid_reason,
+    raw_event = str(payload.get("event") or "").strip().lower()
+    event = "qr" if raw_event == "wa_qr" else raw_event
+    if event not in {"messages.incoming", "qr", "ready"}:
+        WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
+        return Response(status_code=204)
+
+    if event == "messages.incoming":
+        try:
+            normalized_event = _normalize_whatsapp_incoming(payload, tenant)
+        except ValueError as exc:
+            WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
+            raise HTTPException(status_code=422, detail=str(exc) or "invalid_payload") from exc
+        try:
+            await _queue_incoming_event(normalized_event)
+        except HTTPException as exc:
+            status_label = "invalid_payload" if exc.status_code < 500 else "queue_error"
+            WEBHOOK_PROVIDER_COUNTER.labels(status_label, channel_label).inc()
+            raise
+        WEBHOOK_PROVIDER_COUNTER.labels("ok", channel_label).inc()
+        sender_for_log = normalized_event.get("from_jid") or normalized_event.get("from") or "-"
+        message_id = normalized_event.get("message_id") or "-"
+        logger.info(
+            "event=webhook_received channel=%s tenant=%s from=%s msg=%s",
+            channel_label,
+            tenant,
+            sender_for_log,
+            message_id,
         )
-        raise HTTPException(status_code=400, detail="wa_qr_invalid")
+        return _ok({"queued": True})
 
-    assert qr_id is not None  # for type checkers
-    assert svg_value is not None
+    if event == "ready":
+        ready_event = {
+            "event": "ready",
+            "tenant": tenant,
+            "channel": channel_label,
+            "provider": channel_label,
+        }
+        state_value = str(payload.get("state") or payload.get("status") or "ready")
+        ready_event["state"] = state_value
+        ts_value = payload.get("ts") or payload.get("timestamp")
+        if ts_value is not None:
+            ready_event["ts"] = ts_value
+        try:
+            await _queue_incoming_event(ready_event)
+        except HTTPException as exc:
+            status_label = "invalid_payload" if exc.status_code < 500 else "queue_error"
+            WEBHOOK_PROVIDER_COUNTER.labels(status_label, channel_label).inc()
+            raise
+        WEBHOOK_PROVIDER_COUNTER.labels("ok", channel_label).inc()
+        logger.info(
+            "event=webhook_received channel=%s tenant=%s state=%s",
+            channel_label,
+            tenant,
+            state_value,
+        )
+        return _ok({"queued": True})
 
-    ttl = random.randint(WA_QR_CACHE_TTL_MIN, WA_QR_CACHE_TTL_MAX)
-    cache_key = f"wa:qr:{tenant}:{qr_id}"
-    svg_key = f"{cache_key}:svg"
-    last_key = f"wa:qr:last:{tenant}"
-
-    entry = {
-        "tenant": tenant,
-        "qr_id": qr_id,
-        "qr_svg": svg_value,
-        "provider": provider,
-        "event": event,
-        "updated_at": int(time.time()),
-    }
+    # event == "qr"
     try:
-        serialized_entry = json.dumps(entry, ensure_ascii=False)
-    except Exception:
-        serialized_entry = None
-
-    try:
-        await _redis_queue.set(svg_key, svg_value, ex=ttl)
-        await _redis_queue.set(last_key, qr_id, ex=ttl)
-        if serialized_entry is not None:
-            await _redis_queue.set(cache_key, serialized_entry, ex=ttl)
-    except Exception:
-        logger.exception("wa_qr_cache_write_failed tenant=%s qr_id=%s", tenant, qr_id)
-        raise HTTPException(status_code=500, detail="cache_error")
-
-    logger.info("wa_qr_cached tenant=%s qr_id=%s ttl=%s", tenant, qr_id, ttl)
-    return Response(status_code=204)
+        response = await _cache_whatsapp_qr(payload, tenant, channel_label, "qr")
+    except HTTPException as exc:
+        status_label = "invalid_payload" if exc.status_code < 500 else "error"
+        WEBHOOK_PROVIDER_COUNTER.labels(status_label, channel_label).inc()
+        raise
+    WEBHOOK_PROVIDER_COUNTER.labels("ok", channel_label).inc()
+    return response
 
 
 __all__ = ["router", "process_incoming", "provider_webhook"]

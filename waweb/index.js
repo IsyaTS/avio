@@ -26,6 +26,24 @@ const APP_BASE_URL = (() => {
   return normalized || fallback;
 })();
 const LAST_QR_META_PATH = path.join(STATE_DIR, 'last-qr.json');
+const PROVIDER_WEBHOOK_URL = (() => {
+  const raw = (APP_WEBHOOK || `${APP_BASE_URL}/webhook/provider`).trim();
+  try {
+    return new URL(raw).toString();
+  } catch (_) {
+    try {
+      return new URL('/webhook/provider', APP_BASE_URL).toString();
+    } catch (_) {
+      return `${APP_BASE_URL.replace(/\/$/, '')}/webhook/provider`;
+    }
+  }
+})();
+const PROVIDER_TOKEN_REFRESH_INTERVAL_MS = Math.max(
+  60,
+  Number(process.env.PROVIDER_TOKEN_REFRESH_INTERVAL || '300') || 300,
+) * 1000;
+
+const providerTokenCache = Object.create(null);
 
 /** @type {{ tenant: string, ts: number, svg: string, png: string, qrId: string | null } | null } */
 let lastQrCache = null;
@@ -34,6 +52,7 @@ let messageInTotal = 0;
 let messageOutTotal = 0;
 const sendFailTotal = Object.create(null);
 const waSendTotal = Object.create(null);
+const waToAppTotals = Object.create(null);
 const deprecatedNoticeTs = Object.create(null);
 function buildSyncBaseList() {
   const raw = [
@@ -76,6 +95,13 @@ function incSendFail(reason) {
 function incWaSend(result) {
   const key = String(result || 'unknown');
   waSendTotal[key] = (waSendTotal[key] || 0) + 1;
+}
+
+function incWaToApp(eventName, status) {
+  const eventKey = String(eventName || 'unknown');
+  const statusKey = String(status || 'unknown');
+  if (!waToAppTotals[eventKey]) waToAppTotals[eventKey] = Object.create(null);
+  waToAppTotals[eventKey][statusKey] = (waToAppTotals[eventKey][statusKey] || 0) + 1;
 }
 
 function recordDeprecated(route) {
@@ -123,6 +149,24 @@ function renderMetrics() {
     for (const reason of reasons) {
       const value = sendFailTotal[reason] || 0;
       lines.push(`send_fail_total{channel="whatsapp",reason="${sanitizeReason(reason)}"} ${value}`);
+    }
+  }
+  lines.push('# TYPE wa_to_app_total counter');
+  const toAppEvents = Object.keys(waToAppTotals);
+  if (!toAppEvents.length) {
+    lines.push('wa_to_app_total{event="unknown",status="none"} 0');
+  } else {
+    for (const eventName of toAppEvents) {
+      const statuses = waToAppTotals[eventName] || {};
+      const statusKeys = Object.keys(statuses);
+      if (!statusKeys.length) {
+        lines.push(`wa_to_app_total{event="${sanitizeReason(eventName)}",status="none"} 0`);
+        continue;
+      }
+      for (const status of statusKeys) {
+        const value = statuses[status] || 0;
+        lines.push(`wa_to_app_total{event="${sanitizeReason(eventName)}",status="${sanitizeReason(status)}"} ${value}`);
+      }
     }
   }
   return `${lines.join('\n')}\n`;
@@ -275,6 +319,113 @@ function requestJson(method, url, payload, extraHeaders) {
   });
 }
 
+async function ensureProviderToken(tenant, force = false) {
+  const key = String(tenant || '');
+  const cached = providerTokenCache[key];
+  const now = Date.now();
+  if (!force && cached && cached.token && now - cached.ts < PROVIDER_TOKEN_REFRESH_INTERVAL_MS) {
+    return cached.token;
+  }
+
+  let url;
+  try {
+    url = new URL(`/internal/tenant/${key}/ensure`, APP_BASE_URL).toString();
+  } catch (_) {
+    url = `${APP_BASE_URL.replace(/\/$/, '')}/internal/tenant/${key}/ensure`;
+  }
+
+  const headers = {};
+  if (INTERNAL_SYNC_TOKEN) headers['X-Auth-Token'] = INTERNAL_SYNC_TOKEN;
+
+  try {
+    const { statusCode, body } = await requestJson('POST', url, { source: 'waweb' }, headers);
+    if (statusCode >= 200 && statusCode < 300 && body) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object' && parsed.provider_token) {
+          providerTokenCache[key] = { token: String(parsed.provider_token), ts: now };
+          return providerTokenCache[key].token;
+        }
+      } catch (err) {
+        console.warn('[waweb]', `provider_token_parse_error tenant=${key} reason=${err && err.message ? err.message : err}`);
+      }
+    } else {
+      console.warn('[waweb]', `provider_token_http tenant=${key} status=${statusCode}`);
+    }
+  } catch (err) {
+    const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
+    console.warn('[waweb]', `provider_token_request_failed tenant=${key} reason=${reason}`);
+  }
+
+  if (cached && cached.token) {
+    return cached.token;
+  }
+  return '';
+}
+
+function cachedProviderToken(tenant) {
+  const key = String(tenant || '');
+  const cached = providerTokenCache[key];
+  if (!cached || !cached.token) return '';
+  const now = Date.now();
+  if (now - cached.ts > PROVIDER_TOKEN_REFRESH_INTERVAL_MS * 2) {
+    return '';
+  }
+  return cached.token;
+}
+
+async function sendProviderEvent(tenant, payload, attempt = 1) {
+  const tenantKey = String(tenant || '');
+  const eventName = payload && typeof payload === 'object' && payload.event
+    ? String(payload.event)
+    : 'unknown';
+  let token = cachedProviderToken(tenantKey);
+  if (!token || attempt > 1) {
+    token = await ensureProviderToken(tenantKey, attempt > 1);
+  }
+  if (!token) {
+    incWaToApp(eventName, 'no_token');
+    console.warn('[waweb]', `wa_to_app event=${eventName} code=0 tenant=${tenantKey} no_token`);
+    return { statusCode: 0, body: '' };
+  }
+
+  let urlWithToken;
+  try {
+    const u = new URL(PROVIDER_WEBHOOK_URL);
+    u.searchParams.set('token', token);
+    urlWithToken = u.toString();
+  } catch (_) {
+    const separator = PROVIDER_WEBHOOK_URL.includes('?') ? '&' : '?';
+    urlWithToken = `${PROVIDER_WEBHOOK_URL}${separator}token=${encodeURIComponent(token)}`;
+  }
+
+  try {
+    const { statusCode, body } = await requestJson('POST', urlWithToken, payload, {});
+    let statusLabel = 'error';
+    if (statusCode >= 200 && statusCode < 300) statusLabel = 'ok';
+    else if (statusCode === 401) statusLabel = 'unauthorized';
+    else if (statusCode === 422) statusLabel = 'invalid';
+    incWaToApp(eventName, statusLabel);
+    console.log('[waweb]', `wa_to_app event=${eventName} code=${statusCode} tenant=${tenantKey}`);
+    if (statusCode === 401 && attempt < 3) {
+      await ensureProviderToken(tenantKey, true);
+      await wait(Math.min(1500, 250 * Math.pow(2, attempt - 1)));
+      return sendProviderEvent(tenantKey, payload, attempt + 1);
+    }
+    return { statusCode, body };
+  } catch (err) {
+    const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
+    incWaToApp(eventName, 'exception');
+    console.warn('[waweb]', `wa_to_app_exception event=${eventName} tenant=${tenantKey} reason=${reason}`);
+    if (attempt < 3) {
+      await ensureProviderToken(tenantKey, true);
+      await wait(Math.min(1500, 250 * Math.pow(2, attempt - 1)));
+      return sendProviderEvent(tenantKey, payload, attempt + 1);
+    }
+    return { statusCode: 0, body: '' };
+  }
+}
+
 function truncateBody(body, limit = 200) {
   if (!body) return '';
   const text = String(body);
@@ -286,7 +437,6 @@ async function notifyTenantQr(tenant, svg, qrId) {
     console.warn('[waweb]', `wa_qr_callback_skip tenant=${tenant} reason=no_svg`);
     return;
   }
-  const url = `${APP_BASE_URL}/webhook/provider`;
   const qrIdValue = (() => {
     if (typeof qrId === 'string') {
       const trimmed = qrId.trim();
@@ -299,37 +449,27 @@ async function notifyTenantQr(tenant, svg, qrId) {
   })();
   const payload = {
     provider: 'whatsapp',
-    event: 'wa_qr',
+    event: 'qr',
     tenant: Number(tenant),
+    channel: 'whatsapp',
     qr_id: qrIdValue,
     svg,
   };
-  const headers = {};
-  if (WEBHOOK_SECRET) headers['X-Webhook-Token'] = WEBHOOK_SECRET;
-  else if (ADMIN_TOKEN) headers['X-Webhook-Token'] = ADMIN_TOKEN;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const { statusCode, body } = await requestJson('POST', url, payload, headers);
-      console.log('[waweb]', `wa_qr_callback tenant=${tenant} status=${statusCode} attempt=${attempt}`);
-      if (statusCode === 204) {
-        return;
-      }
-      if (statusCode >= 400 && statusCode < 500) {
-        console.warn('[waweb]', `wa_qr_callback_invalid tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
-        return;
-      }
-      if (attempt >= 3) {
-        console.warn('[waweb]', `wa_qr_callback_error tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
-        return;
-      }
-      console.warn('[waweb]', `wa_qr_callback_retry tenant=${tenant} status=${statusCode}`);
-      await wait(500 * attempt);
-    } catch (err) {
-      const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
-      console.warn('[waweb]', `wa_qr_callback_exception tenant=${tenant} attempt=${attempt} reason=${reason}`);
-      if (attempt >= 3) return;
-      await wait(500 * attempt);
+    const { statusCode, body } = await sendProviderEvent(tenant, payload);
+    console.log('[waweb]', `wa_qr_callback tenant=${tenant} status=${statusCode} attempt=${attempt}`);
+    if (statusCode === 204 || statusCode === 200) {
+      return;
     }
+    if (statusCode >= 400 && statusCode < 500 && statusCode !== 401) {
+      console.warn('[waweb]', `wa_qr_callback_invalid tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
+      return;
+    }
+    if (attempt >= 3) {
+      console.warn('[waweb]', `wa_qr_callback_error tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
+      return;
+    }
+    await wait(500 * attempt);
   }
 }
 function ensureDir(p){ try{ fs.mkdirSync(p,{recursive:true}); } catch(_){} }
@@ -420,13 +560,26 @@ function normalizeIncomingMessage(tenant, msg, client){
   const ts = Number(msg.timestamp || Math.floor(Date.now() / 1000));
   const providerRaw = typeof msg.toJSON === 'function' ? msg.toJSON() : (msg._data || {});
   const selfId = client && client.info && client.info.wid ? client.info.wid._serialized : '';
+  const rawFrom = msg.from || '';
+  const fromDigits = typeof rawFrom === 'string' ? rawFrom.replace(/\D/g, '') : '';
+  const messageId = (() => {
+    if (msg.id && msg.id._serialized) return msg.id._serialized;
+    if (msg.id) return String(msg.id);
+    if (providerRaw && providerRaw.id) return String(providerRaw.id);
+    return `msg-${Date.now()}`;
+  })();
   return {
     tenant: Number(tenant),
     channel: 'whatsapp',
-    from_id: msg.from || '',
+    provider: 'whatsapp',
+    from: fromDigits,
+    from_id: rawFrom || '',
+    from_jid: rawFrom || '',
     to: msg.to || selfId || '',
+    message_id: messageId,
     text: typeof msg.body === 'string' ? msg.body : '',
     attachments,
+    media: attachments,
     ts,
     provider_raw: providerRaw,
   };
@@ -532,10 +685,28 @@ function log(t, s){ console.log('[waweb]', s, 't='+t); }
 
 ensureDir(STATE_DIR);
 lastQrCache = loadLastQrFromDisk();
+refreshProviderTokens(true).catch((err) => {
+  const reason = err && err.message ? err.message : err;
+  console.warn('[waweb]', `provider_token_initial_refresh_failed reason=${reason}`);
+});
 
 /* ---------- state ---------- */
 /** tenants[tenant] = { client, webhook, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
 const tenants = Object.create(null);
+
+async function refreshProviderTokens(force = false) {
+  const list = new Set(Object.keys(tenants));
+  if (TENANT_DEFAULT) list.add(String(TENANT_DEFAULT));
+  for (const tenant of list) {
+    if (!tenant) continue;
+    try {
+      await ensureProviderToken(tenant, force);
+    } catch (err) {
+      const reason = err && err.message ? err.message : err;
+      console.warn('[waweb]', `provider_token_refresh_failed tenant=${tenant} reason=${reason}`);
+    }
+  }
+}
 
 async function safeDestroy(client) {
   if (!client) return;
@@ -611,6 +782,21 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
     log(tenant, 'ready');
     triggerTenantSync(tenant);
+    (async () => {
+      try {
+        await sendProviderEvent(tenant, {
+          event: 'ready',
+          tenant: Number(tenant),
+          channel: 'whatsapp',
+          provider: 'whatsapp',
+          state: 'ready',
+          ts: Date.now(),
+        });
+      } catch (err) {
+        const reason = err && err.message ? err.message : err;
+        console.warn('[waweb]', `ready_event_send_failed tenant=${tenant} reason=${reason}`);
+      }
+    })();
   });
   c.on('disconnected', (reason) => {
     tenants[tenant].ready = false;
@@ -625,9 +811,29 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
     const normalized = normalizeIncomingMessage(tenant, msg, c);
     messageInTotal += 1;
-    try { console.log('[waweb]', `event=message_in channel=whatsapp tenant=${tenant} from=${normalized.from_id}`); } catch(_){}
-    const hook = APP_WEBHOOK || tenants[tenant].webhook || '';
-    if (hook) postJson(hook, normalized);
+    try { console.log('[waweb]', `event=message_in channel=whatsapp tenant=${tenant} from=${normalized.from_jid || normalized.from || '-'}`); } catch(_){}
+    (async () => {
+      const payload = {
+        event: 'messages.incoming',
+        tenant: Number(tenant),
+        channel: 'whatsapp',
+        provider: 'whatsapp',
+        message_id: normalized.message_id,
+        from: normalized.from,
+        from_jid: normalized.from_jid || normalized.from_id || '',
+        text: normalized.text || '',
+        ts: normalized.ts,
+      };
+      if (Array.isArray(normalized.media) && normalized.media.length) payload.media = normalized.media;
+      if (normalized.to) payload.to = normalized.to;
+      if (normalized.provider_raw) payload.provider_raw = normalized.provider_raw;
+      try {
+        await sendProviderEvent(tenant, payload);
+      } catch (err) {
+        const reason = err && err.message ? err.message : err;
+        console.warn('[waweb]', `message_event_send_failed tenant=${tenant} reason=${reason}`);
+      }
+    })();
   });
   return c;
 }
@@ -642,6 +848,10 @@ function ensureSession(tenant, webhookUrl) {
     tenants[tenant].client.initialize();
     log(tenant, 'init');
     triggerTenantSync(tenant);
+    ensureProviderToken(tenant).catch((err) => {
+      const reason = err && err.message ? err.message : err;
+      console.warn('[waweb]', `provider_token_ensure_failed tenant=${tenant} reason=${reason}`);
+    });
   }
   if (webhookUrl) tenants[tenant].webhook = webhookUrl;
 
@@ -680,6 +890,13 @@ setInterval(() => {
     }
   } catch (_) {}
 }, 5000);
+
+setInterval(() => {
+  refreshProviderTokens().catch((err) => {
+    const reason = err && err.message ? err.message : err;
+    console.warn('[waweb]', `provider_token_refresh_loop_error reason=${reason}`);
+  });
+}, PROVIDER_TOKEN_REFRESH_INTERVAL_MS);
 
 function resetSession(tenant, webhookUrl) {
   tenant = String(tenant);

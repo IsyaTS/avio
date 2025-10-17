@@ -9,9 +9,13 @@ from app.web import webhooks as webhooks_module
 class _DummyAsyncRedis:
     def __init__(self):
         self.store: dict[str, str] = {}
+        self.queue: list[tuple[str, str]] = []
 
     async def set(self, key: str, value: str, **kwargs):  # pragma: no cover - helper
         self.store[key] = value
+
+    async def lpush(self, key: str, value: str):  # pragma: no cover - helper
+        self.queue.append((key, value))
 
 
 def _build_app():
@@ -23,23 +27,31 @@ def _build_app():
 def test_provider_webhook_caches_qr(monkeypatch):
     dummy = _DummyAsyncRedis()
     monkeypatch.setattr(webhooks_module, "_redis_queue", dummy, raising=False)
-    monkeypatch.setattr(webhooks_module.settings, "WEBHOOK_SECRET", "secret-token", raising=False)
+    async def _fake_get_by_tenant(tenant_id: int):
+        assert tenant_id == 7
+        return type("_T", (), {"token": "provider-secret"})()
+
+    monkeypatch.setattr(
+        webhooks_module.provider_tokens_repo,
+        "get_by_tenant",
+        _fake_get_by_tenant,
+        raising=False,
+    )
 
     app = _build_app()
     client = TestClient(app)
 
     payload = {
         "provider": "whatsapp",
-        "event": "wa_qr",
+        "event": "qr",
         "tenant": 7,
         "qr_id": "1234567890",
         "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
     }
 
     resp = client.post(
-        "/webhook/provider",
+        "/webhook/provider?token=provider-secret",
         json=payload,
-        headers={"X-Webhook-Token": "secret-token"},
     )
 
     assert resp.status_code == 204
@@ -48,6 +60,84 @@ def test_provider_webhook_caches_qr(monkeypatch):
     assert cached_entry["qr_id"] == "1234567890"
     assert cached_entry["qr_svg"].startswith("<svg")
     assert cached_entry["provider"] == "whatsapp"
-    assert cached_entry["event"] == "wa_qr"
+    assert cached_entry["event"] == "qr"
     assert isinstance(cached_entry["updated_at"], int)
     assert dummy.store[f"wa:qr:last:7"] == "1234567890"
+
+
+def test_provider_webhook_messages_incoming(monkeypatch):
+    dummy = _DummyAsyncRedis()
+    monkeypatch.setattr(webhooks_module, "_redis_queue", dummy, raising=False)
+
+    async def _fake_get_by_tenant(tenant_id: int):
+        return type("_T", (), {"token": "provider-secret"})()
+
+    monkeypatch.setattr(
+        webhooks_module.provider_tokens_repo,
+        "get_by_tenant",
+        _fake_get_by_tenant,
+        raising=False,
+    )
+
+    app = _build_app()
+    client = TestClient(app)
+
+    payload = {
+        "provider": "whatsapp",
+        "event": "messages.incoming",
+        "tenant": 5,
+        "channel": "whatsapp",
+        "message_id": "ABCDEF",
+        "from": "+7 (999) 123-45-67",
+        "text": "Hello",
+        "ts": 1716800000,
+    }
+
+    resp = client.post(
+        "/webhook/provider?token=provider-secret",
+        json=payload,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert dummy.queue
+    key, raw_item = dummy.queue[0]
+    assert key == "inbox:message_in"
+    stored = json.loads(raw_item)
+    assert stored["event"] == "messages.incoming"
+    assert stored["tenant"] == 5
+    assert stored["from"] == "79991234567"
+    assert stored["from_jid"].endswith("@c.us")
+    assert stored["text"] == "Hello"
+    assert stored["message_id"] == "ABCDEF"
+
+
+def test_provider_webhook_rejects_bad_token(monkeypatch):
+    dummy = _DummyAsyncRedis()
+    monkeypatch.setattr(webhooks_module, "_redis_queue", dummy, raising=False)
+
+    async def _fake_get_by_tenant(tenant_id: int):
+        return type("_T", (), {"token": "provider-secret"})()
+
+    monkeypatch.setattr(
+        webhooks_module.provider_tokens_repo,
+        "get_by_tenant",
+        _fake_get_by_tenant,
+        raising=False,
+    )
+
+    app = _build_app()
+    client = TestClient(app)
+
+    payload = {
+        "provider": "whatsapp",
+        "event": "ready",
+        "tenant": 3,
+        "channel": "whatsapp",
+    }
+
+    resp = client.post("/webhook/provider?token=wrong", json=payload)
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "unauthorized"
+    assert not dummy.queue
