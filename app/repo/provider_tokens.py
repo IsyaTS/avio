@@ -31,7 +31,7 @@ def _row_to_token(row: Mapping[str, Any] | Any) -> ProviderToken | None:
             data = dict(row.items())
         else:
             return None
-    tenant_raw = data.get("tenant_id")
+    tenant_raw = data.get("tenant_id") or data.get("tenant")
     token_value = data.get("token")
     created_raw = data.get("created_at")
     if tenant_raw is None or token_value is None or not str(token_value).strip():
@@ -57,7 +57,7 @@ def _row_to_token(row: Mapping[str, Any] | Any) -> ProviderToken | None:
 
 async def get_by_tenant(tenant_id: int) -> ProviderToken | None:
     row = await _fetchrow(
-        "SELECT tenant_id, token, created_at FROM provider_tokens WHERE tenant_id = $1",
+        "SELECT tenant AS tenant_id, token, created_at FROM provider_tokens WHERE tenant = $1",
         int(tenant_id),
     )
     if not row:
@@ -68,10 +68,10 @@ async def get_by_tenant(tenant_id: int) -> ProviderToken | None:
 async def create_for_tenant(tenant_id: int, token: str) -> ProviderToken | None:
     row = await _fetchrow(
         """
-        INSERT INTO provider_tokens (tenant_id, token)
+        INSERT INTO provider_tokens (tenant, token)
         VALUES ($1, $2)
-        ON CONFLICT (tenant_id) DO NOTHING
-        RETURNING tenant_id, token, created_at
+        ON CONFLICT (tenant) DO NOTHING
+        RETURNING tenant AS tenant_id, token, created_at
         """,
         int(tenant_id),
         str(token),

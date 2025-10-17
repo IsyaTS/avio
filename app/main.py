@@ -162,7 +162,7 @@ from app.transport import WhatsAppAddressError, normalize_whatsapp_recipient
 from app.common import get_outbox_whitelist
 
 
-_FALSE_OUTBOX_VALUES = {"", "0", "false", "no", "off", "disabled"}
+_FALSE_OUTBOX_VALUES = {"0", "false", "no", "off", "disabled"}
 
 
 def _outbox_enabled() -> bool:
