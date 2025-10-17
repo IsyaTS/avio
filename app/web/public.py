@@ -1104,6 +1104,13 @@ async def wa_status(
         status_snapshot=snapshot,
         qr_id_override=qr_id_value,
     )
+    # When Redis has no QR identifier but waweb still expects a scan, force
+    # the state into QR mode and provide a generic QR URL for the polling
+    # frontend so that the code can be fetched directly from waweb.
+    if not result.get("qr_id") and result.get("need_qr"):
+        result["state"] = "qr"
+        result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
+
     return JSONResponse(result, headers=_no_store_headers())
 
 
@@ -1121,12 +1128,15 @@ async def wa_start(
     webhook = common.webhook_url()
     payload = {"tenant_id": int(tenant_id), "webhook_url": webhook}
     try:
-        response = await common.wa_post(f"/session/{int(tenant_id)}/start", payload)
+        response = await common.wa_post(
+            f"/session/{int(tenant_id)}/start",
+            payload,
+        )
     except Exception:
         return JSONResponse({"error": "wa_unavailable"}, status_code=502)
 
-    status = int(getattr(response, "status_code", 0) or 0)
-    if status <= 0 or status >= 400:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code < 200 or status_code >= 400:
         return JSONResponse({"error": "wa_unavailable"}, status_code=502)
 
     try:
@@ -1144,12 +1154,6 @@ async def wa_start(
         qr_id_value = _normalize_qr_id(response_data.get("qr_id") or response_data.get("qrId"))
 
     status_snapshot = await _wa_status_impl(int(tenant_id))
-    if isinstance(status_snapshot, dict):
-        # allow WA status response to override qr_id if Redis miss
-        if not qr_id_value:
-            qr_id_value = _normalize_qr_id(
-                status_snapshot.get("qr_id")
-            )
 
     result = _compose_public_wa_response(
         int(tenant_id),
@@ -1157,6 +1161,11 @@ async def wa_start(
         status_snapshot=status_snapshot,
         qr_id_override=qr_id_value,
     )
+    if result.get("need_qr") and not result.get("qr_url"):
+        result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
+    if result.get("need_qr") and result.get("state") != "qr":
+        result["state"] = "qr"
+
     return JSONResponse(result, headers=_no_store_headers())
 
 
@@ -1307,8 +1316,11 @@ def _compose_public_wa_response(
         state_value = str(state_value)
 
     qr_url_value: str | None = None
-    if key and qr_id_value:
-        qr_url_value = _build_public_wa_qr_url(int(tenant), key, qr_id_value)
+    if key:
+        if qr_id_value:
+            qr_url_value = _build_public_wa_qr_url(int(tenant), key, qr_id_value)
+        elif need_qr_flag:
+            qr_url_value = _build_public_wa_qr_url(int(tenant), key)
 
     result.setdefault("tenant", int(tenant))
     if state_value is not None:
@@ -2028,7 +2040,7 @@ def _coerce_body_bytes(body: Any) -> bytes:
 
 
 @router.get("/pub/wa/qr.svg")
-def wa_qr_svg(
+async def wa_qr_svg(
     request: Request,
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
@@ -2048,18 +2060,80 @@ def wa_qr_svg(
         if requested_id:
             headers["X-WA-QR-ID"] = str(requested_id)
         return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
-    if not requested_id:
-        return _qr_expired_response()
 
-    svg_value, redis_failed = _load_cached_svg(tenant_id, requested_id)
-    if redis_failed:
-        headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
-        return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
+    svg_value: str | None = None
+    if requested_id:
+        svg_value, redis_failed = _load_cached_svg(tenant_id, requested_id)
+        if redis_failed:
+            headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
+            return JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
+
+    if not svg_value:
+        fallback_headers: dict[str, str] = {}
+        if getattr(common, "WA_INTERNAL_TOKEN", ""):
+            fallback_headers["X-Auth-Token"] = common.WA_INTERNAL_TOKEN
+        timeout = httpx.Timeout(3.0, connect=2.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(
+                    f"{common.WA_WEB_URL}/session/{int(tenant_id)}/qr.svg",
+                    headers=fallback_headers,
+                )
+        except httpx.HTTPError as exc:
+            wa_logger.info(
+                "wa_qr_upstream_error tenant=%s reason=%s",
+                tenant_id,
+                getattr(exc, "__class__", type(exc)).__name__,
+            )
+            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
+
+        status_code = int(response.status_code or 0)
+        if status_code == 404:
+            return _qr_expired_response(requested_id)
+        if 400 <= status_code < 500:
+            wa_logger.info(
+                "wa_qr_upstream_status tenant=%s status=%s",
+                tenant_id,
+                status_code,
+            )
+            return _qr_expired_response(requested_id)
+        if status_code < 200 or status_code >= 300:
+            wa_logger.info(
+                "wa_qr_upstream_status tenant=%s status=%s",
+                tenant_id,
+                status_code,
+            )
+            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
+
+        svg_candidate = response.text.strip()
+        if not svg_candidate or not svg_candidate.lstrip().startswith("<svg"):
+            wa_logger.info("wa_qr_upstream_invalid tenant=%s", tenant_id)
+            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
+
+        svg_value = svg_candidate
+
+        if requested_id:
+            try:
+                _cache_qr_payload(
+                    tenant_id,
+                    requested_id,
+                    {"qr_svg": svg_value},
+                    include_last=bool(requested_id),
+                )
+            except Exception:
+                wa_logger.info(
+                    "wa_qr_cache_store_failed tenant=%s qr_id=%s",
+                    tenant_id,
+                    requested_id,
+                )
 
     if not svg_value:
         return _qr_expired_response(requested_id)
 
-    headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
+    headers = {"Content-Type": "image/svg+xml"}
+    headers.update(_no_store_headers())
+    if requested_id:
+        headers["X-WA-QR-ID"] = str(requested_id)
     return Response(content=svg_value, media_type="image/svg+xml", headers=headers)
 
 
