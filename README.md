@@ -117,6 +117,34 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 
 `channel` выбирает воркер: `telegram` → `tgworker:/send`, `whatsapp` → `waweb:/send`. Алиас `to="me"` отправляет сообщение в сохранённые сообщения аккаунта. Ответы воркеров приводятся к формату `{"ok": true}` либо `{ "ok": false, "error": "..." }`.
 
+## WhatsApp отправка
+
+- Поддерживаемые значения `to`: `+E164`, строка из цифр (10–15 символов) или JID вида `1234567890@c.us`. Для российских номеров `8XXXXXXXXXX` автоматически приводится к `7XXXXXXXXXX`.
+- Перед отправкой убедитесь, что с адресатом уже есть чат в WhatsApp — иначе доставка не состоится.
+- Переменные окружения:
+  - `OUTBOX_ENABLED` — включает REST-эндпойнт `/send` для исходящих сообщений. При значении `false` приложение отвечает `403 outbox_disabled`.
+  - `OUTBOX_WHITELIST` — список разрешённых получателей (числа, `+E164`, JID). Любой другой номер вернёт `403 not_whitelisted`.
+  - `WAWEB_ADMIN_TOKEN` — должен совпадать с `ADMIN_TOKEN` и используется для внутреннего API `waweb`.
+
+### `curl`-примеры для `/send`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/send" \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  -d '{"tenant": 1, "channel": "whatsapp", "to": "+79991234567", "text": "E164 demo"}'
+
+curl -X POST "http://127.0.0.1:8000/send" \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  -d '{"tenant": 1, "channel": "whatsapp", "to": "79991234567", "text": "Digits demo"}'
+
+curl -X POST "http://127.0.0.1:8000/send" \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  -d '{"tenant": 1, "channel": "whatsapp", "to": "79991234567@c.us", "text": "JID demo"}'
+```
+
 ### Пример MessageIn
 
 ```json
@@ -153,6 +181,13 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 ```
 
 Если SVG отсутствует, обработчик возвращает `400 wa_qr_invalid`. Валидные SVG сохраняются в Redis по ключам `wa:qr:{tenant}:{qr_id}:svg` и `wa:qr:last:{tenant}` (TTL ≥ 180 секунд), чтобы публичные маршруты `/pub/wa/status` и `/pub/wa/qr.svg` могли отдавать актуальный код без повторной генерации.
+
+## Диагностика
+
+- Проверка сервисов: `GET http://127.0.0.1:8000/health` (app) и `GET http://waweb:9001/health` (waweb).
+- Тестирование канала: `POST /send` (app) и `POST /send` на `waweb` с `X-Auth-Token`.
+- Публичные WA-эндпойнты: `GET /pub/wa/status?k=<PUBLIC_KEY>&tenant=<TENANT>` и `POST /pub/wa/start`.
+- Скрипт `deploy/diag/wa.sh` автоматизирует health-check, проверку переменных `OUTBOX_*`, тестовые отправки (digits/JID) и сбор логов `app`/`waweb` за последние две минуты.
 
 ### Ключи доступа
 

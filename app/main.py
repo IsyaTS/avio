@@ -156,6 +156,36 @@ from app.metrics import (
     WA_QR_CALLBACK_ERRORS_COUNTER,
     WA_QR_RECEIVED_COUNTER,
 )
+from app.transport import WhatsAppAddressError, normalize_whatsapp_recipient
+from app.common import get_outbox_whitelist
+
+
+_FALSE_OUTBOX_VALUES = {"", "0", "false", "no", "off", "disabled"}
+
+
+def _outbox_enabled() -> bool:
+    raw = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
+    return raw not in _FALSE_OUTBOX_VALUES
+
+
+def _whitelist_allows(number: str) -> bool:
+    whitelist = get_outbox_whitelist()
+    if whitelist.allow_all:
+        return True
+    if not number:
+        return False
+    if number in whitelist.raw_tokens:
+        return True
+    if f"+{number}" in whitelist.raw_tokens:
+        return True
+    if f"{number}@c.us" in whitelist.raw_tokens:
+        return True
+    try:
+        if int(number) in whitelist.ids:
+            return True
+    except ValueError:
+        pass
+    return False
 from app.starlette_ext import register_transport_validation
 
 
@@ -256,7 +286,7 @@ async def metrics_endpoint() -> Response:
 
 
 @app.post("/send")
-async def send_transport_message(request: Request, message: TransportMessage) -> JSONResponse:
+async def send_transport_message(request: Request, message: TransportMessage) -> Response:
     admin_token = getattr(settings, "ADMIN_TOKEN", "") or ""
     header_token = (request.headers.get("X-Admin-Token") or "").strip()
     if admin_token and header_token != admin_token:
@@ -270,46 +300,97 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
         raise HTTPException(status_code=400, detail="channel_unknown")
 
     payload = transport_message_asdict(message)
-    transport_logger.info(
-        "event=message_out stage=dispatch_request channel=%s tenant=%s endpoint=%s",
-        message.channel,
-        message.tenant,
-        endpoint,
-    )
-    peer_value = payload.get("to")
+    channel = message.channel
+    normalized_to = payload.get("to")
+    whitelist_number: str | None = None
+
+    if channel == "whatsapp":
+        try:
+            digits, jid = normalize_whatsapp_recipient(payload.get("to"))
+        except WhatsAppAddressError as exc:
+            reason = str(exc) or "invalid"
+            explanations = {
+                "empty": "empty",
+                "invalid_length": "expected 10-15 digits",
+                "invalid_domain": "expected @c.us jid",
+            }
+            message_text = explanations.get(reason, reason)
+            status_label = "invalid_to"
+            MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
+            transport_logger.warning(
+                "event=message_out channel=%s tenant=%s to=%s status=%s reason=%s",
+                channel,
+                message.tenant,
+                payload.get("to") or "-",
+                status_label,
+                message_text,
+            )
+            return JSONResponse(
+                {"error": f"invalid_to: {message_text}"},
+                status_code=400,
+            )
+        payload["to"] = jid
+        normalized_to = jid
+        whitelist_number = digits
+
+    if not _outbox_enabled():
+        status_label = "outbox_disabled"
+        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
+        transport_logger.warning(
+            "event=message_out channel=%s tenant=%s to=%s status=%s",
+            channel,
+            message.tenant,
+            normalized_to or payload.get("to") or "-",
+            status_label,
+        )
+        return JSONResponse({"error": "outbox_disabled"}, status_code=403)
+
+    if channel == "whatsapp" and whitelist_number is not None:
+        if not _whitelist_allows(whitelist_number):
+            status_label = "not_whitelisted"
+            MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
+            transport_logger.warning(
+                "event=message_out channel=%s tenant=%s to=%s status=%s",
+                channel,
+                message.tenant,
+                normalized_to or "-",
+                status_label,
+            )
+            return JSONResponse({"error": "not_whitelisted"}, status_code=403)
+
     try:
-        client = _transport_client(message.channel)
+        client = _transport_client(channel)
         response = await client.post(
             endpoint,
             json=payload,
             timeout=httpx.Timeout(12.0),
         )
     except httpx.HTTPError as exc:
-        SEND_FAIL_COUNTER.labels(message.channel, "http_error").inc()
+        status_label = "http_error"
+        SEND_FAIL_COUNTER.labels(channel, status_label).inc()
+        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
         transport_logger.error(
-            "event=message_out stage=dispatch_error channel=%s tenant=%s error=%s",
-            message.channel,
+            "event=message_out channel=%s tenant=%s to=%s status=%s error=%s",
+            channel,
             message.tenant,
+            normalized_to or payload.get("to") or "-",
+            status_label,
             exc,
         )
         raise HTTPException(status_code=502, detail="worker_unreachable") from exc
-
-    transport_logger.info(
-        "event=message_out stage=dispatch_response channel=%s tenant=%s status=%s peer=%s",
-        message.channel,
-        message.tenant,
-        response.status_code,
-        peer_value or "-",
-    )
 
     if (
         response.status_code == 409
         and response.headers.get("X-Reauth", "").strip() == "1"
     ):
+        status_label = "reauth"
+        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
         transport_logger.warning(
-            "event=message_out stage=dispatch_reauth channel=%s tenant=%s", 
-            message.channel,
+            "event=message_out channel=%s tenant=%s to=%s status=%s",
+            channel,
             message.tenant,
+            normalized_to or "-",
+            status_label,
         )
         reauth_headers = {
             "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -324,22 +405,33 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
         )
 
     if not (200 <= response.status_code < 300):
+        status_label = "remote_error"
         reason = f"status_{response.status_code}"
-        SEND_FAIL_COUNTER.labels(message.channel, reason).inc()
+        SEND_FAIL_COUNTER.labels(channel, reason).inc()
+        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
         transport_logger.warning(
-            "event=message_out stage=dispatch_fail channel=%s tenant=%s status=%s",
-            message.channel,
+            "event=message_out channel=%s tenant=%s to=%s status=%s http_status=%s",
+            channel,
             message.tenant,
+            normalized_to or "-",
+            status_label,
             response.status_code,
         )
-        detail = response.text
-        raise HTTPException(status_code=response.status_code, detail=detail or "worker_error")
+        media_type = response.headers.get("Content-Type") or "application/json"
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            media_type=media_type,
+        )
 
-    MESSAGE_OUT_COUNTER.labels(message.channel).inc()
+    status_label = "success"
+    MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
     transport_logger.info(
-        "event=message_out stage=dispatch_ok channel=%s tenant=%s",
-        message.channel,
+        "event=message_out channel=%s tenant=%s to=%s status=%s",
+        channel,
         message.tenant,
+        normalized_to or "-",
+        status_label,
     )
     try:
         body = response.json()
