@@ -102,8 +102,8 @@ PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
 _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 
-WA_QR_CACHE_TTL_MIN = 180  # seconds
-WA_QR_CACHE_TTL_MAX = 300  # seconds
+WA_QR_CACHE_TTL_MIN = 30  # seconds
+WA_QR_CACHE_TTL_MAX = 60  # seconds
 
 
 def _qr_cache_ttl() -> int:
@@ -1092,25 +1092,39 @@ async def wa_status(
         return _as_head_response(response, request)
     tenant_id, validated_key = ok
 
-    snapshot = await _wa_status_impl(int(tenant_id))
-
-    qr_id_value, redis_failed = _get_last_qr_id(int(tenant_id))
+    cached_qr_id, redis_failed = _get_last_qr_id(int(tenant_id))
+    qr_id_override = None if redis_failed else cached_qr_id
     if redis_failed:
         wa_logger.info("wa_qr_cache_unavailable tenant=%s", tenant_id)
-        qr_id_value = None
+
+    snapshot = await _wa_status_impl(int(tenant_id))
 
     result = _compose_public_wa_response(
         int(tenant_id),
         validated_key,
         status_snapshot=snapshot,
-        qr_id_override=qr_id_value,
+        qr_id_override=qr_id_override,
     )
-    # When Redis has no QR identifier but waweb still expects a scan, force
-    # the state into QR mode and provide a generic QR URL for the polling
-    # frontend so that the code can be fetched directly from waweb.
-    if not result.get("qr_id") and result.get("need_qr"):
-        result["state"] = "qr"
-        result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
+
+    effective_qr_id = None
+    if qr_id_override:
+        effective_qr_id = _normalize_qr_id(qr_id_override)
+    if not effective_qr_id:
+        effective_qr_id = _normalize_qr_id(result.get("qr_id"))
+
+    if effective_qr_id:
+        result["qr_id"] = effective_qr_id
+        if validated_key:
+            result["qr_url"] = _build_public_wa_qr_url(
+                int(tenant_id), validated_key, effective_qr_id
+            )
+    else:
+        result.pop("qr_id", None)
+        if result.get("need_qr") and validated_key:
+            result.setdefault("state", "qr")
+            result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
+        elif not result.get("need_qr"):
+            result.pop("qr_url", None)
 
     return JSONResponse(result, headers=_no_store_headers())
 
@@ -1203,11 +1217,6 @@ async def _wa_status_impl(tenant: int) -> dict:
     payload["qr"] = bool(data.get("qr")) if "qr" in data else qr_flag
     if last_value is not None:
         payload["last"] = last_value
-    if qr_id_value is None:
-        cached_id, redis_failed = _get_last_qr_id(int(tenant))
-        if not redis_failed and cached_id:
-            qr_id_value = cached_id
-
     if qr_id_value is not None:
         payload["qr_id"] = qr_id_value
     return payload
@@ -2063,6 +2072,15 @@ async def wa_qr_svg(
     tenant_id, _ = ok
 
     requested_id = _normalize_qr_id(qr_id) if qr_id is not None else None
+    query_params = request.query_params
+    force_value = query_params.get("force")
+    bypass_cache = False
+    if "t" in query_params:
+        bypass_cache = True
+    elif force_value is not None:
+        force_normalized = str(force_value).strip().lower()
+        bypass_cache = force_normalized not in ("", "0", "false")
+
     redis_failed = False
     if not requested_id:
         requested_id, redis_failed = _get_last_qr_id(tenant_id)
@@ -2073,15 +2091,17 @@ async def wa_qr_svg(
         response = JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
         return _as_head_response(response, request)
 
-    svg_value: str | None = None
-    if requested_id:
-        svg_value, redis_failed = _load_cached_svg(tenant_id, requested_id)
+    cached_svg: str | None = None
+    if requested_id and not bypass_cache:
+        cached_svg, redis_failed = _load_cached_svg(tenant_id, requested_id)
         if redis_failed:
             headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
             response = JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
             return _as_head_response(response, request)
 
-    if not svg_value:
+    svg_value: str | None = cached_svg if not bypass_cache else None
+
+    if bypass_cache or not svg_value:
         fallback_headers: dict[str, str] = {}
         if getattr(common, "WA_INTERNAL_TOKEN", ""):
             fallback_headers["X-Auth-Token"] = common.WA_INTERNAL_TOKEN
