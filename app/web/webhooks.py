@@ -5,6 +5,7 @@ import os
 import time
 import pathlib
 import logging
+import random
 from typing import Any, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
@@ -55,9 +56,8 @@ settings = core.settings  # type: ignore[attr-defined]
 _redis_queue = settings.r
 _catalog_sent_cache: dict[Tuple[int, str], float] = {}
 
-WA_QR_CACHE_TTL = 600  # seconds, >= 120 per webhook spec
-WA_QR_CACHE_MIN_TTL = 180
-WA_QR_EFFECTIVE_TTL = max(WA_QR_CACHE_TTL, WA_QR_CACHE_MIN_TTL)
+WA_QR_CACHE_TTL_MIN = 180  # seconds
+WA_QR_CACHE_TTL_MAX = 300  # seconds
 
 
 def _digits(s: str) -> str:
@@ -566,69 +566,77 @@ async def provider_webhook(request: Request) -> Response:
         nested_payload = payload.get("payload")
         if isinstance(nested_payload, dict):
             svg_raw = nested_payload.get("svg")
-    if tenant_candidate is None:
-        raise HTTPException(status_code=400, detail="invalid_tenant")
-    if qr_id_raw is None:
-        raise HTTPException(status_code=400, detail="invalid_payload")
 
-    tenant = int(tenant_candidate)
-    qr_id = str(qr_id_raw).strip()
-    svg = str(svg_raw or "").strip()
-    svg_lower = svg.lower()
-    invalid_reason = ""
-    if not qr_id:
-        invalid_reason = "no_qr_id"
-    elif not svg:
-        invalid_reason = "no_svg"
-    elif "<svg" not in svg_lower or "</svg" not in svg_lower:
-        invalid_reason = "invalid_markup"
+    invalid_reason = None
+    if tenant_candidate is None:
+        invalid_reason = "invalid_tenant"
+    tenant = int(tenant_candidate) if tenant_candidate is not None else 0
+
+    qr_id: str | None = None
+    if invalid_reason is None:
+        if qr_id_raw is None:
+            invalid_reason = "missing_qr_id"
+        else:
+            try:
+                qr_id_candidate = str(qr_id_raw).strip()
+            except Exception:
+                qr_id_candidate = ""
+            if not qr_id_candidate:
+                invalid_reason = "empty_qr_id"
+            else:
+                qr_id = qr_id_candidate
+
+    svg_value: str | None = None
+    if invalid_reason is None:
+        if not isinstance(svg_raw, str):
+            svg_value = None
+        else:
+            svg_value = svg_raw.strip()
+        if not svg_value:
+            invalid_reason = "empty_svg"
+        elif not svg_value.lstrip().startswith("<svg"):
+            invalid_reason = "invalid_svg_markup"
 
     if invalid_reason:
         logger.warning(
             "wa_qr_invalid tenant=%s qr_id=%s reason=%s",
-            tenant,
-            qr_id or "-",
+            tenant_candidate if tenant_candidate is not None else "-",
+            qr_id_raw if qr_id_raw is not None else "-",
             invalid_reason,
         )
-        raise HTTPException(status_code=400, detail="invalid_svg")
+        raise HTTPException(status_code=400, detail="wa_qr_invalid")
 
-    png_raw = payload.get("png_base64") or payload.get("png")
-    png_value = str(png_raw or "").strip() or None
-    txt_raw = payload.get("txt") or payload.get("text") or payload.get("qr_text")
-    txt_value = str(txt_raw or "").strip() or None
+    assert qr_id is not None  # for type checkers
+    assert svg_value is not None
 
+    ttl = random.randint(WA_QR_CACHE_TTL_MIN, WA_QR_CACHE_TTL_MAX)
     cache_key = f"wa:qr:{tenant}:{qr_id}"
     svg_key = f"{cache_key}:svg"
-    png_key = f"{cache_key}:png"
-    txt_key = f"{cache_key}:txt"
     last_key = f"wa:qr:last:{tenant}"
-    now_ts = int(time.time())
+
     entry = {
         "tenant": tenant,
         "qr_id": qr_id,
-        "qr_svg": svg,
-        "qr_png": png_value,
-        "qr_text": txt_value,
+        "qr_svg": svg_value,
         "provider": provider,
         "event": event,
-        "updated_at": now_ts,
+        "updated_at": int(time.time()),
     }
-
-    ttl = WA_QR_EFFECTIVE_TTL
+    try:
+        serialized_entry = json.dumps(entry, ensure_ascii=False)
+    except Exception:
+        serialized_entry = None
 
     try:
-        await _redis_queue.set(svg_key, svg, ex=ttl)
-        if png_value:
-            await _redis_queue.set(png_key, png_value, ex=ttl)
-        if txt_value:
-            await _redis_queue.set(txt_key, txt_value, ex=ttl)
+        await _redis_queue.set(svg_key, svg_value, ex=ttl)
         await _redis_queue.set(last_key, qr_id, ex=ttl)
-        await _redis_queue.set(cache_key, json.dumps(entry, ensure_ascii=False), ex=ttl)
+        if serialized_entry is not None:
+            await _redis_queue.set(cache_key, serialized_entry, ex=ttl)
     except Exception:
         logger.exception("wa_qr_cache_write_failed tenant=%s qr_id=%s", tenant, qr_id)
         raise HTTPException(status_code=500, detail="cache_error")
 
-    logger.info("wa_qr_cached tenant=%s qr_id=%s", tenant, qr_id)
+    logger.info("wa_qr_cached tenant=%s qr_id=%s ttl=%s", tenant, qr_id, ttl)
     return Response(status_code=204)
 
 
