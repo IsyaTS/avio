@@ -55,6 +55,8 @@ settings = core.settings  # type: ignore[attr-defined]
 _redis_queue = settings.r
 _catalog_sent_cache: dict[Tuple[int, str], float] = {}
 
+WA_QR_CACHE_TTL = 600  # seconds, >= 120 per webhook spec
+
 
 def _digits(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isdigit())
@@ -553,32 +555,53 @@ async def provider_webhook(request: Request) -> Response:
 
     tenant_candidate = _coerce_int(payload.get("tenant"))
     qr_id_raw = payload.get("qr_id")
-    qr_body = payload.get("qr")
+    svg_raw = payload.get("svg")
+    if svg_raw is None:
+        svg_raw = payload.get("qr")
+    if svg_raw is None:
+        svg_raw = payload.get("data")
     if tenant_candidate is None:
         raise HTTPException(status_code=400, detail="invalid_tenant")
-    if qr_id_raw is None or qr_body is None:
+    if qr_id_raw is None:
         raise HTTPException(status_code=400, detail="invalid_payload")
 
     tenant = int(tenant_candidate)
     qr_id = str(qr_id_raw).strip()
-    qr_text = str(qr_body)
-    if not qr_id or not qr_text:
-        raise HTTPException(status_code=400, detail="invalid_payload")
+    svg = str(svg_raw or "").strip()
+    if not qr_id or not svg:
+        logger.warning("wa_qr_invalid tenant=%s qr_id=%s reason=no_svg", tenant, qr_id or "-")
+        raise HTTPException(status_code=400, detail="invalid_svg")
+
+    png_raw = payload.get("png_base64") or payload.get("png")
+    png_value = str(png_raw or "").strip() or None
+    txt_raw = payload.get("txt") or payload.get("text") or payload.get("qr_text")
+    txt_value = str(txt_raw or "").strip() or None
 
     cache_key = f"wa:qr:{tenant}:{qr_id}"
+    svg_key = f"{cache_key}:svg"
+    png_key = f"{cache_key}:png"
+    txt_key = f"{cache_key}:txt"
     last_key = f"wa:qr:last:{tenant}"
+    now_ts = int(time.time())
     entry = {
         "tenant": tenant,
         "qr_id": qr_id,
-        "qr_text": qr_text,
+        "qr_svg": svg,
+        "qr_png": png_value,
+        "qr_text": txt_value,
         "provider": provider,
         "event": event,
-        "updated_at": int(time.time()),
+        "updated_at": now_ts,
     }
 
     try:
-        await _redis_queue.set(cache_key, json.dumps(entry, ensure_ascii=False))
-        await _redis_queue.set(last_key, qr_id)
+        await _redis_queue.set(svg_key, svg, ex=WA_QR_CACHE_TTL)
+        if png_value:
+            await _redis_queue.set(png_key, png_value, ex=WA_QR_CACHE_TTL)
+        if txt_value:
+            await _redis_queue.set(txt_key, txt_value, ex=WA_QR_CACHE_TTL)
+        await _redis_queue.set(last_key, qr_id, ex=WA_QR_CACHE_TTL)
+        await _redis_queue.set(cache_key, json.dumps(entry, ensure_ascii=False), ex=WA_QR_CACHE_TTL)
     except Exception:
         logger.exception("wa_qr_cache_write_failed tenant=%s qr_id=%s", tenant, qr_id)
         raise HTTPException(status_code=500, detail="cache_error")
