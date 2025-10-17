@@ -104,6 +104,8 @@ _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
 
 WA_QR_CACHE_TTL = 600  # seconds, must be >= 120 per public WA spec
+WA_QR_CACHE_MIN_TTL = 180
+WA_QR_EFFECTIVE_TTL = max(WA_QR_CACHE_TTL, WA_QR_CACHE_MIN_TTL)
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -1672,20 +1674,21 @@ def _cache_qr_payload(
         client = common.redis_client()
         pipe = client.pipeline()
         wrote = False
+        ttl = WA_QR_EFFECTIVE_TTL
         if json_payload is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}", WA_QR_CACHE_TTL, json_payload)
+            pipe.setex(f"wa:qr:{tenant}:{qr_id}", ttl, json_payload)
             wrote = True
         if svg_value is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}:svg", WA_QR_CACHE_TTL, svg_value)
+            pipe.setex(f"wa:qr:{tenant}:{qr_id}:svg", ttl, svg_value)
             wrote = True
         if png_value is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}:png", WA_QR_CACHE_TTL, png_value)
+            pipe.setex(f"wa:qr:{tenant}:{qr_id}:png", ttl, png_value)
             wrote = True
         if txt_value is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}:txt", WA_QR_CACHE_TTL, txt_value)
+            pipe.setex(f"wa:qr:{tenant}:{qr_id}:txt", ttl, txt_value)
             wrote = True
         if include_last:
-            pipe.setex(f"wa:qr:last:{tenant}", WA_QR_CACHE_TTL, qr_id)
+            pipe.setex(f"wa:qr:last:{tenant}", ttl, qr_id)
             wrote = True
         if wrote:
             pipe.execute()
