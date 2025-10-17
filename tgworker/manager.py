@@ -1990,7 +1990,7 @@ class TelegramSessionManager:
                     last_message_id = message_value
                 if peer_value is not None:
                     resolved_peer_id = peer_value
-            MESSAGE_OUT_COUNTER.labels("telegram").inc()
+            MESSAGE_OUT_COUNTER.labels("telegram", "success").inc()
             target_hint: Any = peer_id if peer_id is not None else username
             LOGGER.info(
                 "event=message_out stage=send_ok tenant_id=%s peer_id=%s",

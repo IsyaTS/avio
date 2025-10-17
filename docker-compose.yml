@@ -104,6 +104,7 @@ services:
       - APP_WEBHOOK=http://app:8000/webhook/provider
       - APP_BASE_URL=http://app:8000
       - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - WAWEB_ADMIN_TOKEN=${ADMIN_TOKEN}
       - PUBLIC_KEY=${PUBLIC_KEY}
       - STATE_DIR=/data/wa_state
     restart: unless-stopped

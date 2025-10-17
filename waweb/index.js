@@ -11,7 +11,13 @@ const PORT = process.env.PORT || 8088;
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(__dirname, '.wwebjs_auth'));
 const APP_WEBHOOK = (process.env.APP_WEBHOOK || '').trim();
 const TENANT_DEFAULT = Number(process.env.TENANT_DEFAULT || '0') || 0;
-const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+const RAW_ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+const WAWEB_ADMIN_TOKEN = (process.env.WAWEB_ADMIN_TOKEN || '').trim();
+if (WAWEB_ADMIN_TOKEN && RAW_ADMIN_TOKEN && WAWEB_ADMIN_TOKEN !== RAW_ADMIN_TOKEN) {
+  console.error('[waweb]', 'admin_token_mismatch');
+  process.exit(1);
+}
+const ADMIN_TOKEN = (WAWEB_ADMIN_TOKEN || RAW_ADMIN_TOKEN);
 const WEBHOOK_SECRET = (process.env.WEBHOOK_SECRET || '').trim();
 const APP_BASE_URL = (() => {
   const raw = (process.env.APP_BASE_URL || '').trim();
@@ -27,6 +33,7 @@ let lastQrCache = null;
 let messageInTotal = 0;
 let messageOutTotal = 0;
 const sendFailTotal = Object.create(null);
+const waSendTotal = Object.create(null);
 const deprecatedNoticeTs = Object.create(null);
 function buildSyncBaseList() {
   const raw = [
@@ -66,6 +73,11 @@ function incSendFail(reason) {
   sendFailTotal[key] = (sendFailTotal[key] || 0) + 1;
 }
 
+function incWaSend(result) {
+  const key = String(result || 'unknown');
+  waSendTotal[key] = (waSendTotal[key] || 0) + 1;
+}
+
 function recordDeprecated(route) {
   const nowTs = Date.now();
   if ((deprecatedNoticeTs[route] || 0) + 3600 * 1000 <= nowTs) {
@@ -78,12 +90,31 @@ function sanitizeReason(reason) {
   return String(reason || 'unknown').replace(/[^a-z0-9_]/gi, '_');
 }
 
+function logSendResult(tenant, to, result) {
+  let jid = '-';
+  if (to !== undefined && to !== null) {
+    jid = String(to);
+  }
+  const payload = `event=message_out channel=whatsapp tenant=${tenant} to=${jid} result=${result}`;
+  try { console.log('[waweb]', payload); } catch (_) {}
+}
+
 function renderMetrics() {
   const lines = [];
   lines.push('# TYPE message_in_total counter');
   lines.push(`message_in_total{channel="whatsapp"} ${messageInTotal}`);
-  lines.push('# TYPE message_out_total counter');
-  lines.push(`message_out_total{channel="whatsapp"} ${messageOutTotal}`);
+  lines.push('# TYPE messages_out_total counter');
+  lines.push(`messages_out_total{channel="whatsapp"} ${messageOutTotal}`);
+  lines.push('# TYPE wa_send_total counter');
+  const sendResults = Object.keys(waSendTotal);
+  if (!sendResults.length) {
+    lines.push('wa_send_total{result="success"} 0');
+  } else {
+    for (const result of sendResults) {
+      const value = waSendTotal[result] || 0;
+      lines.push(`wa_send_total{result="${sanitizeReason(result)}"} ${value}`);
+    }
+  }
   lines.push('# TYPE send_fail_total counter');
   const reasons = Object.keys(sendFailTotal);
   if (!reasons.length) {
@@ -414,27 +445,48 @@ function normalizeAttachment(raw){
   };
 }
 
+function normalizeWhatsAppRecipient(value) {
+  if (value === null || value === undefined) return null;
+  let raw = value;
+  if (typeof raw === 'number') raw = String(raw);
+  else raw = String(raw).trim();
+  if (!raw) return null;
+  let local = raw;
+  const lowered = raw.toLowerCase();
+  if (raw.includes('@')) {
+    if (!lowered.endsWith('@c.us')) return null;
+    local = raw.split('@', 1)[0];
+  }
+  let digits = local.replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('8') && digits.length === 11) {
+    digits = `7${digits.slice(1)}`;
+  }
+  if (digits.length < 10 || digits.length > 15) return null;
+  return { digits, jid: `${digits}@c.us` };
+}
+
 async function sendTransportMessage(tenant, transport){
   tenant = String(tenant);
   const s = tenants[tenant];
-  if (!s || !s.client) throw new Error('no_session');
+  if (!s || !s.client) {
+    const err = new Error('no_session');
+    err.normalizedJid = null;
+    throw err;
+  }
 
   let target = transport.to;
   if (typeof target === 'string' && target.trim().toLowerCase() === 'me') {
     const me = s.client.info && s.client.info.wid ? s.client.info.wid._serialized : '';
     target = me || '';
   }
-  if (typeof target === 'number') target = String(target);
-  if (typeof target !== 'string') throw new Error('invalid_to');
-
-  let jid;
-  if (target.includes('@')) {
-    jid = target;
-  } else {
-    const digits = target.replace(/\D/g, '');
-    if (!digits) throw new Error('invalid_to');
-    jid = `${digits}@c.us`;
+  const normalized = normalizeWhatsAppRecipient(target);
+  if (!normalized) {
+    const err = new Error('invalid_to');
+    err.normalizedJid = null;
+    throw err;
   }
+  const { jid } = normalized;
 
   const text = typeof transport.text === 'string' ? transport.text : '';
   const attachments = Array.isArray(transport.attachments) ? transport.attachments : [];
@@ -453,15 +505,22 @@ async function sendTransportMessage(tenant, transport){
       }
       await s.client.sendMessage(jid, media, opts);
     } catch (err) {
-      throw new Error('media_fetch');
+      const error = new Error('media_fetch');
+      error.normalizedJid = jid;
+      throw error;
     }
   }
   if (text && !textSent) {
-    await s.client.sendMessage(jid, text);
+    try {
+      await s.client.sendMessage(jid, text);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      error.normalizedJid = jid;
+      throw error;
+    }
   }
   messageOutTotal += 1;
-  try { console.log('[waweb]', `event=message_out channel=whatsapp tenant=${tenant} to=${jid}`); } catch(_){}
-  return true;
+  return jid;
 }
 function pickChromePath(){
   const cand = [process.env.CHROME_PATH, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome']
@@ -769,17 +828,28 @@ app.post('/session/:tenant/send', async (req, res) => {
     return res.status(400).json({ ok:false, error:'empty_message' });
   }
   try {
-    await sendTransportMessage(tenantNum, transport);
+    const jid = await sendTransportMessage(tenantNum, transport);
+    incWaSend('success');
+    logSendResult(tenantNum, jid, 'success');
     return res.json({ ok:true });
   } catch (e) {
     const message = e && e.message ? e.message : String(e);
+    const normalizedJid = (e && e.normalizedJid) || null;
+    const toValue = normalizedJid || transport.to || '-';
     if (message === 'invalid_to') {
+      incWaSend('invalid_to');
+      logSendResult(tenantNum, toValue, 'invalid_to');
       return res.status(400).json({ ok:false, error:'invalid_to' });
     }
     if (message === 'no_session') {
+      incWaSend('no_session');
+      logSendResult(tenantNum, toValue, 'no_session');
       return res.status(404).json({ ok:false, error:'no_session' });
     }
+    const resultTag = sanitizeReason(message || 'error');
     incSendFail(message);
+    incWaSend(resultTag);
+    logSendResult(tenantNum, toValue, resultTag);
     return res.status(500).json({ ok:false, error:message });
   }
 });
@@ -801,17 +871,28 @@ app.post('/send', async (req, res) => {
     return res.status(400).json({ ok:false, error:'empty_message' });
   }
   try {
-    await sendTransportMessage(tenantNum, { to: payload.to, text, attachments });
+    const jid = await sendTransportMessage(tenantNum, { to: payload.to, text, attachments });
+    incWaSend('success');
+    logSendResult(tenantNum, jid, 'success');
     return res.json({ ok:true });
   } catch (e) {
     const message = e && e.message ? e.message : String(e);
+    const normalizedJid = (e && e.normalizedJid) || null;
+    const toValue = normalizedJid || payload.to || '-';
     if (message === 'invalid_to') {
+      incWaSend('invalid_to');
+      logSendResult(tenantNum, toValue, 'invalid_to');
       return res.status(400).json({ ok:false, error:'invalid_to' });
     }
     if (message === 'no_session') {
+      incWaSend('no_session');
+      logSendResult(tenantNum, toValue, 'no_session');
       return res.status(404).json({ ok:false, error:'no_session' });
     }
+    const resultTag = sanitizeReason(message || 'error');
     incSendFail(message);
+    incWaSend(resultTag);
+    logSendResult(tenantNum, toValue, resultTag);
     return res.status(500).json({ ok:false, error:message });
   }
 });

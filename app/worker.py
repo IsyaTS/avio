@@ -518,7 +518,7 @@ async def send_telegram(
             _http_json, "POST", TGWORKER_SEND_URL, payload, 15.0, headers
         )
         if 200 <= last_status < 300:
-            MESSAGE_OUT_COUNTER.labels("telegram").inc()
+            MESSAGE_OUT_COUNTER.labels("telegram", "success").inc()
             break
 
         parsed_error: Optional[str] = None

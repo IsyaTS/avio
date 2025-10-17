@@ -8,9 +8,9 @@ MESSAGE_IN_COUNTER = Counter(
     labelnames=("channel",),
 )
 MESSAGE_OUT_COUNTER = Counter(
-    "message_out_total",
-    "Normalized outgoing messages",
-    labelnames=("channel",),
+    "messages_out_total",
+    "Normalized outgoing messages grouped by channel and status",
+    labelnames=("channel", "status"),
 )
 DB_ERRORS_COUNTER = Counter(
     "db_errors_total",
