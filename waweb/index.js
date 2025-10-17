@@ -11,6 +11,17 @@ const PORT = process.env.PORT || 8088;
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(__dirname, '.wwebjs_auth'));
 const APP_WEBHOOK = (process.env.APP_WEBHOOK || '').trim();
 const TENANT_DEFAULT = Number(process.env.TENANT_DEFAULT || '0') || 0;
+const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+const APP_BASE_URL = (() => {
+  const raw = (process.env.APP_BASE_URL || '').trim();
+  const fallback = 'http://app:8000';
+  const normalized = (raw || fallback).replace(/\/$/, '');
+  return normalized || fallback;
+})();
+const LAST_QR_META_PATH = path.join(STATE_DIR, 'last-qr.json');
+
+/** @type {{ tenant: string, ts: number, svg: string, png: string } | null } */
+let lastQrCache = null;
 
 let messageInTotal = 0;
 let messageOutTotal = 0;
@@ -100,6 +111,133 @@ function postJson(url, payload) {
     req.on('error', ()=>{});
     req.write(data); req.end();
   } catch (_) {}
+}
+
+function loadLastQrFromDisk() {
+  try {
+    if (!fs.existsSync(LAST_QR_META_PATH)) return null;
+    const raw = fs.readFileSync(LAST_QR_META_PATH, 'utf8');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const tenant = typeof parsed.tenant === 'string' ? parsed.tenant : String(parsed.tenant || '');
+    const ts = Number(parsed.ts || parsed.timestamp || 0) || 0;
+    const svg = typeof parsed.qr_svg === 'string' ? parsed.qr_svg : '';
+    const png = typeof parsed.qr_png === 'string' ? parsed.qr_png : '';
+    if (!svg) return null;
+    return { tenant, ts, svg, png };
+  } catch (_) {
+    return null;
+  }
+}
+
+function persistLastQr(tenant, svg, png, ts) {
+  lastQrCache = {
+    tenant: String(tenant || ''),
+    ts: Number(ts || 0) || Date.now(),
+    svg: typeof svg === 'string' ? svg : '',
+    png: typeof png === 'string' ? png : '',
+  };
+  try {
+    ensureDir(STATE_DIR);
+    const payload = {
+      tenant: lastQrCache.tenant,
+      ts: lastQrCache.ts,
+      qr_svg: lastQrCache.svg,
+      qr_png: lastQrCache.png,
+    };
+    fs.writeFileSync(LAST_QR_META_PATH, JSON.stringify(payload));
+  } catch (_) {}
+}
+
+function getLastQrSnapshot() {
+  if (lastQrCache && lastQrCache.svg) return lastQrCache;
+  const restored = loadLastQrFromDisk();
+  if (restored && restored.svg) {
+    lastQrCache = restored;
+  }
+  return lastQrCache;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function requestJson(method, url, payload, extraHeaders) {
+  return new Promise((resolve, reject) => {
+    try {
+      const u = new URL(url);
+      const body = payload ? Buffer.from(JSON.stringify(payload), 'utf8') : null;
+      const mod = u.protocol === 'https:' ? https : http;
+      const headers = Object.assign(
+        { 'Content-Type': 'application/json; charset=utf-8' },
+        extraHeaders || {}
+      );
+      if (body) headers['Content-Length'] = Buffer.byteLength(body);
+      const req = mod.request(
+        {
+          hostname: u.hostname,
+          port: u.port || (u.protocol === 'https:' ? 443 : 80),
+          path: u.pathname + (u.search || ''),
+          method,
+          headers,
+          timeout: 8000,
+        },
+        (res) => {
+          const chunks = [];
+          res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+          res.on('end', () => {
+            const responseBody = Buffer.concat(chunks).toString('utf8');
+            resolve({ statusCode: res.statusCode || 0, body: responseBody });
+          });
+        }
+      );
+      req.on('error', (err) => reject(err));
+      req.on('timeout', () => {
+        try { req.destroy(); } catch (_) {}
+        reject(new Error('timeout'));
+      });
+      if (body) req.write(body);
+      req.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function truncateBody(body, limit = 200) {
+  if (!body) return '';
+  const text = String(body);
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+async function notifyTenantQr(tenant, svg, png, ts) {
+  const url = `${APP_BASE_URL}/internal/tenant/${tenant}/wa/qr`;
+  const payload = { tenant: Number(tenant), ts };
+  if (svg) payload.qr_svg = svg;
+  if (png) payload.qr_png = png;
+  const headers = {};
+  if (ADMIN_TOKEN) headers['X-Admin-Token'] = ADMIN_TOKEN;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const { statusCode, body } = await requestJson('POST', url, payload, headers);
+      console.log('[waweb]', `wa_qr_callback tenant=${tenant} status=${statusCode} attempt=${attempt}`);
+      if (statusCode >= 500 && attempt < 3) {
+        console.warn('[waweb]', `wa_qr_callback_retry tenant=${tenant} status=${statusCode}`);
+        await wait(500 * attempt);
+        continue;
+      }
+      if (statusCode >= 400) {
+        console.warn('[waweb]', `wa_qr_callback_error tenant=${tenant} status=${statusCode} body=${truncateBody(body)}`);
+      }
+      return;
+    } catch (err) {
+      const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
+      console.warn('[waweb]', `wa_qr_callback_exception tenant=${tenant} attempt=${attempt} reason=${reason}`);
+      if (attempt >= 3) return;
+      await wait(500 * attempt);
+    }
+  }
 }
 function ensureDir(p){ try{ fs.mkdirSync(p,{recursive:true}); } catch(_){} }
 function now(){ return Math.floor(Date.now()/1000); }
@@ -271,8 +409,11 @@ function pickChromePath(){
 }
 function log(t, s){ console.log('[waweb]', s, 't='+t); }
 
+ensureDir(STATE_DIR);
+lastQrCache = loadLastQrFromDisk();
+
 /* ---------- state ---------- */
-/** tenants[tenant] = { client, webhook, qrSvg, qrText, ready, lastTs, lastEvent } */
+/** tenants[tenant] = { client, webhook, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
 const tenants = Object.create(null);
 
 async function safeDestroy(client) {
@@ -295,23 +436,45 @@ function buildClient(tenant) {
 
   c.on('loading_screen', (p, t) => log(tenant, `loading ${p}% ${t||''}`));
   c.on('qr', async (qr) => {
-    tenants[tenant].qrSvg = await QRCode.toString(qr, { type: 'svg' });
+    let svg = '';
+    let png = '';
+    try {
+      svg = await QRCode.toString(qr, { type: 'svg' });
+    } catch (err) {
+      console.warn('[waweb]', `qr_svg_render_failed t=${tenant} reason=${err && err.message ? err.message : err}`);
+    }
+    try {
+      const dataUrl = await QRCode.toDataURL(qr, { type: 'image/png' });
+      png = (dataUrl || '').split(',').pop() || '';
+    } catch (err) {
+      console.warn('[waweb]', `qr_png_render_failed t=${tenant} reason=${err && err.message ? err.message : err}`);
+    }
+    if (svg) tenants[tenant].qrSvg = svg;
     tenants[tenant].qrText = qr;
+    tenants[tenant].qrPng = png || null;
     tenants[tenant].ready = false;
     tenants[tenant].lastEvent = 'qr';
     tenants[tenant].lastTs = now();
+    if (svg || png) persistLastQr(tenant, svg, png, tenants[tenant].lastTs);
+    try {
+      if (svg || png) {
+        await notifyTenantQr(tenant, svg, png, tenants[tenant].lastTs);
+      }
+    } catch (_) {}
     log(tenant, 'qr');
     triggerTenantSync(tenant);
   });
   c.on('authenticated', () => {
     tenants[tenant].lastEvent = 'authenticated';
     tenants[tenant].lastTs = now();
+    tenants[tenant].qrPng = null;
     log(tenant, 'authenticated');
     triggerTenantSync(tenant);
   });
   c.on('auth_failure', (m) => {
     tenants[tenant].ready = false;
     tenants[tenant].qrSvg = null;
+    tenants[tenant].qrPng = null;
     tenants[tenant].lastEvent = 'auth_failure';
     tenants[tenant].lastTs = now();
     log(tenant, 'auth_failure ' + (m||''));
@@ -319,6 +482,7 @@ function buildClient(tenant) {
   c.on('ready', () => {
     tenants[tenant].ready = true;
     tenants[tenant].qrSvg = null;
+    tenants[tenant].qrPng = null;
     tenants[tenant].lastEvent = 'ready';
     tenants[tenant].lastTs = now();
     log(tenant, 'ready');
@@ -326,6 +490,7 @@ function buildClient(tenant) {
   });
   c.on('disconnected', (reason) => {
     tenants[tenant].ready = false;
+    tenants[tenant].qrPng = null;
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
     log(tenant, 'disconnected ' + reason);
@@ -347,7 +512,7 @@ function ensureSession(tenant, webhookUrl) {
   if (!tenants[tenant]) {
     ensureDir(STATE_DIR);
     ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
-    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, ready: false, lastTs: now(), lastEvent: 'init' };
+    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, ready: false, lastTs: now(), lastEvent: 'init' };
     tenants[tenant].client = buildClient(tenant);
     tenants[tenant].client.initialize();
     log(tenant, 'init');
@@ -456,6 +621,18 @@ app.get('/session/:tenant/status', (req, res) => {
   return res.json({ ok:true, tenant:t, ready:!!s.ready, qr:!!s.qrSvg, last:s.lastEvent });
 });
 
+app.get('/session/qr.svg', (req, res) => {
+  if (!authorized(req)) return res.status(401).type('image/svg+xml').send('');
+  const snapshot = getLastQrSnapshot();
+  if (!snapshot || !snapshot.svg) {
+    try { console.log('[waweb]', 'qr_route_last_svg_404'); } catch(_){}
+    return res.status(404).type('image/svg+xml').send('');
+  }
+  res.setHeader('Cache-Control','no-store');
+  try { console.log('[waweb]', 'qr_route_last_svg_200', 't='+snapshot.tenant, 'ts='+snapshot.ts); } catch(_){}
+  return res.type('image/svg+xml').send(snapshot.svg);
+});
+
 app.get('/session/:tenant/qr.svg', (req, res) => {
   if (!authorized(req)) return res.status(401).type('image/svg+xml').send('');
   const t = String(req.params.tenant||'');
@@ -473,12 +650,19 @@ app.get('/session/:tenant/qr.png', async (req, res) => {
   if (!authorized(req)) return res.status(401).type('image/png').send('');
   const t = String(req.params.tenant||'');
   const s = tenants[t];
-  if (!s || !s.qrText) {
+  if (!s || (!s.qrText && !s.qrPng)) {
     try { console.log('[waweb]', 'qr_route_png_404', 't='+t, 'ready='+(!!s&&!!s.ready)); } catch(_){}
     return res.status(404).type('image/png').send('');
   }
   try {
-    const buf = await QRCode.toBuffer(s.qrText, { type: 'png' });
+    let buf;
+    if (s.qrPng) {
+      const b64 = String(s.qrPng).includes(',') ? String(s.qrPng).split(',').pop() : s.qrPng;
+      buf = Buffer.from(b64 || '', 'base64');
+    }
+    if (!buf || !buf.length) {
+      buf = await QRCode.toBuffer(s.qrText, { type: 'png' });
+    }
     res.setHeader('Cache-Control','no-store');
     try { console.log('[waweb]', 'qr_route_png_200', 't='+t, 'len='+(buf?buf.length:0)); } catch(_){}
     return res.type('image/png').send(buf);

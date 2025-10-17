@@ -15,6 +15,7 @@ import sys
 import time
 import uuid
 import asyncio
+import base64
 from typing import Any, Iterable, Mapping
 
 from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException, Query
@@ -1106,7 +1107,14 @@ async def _wa_status_impl(tenant: int) -> dict:
         connected = bool(data.get("connected"))
     else:
         connected = ready
-    return {"ok": True, "ready": ready, "connected": connected, "qr": qr, "last": last}
+    result = {"ok": True, "ready": ready, "connected": connected, "qr": qr, "last": last}
+    if last == "qr":
+        qr_id, redis_failed = _get_last_qr_id(tenant)
+        if qr_id:
+            result["qr_id"] = qr_id
+        elif redis_failed:
+            wa_logger.info("wa_qr_cache_unavailable tenant=%s", tenant)
+    return result
 
 def _fetch_qr_bytes(url: str, timeout: float = 6.0):
     req = urllib.request.Request(url, method="GET")
@@ -1242,10 +1250,60 @@ def _ensure_valid_qr_request(
     if expected and candidate == expected:
         return tenant_id, candidate
 
+
     if common.valid_key(tenant_id, candidate):
         return tenant_id, candidate
 
     return None
+
+
+def _get_last_qr_id(tenant: int) -> tuple[str | None, bool]:
+    key = f"wa:qr:last:{tenant}"
+    try:
+        client = common.redis_client()
+        value = client.get(key)
+    except redis_ex.RedisError:
+        return None, True
+    if not value:
+        return None, False
+    return str(value), False
+
+
+def _load_cached_qr_entry(tenant: int, qr_id: str) -> tuple[dict[str, Any] | None, bool]:
+    key = f"wa:qr:{tenant}:{qr_id}"
+    try:
+        client = common.redis_client()
+        raw = client.get(key)
+    except redis_ex.RedisError:
+        return None, True
+    if raw is None:
+        return None, False
+    if isinstance(raw, bytes):
+        raw = raw.decode('utf-8', errors='ignore')
+    entry: dict[str, Any] | None
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None, False
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            parsed = {'qr_svg': stripped}
+        entry = parsed if isinstance(parsed, dict) else {'qr_svg': stripped}
+    elif isinstance(raw, dict):
+        entry = raw
+    else:
+        entry = None
+    if entry is None:
+        return None, False
+    result: dict[str, Any] = dict(entry)
+    result.setdefault('tenant', tenant)
+    result.setdefault('ts', qr_id)
+    if isinstance(result.get('qr_svg'), str) and not result['qr_svg'].strip():
+        result.pop('qr_svg', None)
+    if isinstance(result.get('qr_png'), str) and not result['qr_png'].strip():
+        result.pop('qr_png', None)
+    return result, False
 
 
 async def _resolve_tenant_and_key(
@@ -1558,6 +1616,7 @@ def wa_qr_svg(
     request: Request,
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
+    qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
     if not WA_ENABLED:
         return JSONResponse({"error": "wa_disabled"}, status_code=503)
@@ -1565,7 +1624,32 @@ def wa_qr_svg(
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
-    return _proxy_qr_with_fallbacks(tenant_id)
+
+    requested_id = (qr_id or "").strip()
+    redis_failed = False
+    if not requested_id:
+        requested_id, redis_failed = _get_last_qr_id(tenant_id)
+    if redis_failed:
+        return JSONResponse({"error": "wa_cache_unavailable"}, status_code=503)
+    if not requested_id:
+        wa_logger.info("wa_qr_cache_miss tenant=%s reason=no_qr_id format=svg", tenant_id)
+        headers = _no_store_headers()
+        return Response(content="", media_type="image/svg+xml", headers=headers, status_code=404)
+
+    entry, redis_failed = _load_cached_qr_entry(tenant_id, requested_id)
+    if redis_failed:
+        return JSONResponse({"error": "wa_cache_unavailable"}, status_code=503)
+
+    svg_value = entry.get("qr_svg") if isinstance(entry, dict) else None
+    if not isinstance(svg_value, str) or not svg_value:
+        wa_logger.info("wa_qr_cache_miss tenant=%s qr_id=%s reason=no_svg", tenant_id, requested_id)
+        headers = _no_store_headers()
+        return Response(content="", media_type="image/svg+xml", headers=headers, status_code=404)
+
+    wa_logger.info("wa_qr_cache_hit tenant=%s qr_id=%s format=svg", tenant_id, requested_id)
+    headers = _no_store_headers()
+    headers["X-WA-QR-ID"] = requested_id
+    return Response(content=svg_value, media_type="image/svg+xml", headers=headers)
 
 
 @router.api_route("/pub/tg/start", methods=["GET", "POST"])
@@ -2079,6 +2163,7 @@ def wa_qr_png(
     request: Request,
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
+    qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
     if not WA_ENABLED:
         return JSONResponse({"error": "wa_disabled"}, status_code=503)
@@ -2086,10 +2171,39 @@ def wa_qr_png(
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
-    return _proxy_qr_with_fallbacks(tenant_id)
+
+    requested_id = (qr_id or "").strip()
+    redis_failed = False
+    if not requested_id:
+        requested_id, redis_failed = _get_last_qr_id(tenant_id)
+    if redis_failed:
+        return JSONResponse({"error": "wa_cache_unavailable"}, status_code=503)
+    if not requested_id:
+        headers = _no_store_headers()
+        return Response(content=b"", media_type="image/png", headers=headers, status_code=404)
+
+    entry, redis_failed = _load_cached_qr_entry(tenant_id, requested_id)
+    if redis_failed:
+        return JSONResponse({"error": "wa_cache_unavailable"}, status_code=503)
+
+    png_value = entry.get("qr_png") if isinstance(entry, dict) else None
+    if not isinstance(png_value, str) or not png_value.strip():
+        headers = _no_store_headers()
+        return Response(content=b"", media_type="image/png", headers=headers, status_code=404)
+
+    normalized = png_value.split(",")[-1].strip()
+    try:
+        binary = base64.b64decode(normalized, validate=False)
+    except Exception:
+        wa_logger.warning("wa_qr_cache_invalid_png tenant=%s qr_id=%s", tenant_id, requested_id)
+        return JSONResponse({"error": "invalid_qr"}, status_code=500)
+
+    headers = _no_store_headers()
+    headers["X-WA-QR-ID"] = requested_id
+    return Response(content=binary, media_type="image/png", headers=headers)
 
 
-@router.post("/pub/wa/restart")
+@router.get("/pub/wa/restart")
 async def wa_restart(
     request: Request,
     tenant: int = Query(..., description="Tenant identifier"),

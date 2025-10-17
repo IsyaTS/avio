@@ -1,4 +1,7 @@
 from fastapi import FastAPI
+import asyncio
+import json
+
 from fastapi.testclient import TestClient
 
 from app.web import public as public_module
@@ -16,16 +19,17 @@ def _configure_retry(monkeypatch, attempts=1, delay=0.0):
     monkeypatch.setattr(public_module.settings, "WA_QR_FETCH_RETRY_DELAY", delay, raising=False)
 
 
-def test_wa_qr_svg_calls_tenant_upstream_and_proxies_svg(monkeypatch):
+class _DummyRedis:
+    def __init__(self, store: dict[str, str]):
+        self.store = store
+
+    def get(self, key: str):  # pragma: no cover - simple test helper
+        return self.store.get(key)
+
+
+def test_wa_qr_svg_serves_cached_value(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    called = {}
-
-    def _fake_fetch(url: str, timeout: float = 6.0):
-        called["url"] = url
-        # Simulate waweb returning a valid SVG image
-        return 200, "image/svg+xml", b"<svg></svg>"
-
-    monkeypatch.setattr(public_module, "_fetch_qr_bytes", _fake_fetch)
+    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     valid_calls: list[tuple[int, str]] = []
@@ -36,6 +40,13 @@ def test_wa_qr_svg_calls_tenant_upstream_and_proxies_svg(monkeypatch):
 
     monkeypatch.setattr(public_module.common, "valid_key", _fake_valid_key)
 
+    store = {
+        "wa:qr:last:123": "abc123",
+        "wa:qr:123:abc123": json.dumps({"qr_svg": "<svg></svg>", "tenant": 123, "ts": "abc123"}),
+    }
+    dummy = _DummyRedis(store)
+    monkeypatch.setattr(public_module.common, "redis_client", lambda: dummy)
+
     app = _build_app(monkeypatch)
     client = TestClient(app)
 
@@ -43,17 +54,16 @@ def test_wa_qr_svg_calls_tenant_upstream_and_proxies_svg(monkeypatch):
 
     assert resp.status_code == 200
     assert resp.headers.get("content-type", "").startswith("image/svg+xml")
-    assert resp.headers.get("cache-control") == "no-store"
-
-    # Ensure tenant-scoped endpoint with query-format svg is used as primary
-    assert "/session/123/qr?format=svg" in called["url"]
+    cache_header = resp.headers.get("cache-control", "")
+    assert cache_header.split(",")[0] == "no-store"
+    assert resp.headers.get("x-wa-qr-id") == "abc123"
+    assert resp.text == "<svg></svg>"
     assert valid_calls == [(123, "tenant-access-key")]
 
 
-def test_wa_qr_svg_returns_204_on_404_or_empty_body(monkeypatch):
+def test_wa_qr_svg_returns_404_when_cache_empty(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    # Case 1: 404 from upstream
-    monkeypatch.setattr(public_module, "_fetch_qr_bytes", lambda url, timeout=6.0: (404, "text/plain", b""))
+    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     valid_calls: list[tuple[int, str]] = []
@@ -63,18 +73,16 @@ def test_wa_qr_svg_returns_204_on_404_or_empty_body(monkeypatch):
         return tenant_id == 1 and key == "tenant-key"
 
     monkeypatch.setattr(public_module.common, "valid_key", _fake_valid_key)
+    monkeypatch.setattr(public_module.common, "redis_client", lambda: _DummyRedis({}))
+
     app = _build_app(monkeypatch)
     client = TestClient(app)
-    resp = client.get("/pub/wa/qr.svg", params={"tenant": 1, "k": "tenant-key"})
-    assert resp.status_code == 204
-    assert resp.headers.get("cache-control") == "no-store"
 
-    # Case 2: 200 but empty body
-    monkeypatch.setattr(public_module, "_fetch_qr_bytes", lambda url, timeout=6.0: (200, "image/svg+xml", b""))
     resp = client.get("/pub/wa/qr.svg", params={"tenant": 1, "k": "tenant-key"})
-    assert resp.status_code == 204
-    assert resp.headers.get("cache-control") == "no-store"
-    assert valid_calls == [(1, "tenant-key"), (1, "tenant-key")]
+    assert resp.status_code == 404
+    cache_header = resp.headers.get("cache-control", "")
+    assert cache_header.split(",")[0] == "no-store"
+    assert valid_calls == [(1, "tenant-key")]
 
 
 def test_wa_qr_routes_reject_missing_query_args(monkeypatch):
@@ -132,33 +140,43 @@ def test_wa_status_accepts_tenant_valid_key(monkeypatch):
     assert webhook_calls and webhook_calls[0][1]["tenant_id"] == 55
 
 
-def test_wa_qr_svg_retries_until_qr_available(monkeypatch):
-    # allow two attempts with no actual sleep
-    _configure_retry(monkeypatch, attempts=2, delay=0.0)
-    attempts: list[str] = []
-
-    def _fake_fetch(url: str, timeout: float = 6.0):
-        attempts.append(url)
-        if len(attempts) == 1:
-            return 404, "text/plain", b""
-        return 200, "image/svg+xml", b"<svg></svg>"
-
-    monkeypatch.setattr(public_module, "_fetch_qr_bytes", _fake_fetch)
+def test_wa_qr_svg_respects_explicit_qr_id(monkeypatch):
+    _configure_retry(monkeypatch, attempts=1, delay=0.0)
+    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     def _fake_valid_key(tenant_id: int, key: str) -> bool:
         return tenant_id == 77 and key == "tenant-77-key"
 
     monkeypatch.setattr(public_module.common, "valid_key", _fake_valid_key)
-    # prevent actual sleeping even if delay misconfigured
-    monkeypatch.setattr(public_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    store = {
+        "wa:qr:last:77": "other",  # ensure explicit id is respected
+        "wa:qr:77:special": json.dumps({"qr_svg": "<svg id=\"special\"></svg>"}),
+    }
+    monkeypatch.setattr(public_module.common, "redis_client", lambda: _DummyRedis(store))
 
     app = _build_app(monkeypatch)
     client = TestClient(app)
 
-    resp = client.get("/pub/wa/qr.svg", params={"tenant": 77, "k": "tenant-77-key"})
+    resp = client.get(
+        "/pub/wa/qr.svg",
+        params={"tenant": 77, "k": "tenant-77-key", "qr_id": "special"},
+    )
 
     assert resp.status_code == 200
-    assert any("/session/77/qr" in url for url in attempts)
-    # ensure we actually retried at least twice
-    assert len(attempts) >= 2
+    assert resp.headers.get("x-wa-qr-id") == "special"
+    assert "special" in resp.text
+
+
+def test_wa_status_impl_adds_qr_id(monkeypatch):
+    store = {"wa:qr:last:5": "qr123"}
+    monkeypatch.setattr(public_module.common, "redis_client", lambda: _DummyRedis(store))
+
+    payload = json.dumps({"ready": False, "qr": True, "last": "qr"})
+    monkeypatch.setattr(public_module.common, "http", lambda method, url, body=None, timeout=8.0: (200, payload))
+
+    result = asyncio.run(public_module._wa_status_impl(5))
+
+    assert result["qr_id"] == "qr123"
+    assert result["last"] == "qr"
