@@ -8,7 +8,7 @@ import logging
 from typing import Any, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 try:
     import core  # type: ignore
@@ -529,7 +529,65 @@ async def telegram_webhook(request: Request):
     return await process_incoming(body, request)
 
 
-__all__ = ["router", "process_incoming"]
+@router.post("/webhook/provider")
+async def provider_webhook(request: Request) -> Response:
+    token = _extract_token(request)
+    secret = settings.WEBHOOK_SECRET or ""
+    if secret and token != secret:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    provider = str(payload.get("provider") or "").strip().lower()
+    event = str(payload.get("event") or "").strip().lower()
+    if provider != "whatsapp" or event != "wa_qr":
+        return Response(status_code=204)
+
+    tenant_candidate = _coerce_int(payload.get("tenant"))
+    qr_id_raw = payload.get("qr_id")
+    qr_body = payload.get("qr")
+    if tenant_candidate is None:
+        raise HTTPException(status_code=400, detail="invalid_tenant")
+    if qr_id_raw is None or qr_body is None:
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    tenant = int(tenant_candidate)
+    qr_id = str(qr_id_raw).strip()
+    qr_text = str(qr_body)
+    if not qr_id or not qr_text:
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    cache_key = f"wa:qr:{tenant}:{qr_id}"
+    last_key = f"wa:qr:last:{tenant}"
+    entry = {
+        "tenant": tenant,
+        "qr_id": qr_id,
+        "qr_text": qr_text,
+        "provider": provider,
+        "event": event,
+        "updated_at": int(time.time()),
+    }
+
+    try:
+        await _redis_queue.set(cache_key, json.dumps(entry, ensure_ascii=False))
+        await _redis_queue.set(last_key, qr_id)
+    except Exception:
+        logger.exception("wa_qr_cache_write_failed tenant=%s qr_id=%s", tenant, qr_id)
+        raise HTTPException(status_code=500, detail="cache_error")
+
+    logger.info("wa_qr_cached tenant=%s qr_id=%s", tenant, qr_id)
+    return Response(status_code=204)
+
+
+__all__ = ["router", "process_incoming", "provider_webhook"]
 async def _is_duplicate(provider: str, tenant: int, message_id: str | None) -> bool:
     if not message_id:
         return False

@@ -12,6 +12,7 @@ const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(__dirname, '.w
 const APP_WEBHOOK = (process.env.APP_WEBHOOK || '').trim();
 const TENANT_DEFAULT = Number(process.env.TENANT_DEFAULT || '0') || 0;
 const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+const WEBHOOK_SECRET = (process.env.WEBHOOK_SECRET || '').trim();
 const APP_BASE_URL = (() => {
   const raw = (process.env.APP_BASE_URL || '').trim();
   const fallback = 'http://app:8000';
@@ -211,13 +212,18 @@ function truncateBody(body, limit = 200) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-async function notifyTenantQr(tenant, svg, png, ts) {
-  const url = `${APP_BASE_URL}/internal/tenant/${tenant}/wa/qr`;
-  const payload = { tenant: Number(tenant), ts };
-  if (svg) payload.qr_svg = svg;
-  if (png) payload.qr_png = png;
+async function notifyTenantQr(tenant, qrText, qrId) {
+  const url = `${APP_BASE_URL}/webhook/provider`;
+  const payload = {
+    provider: 'whatsapp',
+    event: 'wa_qr',
+    tenant: Number(tenant),
+    qr_id: qrId,
+    qr: qrText,
+  };
   const headers = {};
-  if (ADMIN_TOKEN) headers['X-Admin-Token'] = ADMIN_TOKEN;
+  if (WEBHOOK_SECRET) headers['X-Webhook-Token'] = WEBHOOK_SECRET;
+  else if (ADMIN_TOKEN) headers['X-Webhook-Token'] = ADMIN_TOKEN;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const { statusCode, body } = await requestJson('POST', url, payload, headers);
@@ -436,6 +442,7 @@ function buildClient(tenant) {
 
   c.on('loading_screen', (p, t) => log(tenant, `loading ${p}% ${t||''}`));
   c.on('qr', async (qr) => {
+    const qrId = Date.now();
     let svg = '';
     let png = '';
     try {
@@ -455,10 +462,11 @@ function buildClient(tenant) {
     tenants[tenant].ready = false;
     tenants[tenant].lastEvent = 'qr';
     tenants[tenant].lastTs = now();
-    if (svg || png) persistLastQr(tenant, svg, png, tenants[tenant].lastTs);
+    tenants[tenant].qrId = qrId;
+    if (svg || png) persistLastQr(tenant, svg, png, qrId);
     try {
-      if (svg || png) {
-        await notifyTenantQr(tenant, svg, png, tenants[tenant].lastTs);
+      if (qr) {
+        await notifyTenantQr(tenant, qr, qrId);
       }
     } catch (_) {}
     log(tenant, 'qr');
@@ -512,7 +520,7 @@ function ensureSession(tenant, webhookUrl) {
   if (!tenants[tenant]) {
     ensureDir(STATE_DIR);
     ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
-    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, ready: false, lastTs: now(), lastEvent: 'init' };
+    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init' };
     tenants[tenant].client = buildClient(tenant);
     tenants[tenant].client.initialize();
     log(tenant, 'init');
