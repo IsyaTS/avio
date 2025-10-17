@@ -149,22 +149,26 @@ curl -X POST "http://127.0.0.1:8000/send" \
 
 ```json
 {
+  "event": "messages.incoming",
   "tenant": 1,
+  "provider": "whatsapp",
   "channel": "whatsapp",
-  "from_id": "79001234567@c.us",
-  "to": "my-biz@c.us",
+  "message_id": "wamid.123",
+  "from": "+79991234567",
+  "from_jid": "79991234567@c.us",
   "text": "Добрый день",
-  "attachments": [],
-  "ts": 1714650000,
-  "provider_raw": {
-    "id": "ABCD",
-    "type": "chat"
-  }
+  "ts": 1715683200,
+  "media": [
+    {
+      "type": "image",
+      "mime_type": "image/jpeg",
+      "url": "https://example.org/media/1"
+    }
+  ]
 }
 ```
 
-Каждое валидное входящее событие складывается в Redis по ключу `inbox:message_in` (LPUSH), что позволяет независимо подтверждать доставку.
-Все поля типа datetime в телеграм-вебхуке сериализуются в формате ISO 8601 (UTC) либо в миллисекундах эпохи, чтобы не зависеть от часового пояса контейнеров.
+Каждое валидное входящее событие складывается в Redis по ключу `inbox:message_in` (LPUSH), что позволяет независимо подтверждать доставку. `provider_token` передаётся либо как query-параметр `token`, либо в заголовке `X-Provider-Token`. Все поля типа datetime сериализуются в формате ISO 8601 (UTC) либо в миллисекундах эпохи, чтобы не зависеть от часового пояса контейнеров.
 
 ## Inbound WhatsApp
 
@@ -181,7 +185,7 @@ curl -X POST "http://127.0.0.1:8000/send" \
   }
   ```
 
-- Токен сохраняется в таблицу `provider_tokens` и переиспользуется при повторных вызовах.
+- Токен сохраняется в таблицу `provider_tokens` (`tenant INT PRIMARY KEY`, `token TEXT UNIQUE NOT NULL`, `created_at TIMESTAMPTZ DEFAULT now()`) и переиспользуется при повторных вызовах.
 - Админ-роут `/admin/keys/list?tenant=<id>` (с `X-Admin-Token`) возвращает текущий `provider_token` для выбранного tenant.
 
 ### Контракт `/webhook/provider`
@@ -233,6 +237,8 @@ curl -X POST "http://127.0.0.1:8000/send" \
 
 ## Диагностика
 
+- `make diag` — запускает основной скрипт `scripts/diag.sh` с минимальным выводом (передайте `AVIO_URL` и `ADMIN_TOKEN`).
+- `make diag-verbose` — тот же скрипт, но с расширенным логированием (`DIAG_VERBOSE=1`).
 - Проверка сервисов: `GET http://127.0.0.1:8000/health` (app) и `GET http://waweb:9001/health` (waweb).
 - Тестирование канала: `POST /send` (app) и `POST /send` на `waweb` с `X-Auth-Token`.
 - Публичные WA-эндпойнты: `GET /pub/wa/status?k=<PUBLIC_KEY>&tenant=<TENANT>` и `POST /pub/wa/start`.

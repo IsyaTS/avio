@@ -709,21 +709,25 @@ async def provider_webhook(request: Request) -> Response:
         payload = await request.json()
     except json.JSONDecodeError:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_json", channel_label).inc()
-        raise HTTPException(status_code=400, detail="invalid_json")
+        raise HTTPException(status_code=422, detail="invalid_json")
     except Exception:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
-        raise HTTPException(status_code=400, detail="invalid_payload")
+        raise HTTPException(status_code=422, detail="invalid_payload")
 
     if not isinstance(payload, dict):
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
         raise HTTPException(status_code=422, detail="invalid_payload")
+
+    if "tenant" not in payload:
+        WEBHOOK_PROVIDER_COUNTER.labels("invalid_tenant", channel_label).inc()
+        raise HTTPException(status_code=422, detail="invalid_tenant")
 
     provider = str(payload.get("provider") or payload.get("channel") or channel_label).strip().lower()
     if provider and provider not in {"whatsapp", "wa"}:
         WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
         return Response(status_code=204)
 
-    tenant_candidate = _coerce_int(payload.get("tenant") or payload.get("tenant_id"))
+    tenant_candidate = _coerce_int(payload.get("tenant"))
     if tenant_candidate is None:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_tenant", channel_label).inc()
         raise HTTPException(status_code=422, detail="invalid_tenant")

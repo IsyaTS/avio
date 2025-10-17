@@ -1185,6 +1185,8 @@ async def wa_start(
 
 
 async def _wa_status_impl(tenant: int) -> dict:
+    cached_qr_id, redis_failed = _get_last_qr_id(int(tenant))
+
     code, raw = common.http(
         "GET", f"{common.WA_WEB_URL}/session/{int(tenant)}/status", timeout=3.0
     )
@@ -1197,6 +1199,8 @@ async def _wa_status_impl(tenant: int) -> dict:
 
     state_value, need_qr_flag = _derive_wa_state(data)
     qr_id_value = _normalize_qr_id(data.get("qr_id") or data.get("qrId"))
+    if qr_id_value is None and cached_qr_id and not redis_failed:
+        qr_id_value = cached_qr_id
 
     ready_flag = _truthy_flag(data.get("ready"))
     connected_flag = _truthy_flag(data.get("connected"))
@@ -1215,6 +1219,8 @@ async def _wa_status_impl(tenant: int) -> dict:
         bool(data.get("connected")) if "connected" in data else connected_flag or ready_flag
     )
     payload["qr"] = bool(data.get("qr")) if "qr" in data else qr_flag
+    if redis_failed:
+        payload["qr_cache_unavailable"] = True
     if last_value is not None:
         payload["last"] = last_value
     if qr_id_value is not None:
