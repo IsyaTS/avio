@@ -107,6 +107,8 @@
     const query = `tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(key)}`;
     let statusTimer = null;
     let lastQrUrl = null;
+    let activePolling = false;
+    let activePollingStartedAt = 0;
 
     const showQr = () => {
         if (!qrImg) return;
@@ -131,6 +133,11 @@
         qrMessage.style.display = 'none';
     };
 
+    const ACTIVE_POLL_INTERVAL = 1500;
+    const ACTIVE_POLL_TIMEOUT = 180000;
+    const IDLE_POLL_INTERVAL = 15000;
+    const ERROR_POLL_INTERVAL = 8000;
+
     const scheduleStatusPoll = (delay) => {
         if (statusTimer) {
             clearTimeout(statusTimer);
@@ -142,6 +149,21 @@
                 console.debug('[wa-connect] status poll error', error);
             });
         }, delay);
+    };
+
+    const startActivePolling = () => {
+        activePolling = true;
+        activePollingStartedAt = Date.now();
+    };
+
+    const stopActivePolling = () => {
+        activePolling = false;
+        activePollingStartedAt = 0;
+    };
+
+    const hasPollingTimedOut = () => {
+        if (!activePolling) return false;
+        return Date.now() - activePollingStartedAt > ACTIVE_POLL_TIMEOUT;
     };
 
     const updateStatus = (text, offline) => {
@@ -164,14 +186,12 @@
         clearMessage();
     };
 
-    const restartSession = async () => {
-        const url = `/pub/wa/restart?${query}`;
-        try {
-            const response = await fetch(url, { method: 'POST', cache: 'no-store' });
-            console.debug('[wa-connect] restart resp', response.status);
-        } catch (error) {
-            console.debug('[wa-connect] restart resp', 'error');
-            throw error;
+    const startSession = async () => {
+        const url = `/pub/wa/start?${query}`;
+        const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+        console.debug('[wa-connect] start resp', response.status);
+        if (!response.ok) {
+            throw new Error('wa_start_failed');
         }
     };
 
@@ -182,47 +202,60 @@
             statusTimer = null;
         }
         const url = `/pub/wa/status?${query}`;
-        let nextDelay = 15000;
+        let nextDelay = activePolling ? ACTIVE_POLL_INTERVAL : IDLE_POLL_INTERVAL;
+        let stopAfterCycle = false;
         try {
             const response = await fetch(url, { cache: 'no-store' });
             if (!response.ok) {
                 updateStatus('Статус недоступен', true);
+                hideQr();
                 setMessage('Не удалось получить статус');
-                scheduleStatusPoll(nextDelay);
-                return;
-            }
-            const payload = await response.json();
-            const state = typeof payload.state === 'string' ? payload.state : null;
-            const needQr = !!payload.need_qr || state === 'qr';
-            const connected = !!(payload.ready || payload.connected || state === 'ready');
-            const qrUrlFromStatus = typeof payload.qr_url === 'string' ? payload.qr_url : null;
-
-            if (needQr) {
-                updateStatus('Ожидает сканирования', true);
-                if (qrUrlFromStatus) {
-                    updateQrImage(qrUrlFromStatus);
-                    nextDelay = 5000;
-                } else {
-                    hideQr();
-                    setMessage('QR не готов');
-                    nextDelay = 4000;
-                }
-            } else if (connected) {
-                updateStatus('Подключено', false);
-                hideQr();
-                clearMessage();
-                lastQrUrl = null;
-                nextDelay = 15000;
+                nextDelay = activePolling ? ACTIVE_POLL_INTERVAL : ERROR_POLL_INTERVAL;
             } else {
-                const fallbackState = state ? state : 'нет данных';
-                updateStatus(`Статус: ${fallbackState}`, true);
-                hideQr();
-                setMessage('Ожидаем подключение');
-                nextDelay = 8000;
+                const payload = await response.json();
+                const state = typeof payload.state === 'string' ? payload.state : null;
+                const needQr = !!payload.need_qr || state === 'qr';
+                const connected = !!(payload.ready || payload.connected || state === 'ready');
+                const qrUrlFromStatus = typeof payload.qr_url === 'string' ? payload.qr_url : null;
+
+                if (needQr) {
+                    updateStatus('Ожидает сканирования', true);
+                    if (qrUrlFromStatus) {
+                        updateQrImage(qrUrlFromStatus);
+                    } else {
+                        hideQr();
+                        setMessage('QR не готов');
+                    }
+                    nextDelay = activePolling ? ACTIVE_POLL_INTERVAL : 4000;
+                } else if (connected) {
+                    updateStatus('Подключено', false);
+                    hideQr();
+                    clearMessage();
+                    lastQrUrl = null;
+                    stopActivePolling();
+                    stopAfterCycle = true;
+                } else {
+                    const fallbackState = state ? state : 'нет данных';
+                    updateStatus(`Статус: ${fallbackState}`, true);
+                    hideQr();
+                    setMessage('Ожидаем подключение');
+                    nextDelay = activePolling ? ACTIVE_POLL_INTERVAL : ERROR_POLL_INTERVAL;
+                }
             }
         } catch (error) {
             updateStatus('Статус недоступен', true);
+            hideQr();
             setMessage('Не удалось получить статус');
+            nextDelay = activePolling ? ACTIVE_POLL_INTERVAL : ERROR_POLL_INTERVAL;
+        }
+        if (hasPollingTimedOut()) {
+            stopActivePolling();
+            hideQr();
+            setMessage('Время ожидания истекло. Нажмите «Обновить QR».');
+            return;
+        }
+        if (stopAfterCycle) {
+            return;
         }
         scheduleStatusPoll(nextDelay);
     };
@@ -234,9 +267,14 @@
             hideQr();
             setMessage('Обновляем QR…');
             try {
-                await restartSession();
+                await startSession();
+                startActivePolling();
             } catch (error) {
-                setMessage('Не удалось перезапустить сессию');
+                stopActivePolling();
+                updateStatus('Статус недоступен', true);
+                setMessage('Не удалось обновить QR');
+                scheduleStatusPoll(IDLE_POLL_INTERVAL);
+                return;
             }
             fetchStatus();
         });
