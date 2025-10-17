@@ -667,6 +667,10 @@ DEFAULT_TENANT_JSON = {
         "ga_id": "",
         "uploaded_catalog": "",
     },
+    "channels": {
+        "whatsapp": {"enabled": True},
+        "telegram": {"enabled": True},
+    },
 }
 
 DEFAULT_PERSONA_MD = """{AGENT_NAME} из {BRAND}, {CITY}. Канал: {CHANNEL}. Валюта: {CURRENCY}.\nПравила:\n- Говори живо и предметно: 2–3 коротких абзаца или списки.\n- Показывай конкретные товары с их выгодами, держи фокус на продаже.\n- Максимум один уточняющий вопрос в ответе.\n- Один понятный CTA в финале, без длинных сценариев.\n- Если клиент просит каталог — предложи лучшие позиции и ссылку.\n\nТактика: активное слушание, выгоды «что получите», уместное соцдоказательство и мягкая допродажа (≤1 за ответ). Антидублирование: не повторяй вступление и одинаковые товары подряд.\n"""
@@ -687,6 +691,34 @@ def ensure_tenant_files(tenant: int) -> pathlib.Path:
         cfg.setdefault("passport", {})["tenant_id"] = int(tenant)
         with open(tj, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    else:
+        try:
+            with open(tj, "r", encoding="utf-8") as fh:
+                existing_cfg = json.load(fh)
+        except Exception:
+            existing_cfg = {}
+
+        channels = existing_cfg.get("channels") if isinstance(existing_cfg, dict) else None
+        mutated = False
+        if not isinstance(channels, dict):
+            channels = {"whatsapp": {"enabled": True}}
+            existing_cfg["channels"] = channels
+            mutated = True
+        else:
+            whatsapp_cfg = channels.get("whatsapp")
+            if not isinstance(whatsapp_cfg, dict):
+                channels["whatsapp"] = {"enabled": True}
+                mutated = True
+            elif "enabled" not in whatsapp_cfg:
+                whatsapp_cfg["enabled"] = True
+                mutated = True
+
+        if mutated:
+            try:
+                with open(tj, "w", encoding="utf-8") as fh:
+                    json.dump(existing_cfg, fh, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
 
     if not pm.exists() or pm.stat().st_size == 0:
         with open(pm, "w", encoding="utf-8") as fh:

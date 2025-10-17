@@ -29,7 +29,7 @@ class _DummyRedis:
 
 def test_wa_qr_svg_serves_cached_value(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     valid_calls: list[tuple[int, str]] = []
@@ -63,7 +63,7 @@ def test_wa_qr_svg_serves_cached_value(monkeypatch):
 
 def test_wa_qr_svg_returns_410_when_cache_empty(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     valid_calls: list[tuple[int, str]] = []
@@ -100,6 +100,7 @@ def test_wa_qr_routes_reject_missing_query_args(monkeypatch):
 
 def test_wa_status_accepts_tenant_valid_key(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     valid_calls: list[tuple[int, str]] = []
@@ -110,26 +111,16 @@ def test_wa_status_accepts_tenant_valid_key(monkeypatch):
 
     monkeypatch.setattr(public_module.common, "valid_key", _fake_valid_key)
 
-    webhook_calls: list[tuple[str, dict]] = []
-
-    monkeypatch.setattr(public_module.common, "webhook_url", lambda: "https://example.test/webhook")
-
-    async def _fake_wa_post(path: str, payload: dict) -> object:
-        webhook_calls.append((path, payload))
-
-        class _Resp:
-            status_code = 200
-
-        return _Resp()
-
-    monkeypatch.setattr(public_module.common, "wa_post", _fake_wa_post)
-
     async def _fake_status_impl(tenant_id: int) -> dict:
         assert tenant_id == 55
         return {"ok": True, "ready": True, "connected": True, "qr": False, "last": 123}
 
     monkeypatch.setattr(public_module, "_wa_status_impl", _fake_status_impl)
-    monkeypatch.setattr(public_module.common, "redis_client", lambda: _DummyRedis({}))
+    store = {
+        "wa:qr:last:55": "abc123",
+        "wa:qr:55:abc123": json.dumps({"qr_svg": "<svg />"}),
+    }
+    monkeypatch.setattr(public_module.common, "redis_client", lambda: _DummyRedis(store))
 
     app = _build_app(monkeypatch)
     client = TestClient(app)
@@ -143,15 +134,15 @@ def test_wa_status_accepts_tenant_valid_key(monkeypatch):
         "connected": True,
         "qr": False,
         "last": 123,
-        "qr_url": "/pub/wa/qr.svg?tenant=55&k=tenant-55-key",
+        "qr_id": "abc123",
+        "qr_url": "/pub/wa/qr.svg?tenant=55&k=tenant-55-key&qr_id=abc123",
     }
     assert valid_calls == [(55, "tenant-55-key")]
-    assert webhook_calls and webhook_calls[0][1]["tenant_id"] == 55
 
 
 def test_wa_qr_svg_respects_explicit_qr_id(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     def _fake_valid_key(tenant_id: int, key: str) -> bool:
@@ -180,7 +171,7 @@ def test_wa_qr_svg_respects_explicit_qr_id(monkeypatch):
 
 def test_wa_qr_svg_renders_from_text(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     def _fake_valid_key(tenant_id: int, key: str) -> bool:
@@ -207,7 +198,7 @@ def test_wa_qr_svg_renders_from_text(monkeypatch):
 
 def test_wa_qr_png_renders_from_text(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     def _fake_valid_key(tenant_id: int, key: str) -> bool:
@@ -247,13 +238,16 @@ def test_wa_status_impl_adds_qr_id(monkeypatch):
 
 def test_wa_start_returns_state(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
-    monkeypatch.setattr(public_module, "WA_ENABLED", True, raising=False)
+    monkeypatch.setattr(public_module, "_wa_channel_enabled", lambda tenant: True, raising=False)
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "global-public-key")
 
     def _fake_valid_key(tenant_id: int, key: str) -> bool:
         return tenant_id == 42 and key == "tenant-42-key"
 
-    store = {"wa:qr:last:42": "qr-42"}
+    store = {
+        "wa:qr:last:42": "qr-42",
+        "wa:qr:42:qr-42": json.dumps({"qr_svg": "<svg />"}),
+    }
     monkeypatch.setattr(public_module.common, "valid_key", _fake_valid_key)
     monkeypatch.setattr(public_module.common, "redis_client", lambda: _DummyRedis(store))
     monkeypatch.setattr(public_module.common, "webhook_url", lambda: "https://example.test/webhook")
@@ -290,6 +284,6 @@ def test_wa_start_returns_state(monkeypatch):
         "ok": True,
         "state": "qr",
         "qr_id": "qr-42",
-        "qr_url": "/pub/wa/qr.svg?tenant=42&k=tenant-42-key",
+        "qr_url": "/pub/wa/qr.svg?tenant=42&k=tenant-42-key&qr_id=qr-42",
     }
-    assert calls and calls[0][0] == "/session/start"
+    assert calls and calls[0][0] == "/session/42/start"

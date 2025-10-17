@@ -1081,18 +1081,25 @@ async def wa_status(
     if ok is None:
         return _invalid_key_response()
     tenant_id, validated_key = ok
-    try:
-        webhook = common.webhook_url()
-        payload = {"tenant_id": int(tenant_id), "webhook_url": webhook}
-        resp = await common.wa_post("/session/start", payload)
-        status = int(getattr(resp, "status_code", 0) or 0)
-        if status == 404:
-            await common.wa_post(f"/session/{int(tenant_id)}/start", payload)
-    except Exception:
-        pass
+    if not _wa_channel_enabled(tenant_id):
+        return JSONResponse({"error": "wa_disabled"}, status_code=503)
+
     result = await _wa_status_impl(int(tenant_id))
+
+    qr_id_value, _, redis_failed = _resolve_cached_qr(int(tenant_id))
+    if redis_failed:
+        result.pop("qr_id", None)
+    elif qr_id_value:
+        result["qr_id"] = qr_id_value
+    else:
+        result.pop("qr_id", None)
+
     if validated_key:
-        result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
+        if qr_id_value:
+            result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key, qr_id_value)
+        else:
+            result["qr_url"] = None
+
     return result
 
 
@@ -1102,51 +1109,50 @@ async def wa_start(
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
-    if not WA_ENABLED:
-        return JSONResponse({"error": "wa_disabled"}, status_code=503)
-
     ok = _ensure_valid_qr_request(tenant, k, request)
     if ok is None:
         return _invalid_key_response()
     tenant_id, validated_key = ok
 
+    if not _wa_channel_enabled(tenant_id):
+        return JSONResponse({"error": "wa_disabled"}, status_code=503)
+
     webhook = common.webhook_url()
     payload = {"tenant_id": int(tenant_id), "webhook_url": webhook}
     try:
-        response = await common.wa_post("/session/start", payload)
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status == 404:
-            response = await common.wa_post(f"/session/{int(tenant_id)}/start", payload)
-            status = int(getattr(response, "status_code", 0) or 0)
+        response = await common.wa_post(f"/session/{int(tenant_id)}/start", payload)
     except Exception:
         return JSONResponse({"error": "wa_unavailable"}, status_code=502)
 
+    status = int(getattr(response, "status_code", 0) or 0)
     if status <= 0 or status >= 400:
         return JSONResponse({"error": "wa_unavailable"}, status_code=502)
 
-    snapshot = await _wa_status_impl(int(tenant_id))
-    qr_id_value = snapshot.get("qr_id") if isinstance(snapshot, dict) else None
-    if qr_id_value is None:
-        qr_id_value, redis_failed = _get_last_qr_id(int(tenant_id))
-        if redis_failed:
-            qr_id_value = None
+    try:
+        response_data = response.json()
+    except Exception:
+        response_data = {}
+    if not isinstance(response_data, dict):
+        response_data = {}
 
+    snapshot = await _wa_status_impl(int(tenant_id))
     state_value = snapshot.get("last") if isinstance(snapshot, dict) else None
     if state_value is None:
-        try:
-            data = response.json()
-        except Exception:
-            data = {}
-        if isinstance(data, dict):
-            state_value = data.get("last") or data.get("state")
+        state_value = response_data.get("state") or response_data.get("last")
 
-    qr_url = _build_public_wa_qr_url(int(tenant_id), validated_key) if validated_key else ""
+    qr_id_value, _, redis_failed = _resolve_cached_qr(int(tenant_id))
+    if redis_failed:
+        qr_id_value = None
+
+    qr_url_value: str | None = None
+    if validated_key and qr_id_value:
+        qr_url_value = _build_public_wa_qr_url(int(tenant_id), validated_key, qr_id_value)
 
     result = {
         "ok": True,
         "state": state_value,
         "qr_id": qr_id_value,
-        "qr_url": qr_url,
+        "qr_url": qr_url_value,
     }
     return JSONResponse(result)
 
@@ -1176,9 +1182,11 @@ async def _wa_status_impl(tenant: int) -> dict:
     return result
 
 
-def _build_public_wa_qr_url(tenant: int, key: str) -> str:
-    encoded_key = quote_plus(str(key or ""))
-    return f"/pub/wa/qr.svg?tenant={int(tenant)}&k={encoded_key}"
+def _build_public_wa_qr_url(tenant: int, key: str, qr_id: str | None = None) -> str:
+    params: dict[str, Any] = {"tenant": int(tenant), "k": str(key or "")}
+    if qr_id:
+        params["qr_id"] = str(qr_id)
+    return f"/pub/wa/qr.svg?{urlencode(params, doseq=False)}"
 
 def _fetch_qr_bytes(url: str, timeout: float = 6.0):
     req = urllib.request.Request(url, method="GET")
@@ -1376,6 +1384,20 @@ def _load_cached_qr_entry(tenant: int, qr_id: str) -> tuple[dict[str, Any] | Non
     if isinstance(result.get('qr_text'), str) and not result['qr_text'].strip():
         result.pop('qr_text', None)
     return result, False
+
+
+def _resolve_cached_qr(tenant: int) -> tuple[str | None, dict[str, Any] | None, bool]:
+    qr_id, redis_failed = _get_last_qr_id(tenant)
+    if redis_failed:
+        return None, None, True
+    if not qr_id:
+        return None, None, False
+    entry, entry_failed = _load_cached_qr_entry(tenant, qr_id)
+    if entry_failed:
+        return None, None, True
+    if entry is None:
+        return None, None, False
+    return qr_id, entry, False
 
 
 def _qr_expired_response(qr_id: str | None = None) -> JSONResponse:
@@ -1718,9 +1740,6 @@ def _truthy_flag(value: Any) -> bool:
     return False
 
 
-WA_ENABLED = _truthy_flag(os.getenv("WA_ENABLED", "true"))
-
-
 def _coerce_body_bytes(body: Any) -> bytes:
     if isinstance(body, (bytes, bytearray)):
         return bytes(body)
@@ -1734,6 +1753,28 @@ def _coerce_body_bytes(body: Any) -> bytes:
         return b""
 
 
+def _wa_channel_enabled(tenant: int) -> bool:
+    try:
+        cfg = common.read_tenant_config(int(tenant))
+    except Exception:
+        return False
+
+    channels = cfg.get("channels") if isinstance(cfg, dict) else None
+    if isinstance(channels, dict):
+        whatsapp_cfg = channels.get("whatsapp")
+        if isinstance(whatsapp_cfg, dict):
+            if "enabled" in whatsapp_cfg:
+                return _truthy_flag(whatsapp_cfg.get("enabled"))
+            if "active" in whatsapp_cfg:
+                return _truthy_flag(whatsapp_cfg.get("active"))
+        elif isinstance(whatsapp_cfg, bool):
+            return whatsapp_cfg
+    elif isinstance(channels, list):
+        return "whatsapp" in {str(item).lower() for item in channels}
+
+    return False
+
+
 @router.get("/pub/wa/qr.svg")
 def wa_qr_svg(
     request: Request,
@@ -1741,12 +1782,13 @@ def wa_qr_svg(
     k: str = Query(..., description="PUBLIC_KEY access token"),
     qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
-    if not WA_ENABLED:
-        return JSONResponse({"error": "wa_disabled"}, status_code=503)
     ok = _ensure_valid_qr_request(tenant, k, request)
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
+
+    if not _wa_channel_enabled(tenant_id):
+        return JSONResponse({"error": "wa_disabled"}, status_code=503)
 
     requested_id = (qr_id or "").strip()
     redis_failed = False
@@ -2305,12 +2347,13 @@ def wa_qr_png(
     k: str = Query(..., description="PUBLIC_KEY access token"),
     qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
-    if not WA_ENABLED:
-        return JSONResponse({"error": "wa_disabled"}, status_code=503)
     ok = _ensure_valid_qr_request(tenant, k, request)
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
+
+    if not _wa_channel_enabled(tenant_id):
+        return JSONResponse({"error": "wa_disabled"}, status_code=503)
 
     requested_id = (qr_id or "").strip()
     redis_failed = False
