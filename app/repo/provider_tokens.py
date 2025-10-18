@@ -82,4 +82,21 @@ async def create_for_tenant(tenant_id: int, token: str) -> ProviderToken | None:
     return await get_by_tenant(int(tenant_id))
 
 
-__all__ = ["get_by_tenant", "create_for_tenant"]
+async def upsert(tenant_id: int, token: str) -> ProviderToken | None:
+    row = await _fetchrow(
+        """
+        INSERT INTO provider_tokens (tenant, token)
+        VALUES ($1, $2)
+        ON CONFLICT (tenant)
+        DO UPDATE SET token = EXCLUDED.token, created_at = now()
+        RETURNING tenant AS tenant_id, token, created_at
+        """,
+        int(tenant_id),
+        str(token),
+    )
+    if not row:
+        return None
+    return _row_to_token(row)
+
+
+__all__ = ["get_by_tenant", "create_for_tenant", "upsert"]

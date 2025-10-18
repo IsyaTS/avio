@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - fallback for tests
 
     common_module = importlib.import_module("app.web.common")
 
+from app.metrics import DB_ERRORS_COUNTER, INTERNAL_TENANT_COUNTER
 from app.repo import provider_tokens
 
 
@@ -42,26 +43,53 @@ async def ensure_tenant(tenant: int, request: Request) -> JSONResponse:
         or (os.getenv("WA_WEB_TOKEN") or "").strip()
     )
     if allowed and token_header != allowed and token_query != allowed:
+        INTERNAL_TENANT_COUNTER.labels("unauthorized").inc()
         raise HTTPException(status_code=401, detail="unauthorized")
 
     try:
         common_module.ensure_tenant_files(int(tenant))
     except Exception as exc:
         logger.warning("tenant_files_ensure_failed tenant=%s error=%s", tenant, exc)
+        INTERNAL_TENANT_COUNTER.labels("error").inc()
         raise HTTPException(status_code=500, detail="ensure_failed") from exc
 
-    existing = await provider_tokens.get_by_tenant(int(tenant))
+    try:
+        existing = await provider_tokens.get_by_tenant(int(tenant))
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("provider_token_get").inc()
+        INTERNAL_TENANT_COUNTER.labels("error").inc()
+        logger.exception("provider_token_fetch_failed tenant=%s", tenant)
+        raise HTTPException(status_code=500, detail="db_error") from exc
+
     if existing and existing.token:
         token_value = existing.token
     else:
         generated = secrets.token_urlsafe(32)
-        created = await provider_tokens.create_for_tenant(int(tenant), generated)
+        try:
+            created = await provider_tokens.create_for_tenant(int(tenant), generated)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("provider_token_create").inc()
+            INTERNAL_TENANT_COUNTER.labels("error").inc()
+            logger.exception("provider_token_create_failed tenant=%s", tenant)
+            raise HTTPException(status_code=500, detail="db_error") from exc
         if created is None:
-            logger.error("provider_token_create_failed tenant=%s", tenant)
-            raise HTTPException(status_code=503, detail="token_unavailable")
-        token_value = created.token
+            try:
+                existing_after = await provider_tokens.get_by_tenant(int(tenant))
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("provider_token_get").inc()
+                INTERNAL_TENANT_COUNTER.labels("error").inc()
+                logger.exception("provider_token_fetch_failed tenant=%s", tenant)
+                raise HTTPException(status_code=500, detail="db_error") from exc
+            if not existing_after or not existing_after.token:
+                INTERNAL_TENANT_COUNTER.labels("error").inc()
+                logger.error("provider_token_unavailable tenant=%s", tenant)
+                raise HTTPException(status_code=503, detail="token_unavailable")
+            token_value = existing_after.token
+        else:
+            token_value = created.token
 
     logger.info("tenant_ensure_ok tenant=%s", tenant)
+    INTERNAL_TENANT_COUNTER.labels("ok").inc()
     return _success({"tenant": int(tenant), "provider_token": token_value})
 
 

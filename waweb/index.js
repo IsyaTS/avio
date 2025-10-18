@@ -412,6 +412,10 @@ async function sendProviderEvent(tenant, payload, attempt = 1) {
       await wait(Math.min(1500, 250 * Math.pow(2, attempt - 1)));
       return sendProviderEvent(tenantKey, payload, attempt + 1);
     }
+    if (statusCode >= 500 && attempt < 3) {
+      await wait(Math.min(2500, 400 * Math.pow(2, attempt - 1)));
+      return sendProviderEvent(tenantKey, payload, attempt + 1);
+    }
     return { statusCode, body };
   } catch (err) {
     const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);

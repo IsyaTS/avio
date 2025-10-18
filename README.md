@@ -244,6 +244,7 @@ curl -X POST "http://127.0.0.1:8000/send" \
 - Публичные WA-эндпойнты: `GET /pub/wa/status?k=<PUBLIC_KEY>&tenant=<TENANT>` и `POST /pub/wa/start`.
 - Скрипт `deploy/diag/wa.sh` автоматизирует health-check, проверку переменных `OUTBOX_*`, тестовые отправки (digits/JID) и сбор логов `app`/`waweb` за последние две минуты.
 - Получение provider_token: `curl -X POST "http://app:8000/internal/tenant/7/ensure" -H "X-Auth-Token: ${WA_WEB_TOKEN}"`.
+- Просмотр provider_token без генерации: `curl -H "X-Admin-Token: ${ADMIN_TOKEN}" http://app:8000/admin/provider-token/7`.
 - Проверка webhook-аутентификации: `curl -X POST "http://app:8000/webhook/provider?token=${PROVIDER_TOKEN}" -H 'Content-Type: application/json' -d '{"event":"ready","tenant":7,"channel":"whatsapp"}'`.
 
 ### Ключи доступа

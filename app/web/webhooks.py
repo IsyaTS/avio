@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
 
 from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
 from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
-from app.metrics import WEBHOOK_PROVIDER_COUNTER
+from app.metrics import DB_ERRORS_COUNTER, WEBHOOK_PROVIDER_COUNTER
 from app.repo import provider_tokens as provider_tokens_repo
 
 
@@ -738,7 +738,17 @@ async def provider_webhook(request: Request) -> Response:
         WEBHOOK_PROVIDER_COUNTER.labels("unauthorized", channel_label).inc()
         raise HTTPException(status_code=401, detail="unauthorized")
 
-    stored = await provider_tokens_repo.get_by_tenant(tenant)
+    try:
+        stored = await provider_tokens_repo.get_by_tenant(tenant)
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("provider_token_get").inc()
+        WEBHOOK_PROVIDER_COUNTER.labels("error", channel_label).inc()
+        logger.exception(
+            "provider_token_lookup_failed channel=%s tenant=%s",
+            channel_label,
+            tenant,
+        )
+        raise HTTPException(status_code=500, detail="db_error") from exc
     if not stored or stored.token != token:
         WEBHOOK_PROVIDER_COUNTER.labels("unauthorized", channel_label).inc()
         raise HTTPException(status_code=401, detail="unauthorized")
