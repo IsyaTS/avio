@@ -86,6 +86,7 @@ def webhook_client(monkeypatch: pytest.MonkeyPatch) -> Tuple[TestClient, _RedisC
     redis_stub = _RedisCapture()
     if hasattr(main, "_webhooks_mod"):
         monkeypatch.setattr(main._webhooks_mod, "_redis_queue", redis_stub)
+        monkeypatch.setattr(main._webhooks_mod.settings, "WEBHOOK_SECRET", "webhook-secret", raising=False)
 
         async def _dummy_build(*args: Any, **kwargs: Any) -> list[Any]:
             return []
@@ -98,6 +99,7 @@ def webhook_client(monkeypatch: pytest.MonkeyPatch) -> Tuple[TestClient, _RedisC
         monkeypatch.setattr(main._webhooks_mod.core, "record_bot_reply", lambda *a, **k: None)
 
     main._transport_clients.clear()
+    monkeypatch.setattr(main.settings, "WEBHOOK_SECRET", "webhook-secret", raising=False)
     with TestClient(main.app) as client:
         yield client, redis_stub
 
@@ -112,9 +114,7 @@ def test_webhook_persists_message(webhook_client: Tuple[TestClient, _RedisCaptur
         "attachments": [],
         "ts": 1_700_100_000,
     }
-    headers = {"X-Admin-Token": "admin-token"}
-
-    response = client.post("/webhook/provider", json=payload, headers=headers)
+    response = client.post("/webhook/telegram?token=webhook-secret", json=payload)
     assert response.status_code in (200, 202)
     assert any(key == main._webhooks_mod.INCOMING_QUEUE_KEY for key, _ in redis_stub.items)
 

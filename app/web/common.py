@@ -175,7 +175,7 @@ def ensure_bytes(x: str) -> bytes:
 
 def webhook_url() -> str:
     base = settings.APP_INTERNAL_URL or os.getenv("APP_INTERNAL_URL") or "http://app:8000"
-    url = f"{base.rstrip('/')}/webhook/provider"
+    url = f"{base.rstrip('/')}/webhook"
     token = settings.WEBHOOK_SECRET or os.getenv("WEBHOOK_SECRET") or ""
     if token:
         separator = "&" if "?" in url else "?"

@@ -9,7 +9,7 @@ import random
 from typing import Any, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 try:
     import core  # type: ignore
@@ -22,6 +22,7 @@ try:
         link_lead_contact,
         insert_message_in,
         upsert_lead,
+        insert_webhook_event,
     )
 except ImportError:  # pragma: no cover
     from app.db import (  # type: ignore
@@ -29,6 +30,7 @@ except ImportError:  # pragma: no cover
         link_lead_contact,
         insert_message_in,
         upsert_lead,
+        insert_webhook_event,
     )
 
 try:
@@ -434,7 +436,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             lead_id,
         )
 
-    if not reply:
+    reply_text = str(reply or "").strip()
+    if not reply_text:
         return _ok({"queued": False, "leadId": lead_id, "smartReply": False})
 
     if provider == "telegram":
@@ -449,7 +452,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     resolved_provider = provider or "whatsapp"
     out: Dict[str, Any] = {
         "lead_id": lead_id,
-        "text": reply,
+        "text": reply_text,
         "provider": resolved_provider,
         "ch": resolved_provider,
         "tenant_id": int(tenant),
@@ -474,9 +477,12 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             pages = []
         if pages:
             for page in pages:
+                page_text = str(page or "").strip()
+                if not page_text:
+                    continue
                 page_out = {
                     "lead_id": lead_id,
-                    "text": page,
+                    "text": page_text,
                     "provider": resolved_provider,
                     "ch": resolved_provider,
                     "tenant_id": int(tenant),
@@ -607,7 +613,7 @@ async def _queue_incoming_event(event_payload: dict[str, Any]) -> None:
 
 async def _cache_whatsapp_qr(
     payload: dict[str, Any], tenant: int, provider: str, event_name: str
-) -> Response:
+) -> dict[str, Any]:
     qr_id_raw = (
         payload.get("qr_id")
         or payload.get("qrId")
@@ -667,7 +673,7 @@ async def _cache_whatsapp_qr(
         raise HTTPException(status_code=500, detail="cache_error") from exc
 
     logger.info("wa_qr_cached tenant=%s qr_id=%s ttl=%s", tenant, qr_id, ttl)
-    return Response(status_code=204)
+    return {"qr_id": qr_id}
 
 
 @router.post("/webhook/telegram")
@@ -702,8 +708,7 @@ async def telegram_webhook(request: Request):
     return await process_incoming(body, request)
 
 
-@router.post("/webhook/provider")
-async def provider_webhook(request: Request) -> Response:
+async def provider_webhook(request: Request) -> JSONResponse:
     channel_label = "whatsapp"
     try:
         payload = await request.json()
@@ -718,20 +723,16 @@ async def provider_webhook(request: Request) -> Response:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
         raise HTTPException(status_code=422, detail="invalid_payload")
 
-    if "tenant" not in payload:
-        WEBHOOK_PROVIDER_COUNTER.labels("invalid_tenant", channel_label).inc()
-        raise HTTPException(status_code=422, detail="invalid_tenant")
-
-    provider = str(payload.get("provider") or payload.get("channel") or channel_label).strip().lower()
-    if provider and provider not in {"whatsapp", "wa"}:
-        WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
-        return Response(status_code=204)
-
     tenant_candidate = _coerce_int(payload.get("tenant"))
     if tenant_candidate is None:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_tenant", channel_label).inc()
         raise HTTPException(status_code=422, detail="invalid_tenant")
     tenant = int(tenant_candidate)
+
+    provider_value = str(payload.get("provider") or payload.get("channel") or channel_label).strip().lower()
+    if provider_value and provider_value not in {"whatsapp", "wa"}:
+        WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
+        return JSONResponse({"ok": True, "queued": False, "event": provider_value or "ignored"})
 
     token = _extract_provider_token(request)
     if not token:
@@ -749,15 +750,16 @@ async def provider_webhook(request: Request) -> Response:
             tenant,
         )
         raise HTTPException(status_code=500, detail="db_error") from exc
+
     if not stored or stored.token != token:
         WEBHOOK_PROVIDER_COUNTER.labels("unauthorized", channel_label).inc()
         raise HTTPException(status_code=401, detail="unauthorized")
 
     raw_event = str(payload.get("event") or "").strip().lower()
     event = "qr" if raw_event == "wa_qr" else raw_event
-    if event not in {"messages.incoming", "qr", "ready"}:
-        WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
-        return Response(status_code=204)
+    if not event:
+        WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
+        raise HTTPException(status_code=422, detail="invalid_event")
 
     if event == "messages.incoming":
         try:
@@ -765,12 +767,40 @@ async def provider_webhook(request: Request) -> Response:
         except ValueError as exc:
             WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
             raise HTTPException(status_code=422, detail=str(exc) or "invalid_payload") from exc
+
+        text_value = ""
+        if "text" in normalized_event and isinstance(normalized_event.get("text"), str):
+            text_value = normalized_event["text"].strip()
+        media_items = normalized_event.get("media") if isinstance(normalized_event.get("media"), list) else []
+        if not text_value and not media_items:
+            WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
+            raise HTTPException(status_code=422, detail="empty_message")
+
+        lead_hint = _coerce_int(payload.get("lead_id") or payload.get("leadId"))
+        try:
+            await insert_webhook_event(
+                "whatsapp",
+                "messages.incoming",
+                lead_hint,
+                payload,
+            )
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("webhook_event_insert").inc()
+            WEBHOOK_PROVIDER_COUNTER.labels("error", channel_label).inc()
+            logger.exception(
+                "webhook_event_store_failed channel=%s tenant=%s",
+                channel_label,
+                tenant,
+            )
+            raise HTTPException(status_code=500, detail="db_error") from exc
+
         try:
             await _queue_incoming_event(normalized_event)
         except HTTPException as exc:
             status_label = "invalid_payload" if exc.status_code < 500 else "queue_error"
             WEBHOOK_PROVIDER_COUNTER.labels(status_label, channel_label).inc()
             raise
+
         WEBHOOK_PROVIDER_COUNTER.labels("ok", channel_label).inc()
         sender_for_log = normalized_event.get("from_jid") or normalized_event.get("from") or "-"
         message_id = normalized_event.get("message_id") or "-"
@@ -781,7 +811,7 @@ async def provider_webhook(request: Request) -> Response:
             sender_for_log,
             message_id,
         )
-        return _ok({"queued": True})
+        return JSONResponse({"ok": True, "queued": True})
 
     if event == "ready":
         ready_event = {
@@ -808,20 +838,38 @@ async def provider_webhook(request: Request) -> Response:
             tenant,
             state_value,
         )
-        return _ok({"queued": True})
+        return JSONResponse({"ok": True, "queued": True, "event": "ready"})
 
-    # event == "qr"
-    try:
-        response = await _cache_whatsapp_qr(payload, tenant, channel_label, "qr")
-    except HTTPException as exc:
-        status_label = "invalid_payload" if exc.status_code < 500 else "error"
-        WEBHOOK_PROVIDER_COUNTER.labels(status_label, channel_label).inc()
-        raise
-    WEBHOOK_PROVIDER_COUNTER.labels("ok", channel_label).inc()
-    return response
+    if event == "qr":
+        try:
+            qr_meta = await _cache_whatsapp_qr(payload, tenant, channel_label, "qr")
+        except HTTPException as exc:
+            status_label = "invalid_payload" if exc.status_code < 500 else "error"
+            WEBHOOK_PROVIDER_COUNTER.labels(status_label, channel_label).inc()
+            raise
+        WEBHOOK_PROVIDER_COUNTER.labels("ok", channel_label).inc()
+        response_payload: dict[str, Any] = {"ok": True, "queued": False, "event": "qr"}
+        response_payload.update(qr_meta)
+        return JSONResponse(response_payload)
+
+    WEBHOOK_PROVIDER_COUNTER.labels("ignored", channel_label).inc()
+    return JSONResponse({"ok": True, "queued": False, "event": event})
+
+
+@router.post("/webhook")
+async def webhook_entry(request: Request) -> JSONResponse:
+    return await provider_webhook(request)
+
+
+@router.post("/webhook/provider")
+async def webhook_provider_compat(request: Request) -> JSONResponse:
+    logger.warning("deprecated_webhook_provider_path")
+    return await provider_webhook(request)
 
 
 __all__ = ["router", "process_incoming", "provider_webhook"]
+
+
 async def _is_duplicate(provider: str, tenant: int, message_id: str | None) -> bool:
     if not message_id:
         return False

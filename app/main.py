@@ -530,15 +530,6 @@ async def _handle(request: Request):
 
     return await process_incoming(body, request)
 
-@webhook.post("/webhook")
-async def webhook_in(request: Request):
-    return await _handle(request)
-
-@webhook.post("/webhook/provider")
-async def webhook_provider(request: Request):
-    return await _handle(request)
-
-
 @webhook.get("/internal/tenant/{tenant}/catalog-file")
 async def internal_catalog_file(tenant: int, path: str, token: str = ""):
     if settings.WEBHOOK_SECRET and token != settings.WEBHOOK_SECRET:

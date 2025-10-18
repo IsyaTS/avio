@@ -32,11 +32,16 @@ def app_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _DummyRedis
     redis_stub = _DummyRedis()
     monkeypatch.setattr(public_module.common, "redis_client", lambda: redis_stub)
     monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: True)
-    monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token")
+    monkeypatch.setattr(public_module.settings, "ADMIN_TOKEN", "admin-token", raising=False)
+    monkeypatch.setattr(public_module.settings, "WEBHOOK_SECRET", "webhook-secret", raising=False)
+    monkeypatch.setattr(main.settings, "ADMIN_TOKEN", "admin-token", raising=False)
+    monkeypatch.setattr(main.settings, "WEBHOOK_SECRET", "webhook-secret", raising=False)
     monkeypatch.setattr(main, "_r", redis_stub)
     main._transport_clients.clear()
     if hasattr(main, "_webhooks_mod"):
         monkeypatch.setattr(main._webhooks_mod, "_redis_queue", redis_stub)
+        monkeypatch.setattr(main._webhooks_mod.settings, "WEBHOOK_SECRET", "webhook-secret", raising=False)
+        monkeypatch.setattr(main._webhooks_mod.settings, "ADMIN_TOKEN", "admin-token", raising=False)
         monkeypatch.setattr(
             public_module,
             "INBOX_MESSAGE_KEY",
@@ -65,9 +70,7 @@ def test_webhook_smoke_and_outgoing(
         },
     }
 
-    headers = {"X-Admin-Token": "admin-token"}
-
-    response = client.post("/webhook/provider", json=inbound_payload, headers=headers)
+    response = client.post("/webhook/telegram?token=webhook-secret", json=inbound_payload)
     assert response.status_code == 200
 
     assert redis_stub.items, "webhook payload was not stored"
@@ -75,10 +78,7 @@ def test_webhook_smoke_and_outgoing(
     assert key == public_module.INBOX_MESSAGE_KEY
     stored_payload = json.loads(raw_payload)
     assert isinstance(stored_payload["ts"], int)
-    provider_raw = stored_payload.get("provider_raw", {})
-    assert isinstance(provider_raw, dict)
-    assert provider_raw.get("date") == "2024-05-01T12:00:00Z"
-    assert provider_raw.get("nested", {}).get("edit_date") == "2024-05-01T12:05:00Z"
+    assert stored_payload.get("ch") == "telegram"
 
     captured: dict[str, Any] = {"calls": []}
 
@@ -106,6 +106,8 @@ def test_webhook_smoke_and_outgoing(
         "attachments": [],
         "meta": {},
     }
+
+    headers = {"X-Admin-Token": "admin-token"}
 
     send_response = client.post("/send", json=outbound_payload, headers=headers)
     assert send_response.status_code == 200

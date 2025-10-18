@@ -64,7 +64,7 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 
 - `need_qr` — QR сгенерирован и ждёт сканирования.
 - `need_2fa` — аккаунт требует пароль второй факторной авторизации.
-- `authorized` — сессия активирована, сообщения начинают поступать в `/webhook/provider`.
+- `authorized` — сессия активирована, сообщения начинают поступать в `/webhook`.
 - `failed` — QR истёк или поток авторизации завершился с ошибкой, требуется повторный запуск.
 
 ### Эндпоинты
@@ -91,7 +91,7 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 Единый транспортный контракт использует две структуры:
 
 - **TransportMessage** — исходящее сообщение, которое отправляется в `POST /send` на приложении.
-- **MessageIn** — входящее событие, которое провайдеры (Telegram/WhatsApp) публикуют в `POST /webhook/provider`.
+- **MessageIn** — входящее событие, которое провайдеры (Telegram/WhatsApp) публикуют в `POST /webhook`.
 
 ### Пример TransportMessage
 
@@ -188,52 +188,47 @@ curl -X POST "http://127.0.0.1:8000/send" \
 - Токен сохраняется в таблицу `provider_tokens` (`tenant INT PRIMARY KEY`, `token TEXT UNIQUE NOT NULL`, `created_at TIMESTAMPTZ DEFAULT now()`) и переиспользуется при повторных вызовах.
 - Админ-роут `/admin/keys/list?tenant=<id>` (с `X-Admin-Token`) возвращает текущий `provider_token` для выбранного tenant.
 
-### Контракт `/webhook/provider`
+### Контракт `/webhook`
 
-- Аутентификация: токен передаётся в `?token=...` или заголовке `X-Provider-Token`.
+- Аутентификация: `provider_token` передаётся в `?token=<secret>` (стандартный путь для `waweb`) либо в заголовке `X-Provider-Token`. Токен должен совпадать с записью из таблицы `provider_tokens` для указанного tenant.
 - Обязательное поле `tenant` в теле запроса.
 - Поддерживаемые события:
-  - `messages.incoming` — входящее сообщение WhatsApp.
-  - `qr` — свежий QR для авторизации.
-  - `ready` — сессия авторизована и готова принимать сообщения.
-- Схема события `messages.incoming`:
+  - `messages.incoming` — входящее сообщение WhatsApp. Требует `channel="whatsapp"`, поле `from` и хотя бы одно из `text` или `media`/`attachments`.
+  - `qr` — свежий QR-код авторизации (`qr_id`, `svg`).
+  - `ready` — сессия авторизована; можно передать `state` и `ts`.
+- Успешный ответ — JSON `{"ok": true, "queued": true}` для сообщений, которые ставятся в очередь (`messages.incoming`, `ready`), и `{"ok": true, "queued": false, "event": "qr"}` для QR-событий. Ошибки аутентификации отвечают `401`, нарушения схемы — `422`.
+- Все события `messages.incoming` дополнительно сохраняются в таблице `webhook_events` и попадают в Redis (`inbox:message_in`), откуда их обрабатывает воркер. Метрики `webhook_provider_total{status,channel}` и `wa_to_app_total{event,status}` отображают статусы доставки.
 
-  ```json
-  {
-    "event": "messages.incoming",
-    "tenant": 7,
-    "channel": "whatsapp",
-    "message_id": "ABCD123",
-    "from": "79991234567",
-    "from_jid": "79991234567@c.us",
-    "text": "Привет!",
-    "media": [
-      { "type": "image", "url": "whatsapp://7/ABCD", "name": "photo.jpg" }
-    ],
-    "ts": 1716748800
-  }
-  ```
+Пример валидного входящего сообщения:
 
-- События `qr` и `ready` также содержат `tenant`, `channel` и дополнительные поля (`qr_id`, `svg`, `state`, `ts`).
-- При валидации канал принудительно приводится к `whatsapp`, `from` очищается до цифр; некорректные тела возвращают `422`.
-- Принятые события попадают в Redis (`inbox:message_in`), логируются как `event=webhook_received channel=whatsapp ...`, а метрика `webhook_provider_total{status,channel}` фиксирует результат обработки.
-- На стороне `waweb` счётчик `wa_to_app_total{event,status}` отражает состояние отправок (`/metrics`).
+```json
+{
+  "event": "messages.incoming",
+  "tenant": 7,
+  "channel": "whatsapp",
+  "message_id": "ABCD123",
+  "from": "79991234567",
+  "text": "Привет!",
+  "media": [
+    { "type": "image", "url": "whatsapp://7/ABCD", "name": "photo.jpg" }
+  ],
+  "ts": 1716748800
+}
+```
 
-### WhatsApp QR события
-
-`waweb` отправляет QR-коды авторизации в `POST /webhook/provider` с телом:
+QR события отправляются тем же маршрутом `POST /webhook?token=<provider_token>` с телом вида:
 
 ```json
 {
   "provider": "whatsapp",
-  "event": "wa_qr",
+  "event": "qr",
   "tenant": 1,
   "qr_id": "1715940000000",
   "svg": "<?xml version=...>"
 }
 ```
 
-Если SVG отсутствует, обработчик возвращает `400 wa_qr_invalid`. Валидные SVG сохраняются в Redis по ключам `wa:qr:{tenant}:{qr_id}:svg` и `wa:qr:last:{tenant}` (TTL ≥ 180 секунд), чтобы публичные маршруты `/pub/wa/status` и `/pub/wa/qr.svg` могли отдавать актуальный код без повторной генерации.
+Если SVG отсутствует, обработчик вернёт `422 invalid_qr`. Валидные SVG кэшируются в Redis по ключам `wa:qr:{tenant}:{qr_id}:svg` и `wa:qr:last:{tenant}` (TTL ≥ 180 секунд), чтобы публичные маршруты `/pub/wa/status` и `/pub/wa/qr.svg` могли отдавать актуальный код без повторной генерации.
 
 ## Диагностика
 
@@ -243,9 +238,9 @@ curl -X POST "http://127.0.0.1:8000/send" \
 - Тестирование канала: `POST /send` (app) и `POST /send` на `waweb` с `X-Auth-Token`.
 - Публичные WA-эндпойнты: `GET /pub/wa/status?k=<PUBLIC_KEY>&tenant=<TENANT>` и `POST /pub/wa/start`.
 - Скрипт `deploy/diag/wa.sh` автоматизирует health-check, проверку переменных `OUTBOX_*`, тестовые отправки (digits/JID) и сбор логов `app`/`waweb` за последние две минуты.
-- Получение provider_token: `curl -X POST "http://app:8000/internal/tenant/7/ensure" -H "X-Auth-Token: ${WA_WEB_TOKEN}"`.
-- Просмотр provider_token без генерации: `curl -H "X-Admin-Token: ${ADMIN_TOKEN}" http://app:8000/admin/provider-token/7`.
-- Проверка webhook-аутентификации: `curl -X POST "http://app:8000/webhook/provider?token=${PROVIDER_TOKEN}" -H 'Content-Type: application/json' -d '{"event":"ready","tenant":7,"channel":"whatsapp"}'`.
+- Получение/создание provider_token: `curl -H "X-Admin-Token: ${ADMIN_TOKEN}" http://app:8000/admin/provider-token/7`.
+- Проверка webhook-аутентификации: `curl -X POST "http://app:8000/webhook?token=${PROVIDER_TOKEN}" -H 'Content-Type: application/json' -d '{"event":"ready","tenant":7,"channel":"whatsapp"}'`.
+- Поток обработки: `waweb → POST /webhook (?token=provider_token)` → HTTP `200` → запись в `webhook_events` → задача в Redis → `worker` логирует `send_success` → `waweb` метрика `wa_to_app_total{result=success}`.
 
 ### Ключи доступа
 

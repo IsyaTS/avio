@@ -27,14 +27,14 @@ const APP_BASE_URL = (() => {
 })();
 const LAST_QR_META_PATH = path.join(STATE_DIR, 'last-qr.json');
 const PROVIDER_WEBHOOK_URL = (() => {
-  const raw = (APP_WEBHOOK || `${APP_BASE_URL}/webhook/provider`).trim();
+  const raw = (APP_WEBHOOK || `${APP_BASE_URL}/webhook`).trim();
   try {
     return new URL(raw).toString();
   } catch (_) {
     try {
-      return new URL('/webhook/provider', APP_BASE_URL).toString();
+      return new URL('/webhook', APP_BASE_URL).toString();
     } catch (_) {
-      return `${APP_BASE_URL.replace(/\/$/, '')}/webhook/provider`;
+      return `${APP_BASE_URL.replace(/\/$/, '')}/webhook`;
     }
   }
 })();
@@ -54,6 +54,12 @@ const sendFailTotal = Object.create(null);
 const waSendTotal = Object.create(null);
 const waToAppTotals = Object.create(null);
 const deprecatedNoticeTs = Object.create(null);
+function logProviderWebhook(eventName, tenantKey, statusCode, tokenPresent) {
+  const flag = tokenPresent ? 'true' : 'false';
+  try {
+    console.log('[waweb]', `wa_to_app event=${eventName} tenant=${tenantKey} code=${statusCode} token_present=${flag}`);
+  } catch (_) {}
+}
 function buildSyncBaseList() {
   const raw = [
     process.env.APP_INTERNAL_URLS || '',
@@ -328,27 +334,38 @@ async function ensureProviderToken(tenant, force = false) {
   }
 
   let url;
+  const encodedKey = encodeURIComponent(key);
   try {
-    url = new URL(`/internal/tenant/${key}/ensure`, APP_BASE_URL).toString();
+    url = new URL(`/admin/provider-token/${encodedKey}`, APP_BASE_URL).toString();
   } catch (_) {
-    url = `${APP_BASE_URL.replace(/\/$/, '')}/internal/tenant/${key}/ensure`;
+    url = `${APP_BASE_URL.replace(/\/$/, '')}/admin/provider-token/${encodedKey}`;
   }
 
   const headers = {};
-  if (INTERNAL_SYNC_TOKEN) headers['X-Auth-Token'] = INTERNAL_SYNC_TOKEN;
+  if (ADMIN_TOKEN) headers['X-Admin-Token'] = ADMIN_TOKEN;
 
   try {
-    const { statusCode, body } = await requestJson('POST', url, { source: 'waweb' }, headers);
+    const { statusCode, body } = await requestJson('GET', url, null, headers);
     if (statusCode >= 200 && statusCode < 300 && body) {
       try {
         const parsed = JSON.parse(body);
-        if (parsed && typeof parsed === 'object' && parsed.provider_token) {
-          providerTokenCache[key] = { token: String(parsed.provider_token), ts: now };
+        const nextToken = (() => {
+          if (!parsed || typeof parsed !== 'object') return '';
+          if (parsed.provider_token) return String(parsed.provider_token);
+          if (parsed.token) return String(parsed.token);
+          return '';
+        })();
+        if (nextToken) {
+          providerTokenCache[key] = { token: nextToken, ts: now };
           return providerTokenCache[key].token;
         }
       } catch (err) {
         console.warn('[waweb]', `provider_token_parse_error tenant=${key} reason=${err && err.message ? err.message : err}`);
       }
+    } else if (statusCode === 404) {
+      console.warn('[waweb]', `provider_token_missing tenant=${key}`);
+    } else if (statusCode === 401) {
+      console.warn('[waweb]', `provider_token_unauthorized tenant=${key}`);
     } else {
       console.warn('[waweb]', `provider_token_http tenant=${key} status=${statusCode}`);
     }
@@ -379,55 +396,78 @@ async function sendProviderEvent(tenant, payload, attempt = 1) {
   const eventName = payload && typeof payload === 'object' && payload.event
     ? String(payload.event)
     : 'unknown';
-  let token = cachedProviderToken(tenantKey);
-  if (!token || attempt > 1) {
-    token = await ensureProviderToken(tenantKey, attempt > 1);
-  }
-  if (!token) {
-    incWaToApp(eventName, 'no_token');
-    console.warn('[waweb]', `wa_to_app event=${eventName} code=0 tenant=${tenantKey} no_token`);
-    return { statusCode: 0, body: '' };
+  let tries = Math.max(1, Number(attempt) || 1);
+  let refreshNext = tries > 1;
+  let refreshedOn401 = false;
+
+  while (tries <= 3) {
+    let token = '';
+    if (refreshNext) {
+      token = await ensureProviderToken(tenantKey, true);
+      refreshNext = false;
+    } else {
+      token = cachedProviderToken(tenantKey);
+      if (!token) {
+        token = await ensureProviderToken(tenantKey, false);
+      }
+    }
+
+    if (!token) {
+      incWaToApp(eventName, 'no_token');
+      console.warn('[waweb]', `wa_to_app event=${eventName} code=0 tenant=${tenantKey} no_token`);
+      return { statusCode: 0, body: '' };
+    }
+
+    let urlWithToken;
+    try {
+      const u = new URL(PROVIDER_WEBHOOK_URL);
+      u.searchParams.set('token', token);
+      urlWithToken = u.toString();
+    } catch (_) {
+      const separator = PROVIDER_WEBHOOK_URL.includes('?') ? '&' : '?';
+      urlWithToken = `${PROVIDER_WEBHOOK_URL}${separator}token=${encodeURIComponent(token)}`;
+    }
+
+    const tokenPresent = !!token;
+
+    try {
+      const { statusCode, body } = await requestJson('POST', urlWithToken, payload, {});
+      let statusLabel = 'error';
+      if (statusCode >= 200 && statusCode < 300) statusLabel = 'ok';
+      else if (statusCode === 401) statusLabel = 'unauthorized';
+      else if (statusCode === 422) statusLabel = 'invalid';
+      incWaToApp(eventName, statusLabel);
+      logProviderWebhook(eventName, tenantKey, statusCode, tokenPresent);
+      if (statusCode === 401 && !refreshedOn401) {
+        refreshedOn401 = true;
+        await ensureProviderToken(tenantKey, true);
+        tries += 1;
+        await wait(Math.min(1500, 250 * Math.pow(2, tries - 2)));
+        continue;
+      }
+      if (statusCode >= 500 && tries < 3) {
+        tries += 1;
+        await wait(Math.min(2500, 400 * Math.pow(2, tries - 2)));
+        refreshNext = false;
+        continue;
+      }
+      return { statusCode, body };
+    } catch (err) {
+      const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
+      incWaToApp(eventName, 'exception');
+      console.warn('[waweb]', `wa_to_app_exception event=${eventName} tenant=${tenantKey} reason=${reason}`);
+      logProviderWebhook(eventName, tenantKey, 0, tokenPresent);
+      if (tries < 3) {
+        tries += 1;
+        refreshNext = true;
+        await wait(Math.min(1500, 250 * Math.pow(2, tries - 2)));
+        continue;
+      }
+      return { statusCode: 0, body: '' };
+    }
   }
 
-  let urlWithToken;
-  try {
-    const u = new URL(PROVIDER_WEBHOOK_URL);
-    u.searchParams.set('token', token);
-    urlWithToken = u.toString();
-  } catch (_) {
-    const separator = PROVIDER_WEBHOOK_URL.includes('?') ? '&' : '?';
-    urlWithToken = `${PROVIDER_WEBHOOK_URL}${separator}token=${encodeURIComponent(token)}`;
-  }
-
-  try {
-    const { statusCode, body } = await requestJson('POST', urlWithToken, payload, {});
-    let statusLabel = 'error';
-    if (statusCode >= 200 && statusCode < 300) statusLabel = 'ok';
-    else if (statusCode === 401) statusLabel = 'unauthorized';
-    else if (statusCode === 422) statusLabel = 'invalid';
-    incWaToApp(eventName, statusLabel);
-    console.log('[waweb]', `wa_to_app event=${eventName} code=${statusCode} tenant=${tenantKey}`);
-    if (statusCode === 401 && attempt < 3) {
-      await ensureProviderToken(tenantKey, true);
-      await wait(Math.min(1500, 250 * Math.pow(2, attempt - 1)));
-      return sendProviderEvent(tenantKey, payload, attempt + 1);
-    }
-    if (statusCode >= 500 && attempt < 3) {
-      await wait(Math.min(2500, 400 * Math.pow(2, attempt - 1)));
-      return sendProviderEvent(tenantKey, payload, attempt + 1);
-    }
-    return { statusCode, body };
-  } catch (err) {
-    const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
-    incWaToApp(eventName, 'exception');
-    console.warn('[waweb]', `wa_to_app_exception event=${eventName} tenant=${tenantKey} reason=${reason}`);
-    if (attempt < 3) {
-      await ensureProviderToken(tenantKey, true);
-      await wait(Math.min(1500, 250 * Math.pow(2, attempt - 1)));
-      return sendProviderEvent(tenantKey, payload, attempt + 1);
-    }
-    return { statusCode: 0, body: '' };
-  }
+  return { statusCode: 0, body: '' };
 }
 
 function truncateBody(body, limit = 200) {
@@ -644,6 +684,7 @@ async function sendTransportMessage(tenant, transport){
     throw err;
   }
   const { jid } = normalized;
+  transport.to = jid;
 
   const text = typeof transport.text === 'string' ? transport.text : '';
   const attachments = Array.isArray(transport.attachments) ? transport.attachments : [];

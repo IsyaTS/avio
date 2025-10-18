@@ -8,7 +8,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Повышенный уровень 401 на /webhook/provider"
+          summary: "Повышенный уровень 401 на /webhook"
           description: |
             За последние 5 минут фиксируется стабильный поток 401 ответов на WhatsApp вебхук.
             Проверьте токены провайдера и соединение waweb → app.
