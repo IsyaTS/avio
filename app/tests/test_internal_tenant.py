@@ -23,7 +23,11 @@ def test_internal_ensure_reuses_existing_token(monkeypatch):
         created.append((tenant_id, token))
         return SimpleNamespace(token=token)
 
+    async def _noop_schema() -> None:
+        return None
+
     monkeypatch.setattr(tenant_module.common_module, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(tenant_module.provider_tokens, "ensure_schema", _noop_schema, raising=False)
     monkeypatch.setattr(tenant_module.provider_tokens, "get_by_tenant", _fake_get_by_tenant)
     monkeypatch.setattr(tenant_module.provider_tokens, "create_for_tenant", _fake_create)
     monkeypatch.setattr(tenant_module.settings, "WEBHOOK_SECRET", "secret", raising=False)
@@ -51,7 +55,11 @@ def test_internal_ensure_generates_new_token(monkeypatch):
         captured["token"] = token
         return SimpleNamespace(token=token)
 
+    async def _noop_schema() -> None:
+        return None
+
     monkeypatch.setattr(tenant_module.common_module, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(tenant_module.provider_tokens, "ensure_schema", _noop_schema, raising=False)
     monkeypatch.setattr(tenant_module.provider_tokens, "get_by_tenant", _fake_get_by_tenant)
     monkeypatch.setattr(tenant_module.provider_tokens, "create_for_tenant", _fake_create)
     monkeypatch.setattr(tenant_module.settings, "WEBHOOK_SECRET", "secret", raising=False)
@@ -74,7 +82,11 @@ def test_internal_ensure_db_error(monkeypatch):
     async def _boom(*_: object, **__: object):
         raise RuntimeError("boom")
 
+    async def _noop_schema() -> None:
+        return None
+
     monkeypatch.setattr(tenant_module.common_module, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(tenant_module.provider_tokens, "ensure_schema", _noop_schema, raising=False)
     monkeypatch.setattr(tenant_module.provider_tokens, "get_by_tenant", _boom)
     monkeypatch.setattr(tenant_module.settings, "WEBHOOK_SECRET", "secret", raising=False)
 

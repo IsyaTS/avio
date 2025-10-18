@@ -159,7 +159,7 @@ from app.metrics import (
     WA_QR_RECEIVED_COUNTER,
 )
 from app.transport import WhatsAppAddressError, normalize_whatsapp_recipient
-from app.common import get_outbox_whitelist
+from app.common import get_outbox_whitelist, whitelist_contains_number
 
 
 _FALSE_OUTBOX_VALUES = {"0", "false", "no", "off", "disabled"}
@@ -170,24 +170,6 @@ def _outbox_enabled() -> bool:
     return raw not in _FALSE_OUTBOX_VALUES
 
 
-def _whitelist_allows(number: str) -> bool:
-    whitelist = get_outbox_whitelist()
-    if whitelist.allow_all:
-        return True
-    if not number:
-        return False
-    if number in whitelist.raw_tokens:
-        return True
-    if f"+{number}" in whitelist.raw_tokens:
-        return True
-    if f"{number}@c.us" in whitelist.raw_tokens:
-        return True
-    try:
-        if int(number) in whitelist.ids:
-            return True
-    except ValueError:
-        pass
-    return False
 from app.starlette_ext import register_transport_validation
 
 
@@ -321,12 +303,14 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
 
     payload = transport_message_asdict(message)
     channel = message.channel
-    normalized_to = payload.get("to")
+    raw_to_value = payload.get("to")
+    normalized_to = raw_to_value
     whitelist_number: str | None = None
+    normalized_e164: str | None = None
 
     if channel == "whatsapp":
         try:
-            digits, jid = normalize_whatsapp_recipient(payload.get("to"))
+            digits, jid = normalize_whatsapp_recipient(raw_to_value)
         except WhatsAppAddressError as exc:
             reason = str(exc) or "invalid"
             explanations = {
@@ -352,6 +336,7 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
         payload["to"] = jid
         normalized_to = jid
         whitelist_number = digits
+        normalized_e164 = f"+{digits}"
 
     if not _outbox_enabled():
         status_label = "outbox_disabled"
@@ -366,15 +351,21 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
         return JSONResponse({"error": "outbox_disabled"}, status_code=403)
 
     if channel == "whatsapp" and whitelist_number is not None:
-        if not _whitelist_allows(whitelist_number):
+        whitelist = get_outbox_whitelist()
+        if not whitelist_contains_number(whitelist, whitelist_number):
             status_label = "not_whitelisted"
             MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
             transport_logger.warning(
-                "event=message_out channel=%s tenant=%s to=%s status=%s",
+                "event=message_out channel=%s tenant=%s to=%s status=%s normalized_to=%s raw_to=%s "
+                "whitelist=%s reason=%s",
                 channel,
                 message.tenant,
                 normalized_to or "-",
                 status_label,
+                normalized_e164 or (whitelist_number and f"+{whitelist_number}") or "-",
+                raw_to_value or "-",
+                whitelist.raw_value,
+                "not_found",
             )
             return JSONResponse({"error": "not_whitelisted"}, status_code=403)
 

@@ -26,6 +26,7 @@ from app.db import (
     find_lead_by_telegram,
     get_telegram_user_id_by_lead,
     update_message_status,
+    has_recent_incoming_message,
 )
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
 from app.common import (
@@ -34,8 +35,10 @@ from app.common import (
     get_outbox_whitelist,
     normalize_username,
     smart_reply_enabled,
+    whitelist_contains_number,
 )
 from app.core import build_llm_messages, ask_llm
+from app.transport import WhatsAppAddressError, normalize_e164_digits
 
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
@@ -103,15 +106,20 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 OUTBOX_WHITELIST = get_outbox_whitelist()
 
+RECENT_INCOMING_TTL_SECONDS = 24 * 60 * 60
 
-def _whitelist_allows(
+
+async def _whitelist_allows(
     *,
     telegram_user_id: Optional[int],
     username: Optional[str],
     raw_to: Any,
-) -> bool:
+    lead_id: Optional[int],
+    tenant_id: Optional[int],
+    channel: str,
+) -> tuple[bool, str]:
     if OUTBOX_WHITELIST.allow_all:
-        return True
+        return True, "allow_all"
 
     candidate_ids: set[int] = set()
     if telegram_user_id is not None:
@@ -121,7 +129,7 @@ def _whitelist_allows(
         candidate_ids.add(raw_id)
     for candidate in candidate_ids:
         if candidate in OUTBOX_WHITELIST.ids:
-            return True
+            return True, "id"
 
     candidate_names: set[str] = set()
     normalized = normalize_username(username)
@@ -135,7 +143,49 @@ def _whitelist_allows(
             lowered_alt = alt.lower()
             candidate_names.add(lowered_alt)
             candidate_names.add(lowered_alt.lstrip("@"))
-    return any(name in OUTBOX_WHITELIST.usernames for name in candidate_names)
+    for name in candidate_names:
+        if name in OUTBOX_WHITELIST.usernames:
+            return True, "username"
+
+    number_candidates: set[str] = set()
+    format_error = False
+    if raw_to is not None:
+        try:
+            number_candidates.add(normalize_e164_digits(raw_to))
+        except WhatsAppAddressError:
+            format_error = True
+        except Exception:
+            format_error = True
+
+    for digits in number_candidates:
+        if whitelist_contains_number(OUTBOX_WHITELIST, digits):
+            return True, "number"
+
+    if channel == "whatsapp":
+        if lead_id and lead_id > 0:
+            try:
+                recent = await has_recent_incoming_message(
+                    int(lead_id),
+                    tenant_id=int(tenant_id) if tenant_id is not None else None,
+                    within_seconds=RECENT_INCOMING_TTL_SECONDS,
+                )
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("recent_incoming_check").inc()
+                log(
+                    "event=whitelist_bypass_check status=error reason=db "
+                    f"lead_id={lead_id} tenant_id={tenant_id} error={exc}"
+                )
+            else:
+                if recent:
+                    log(
+                        "event=whitelist_bypass status=allow reason=recent_incoming "
+                        f"lead_id={lead_id} tenant_id={tenant_id}"
+                    )
+                    return True, "recent_incoming"
+        if format_error:
+            return False, "format"
+
+    return False, "not_found"
 
 
 def _resolve_channel(item: Mapping[str, Any]) -> str:
@@ -647,15 +697,19 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         return ("skipped", "outbox_disabled", "", 0)
 
     if channel != "telegram":
-        if not _whitelist_allows(
+        allowed, whitelist_reason = await _whitelist_allows(
             telegram_user_id=telegram_user_id,
             username=username,
             raw_to=raw_to,
-        ):
+            lead_id=lead_id,
+            tenant_id=tenant,
+            channel=channel,
+        )
+        if not allowed:
             log(
                 "event=send_result status=skipped reason=whitelist_miss "
                 f"channel={channel} lead_id={lead_id} telegram_user_id={telegram_user_id} "
-                f"username={username} raw_to={raw_to}"
+                f"username={username} raw_to={raw_to} whitelist_reason={whitelist_reason}"
             )
             return ("skipped", "whitelist", "", 0)
 

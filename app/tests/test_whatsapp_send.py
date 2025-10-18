@@ -6,6 +6,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common import get_outbox_whitelist, whitelist_contains_number
 from app.transport import WhatsAppAddressError, normalize_whatsapp_recipient
 
 
@@ -67,6 +68,17 @@ def test_normalize_whatsapp_recipient_variants(value: str, expected: str) -> Non
     digits, jid = normalize_whatsapp_recipient(value)
     assert digits == expected
     assert jid == f"{expected}@c.us"
+
+
+def test_outbox_whitelist_csv_and_normalization() -> None:
+    whitelist = get_outbox_whitelist(
+        {
+            "OUTBOX_WHITELIST": " +79991234567 , @demo , 89990000000@c.us ",
+        }
+    )
+    assert whitelist_contains_number(whitelist, "79991234567")
+    assert whitelist_contains_number(whitelist, "79990000000")
+    assert "@demo" in whitelist.usernames
 
 
 def test_normalize_whatsapp_recipient_invalid() -> None:
