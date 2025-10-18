@@ -9,6 +9,8 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
 from . import common as C
 from .ui import templates
+import secrets
+
 from app.repo import provider_tokens as provider_tokens_repo
 
 router = APIRouter()
@@ -100,7 +102,14 @@ async def provider_token_get(tenant: int, request: Request):
         _log.exception("provider_token_fetch_failed tenant=%s", tenant)
         return JSONResponse({"detail": "db_error"}, status_code=500)
     if not token_entry or not token_entry.token:
-        return JSONResponse({"detail": "not_found"}, status_code=404)
+        new_token = secrets.token_urlsafe(32)
+        try:
+            token_entry = await provider_tokens_repo.upsert(int(tenant), new_token)
+        except Exception:
+            _log.exception("provider_token_upsert_failed tenant=%s", tenant)
+            return JSONResponse({"detail": "db_error"}, status_code=500)
+        if not token_entry:
+            return JSONResponse({"detail": "db_error"}, status_code=500)
     return {
         "ok": True,
         "tenant": int(tenant),

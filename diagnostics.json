@@ -698,16 +698,16 @@
       "methods": [
         "POST"
       ],
-      "name": "webhook_in",
-      "endpoint": "app.main.webhook_in"
+      "name": "webhook",
+      "endpoint": "app.web.webhooks.webhook_entry"
     },
     {
       "path": "/webhook/provider",
       "methods": [
         "POST"
       ],
-      "name": "webhook_provider",
-      "endpoint": "app.main.webhook_provider"
+      "name": "webhook_provider_compat",
+      "endpoint": "app.web.webhooks.webhook_provider_compat"
     }
   ],
   "unused_functions": [

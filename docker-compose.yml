@@ -101,7 +101,7 @@ services:
     environment:
       - PORT=9001
       - TENANT_DEFAULT=${TENANT_DEFAULT:-1}
-      - APP_WEBHOOK=http://app:8000/webhook/provider
+      - APP_WEBHOOK=http://app:8000/webhook
       - APP_BASE_URL=http://app:8000
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - WAWEB_ADMIN_TOKEN=${ADMIN_TOKEN}
@@ -209,7 +209,7 @@ services:
     environment:
       - TG_SESSIONS_DIR=/app/tg-sessions
       - TENANT_DEFAULT=${TENANT_DEFAULT:-1}
-      - APP_WEBHOOK=http://app:8000/webhook/provider
+      - APP_WEBHOOK=http://app:8000/webhook
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - TELEGRAM_QR_TTL=${TELEGRAM_QR_TTL:-120}

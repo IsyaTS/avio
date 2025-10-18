@@ -15,6 +15,7 @@ APP_URL = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 INBOX_KEY = "inbox:message_in"
 TENANT = int(os.getenv("TENANT_ID", "1"))
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_SECRET", "")
 
 
 def _redis_client() -> redis.Redis:
@@ -35,7 +36,10 @@ async def main() -> None:
     client = _redis_client()
     before = client.llen(INBOX_KEY)
     async with httpx.AsyncClient(timeout=5.0) as http:
-        response = await http.post(f"{APP_URL}/webhook/provider", json=sample)
+        url = f"{APP_URL}/webhook/telegram"
+        if WEBHOOK_TOKEN:
+            url = f"{url}?token={WEBHOOK_TOKEN}"
+        response = await http.post(url, json=sample)
         try:
             body: Any = response.json()
         except Exception:

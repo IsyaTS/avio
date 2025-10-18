@@ -206,7 +206,7 @@ def _resolve_webhook_url() -> tuple[str, Optional[str]]:
             or os.getenv("APP_INTERNAL_URL")
             or "http://app:8000"
         )
-        url = f"{base.rstrip('/')}/webhook/provider"
+        url = f"{base.rstrip('/')}/webhook"
     token = os.getenv("WEBHOOK_SECRET") or None
     if token:
         from urllib.parse import quote_plus
