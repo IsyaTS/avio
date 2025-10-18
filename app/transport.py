@@ -21,24 +21,23 @@ def _normalize_digits(raw: str) -> str:
     return digits
 
 
-def normalize_whatsapp_recipient(value: str | int) -> Tuple[str, str]:
-    """Normalize supported WhatsApp recipient formats.
+def normalize_e164_digits(value: str | int) -> str:
+    """Normalize arbitrary recipient value to bare E.164 digits.
 
     Parameters
     ----------
     value:
-        Recipient identifier in ``+E164`` format, plain digits, or an existing
-        JID (``<digits>@c.us``).
+        Recipient identifier that may include ``+`` prefix or a JID suffix.
 
     Returns
     -------
-    tuple[str, str]
-        A pair of ``(digits, jid)`` suitable for downstream APIs.
+    str
+        Digits representing the E.164 number without the leading ``+``.
 
     Raises
     ------
     WhatsAppAddressError
-        If the value cannot be parsed or validated.
+        If the value cannot be parsed into a valid E.164 number.
     """
 
     if value is None:
@@ -59,8 +58,19 @@ def normalize_whatsapp_recipient(value: str | int) -> Tuple[str, str]:
             raise WhatsAppAddressError("invalid_domain")
         local_part = raw.split("@", 1)[0]
     digits = _normalize_digits(local_part)
+    return digits
+
+
+def normalize_whatsapp_recipient(value: str | int) -> Tuple[str, str]:
+    """Normalize supported WhatsApp recipient formats."""
+
+    digits = normalize_e164_digits(value)
     jid = f"{digits}{_WHATSAPP_JID_SUFFIX}"
     return digits, jid
 
 
-__all__ = ["normalize_whatsapp_recipient", "WhatsAppAddressError"]
+__all__ = [
+    "normalize_e164_digits",
+    "normalize_whatsapp_recipient",
+    "WhatsAppAddressError",
+]

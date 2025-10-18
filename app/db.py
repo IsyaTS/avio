@@ -811,6 +811,48 @@ async def insert_message_in(
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
 
+async def has_recent_incoming_message(
+    lead_id: int,
+    tenant_id: Optional[int] = None,
+    *,
+    within_seconds: int = 24 * 60 * 60,
+) -> bool:
+    """Check whether the lead has inbound messages within the given window."""
+
+    if lead_id is None or int(lead_id) <= 0:
+        return False
+
+    try:
+        interval = float(within_seconds)
+    except Exception:
+        interval = 0.0
+    if interval <= 0:
+        return False
+
+    params: list[Any] = [int(lead_id), interval]
+    tenant_clause = ""
+    if tenant_id is not None:
+        try:
+            tenant_value = int(tenant_id)
+        except Exception:
+            tenant_value = None
+        if tenant_value is not None:
+            params.append(tenant_value)
+            tenant_clause = f" AND tenant_id = ${len(params)}"
+
+    sql = (
+        "SELECT 1"
+        " FROM messages"
+        " WHERE lead_id = $1"
+        "   AND direction = 0"
+        "   AND created_at >= now() - ($2::double precision * INTERVAL '1 second')"
+        f"{tenant_clause}"
+        " LIMIT 1"
+    )
+    row = await _fetchrow(sql, *params)
+    return bool(row)
+
+
 async def insert_message_out(
     lead_id: int,
     text: str,

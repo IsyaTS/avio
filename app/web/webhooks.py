@@ -514,12 +514,16 @@ def _extract_provider_token(request: Request) -> str:
     if query_token:
         return query_token
     headers = getattr(request, "headers", {}) or {}
-    header_token = headers.get("X-Provider-Token") or headers.get("X-Webhook-Token") or ""
+    header_token = headers.get("X-Provider-Token")
+    if header_token:
+        return str(header_token).strip()
+    legacy_token = headers.get("X-Webhook-Token")
+    if legacy_token:
+        return str(legacy_token).strip()
     auth_header = headers.get("Authorization") or ""
-    value = str(header_token or auth_header or "").strip()
-    if value.lower().startswith("bearer "):
-        value = value[7:].strip()
-    return value
+    if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return ""
 
 
 def _sanitize_media_item(blob: dict[str, Any]) -> dict[str, Any]:

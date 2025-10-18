@@ -47,6 +47,14 @@ async def ensure_tenant(tenant: int, request: Request) -> JSONResponse:
         raise HTTPException(status_code=401, detail="unauthorized")
 
     try:
+        await provider_tokens.ensure_schema()
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("provider_token_ensure").inc()
+        INTERNAL_TENANT_COUNTER.labels("error").inc()
+        logger.exception("provider_token_schema_ensure_failed tenant=%s", tenant)
+        raise HTTPException(status_code=500, detail="db_error") from exc
+
+    try:
         common_module.ensure_tenant_files(int(tenant))
     except Exception as exc:
         logger.warning("tenant_files_ensure_failed tenant=%s error=%s", tenant, exc)

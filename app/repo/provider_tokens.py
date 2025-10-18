@@ -15,12 +15,33 @@ except ImportError:  # pragma: no cover - scripts/tests may import as top-level
 logger = logging.getLogger(__name__)
 
 
+async def ensure_schema() -> None:
+    runner = getattr(db_module, "ensure_provider_tokens_schema", None)
+    if runner is None:
+        logger.debug("provider_tokens_ensure_skip reason=no_runner")
+        return
+    await runner()
+
+
 async def _fetchrow(sql: str, *args: Any):
     fetchrow = getattr(db_module, "_fetchrow", None)
     if fetchrow is None:
         logger.debug("provider_token_fetchrow_skip reason=no_driver")
         return None
-    return await fetchrow(sql, *args)
+    asyncpg_module = getattr(db_module, "asyncpg", None)
+    undefined_table_error = getattr(asyncpg_module, "UndefinedTableError", None)
+    try:
+        return await fetchrow(sql, *args)
+    except Exception as exc:
+        if undefined_table_error and isinstance(exc, undefined_table_error):
+            await ensure_schema()
+            try:
+                return await fetchrow(sql, *args)
+            except Exception as retry_exc:
+                if undefined_table_error and isinstance(retry_exc, undefined_table_error):
+                    raise
+                raise
+        raise
 
 
 def _row_to_token(row: Mapping[str, Any] | Any) -> ProviderToken | None:
@@ -99,4 +120,4 @@ async def upsert(tenant_id: int, token: str) -> ProviderToken | None:
     return _row_to_token(row)
 
 
-__all__ = ["get_by_tenant", "create_for_tenant", "upsert"]
+__all__ = ["ensure_schema", "get_by_tenant", "create_for_tenant", "upsert"]
