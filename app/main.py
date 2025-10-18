@@ -250,6 +250,24 @@ async def _log_alembic_revision_on_startup() -> None:
 
 
 @app.on_event("startup")
+async def _startup_run_provider_token_migration() -> None:
+    module = globals().get("db_module")
+    runner = getattr(module, "ensure_provider_tokens_schema", None)
+    if runner is None:
+        logging.getLogger("app.migrations").info(
+            "provider_tokens_migration_skip reason=no_db_module",
+        )
+        return
+    try:
+        await runner()  # type: ignore[misc]
+    except Exception:
+        logging.getLogger("app.migrations").exception(
+            "provider_tokens_migration_failed",
+        )
+        raise
+
+
+@app.on_event("startup")
 async def _startup_log_revision() -> None:
     await _log_alembic_revision_on_startup()
 

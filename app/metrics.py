@@ -17,6 +17,11 @@ DB_ERRORS_COUNTER = Counter(
     "Database errors grouped by operation",
     labelnames=("operation",),
 )
+INTERNAL_TENANT_COUNTER = Counter(
+    "internal_tenant_requests_total",
+    "Internal tenant ensure results grouped by status",
+    labelnames=("status",),
+)
 SEND_FAIL_COUNTER = Counter(
     "send_fail_total",
     "Failed send attempts",
@@ -45,6 +50,7 @@ __all__ = [
     "MESSAGE_IN_COUNTER",
     "MESSAGE_OUT_COUNTER",
     "DB_ERRORS_COUNTER",
+    "INTERNAL_TENANT_COUNTER",
     "SEND_FAIL_COUNTER",
     "WA_QR_RECEIVED_COUNTER",
     "WA_QR_CALLBACK_ERRORS_COUNTER",

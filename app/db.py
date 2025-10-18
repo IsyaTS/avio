@@ -120,6 +120,57 @@ async def _fetch(sql: str, *args):
         return await con.fetch(sql, *args)
 
 
+async def ensure_provider_tokens_schema() -> None:
+    pool = await _ensure_pool()
+    if not pool:
+        _log.info("provider_tokens_migration_skip reason=no_pool")
+        return
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS provider_tokens (
+            tenant INTEGER PRIMARY KEY,
+            token TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'provider_tokens'
+                  AND column_name = 'tenant_id'
+            ) THEN
+                EXECUTE 'ALTER TABLE provider_tokens RENAME COLUMN tenant_id TO tenant';
+            END IF;
+        END $$
+        """,
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'provider_tokens'::regclass
+                  AND conname = 'provider_tokens_token_key'
+            ) THEN
+                EXECUTE 'ALTER TABLE provider_tokens ADD CONSTRAINT provider_tokens_token_key UNIQUE (token)';
+            END IF;
+        END $$
+        """,
+        "ALTER TABLE provider_tokens ALTER COLUMN created_at SET DEFAULT now()",
+    )
+    async with pool.acquire() as con:
+        for statement in statements:
+            try:
+                await con.execute(statement)
+            except Exception:
+                _log.exception("provider_tokens_migration_failed statement=%s", statement.strip().split("\n", 1)[0])
+                raise
+
+
 async def current_alembic_revision() -> Optional[str]:
     pool = await _ensure_pool()
     if not pool:

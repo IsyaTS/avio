@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib
 import sys
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -60,3 +62,32 @@ def test_admin_login_sets_secure_cookie(monkeypatch):
 
     max_age = cookie.get("max-age")
     assert max_age and int(max_age) >= 60 * 60 * 24 * 7
+
+
+def test_admin_provider_token_lookup(monkeypatch):
+    admin_token = "valid-admin-token"
+    monkeypatch.setenv("ADMIN_TOKEN", admin_token)
+    _reload_for_admin_tests()
+
+    main_mod = importlib.import_module("app.main")
+    admin_mod = importlib.import_module("app.web.admin")
+
+    async def _fake_get_by_tenant(tenant_id: int):
+        assert tenant_id == 9
+        return SimpleNamespace(token="provider-secret", created_at=datetime(2024, 5, 21, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(admin_mod.provider_tokens_repo, "get_by_tenant", _fake_get_by_tenant, raising=False)
+
+    client = TestClient(main_mod.app)
+
+    resp = client.get(
+        "/admin/provider-token/9",
+        headers={"X-Admin-Token": admin_token},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["tenant"] == 9
+    assert payload["provider_token"] == "provider-secret"
+    assert payload["created_at"].startswith("2024-05-21")

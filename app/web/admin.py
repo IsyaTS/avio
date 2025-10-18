@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from typing import Any
 from urllib.parse import quote_plus
 from fastapi import APIRouter, Request
@@ -11,6 +12,7 @@ from .ui import templates
 from app.repo import provider_tokens as provider_tokens_repo
 
 router = APIRouter()
+_log = logging.getLogger("app.web.admin")
 
 
 def _auth_ok(request: Request) -> bool:
@@ -85,6 +87,25 @@ async def keys_list(tenant: int, request: Request):
         "ok": True,
         "items": C.list_keys(int(tenant)),
         "provider_token": provider_token,
+    }
+
+
+@router.get("/admin/provider-token/{tenant}")
+async def provider_token_get(tenant: int, request: Request):
+    if not _auth_ok(request):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    try:
+        token_entry = await provider_tokens_repo.get_by_tenant(int(tenant))
+    except Exception:
+        _log.exception("provider_token_fetch_failed tenant=%s", tenant)
+        return JSONResponse({"detail": "db_error"}, status_code=500)
+    if not token_entry or not token_entry.token:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+    return {
+        "ok": True,
+        "tenant": int(tenant),
+        "provider_token": token_entry.token,
+        "created_at": token_entry.created_at.isoformat(),
     }
 
 

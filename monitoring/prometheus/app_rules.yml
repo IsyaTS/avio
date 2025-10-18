@@ -1,0 +1,24 @@
+groups:
+  - name: app.whatsapp.alerts
+    interval: 1m
+    rules:
+      - alert: ProviderWebhookUnauthorizedRate
+        expr: rate(webhook_provider_total{status="unauthorized",channel="whatsapp"}[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Повышенный уровень 401 на /webhook/provider"
+          description: |
+            За последние 5 минут фиксируется стабильный поток 401 ответов на WhatsApp вебхук.
+            Проверьте токены провайдера и соединение waweb → app.
+      - alert: TenantEnsureServerErrors
+        expr: increase(internal_tenant_requests_total{status="error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "500 ответы на /internal/tenant/*"
+          description: |
+            Эндпоинт ensure возвращал 500 за последние 5 минут.
+            Изучите логи app и состояние Postgres.

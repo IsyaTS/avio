@@ -141,3 +141,33 @@ def test_provider_webhook_rejects_bad_token(monkeypatch):
     assert resp.status_code == 401
     assert resp.json()["detail"] == "unauthorized"
     assert not dummy.queue
+
+
+def test_provider_webhook_db_error(monkeypatch):
+    dummy = _DummyAsyncRedis()
+    monkeypatch.setattr(webhooks_module, "_redis_queue", dummy, raising=False)
+
+    async def _boom(*_: object, **__: object):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        webhooks_module.provider_tokens_repo,
+        "get_by_tenant",
+        _boom,
+        raising=False,
+    )
+
+    app = _build_app()
+    client = TestClient(app)
+
+    payload = {
+        "provider": "whatsapp",
+        "event": "ready",
+        "tenant": 2,
+        "channel": "whatsapp",
+    }
+
+    resp = client.post("/webhook/provider?token=fake", json=payload)
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "db_error"
+    assert not dummy.queue
