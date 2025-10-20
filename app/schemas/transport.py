@@ -88,6 +88,10 @@ class MessageIn(BaseModel):
     attachments: List[Attachment] = Field(default_factory=list)
     ts: int | None = None
     provider_raw: Dict[str, Any] = Field(default_factory=dict)
+    telegram_user_id: int | None = None
+    username: str | None = None
+    peer: str | None = None
+    peer_id: int | None = None
 
 
 class PingEvent(BaseModel):

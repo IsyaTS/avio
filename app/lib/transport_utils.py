@@ -73,7 +73,49 @@ def update_meta(target: MutableMapping[str, Any], **updates: Any) -> None:
 
 
 def message_in_asdict(message: MessageIn) -> dict[str, Any]:
-    return _model_dump(message)
+    data = _model_dump(message)
+    channel = str(data.get("channel") or "").lower()
+
+    for key in ("telegram_user_id", "username", "peer", "peer_id"):
+        if data.get(key) is None:
+            data.pop(key, None)
+
+    if channel == "telegram":
+        nested: dict[str, Any] = {}
+        existing_nested = data.get("message")
+        if isinstance(existing_nested, dict):
+            nested.update(existing_nested)
+
+        text_value = data.get("text")
+        if text_value is not None and "text" not in nested:
+            nested["text"] = text_value
+        attachments_value = data.get("attachments")
+        if attachments_value is not None and "attachments" not in nested:
+            nested["attachments"] = attachments_value
+
+        telegram_details: dict[str, Any] = {}
+        if message.telegram_user_id is not None:
+            telegram_id = int(message.telegram_user_id)
+            telegram_details["telegram_user_id"] = telegram_id
+            data["telegram_user_id"] = telegram_id
+        if message.username:
+            telegram_details["telegram_username"] = message.username
+            data["username"] = message.username
+        if message.peer is not None:
+            telegram_details["peer"] = message.peer
+            data["peer"] = message.peer
+        if message.peer_id is not None:
+            peer_id_value = int(message.peer_id)
+            telegram_details["peer_id"] = peer_id_value
+            data["peer_id"] = peer_id_value
+
+        if telegram_details:
+            nested.update(telegram_details)
+
+        if nested:
+            data["message"] = nested
+
+    return data
 
 
 def transport_message_asdict(message: TransportMessage) -> dict[str, Any]:
