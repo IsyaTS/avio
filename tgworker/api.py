@@ -58,6 +58,7 @@ from .metrics import (
 
 logger = logging.getLogger("tgworker.api")
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
+_TELEGRAM_WEBHOOK_PATH = "/webhook/telegram"
 
 
 @dataclass(slots=True)
@@ -196,28 +197,32 @@ class TwoFARequest(TenantBody):
 
 
 def _resolve_webhook_url() -> tuple[str, Optional[str]]:
-    explicit = os.getenv("APP_WEBHOOK")
+    explicit = (os.getenv("APP_WEBHOOK") or "").strip()
     if explicit:
         url = explicit.rstrip("/")
     else:
-        base = (
-            os.getenv("TG_WEBHOOK_URL")
-            or os.getenv("APP_BASE_URL")
-            or os.getenv("APP_INTERNAL_URL")
-            or "http://app:8000"
-        )
-        url = f"{base.rstrip('/')}/webhook"
-    token = os.getenv("WEBHOOK_SECRET") or None
-    if token:
-        from urllib.parse import quote_plus
-
-        url = f"{url}?token={quote_plus(token)}"
-    return url, None
+        tg_specific = (os.getenv("TG_WEBHOOK_URL") or "").strip()
+        if tg_specific:
+            url = tg_specific.rstrip("/")
+        else:
+            base = (os.getenv("APP_INTERNAL_URL") or "").strip()
+            if not base:
+                base = (os.getenv("APP_BASE_URL") or "").strip()
+            if not base:
+                base = "http://app:8000"
+            url = f"{base.rstrip('/')}{_TELEGRAM_WEBHOOK_PATH}"
+    token = (os.getenv("WEBHOOK_SECRET") or "").strip() or None
+    return url, token
 
 
 def create_app() -> FastAPI:
     cfg = telegram_config()
     webhook_url, webhook_token = _resolve_webhook_url()
+    logger.info(
+        "stage=webhook_url_resolved url=%s token_present=%s",
+        webhook_url,
+        "true" if webhook_token else "false",
+    )
     manager = SessionManager(
         api_id=cfg.api_id,
         api_hash=cfg.api_hash,

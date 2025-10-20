@@ -1527,16 +1527,11 @@ class TelegramSessionManager:
             peer_id_value = peer_id if isinstance(peer_id, int) else None
             peer_value = str(peer_id_value) if peer_id_value is not None else None
             sender_id_value = sender_id if isinstance(sender_id, int) else None
-            telegram_user_id = peer_id_value if peer_id_value is not None else sender_id_value
             telegram_username = username or None
             chat_id_value = peer_id_value
 
             extra = {
                 "message_id": message_id_value,
-                "peer_id": peer_id_value,
-                "peer": peer_value,
-                "telegram_user_id": telegram_user_id,
-                "telegram_username": telegram_username,
                 "chat_id": chat_id_value,
             }
             extra = {key: value for key, value in extra.items() if value is not None}
@@ -1550,6 +1545,10 @@ class TelegramSessionManager:
                 attachments=attachments,
                 ts=ts_unix,
                 provider_raw=provider_raw,
+                telegram_user_id=sender_id_value,
+                username=telegram_username,
+                peer=peer_value,
+                peer_id=peer_id_value,
             )
             delivered = await self._send_webhook(normalized, extra=extra)
             if delivered:
@@ -1622,6 +1621,23 @@ class TelegramSessionManager:
                     payload_dict["message"] = base_message
             payload = jsonable_encoder(_json_safe(payload_dict))
             payload_keys = ",".join(sorted(payload.keys())) if isinstance(payload, dict) else ""
+            if isinstance(payload, dict):
+                expected_keys = {"peer", "peer_id", "telegram_user_id", "username"}
+                present_keys = set(payload.keys())
+                missing_keys = sorted(expected_keys - present_keys)
+                if missing_keys:
+                    LOGGER.warning(
+                        "stage=webhook_payload_missing tenant_id=%s missing=%s payload_keys=%s",
+                        message.tenant,
+                        ",".join(missing_keys),
+                        payload_keys,
+                    )
+                else:
+                    LOGGER.debug(
+                        "stage=webhook_payload_verified tenant_id=%s payload_keys=%s",
+                        message.tenant,
+                        payload_keys,
+                    )
             LOGGER.info(
                 "stage=webhook_request tenant_id=%s url=%s payload_keys=%s",
                 message.tenant,
