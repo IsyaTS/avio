@@ -1,6 +1,6 @@
 import os, hashlib, json, time, logging, pathlib, threading, re
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple, AsyncIterator
+from typing import Optional, List, Dict, Any, Tuple, AsyncIterator, Mapping
 
 try:
     import asyncpg  # type: ignore
@@ -398,6 +398,38 @@ def sha1(text: str) -> str:
 
 # -------- Leads / sources --------
 
+async def find_lead_by_peer(
+    tenant_id: Optional[int],
+    channel: str,
+    peer: str,
+) -> Optional[Mapping[str, Any]]:
+    try:
+        tenant_val = int(tenant_id) if tenant_id is not None else 0
+    except Exception:
+        tenant_val = 0
+
+    channel_val = (channel or "avito").strip().lower() or "avito"
+    peer_text = (peer or "").strip()
+    if not peer_text:
+        return None
+
+    peer_lookup = peer_text[:255]
+
+    return await _fetchrow(
+        """
+        SELECT id, tenant_id
+        FROM leads
+        WHERE ($1 = 0 OR tenant_id = $1)
+          AND channel = $2
+          AND peer = $3
+        LIMIT 1;
+        """,
+        tenant_val,
+        channel_val,
+        peer_lookup,
+    )
+
+
 async def upsert_lead(
     lead_id: Optional[int],
     channel: str = "avito",
@@ -418,7 +450,7 @@ async def upsert_lead(
     except Exception:
         tenant_val = 0
 
-    channel_val = (channel or "avito").strip() or "avito"
+    channel_val = (channel or "avito").strip().lower() or "avito"
     username_val = (telegram_username or "").strip() or None
 
     peer_str = (peer or "").strip()
@@ -456,6 +488,8 @@ async def upsert_lead(
     peer_text = (peer_str or (str(peer_val) if peer_val is not None else "")).strip()
     if not peer_text:
         peer_text = None
+    elif len(peer_text) > 255:
+        peer_text = peer_text[:255]
 
     existing: Optional[Dict[str, Any]] = None
     if telegram_val is not None:
@@ -495,17 +529,7 @@ async def upsert_lead(
             tenant_val,
         )
     if existing is None and peer_text:
-        existing = await _fetchrow(
-            """
-            SELECT id, tenant_id
-            FROM leads
-            WHERE ($1 = 0 OR tenant_id = $1)
-              AND peer = $2
-            LIMIT 1;
-            """,
-            tenant_val,
-            peer_text,
-        )
+        existing = await find_lead_by_peer(tenant_val, channel_val, peer_text)
 
     if existing is not None:
         existing_id = existing.get("id")

@@ -26,8 +26,17 @@ async def test_worker_handles_whatsapp_event(monkeypatch: pytest.MonkeyPatch) ->
     ) -> None:
         inserted.append((lead_id, text, status, tenant_id))
 
-    async def fake_upsert_lead(lead_id: int, **kwargs: object) -> int:
-        return lead_id
+    async def fake_get_or_create_by_peer(
+        tenant_id: int,
+        channel: str,
+        peer: str,
+        *,
+        lead_id_hint: int | None = None,
+        source_real_id: int | None = None,
+        title: str | None = None,
+        contact: str | None = None,
+    ) -> int:
+        return lead_id_hint or 1234
 
     async def fake_resolve_contact(**kwargs: object) -> int:
         return 777
@@ -43,7 +52,12 @@ async def test_worker_handles_whatsapp_event(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(worker_module, "r", FakeRedis(), raising=False)
     monkeypatch.setattr(worker_module, "insert_message_in", fake_insert_message_in, raising=False)
-    monkeypatch.setattr(worker_module, "upsert_lead", fake_upsert_lead, raising=False)
+    monkeypatch.setattr(
+        worker_module,
+        "get_or_create_by_peer",
+        fake_get_or_create_by_peer,
+        raising=False,
+    )
     monkeypatch.setattr(
         worker_module,
         "resolve_or_create_contact",

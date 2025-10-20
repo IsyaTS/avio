@@ -9,12 +9,22 @@ CREATE TABLE IF NOT EXISTS leads (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   telegram_user_id  BIGINT,
   telegram_username TEXT,
-  peer              TEXT,
+  peer              VARCHAR(255),
   contact           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_tenant_updated_at
   ON leads(tenant_id, updated_at DESC);
+DO $$
+BEGIN
+  ALTER TABLE leads
+    ADD CONSTRAINT ux_leads_tenant_channel_peer
+    UNIQUE (tenant_id, channel, peer);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_leads_tenant_channel_peer
+  ON leads(tenant_id, channel, peer);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_tenant_telegram_user
   ON leads(tenant_id, telegram_user_id)
   WHERE telegram_user_id IS NOT NULL;
