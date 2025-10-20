@@ -1523,6 +1523,24 @@ class TelegramSessionManager:
 
             provider_raw = jsonable_encoder(_json_safe(message.to_dict()))
 
+            message_id_value = message_id if isinstance(message_id, int) else None
+            peer_id_value = peer_id if isinstance(peer_id, int) else None
+            peer_value = str(peer_id_value) if peer_id_value is not None else None
+            sender_id_value = sender_id if isinstance(sender_id, int) else None
+            telegram_user_id = peer_id_value if peer_id_value is not None else sender_id_value
+            telegram_username = username or None
+            chat_id_value = peer_id_value
+
+            extra = {
+                "message_id": message_id_value,
+                "peer_id": peer_id_value,
+                "peer": peer_value,
+                "telegram_user_id": telegram_user_id,
+                "telegram_username": telegram_username,
+                "chat_id": chat_id_value,
+            }
+            extra = {key: value for key, value in extra.items() if value is not None}
+
             normalized = MessageIn(
                 tenant=tenant,
                 channel="telegram",
@@ -1533,7 +1551,7 @@ class TelegramSessionManager:
                 ts=ts_unix,
                 provider_raw=provider_raw,
             )
-            delivered = await self._send_webhook(normalized)
+            delivered = await self._send_webhook(normalized, extra=extra)
             if delivered:
                 self._delivered_incoming += 1
                 MESSAGE_IN_COUNTER.labels("telegram").inc()
@@ -1580,7 +1598,9 @@ class TelegramSessionManager:
                 source="handle_new_message",
             )
 
-    async def _send_webhook(self, message: MessageIn) -> bool:
+    async def _send_webhook(
+        self, message: MessageIn, extra: Optional[Dict[str, Any]] = None
+    ) -> bool:
         headers = {"Content-Type": "application/json"}
         if self._webhook_token:
             headers["X-Webhook-Token"] = self._webhook_token
@@ -1588,6 +1608,18 @@ class TelegramSessionManager:
             headers["X-Admin-Token"] = self._admin_token
         try:
             payload_dict = message_in_asdict(message)
+            if extra:
+                cleaned_extra = {key: value for key, value in extra.items() if value is not None}
+                if cleaned_extra:
+                    payload_dict.update(cleaned_extra)
+                    message_payload = payload_dict.get("message")
+                    base_message: dict[str, Any]
+                    if isinstance(message_payload, dict):
+                        base_message = dict(message_payload)
+                    else:
+                        base_message = {}
+                    base_message.update(cleaned_extra)
+                    payload_dict["message"] = base_message
             payload = jsonable_encoder(_json_safe(payload_dict))
             payload_keys = ",".join(sorted(payload.keys())) if isinstance(payload, dict) else ""
             LOGGER.info(
