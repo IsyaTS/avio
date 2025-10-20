@@ -15,7 +15,7 @@ import os
 import socket
 import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -150,10 +150,9 @@ def _make_pdf(content_lines: list[str]) -> bytes:
 
 
 def check_api_key_creation(tenant_id: int) -> Optional[str]:
-    url = _make_url(f"/admin/keys/generate?token={ADMIN_TOKEN}")
-    payload = {"tenant": tenant_id, "label": "diagnostic"}
+    url = _make_url(f"/admin/key/get?tenant={tenant_id}&token={ADMIN_TOKEN}")
     try:
-        resp = _SESSION.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        resp = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as exc:  # pragma: no cover - network errors
         report(False, f"Tenant {tenant_id}: запрос ключа не выполнен ({exc})")
         return None
@@ -162,8 +161,28 @@ def check_api_key_creation(tenant_id: int) -> Optional[str]:
     data = resp.json() if ok_http else {}
     key = (data.get("key") or "").strip()
     if not (ok_http and key):
-        report(False, f"Tenant {tenant_id}: не удалось создать ключ (HTTP {resp.status_code})")
+        report(False, f"Tenant {tenant_id}: не удалось получить ключ (HTTP {resp.status_code})")
         return None
+
+    list_url = _make_url(f"/admin/keys/list?tenant={tenant_id}&token={ADMIN_TOKEN}")
+    items: list[dict[str, Any]] = []
+    list_ok = False
+    try:
+        list_resp = _SESSION.get(list_url, timeout=REQUEST_TIMEOUT)
+    except requests.RequestException:
+        list_resp = None
+    if list_resp is not None and list_resp.status_code == 200:
+        try:
+            list_data = list_resp.json()
+        except ValueError:
+            list_data = {}
+        if isinstance(list_data, dict):
+            raw_items = list_data.get("items")
+            if isinstance(raw_items, list):
+                items = raw_items
+        list_ok = True
+    single_key = list_ok and len(items) == 1 and (items[0].get("key") or "").strip().lower() == key.lower()
+    report(single_key, f"Tenant {tenant_id}: проверка списка ключей (найдено {len(items)})")
 
     tenant_dir = TENANTS_DIR / str(tenant_id)
     persona_path = tenant_dir / "persona.md"

@@ -125,11 +125,13 @@ async def keys_generate(request: Request):
     payload = await request.json()
     tenant = int(payload.get("tenant"))
     label = (payload.get("label") or "").strip()
+    existing = (get_tenant_pubkey(tenant) or "").strip()
+    if existing:
+        return JSONResponse({"error": "key_already_exists"}, status_code=409)
     key = os.urandom(16).hex()
     C.add_key(tenant, key, label)
     C.ensure_tenant_files(tenant)
-    if not (get_tenant_pubkey(tenant) or ""):
-        C.set_primary(tenant, key)
+    C.set_primary(tenant, key)
     encoded = quote_plus(key)
     link = f"/connect/wa?tenant={tenant}&k={encoded}"
     settings_link = f"/client/{tenant}/settings?k={encoded}"
@@ -144,30 +146,18 @@ async def keys_save(request: Request):
     tenant = int(payload.get("tenant"))
     key = (payload.get("key") or "").strip()
     label = (payload.get("label") or "").strip()
-    primary = bool(payload.get("primary"))
     if not key:
         return {"ok": False, "error": "empty_key"}
+    current = (get_tenant_pubkey(tenant) or "").strip()
+    if current and current.lower() != key.lower():
+        return JSONResponse({"error": "key_already_exists"}, status_code=409)
     C.add_key(tenant, key, label)
     C.ensure_tenant_files(tenant)
-    if primary or not (get_tenant_pubkey(tenant) or ""):
-        C.set_primary(tenant, key)
+    C.set_primary(tenant, key)
     encoded = quote_plus(key)
     link = f"/connect/wa?tenant={tenant}&k={encoded}"
     settings_link = f"/client/{tenant}/settings?k={encoded}"
     return {"ok": True, "key": key, "link": link, "settings_link": settings_link}
-
-
-@router.post("/admin/keys/set_primary")
-async def keys_set_primary(request: Request):
-    if not _auth_ok(request):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = await request.json()
-    tenant = int(payload.get("tenant"))
-    key = (payload.get("key") or "").strip()
-    if not key:
-        return {"ok": False, "error": "empty_key"}
-    C.set_primary(tenant, key)
-    return {"ok": True}
 
 
 @router.post("/admin/keys/delete")
@@ -190,19 +180,37 @@ async def keys_delete(request: Request):
 def admin_key_get(tenant: int, request: Request):
     if not _auth_ok(request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    key = get_tenant_pubkey(int(tenant)) or ""
-    return {"ok": True, "tenant": int(tenant), "key": key}
+    tenant_id = int(tenant)
+    items = C.list_keys(tenant_id)
+    if items:
+        key_value = items[0].get("key", "")
+    else:
+        existing = (get_tenant_pubkey(tenant_id) or "").strip()
+        key_value = existing
+        if not existing:
+            key_value = os.urandom(16).hex()
+            C.add_key(tenant_id, key_value, "primary")
+            C.ensure_tenant_files(tenant_id)
+            C.set_primary(tenant_id, key_value)
+            items = C.list_keys(tenant_id)
+            if items:
+                key_value = items[0].get("key", key_value)
+    return {"ok": True, "tenant": tenant_id, "key": key_value}
 
 
 @router.post("/admin/key/generate")
 def admin_key_generate(tenant: int, request: Request):
     if not _auth_ok(request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    tenant_id = int(tenant)
+    existing = (get_tenant_pubkey(tenant_id) or "").strip()
+    if existing:
+        return JSONResponse({"error": "key_already_exists"}, status_code=409)
     key = os.urandom(16).hex()
-    C.add_key(int(tenant), key, "primary")
-    C.set_primary(int(tenant), key)
-    C.ensure_tenant_files(int(tenant))
-    return {"ok": True, "tenant": int(tenant), "key": key}
+    C.add_key(tenant_id, key, "primary")
+    C.set_primary(tenant_id, key)
+    C.ensure_tenant_files(tenant_id)
+    return {"ok": True, "tenant": tenant_id, "key": key}
 
 
 @router.post("/admin/key/save")
@@ -257,6 +265,10 @@ async def admin_key_save(
     key_value = "" if raw_key is None else str(raw_key).strip()
     if not key_value:
         return {"ok": False, "error": "empty_key"}
+
+    current = (get_tenant_pubkey(tenant_id) or "").strip()
+    if current and current.lower() != key_value.lower():
+        return JSONResponse({"error": "key_already_exists"}, status_code=409)
 
     C.add_key(tenant_id, key_value, "manual")
     C.set_primary(tenant_id, key_value)
