@@ -735,9 +735,20 @@ def _find_username(value: Any) -> str | None:
 @router.get("/connect/wa")
 def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | None = None):
     tenant = int(tenant)
-    access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
-    if not common.valid_key(tenant, access_key):
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
+    query_candidate = (
+        k or key or request.query_params.get("k") or request.query_params.get("key") or ""
+    )
+    header_candidate = request.headers.get("X-Admin-Token")
+
+    resolved_key = _ensure_public_key(header_candidate, request)
+    if not resolved_key:
+        resolved_key = _ensure_public_key(query_candidate, request)
+
+    if not resolved_key:
+        candidate = _resolve_public_key_candidate(query_candidate, request)
+        if not (candidate and common.valid_key(tenant, candidate)):
+            return _invalid_key_response()
+        resolved_key = candidate
 
     common.ensure_tenant_files(tenant)
     cfg = common.read_tenant_config(tenant)
@@ -747,15 +758,15 @@ def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | N
     persona_preview = "\n".join((persona or "").splitlines()[:6])
 
     settings_link = ""
-    if access_key:
+    if resolved_key:
         raw_settings = request.url_for('client_settings', tenant=str(tenant))
-        settings_link = common.public_url(request, f"{raw_settings}?k={quote_plus(access_key)}")
+        settings_link = common.public_url(request, f"{raw_settings}?k={quote_plus(resolved_key)}")
 
     context = {
         "request": request,
         "tenant": tenant,
-        "key": access_key,
-        "k": access_key,
+        "key": resolved_key,
+        "k": resolved_key,
         "timestamp": int(time.time()),
         "passport": passport,
         "persona_preview": persona_preview,
