@@ -352,7 +352,9 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
 
     if channel == "whatsapp" and whitelist_number is not None:
         whitelist = get_outbox_whitelist()
-        if not whitelist_contains_number(whitelist, whitelist_number):
+        if not whitelist.allow_all and not whitelist_contains_number(
+            whitelist, whitelist_number
+        ):
             status_label = "not_whitelisted"
             MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
             transport_logger.warning(

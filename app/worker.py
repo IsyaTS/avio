@@ -2,10 +2,11 @@ from __future__ import annotations
 import os
 import re
 import json
+import time
 import asyncio
 import urllib.request
 import urllib.error
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlparse
 
 import redis.asyncio as redis
@@ -21,12 +22,15 @@ except Exception:  # pragma: no cover - fallback for bootstrap edge cases
 from app.db import (
     init_db,
     insert_message_out,
+    insert_message_in,
     upsert_lead,
     lead_exists,
     find_lead_by_telegram,
     get_telegram_user_id_by_lead,
     update_message_status,
     has_recent_incoming_message,
+    resolve_or_create_contact,
+    link_lead_contact,
 )
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
 from app.common import (
@@ -255,16 +259,7 @@ def _normalize_attachments(blobs: Iterable[dict[str, Any]]) -> list[dict[str, An
     return normalized
 
 
-async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
-    channel_raw = event.get("channel") or event.get("ch") or event.get("provider")
-    channel = ""
-    if isinstance(channel_raw, str):
-        channel = channel_raw.strip().lower()
-    elif channel_raw is not None:
-        channel = str(channel_raw).strip().lower()
-    if channel != "telegram":
-        return
-
+async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     tenant_raw = event.get("tenant") or event.get("tenant_id") or os.getenv("TENANT_ID", "1")
     try:
         tenant_id = int(tenant_raw)
@@ -433,6 +428,232 @@ async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
     log(
         f"event=smart_reply_enqueued channel=telegram tenant={tenant_id} lead_id={lead_id}"
     )
+
+
+async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
+    tenant_raw = event.get("tenant") or event.get("tenant_id") or os.getenv("TENANT_ID", "1")
+    try:
+        tenant_id = int(tenant_raw)
+    except Exception:
+        tenant_id = int(os.getenv("TENANT_ID", "1"))
+
+    if event.get("auto_reply_handled"):
+        log(
+            f"event=incoming_skip_auto_handled channel=whatsapp tenant={tenant_id}"
+        )
+        return
+
+    message_id_raw = event.get("message_id")
+    message_id = str(message_id_raw) if message_id_raw is not None else ""
+
+    sender_raw = event.get("from") or event.get("from_jid") or event.get("from_raw") or ""
+    sender_digits = _digits(sender_raw)
+    if not sender_digits:
+        log(
+            f"event=skip_invalid_sender channel=whatsapp tenant={tenant_id} message_id={message_id}"
+        )
+        return
+
+    text_raw = event.get("text")
+    text = "" if text_raw is None else str(text_raw)
+    text = text.strip()
+
+    lead_candidate = _coerce_int(event.get("lead_id"))
+    if lead_candidate is None or lead_candidate <= 0:
+        try:
+            lead_candidate = int(sender_digits)
+        except Exception:
+            lead_candidate = None
+    if lead_candidate is None or lead_candidate <= 0:
+        lead_candidate = int(time.time())
+
+    conversation_id = _coerce_int(event.get("conversation_id"))
+    upsert_kwargs: Dict[str, Any] = {"channel": "whatsapp", "tenant_id": tenant_id}
+    if conversation_id and conversation_id > 0:
+        upsert_kwargs["source_real_id"] = conversation_id
+
+    try:
+        resolved_lead = await upsert_lead(lead_candidate, **upsert_kwargs)
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("upsert_lead").inc()
+        log(
+            "event=inbox_lead_upsert_failed channel=whatsapp tenant=%s error=%s"
+            % (tenant_id, exc)
+        )
+        return
+
+    lead_id = lead_candidate if lead_candidate and lead_candidate > 0 else 0
+    if resolved_lead is not None:
+        try:
+            lead_id = int(resolved_lead)
+        except Exception:
+            lead_id = lead_candidate if lead_candidate else 0
+
+    if lead_id <= 0:
+        log(
+            f"event=skip_missing_lead channel=whatsapp tenant={tenant_id} message_id={message_id}"
+        )
+        return
+
+    log(
+        f"event=inbox_lead_resolved channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+    )
+
+    contact_id = 0
+    try:
+        contact_id = await resolve_or_create_contact(whatsapp_phone=sender_digits)
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("resolve_or_create_contact").inc()
+        log(
+            "event=contact_resolve_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        contact_id = 0
+
+    stored_incoming = False
+    if contact_id:
+        try:
+            await link_lead_contact(lead_id, contact_id)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("link_lead_contact").inc()
+            log(
+                "event=link_lead_contact_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+        if text:
+            try:
+                await insert_message_in(
+                    lead_id,
+                    text,
+                    status="received",
+                    tenant_id=tenant_id,
+                )
+                stored_incoming = True
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("insert_message_in").inc()
+                log(
+                    "event=store_incoming_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
+                    % (tenant_id, lead_id, exc)
+                )
+
+    if text and not stored_incoming:
+        try:
+            await insert_message_in(
+                lead_id,
+                text,
+                status="received",
+                tenant_id=tenant_id,
+            )
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("insert_message_in").inc()
+            log(
+                "event=store_incoming_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    refer_id = contact_id if contact_id and contact_id > 0 else lead_id
+
+    if not text:
+        log(
+            f"event=skip_no_text channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    if not smart_reply_enabled(tenant_id):
+        log(
+            f"event=smart_reply_disabled channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    try:
+        messages = await build_llm_messages(
+            refer_id,
+            text,
+            "whatsapp",
+            tenant=tenant_id,
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=build_messages error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    try:
+        reply = await ask_llm(
+            messages,
+            tenant=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="whatsapp",
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=ask_llm error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    reply_text = (reply or "").strip()
+    if not reply_text:
+        log(
+            f"event=smart_reply_empty channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    log(
+        f"event=smart_reply_generated channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+    )
+
+    out_payload: Dict[str, Any] = {
+        "lead_id": int(lead_id),
+        "tenant": int(tenant_id),
+        "tenant_id": int(tenant_id),
+        "provider": "whatsapp",
+        "ch": "whatsapp",
+        "channel": "whatsapp",
+        "text": reply_text,
+        "attachments": [],
+        "to": sender_digits,
+    }
+    if message_id:
+        out_payload["message_id"] = message_id
+
+    try:
+        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
+    except Exception as exc:
+        log(
+            "event=smart_reply_enqueue_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    log(
+        f"event=smart_reply_enqueued channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+    )
+
+
+_INCOMING_EVENT_HANDLERS: dict[
+    str, Callable[[Mapping[str, Any]], Awaitable[None]]
+] = {
+    "telegram": _handle_telegram_incoming,
+    "whatsapp": _handle_whatsapp_incoming,
+}
+
+
+async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
+    channel_raw = event.get("channel") or event.get("ch") or event.get("provider")
+    channel = ""
+    if isinstance(channel_raw, str):
+        channel = channel_raw.strip().lower()
+    elif channel_raw is not None:
+        channel = str(channel_raw).strip().lower()
+
+    handler = _INCOMING_EVENT_HANDLERS.get(channel)
+    if handler is None:
+        log(f"event=incoming_skip_handler channel={channel or '-'}")
+        return
+
+    await handler(event)
 def _http_json(
     method: str,
     url: str,

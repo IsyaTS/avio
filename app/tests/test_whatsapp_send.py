@@ -130,6 +130,32 @@ def test_send_whatsapp_success(monkeypatch: pytest.MonkeyPatch, recipient: str) 
     assert stub.calls[0]["json"]["to"] == "79991234567@c.us"
 
 
+def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = DummyResponse(200, {"ok": True})
+    client, stub = _prepare_app(
+        monkeypatch,
+        whitelist="*",
+        response_factory=lambda: response,
+    )
+
+    payload = {
+        "tenant": 1,
+        "channel": "whatsapp",
+        "to": "+79991234567",
+        "text": "wildcard",
+    }
+
+    http_response = client.post(
+        "/send",
+        json=payload,
+        headers={"X-Admin-Token": "test-token"},
+    )
+
+    assert http_response.status_code == 200
+    assert http_response.json()["ok"] is True
+    assert stub.calls and stub.calls[0]["json"]["to"] == "79991234567@c.us"
+
+
 def test_send_whatsapp_not_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
     response = DummyResponse(200, {"ok": True})
     client, stub = _prepare_app(

@@ -46,7 +46,12 @@ from app.repo import provider_tokens as provider_tokens_repo
 
 logger = logging.getLogger("app.web.webhooks")
 
-INCOMING_QUEUE_KEY = "inbox:message_in"
+INCOMING_QUEUE_KEY = (
+    os.getenv("INBOX_QUEUE")
+    or os.getenv("INBOX_QUEUE_KEY")
+    or os.getenv("INCOMING_QUEUE_KEY")
+    or "inbox:message_in"
+)
 INCOMING_DEDUP_TTL = 60 * 60 * 24  # 24 hours
 
 router = APIRouter()
@@ -277,6 +282,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         normalized_event["username"] = telegram_username
     if peer_id is not None:
         normalized_event["peer_id"] = peer_id
+    if provider != "telegram":
+        normalized_event["auto_reply_handled"] = True
 
     try:
         await _redis_queue.lpush(
@@ -517,9 +524,6 @@ def _extract_provider_token(request: Request) -> str:
     header_token = headers.get("X-Provider-Token")
     if header_token:
         return str(header_token).strip()
-    legacy_token = headers.get("X-Webhook-Token")
-    if legacy_token:
-        return str(legacy_token).strip()
     auth_header = headers.get("Authorization") or ""
     if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
         return auth_header[7:].strip()
@@ -536,7 +540,9 @@ def _sanitize_media_item(blob: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def _normalize_whatsapp_incoming(payload: dict[str, Any], tenant: int) -> dict[str, Any]:
+def _normalize_whatsapp_incoming(
+    payload: dict[str, Any], tenant: int, lead_hint: int | None = None
+) -> dict[str, Any]:
     channel_value = str(payload.get("channel") or payload.get("provider") or "whatsapp").strip().lower()
     if channel_value and channel_value not in {"whatsapp", "wa"}:
         raise ValueError("invalid_channel")
@@ -597,6 +603,25 @@ def _normalize_whatsapp_incoming(payload: dict[str, Any], tenant: int) -> dict[s
         if optional_key in payload:
             normalized[optional_key] = payload[optional_key]
 
+    lead_value = lead_hint if isinstance(lead_hint, int) and lead_hint > 0 else None
+    if lead_value is None:
+        conversation_hint = _coerce_int(payload.get("conversation_id"))
+        if conversation_hint and conversation_hint > 0:
+            lead_value = conversation_hint
+    if lead_value is None and sender_digits:
+        try:
+            lead_value = int(sender_digits)
+        except Exception:
+            lead_value = None
+    if lead_value is None:
+        ts_hint = _coerce_int(ts_value)
+        if ts_hint and ts_hint > 0:
+            lead_value = ts_hint
+    if lead_value is None:
+        lead_value = int(time.time() * 1000)
+
+    normalized["lead_id"] = int(lead_value)
+
     return normalized
 
 
@@ -608,6 +633,22 @@ async def _queue_incoming_event(event_payload: dict[str, Any]) -> None:
 
     try:
         await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
+        channel_hint = str(
+            (
+                event_payload.get("channel")
+                or event_payload.get("ch")
+                or event_payload.get("provider")
+                or ""
+            )
+        ).strip()
+        tenant_hint = event_payload.get("tenant") or event_payload.get("tenant_id") or ""
+        message_id = event_payload.get("message_id") or ""
+        logger.info(
+            "incoming_enqueued ch=%s tenant=%s message_id=%s",
+            channel_hint or "-",
+            tenant_hint,
+            message_id or "-",
+        )
     except Exception as exc:  # pragma: no cover - Redis connectivity issues
         logger.exception(
             "webhook_provider_queue_failed tenant=%s", event_payload.get("tenant")
@@ -766,8 +807,9 @@ async def provider_webhook(request: Request) -> JSONResponse:
         raise HTTPException(status_code=422, detail="invalid_event")
 
     if event == "messages.incoming":
+        lead_hint = _coerce_int(payload.get("lead_id") or payload.get("leadId"))
         try:
-            normalized_event = _normalize_whatsapp_incoming(payload, tenant)
+            normalized_event = _normalize_whatsapp_incoming(payload, tenant, lead_hint)
         except ValueError as exc:
             WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
             raise HTTPException(status_code=422, detail=str(exc) or "invalid_payload") from exc
@@ -780,7 +822,6 @@ async def provider_webhook(request: Request) -> JSONResponse:
             WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
             raise HTTPException(status_code=422, detail="empty_message")
 
-        lead_hint = _coerce_int(payload.get("lead_id") or payload.get("leadId"))
         try:
             await insert_webhook_event(
                 "whatsapp",

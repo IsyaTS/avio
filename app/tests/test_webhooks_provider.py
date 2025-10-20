@@ -123,6 +123,7 @@ def test_provider_webhook_messages_incoming(monkeypatch):
     stored = json.loads(raw_item)
     assert stored["event"] == "messages.incoming"
     assert stored["tenant"] == 5
+    assert stored["lead_id"]
     assert stored["from"] == "79991234567"
     assert stored["from_jid"].endswith("@c.us")
     assert stored["text"] == "Hello"
