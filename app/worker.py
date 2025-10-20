@@ -33,6 +33,7 @@ from app.db import (
     resolve_or_create_contact,
     link_lead_contact,
 )
+from app.dao import get_or_create_by_peer
 from app.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
 from app.common import (
     OUTBOX_QUEUE_KEY,
@@ -99,6 +100,17 @@ def log(msg: str):
 
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
+
+
+def _normalize_whatsapp_peer(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raw = str(raw)
+    peer = raw.strip()
+    if not peer:
+        return None
+    return peer.lower()
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -465,48 +477,50 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     message_id_raw = event.get("message_id")
     message_id = str(message_id_raw) if message_id_raw is not None else ""
 
-    sender_raw = event.get("from") or event.get("from_jid") or event.get("from_raw") or ""
-    sender_digits = _digits(sender_raw)
-    if not sender_digits:
+    sender_raw = (
+        event.get("from")
+        or event.get("from_jid")
+        or event.get("from_raw")
+        or event.get("sender")
+    )
+    sender_peer = _normalize_whatsapp_peer(sender_raw)
+    if not sender_peer:
         log(
             f"event=skip_invalid_sender channel=whatsapp tenant={tenant_id} message_id={message_id}"
         )
         return
 
+    peer_local = sender_peer.split("@", 1)[0]
+    sender_digits = _digits(peer_local)
+
     text_raw = event.get("text")
     text = "" if text_raw is None else str(text_raw)
     text = text.strip()
 
-    lead_candidate = _coerce_int(event.get("lead_id"))
-    if lead_candidate is None or lead_candidate <= 0:
-        try:
-            lead_candidate = int(sender_digits)
-        except Exception:
-            lead_candidate = None
-    if lead_candidate is None or lead_candidate <= 0:
-        lead_candidate = int(time.time())
-
     conversation_id = _coerce_int(event.get("conversation_id"))
-    upsert_kwargs: Dict[str, Any] = {"channel": "whatsapp", "tenant_id": tenant_id}
-    if conversation_id and conversation_id > 0:
-        upsert_kwargs["source_real_id"] = conversation_id
+    lead_hint = _coerce_int(event.get("lead_id"))
+    if lead_hint is not None and lead_hint <= 0:
+        lead_hint = None
+    if lead_hint is None and conversation_id and conversation_id > 0:
+        lead_hint = conversation_id
+    source_real_id = conversation_id if conversation_id and conversation_id > 0 else None
 
     try:
-        resolved_lead = await upsert_lead(lead_candidate, **upsert_kwargs)
+        lead_id = await get_or_create_by_peer(
+            tenant_id=tenant_id,
+            channel="whatsapp",
+            peer=sender_peer,
+            lead_id_hint=lead_hint,
+            source_real_id=source_real_id,
+        )
+        lead_id = int(lead_id)
     except Exception as exc:
-        DB_ERRORS_COUNTER.labels("upsert_lead").inc()
+        DB_ERRORS_COUNTER.labels("get_or_create_lead_peer").inc()
         log(
-            "event=inbox_lead_upsert_failed channel=whatsapp tenant=%s error=%s"
+            "event=inbox_lead_resolve_failed channel=whatsapp tenant=%s error=%s"
             % (tenant_id, exc)
         )
         return
-
-    lead_id = lead_candidate if lead_candidate and lead_candidate > 0 else 0
-    if resolved_lead is not None:
-        try:
-            lead_id = int(resolved_lead)
-        except Exception:
-            lead_id = lead_candidate if lead_candidate else 0
 
     if lead_id <= 0:
         log(
@@ -519,15 +533,16 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     )
 
     contact_id = 0
-    try:
-        contact_id = await resolve_or_create_contact(whatsapp_phone=sender_digits)
-    except Exception as exc:
-        DB_ERRORS_COUNTER.labels("resolve_or_create_contact").inc()
-        log(
-            "event=contact_resolve_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
-            % (tenant_id, lead_id, exc)
-        )
-        contact_id = 0
+    if sender_digits:
+        try:
+            contact_id = await resolve_or_create_contact(whatsapp_phone=sender_digits)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("resolve_or_create_contact").inc()
+            log(
+                "event=contact_resolve_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            contact_id = 0
 
     stored_incoming = False
     if contact_id:
@@ -536,7 +551,7 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
                 lead_id,
                 contact_id,
                 channel="whatsapp",
-                peer=sender_digits or None,
+                peer=sender_peer,
             )
         except Exception as exc:
             DB_ERRORS_COUNTER.labels("link_lead_contact").inc()
