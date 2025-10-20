@@ -407,6 +407,8 @@ async def upsert_lead(
     telegram_username: Optional[str] = None,
     *,
     peer_id: Optional[int] = None,
+    peer: Optional[str] = None,
+    contact: Optional[str] = None,
     title: Optional[str] = None,
 ) -> int:
     """Ensure that a lead record exists and refresh metadata."""
@@ -417,7 +419,15 @@ async def upsert_lead(
         tenant_val = 0
 
     channel_val = (channel or "avito").strip() or "avito"
-    _ = telegram_username  # leads no longer persist usernames; parameter kept for compatibility
+    username_val = (telegram_username or "").strip() or None
+
+    peer_str = (peer or "").strip()
+    if not peer_str and peer_id is not None:
+        try:
+            peer_str = str(int(peer_id))
+        except Exception:
+            peer_str = str(peer_id).strip()
+    contact_val = (contact or "").strip() or None
 
     def _normalize_int(value: Optional[int]) -> Optional[int]:
         try:
@@ -443,6 +453,9 @@ async def upsert_lead(
     source_val = _normalize_int(source_real_id)
 
     title_val = (title or "").strip() or None
+    peer_text = (peer_str or (str(peer_val) if peer_val is not None else "")).strip()
+    if not peer_text:
+        peer_text = None
 
     existing: Optional[Dict[str, Any]] = None
     if telegram_val is not None:
@@ -481,6 +494,18 @@ async def upsert_lead(
             source_val,
             tenant_val,
         )
+    if existing is None and peer_text:
+        existing = await _fetchrow(
+            """
+            SELECT id, tenant_id
+            FROM leads
+            WHERE ($1 = 0 OR tenant_id = $1)
+              AND peer = $2
+            LIMIT 1;
+            """,
+            tenant_val,
+            peer_text,
+        )
 
     if existing is not None:
         existing_id = existing.get("id")
@@ -503,7 +528,10 @@ async def upsert_lead(
                     source_real_id = COALESCE($3::int, source_real_id),
                     tenant_id = CASE WHEN $4::int > 0 THEN $4::int ELSE tenant_id END,
                     telegram_user_id = $5::bigint,
-                    title = COALESCE(NULLIF($6::text, ''), title),
+                    telegram_username = COALESCE(NULLIF($6::text, ''), telegram_username),
+                    peer = COALESCE(NULLIF($7::text, ''), peer),
+                    contact = COALESCE(NULLIF($8::text, ''), contact),
+                    title = COALESCE(NULLIF($9::text, ''), title),
                     updated_at = now()
                 WHERE id = $1::bigint;
                 """,
@@ -512,6 +540,9 @@ async def upsert_lead(
                 source_val,
                 tenant_update,
                 telegram_val,
+                username_val,
+                peer_text,
+                contact_val,
                 title_val,
             )
         else:
@@ -521,7 +552,9 @@ async def upsert_lead(
                 SET channel = CASE WHEN $2::text <> '' THEN $2::text ELSE channel END,
                     source_real_id = COALESCE($3::int, source_real_id),
                     tenant_id = CASE WHEN $4::int > 0 THEN $4::int ELSE tenant_id END,
-                    title = COALESCE(NULLIF($5::text, ''), title),
+                    peer = COALESCE(NULLIF($5::text, ''), peer),
+                    contact = COALESCE(NULLIF($6::text, ''), contact),
+                    title = COALESCE(NULLIF($7::text, ''), title),
                     updated_at = now()
                 WHERE id = $1::bigint;
                 """,
@@ -529,6 +562,8 @@ async def upsert_lead(
                 channel_val,
                 source_val,
                 tenant_update,
+                peer_text,
+                contact_val,
                 title_val,
             )
         return target_id or existing_id_val
@@ -538,8 +573,8 @@ async def upsert_lead(
 
     row = await _fetchrow(
         """
-        INSERT INTO leads(id, title, channel, source_real_id, tenant_id, telegram_user_id)
-        VALUES($1::bigint, $2::text, $3::text, $4::int, $5::int, $6::bigint)
+        INSERT INTO leads(id, title, channel, source_real_id, tenant_id, telegram_user_id, telegram_username, peer, contact)
+        VALUES($1::bigint, $2::text, $3::text, $4::int, $5::int, $6::bigint, $7::text, $8::text, $9::text)
         ON CONFLICT (id)
         DO UPDATE SET channel = EXCLUDED.channel,
                       source_real_id = COALESCE(EXCLUDED.source_real_id, leads.source_real_id),
@@ -548,6 +583,9 @@ async def upsert_lead(
                           ELSE leads.tenant_id
                       END,
                       telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, leads.telegram_user_id),
+                      telegram_username = COALESCE(NULLIF(EXCLUDED.telegram_username, ''), leads.telegram_username),
+                      peer = COALESCE(NULLIF(EXCLUDED.peer, ''), leads.peer),
+                      contact = COALESCE(NULLIF(EXCLUDED.contact, ''), leads.contact),
                       title = COALESCE(EXCLUDED.title, leads.title),
                       updated_at = now()
         RETURNING id;
@@ -558,6 +596,9 @@ async def upsert_lead(
         source_val,
         tenant_val,
         telegram_val,
+        username_val,
+        peer_text,
+        contact_val,
     )
     if row and "id" in row and row["id"] is not None:
         try:
@@ -662,12 +703,30 @@ async def resolve_or_create_contact(
     # если БД недоступна — вернём фиктивный id, чтобы не падал вызов
     return int(row["id"]) if row and "id" in row else 0
 
-async def link_lead_contact(lead_id: int, contact_id: int):
-    await _exec("""
-        INSERT INTO lead_contacts(lead_id, contact_id)
-        VALUES($1, $2)
-        ON CONFLICT (lead_id) DO UPDATE SET contact_id=EXCLUDED.contact_id, linked_at=now();
-    """, lead_id, contact_id)
+async def link_lead_contact(
+    lead_id: int,
+    contact_id: int,
+    *,
+    channel: Optional[str] = None,
+    peer: Optional[str] = None,
+):
+    channel_val = (channel or "").strip() or None
+    peer_val = (peer or "").strip() or None
+    await _exec(
+        """
+        INSERT INTO lead_contacts(lead_id, contact_id, channel, peer)
+        VALUES($1, $2, $3, $4)
+        ON CONFLICT (lead_id)
+        DO UPDATE SET contact_id = EXCLUDED.contact_id,
+                      channel = COALESCE(NULLIF(EXCLUDED.channel, ''), lead_contacts.channel),
+                      peer = COALESCE(NULLIF(EXCLUDED.peer, ''), lead_contacts.peer),
+                      linked_at = now();
+    """,
+        lead_id,
+        contact_id,
+        channel_val,
+        peer_val,
+    )
 
 async def get_contact_id_by_lead(lead_id: int) -> Optional[int]:
     row = await _fetchrow("SELECT contact_id FROM lead_contacts WHERE lead_id=$1", lead_id)
@@ -997,6 +1056,44 @@ async def get_telegram_user_id_by_lead(lead_id: int) -> Optional[int]:
     if coerced <= 0:
         return None
     return coerced
+
+
+async def get_lead_peer(lead_id: int, channel: Optional[str] = None) -> Optional[str]:
+    try:
+        lead_ref = int(lead_id)
+    except Exception:
+        return None
+    if lead_ref <= 0:
+        return None
+
+    channel_val = (channel or "").strip().lower()
+    row = await _fetchrow(
+        """
+        SELECT COALESCE(NULLIF(lc.peer, ''), NULLIF(l.peer, '')) AS peer
+        FROM leads l
+        LEFT JOIN lead_contacts lc
+            ON lc.lead_id = l.id
+            AND ($2 = '' OR lc.channel = $2)
+        WHERE l.id = $1
+          AND ($2 = '' OR l.channel = $2)
+        LIMIT 1;
+        """,
+        lead_ref,
+        channel_val,
+    )
+    if not row:
+        return None
+    value: Optional[str]
+    if isinstance(row, dict):
+        value = row.get("peer")  # type: ignore[assignment]
+    else:
+        value = getattr(row, "peer", None)
+        if value is None and getattr(row, "get", None):  # pragma: no branch - mapping-like row
+            value = row.get("peer")  # type: ignore[assignment]
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    return value_str or None
 
 async def get_recent_dialog_by_contact(contact_id: int, limit: int = 40) -> List[Dict[str, Any]]:
     rows = await _fetch("""
