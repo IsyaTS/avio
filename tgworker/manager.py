@@ -1525,8 +1525,13 @@ class TelegramSessionManager:
 
             message_id_value = message_id if isinstance(message_id, int) else None
             peer_id_value = peer_id if isinstance(peer_id, int) else None
-            peer_value = str(peer_id_value) if peer_id_value is not None else None
             sender_id_value = sender_id if isinstance(sender_id, int) else None
+            if peer_id_value is not None:
+                peer_value = str(peer_id_value)
+            elif sender_id_value is not None:
+                peer_value = str(sender_id_value)
+            else:
+                peer_value = None
             telegram_username = username or None
             chat_id_value = peer_id_value
 
@@ -1545,6 +1550,7 @@ class TelegramSessionManager:
                 attachments=attachments,
                 ts=ts_unix,
                 provider_raw=provider_raw,
+                message_id=message_id_value,
                 telegram_user_id=sender_id_value,
                 username=telegram_username,
                 peer=peer_value,
@@ -1622,7 +1628,13 @@ class TelegramSessionManager:
             payload = jsonable_encoder(_json_safe(payload_dict))
             payload_keys = ",".join(sorted(payload.keys())) if isinstance(payload, dict) else ""
             if isinstance(payload, dict):
-                expected_keys = {"peer", "peer_id", "telegram_user_id", "username"}
+                expected_keys = {
+                    "message",
+                    "peer",
+                    "peer_id",
+                    "telegram_user_id",
+                    "username",
+                }
                 present_keys = set(payload.keys())
                 missing_keys = sorted(expected_keys - present_keys)
                 if missing_keys:

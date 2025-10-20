@@ -197,20 +197,15 @@ class TwoFARequest(TenantBody):
 
 
 def _resolve_webhook_url() -> tuple[str, Optional[str]]:
-    explicit = (os.getenv("APP_WEBHOOK") or "").strip()
+    explicit = (os.getenv("TG_WEBHOOK_URL") or "").strip()
     if explicit:
         url = explicit.rstrip("/")
     else:
-        tg_specific = (os.getenv("TG_WEBHOOK_URL") or "").strip()
-        if tg_specific:
-            url = tg_specific.rstrip("/")
-        else:
-            base = (os.getenv("APP_INTERNAL_URL") or "").strip()
-            if not base:
-                base = (os.getenv("APP_BASE_URL") or "").strip()
-            if not base:
-                base = "http://app:8000"
-            url = f"{base.rstrip('/')}{_TELEGRAM_WEBHOOK_PATH}"
+        base = (os.getenv("APP_INTERNAL_URL") or "").strip()
+        if not base:
+            base = "http://app:8000"
+        url = f"{base.rstrip('/')}{_TELEGRAM_WEBHOOK_PATH}"
+    logger.info("stage=webhook_url_resolved url=%s", url)
     token = (os.getenv("WEBHOOK_SECRET") or "").strip() or None
     return url, token
 
@@ -219,7 +214,7 @@ def create_app() -> FastAPI:
     cfg = telegram_config()
     webhook_url, webhook_token = _resolve_webhook_url()
     logger.info(
-        "stage=webhook_url_resolved url=%s token_present=%s",
+        "stage=webhook_token_resolved url=%s token_present=%s",
         webhook_url,
         "true" if webhook_token else "false",
     )
