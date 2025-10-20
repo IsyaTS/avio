@@ -204,7 +204,11 @@ def _resolve_webhook_url() -> tuple[str, Optional[str]]:
         base = (os.getenv("APP_INTERNAL_URL") or "").strip()
         if not base:
             base = "http://app:8000"
-        url = f"{base.rstrip('/')}{_TELEGRAM_WEBHOOK_PATH}"
+        base = base.rstrip("/") or "http://app:8000"
+        if base.endswith(_TELEGRAM_WEBHOOK_PATH):
+            url = base
+        else:
+            url = f"{base}{_TELEGRAM_WEBHOOK_PATH}"
     logger.info("stage=webhook_url_resolved url=%s", url)
     token = (os.getenv("WEBHOOK_SECRET") or "").strip() or None
     return url, token

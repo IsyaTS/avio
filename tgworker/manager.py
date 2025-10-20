@@ -1523,20 +1523,36 @@ class TelegramSessionManager:
 
             provider_raw = jsonable_encoder(_json_safe(message.to_dict()))
 
-            message_id_value = message_id if isinstance(message_id, int) else None
-            peer_id_value = peer_id if isinstance(peer_id, int) else None
-            sender_id_value = sender_id if isinstance(sender_id, int) else None
-            if peer_id_value is not None:
-                peer_value = str(peer_id_value)
-            elif sender_id_value is not None:
-                peer_value = str(sender_id_value)
+            message_id_value = message_id
+            message_id_int: Optional[int]
+            try:
+                message_id_int = int(message_id) if message_id is not None else None
+            except (TypeError, ValueError):
+                message_id_int = None
+
+            peer_id_value: Optional[int]
+            if isinstance(peer_id, int):
+                peer_id_value = peer_id
             else:
-                peer_value = None
+                try:
+                    peer_id_value = int(peer_id) if peer_id is not None else None
+                except (TypeError, ValueError):
+                    peer_id_value = None
+            sender_id_value = sender_id if isinstance(sender_id, int) else None
+            peer_value = str(peer_id_value) if peer_id_value is not None else None
             telegram_username = username or None
             chat_id_value = peer_id_value
 
+            text_raw = getattr(message, "message", None)
+            if text_raw is None:
+                text_value = ""
+            elif isinstance(text_raw, str):
+                text_value = text_raw
+            else:
+                text_value = str(text_raw)
+
             extra = {
-                "message_id": message_id_value,
+                "message_id": message_id_int,
                 "chat_id": chat_id_value,
             }
             extra = {key: value for key, value in extra.items() if value is not None}
@@ -1545,8 +1561,8 @@ class TelegramSessionManager:
                 tenant=tenant,
                 channel="telegram",
                 from_id=sender_id or username or "unknown",
-                to=me or peer_id or tenant,
-                text=message.message or "",
+                to=me or peer_id_value or peer_id or tenant,
+                text=text_value,
                 attachments=attachments,
                 ts=ts_unix,
                 provider_raw=provider_raw,
@@ -1630,10 +1646,14 @@ class TelegramSessionManager:
             if isinstance(payload, dict):
                 expected_keys = {
                     "message",
-                    "peer",
-                    "peer_id",
+                    "text",
                     "telegram_user_id",
                     "username",
+                    "peer",
+                    "peer_id",
+                    "source",
+                    "channel",
+                    "tenant",
                 }
                 present_keys = set(payload.keys())
                 missing_keys = sorted(expected_keys - present_keys)

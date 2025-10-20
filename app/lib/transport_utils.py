@@ -93,82 +93,99 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
     if channel != "telegram":
         return {key: value for key, value in data.items() if value is not None}
 
-    payload: dict[str, Any] = {"provider": "telegram"}
+    def _coerce_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
-    for key in ("tenant", "channel", "from_id", "to", "ts"):
+    tenant_raw = data.get("tenant")
+    try:
+        tenant = int(tenant_raw) if tenant_raw is not None else None
+    except (TypeError, ValueError):
+        tenant = tenant_raw
+    provider_raw = data.get("provider_raw")
+
+    if message.text is not None:
+        text_raw: Any = message.text
+    else:
+        text_raw = data.get("text")
+    if text_raw is None:
+        text_value = ""
+    elif isinstance(text_raw, str):
+        text_value = text_raw
+    else:
+        text_value = str(text_raw)
+
+    telegram_user_id = message.telegram_user_id
+    if telegram_user_id is None:
+        telegram_user_id = _coerce_int(data.get("telegram_user_id"))
+
+    username_value = message.username if message.username is not None else data.get("username")
+    if isinstance(username_value, str):
+        username_value = username_value.strip() or None
+
+    peer_id_value = message.peer_id
+    if peer_id_value is None:
+        peer_id_value = _coerce_int(data.get("peer_id"))
+
+    peer_value: str | None
+    if peer_id_value is not None:
+        peer_value = str(peer_id_value)
+    else:
+        peer_raw = message.peer if message.peer is not None else data.get("peer")
+        if isinstance(peer_raw, str):
+            peer_value = peer_raw.strip() or None
+        elif peer_raw is None:
+            peer_value = None
+        else:
+            peer_value = str(peer_raw)
+
+    message_id_value = message.message_id if message.message_id is not None else data.get("message_id")
+    if isinstance(message_id_value, str):
+        message_id_value = message_id_value.strip() or None
+    elif message_id_value is not None and not isinstance(message_id_value, int):
+        coerced = _coerce_int(message_id_value)
+        message_id_value = coerced if coerced is not None else str(message_id_value)
+
+    attachments_value = data.get("attachments")
+    if not isinstance(attachments_value, list):
+        attachments_value = list(message.attachments) if isinstance(message.attachments, list) else []
+
+    nested: dict[str, Any] = {
+        "id": message_id_value,
+        "text": text_value,
+        "attachments": attachments_value or [],
+        "telegram_user_id": telegram_user_id,
+        "telegram_username": username_value,
+        "peer": peer_value,
+        "peer_id": peer_id_value,
+    }
+    if peer_id_value is not None:
+        nested["chat_id"] = peer_id_value
+
+    payload: dict[str, Any] = {
+        "provider": "telegram",
+        "tenant": tenant,
+        "channel": "telegram",
+        "source": {"type": "telegram", "tenant": tenant},
+        "text": text_value,
+        "telegram_user_id": telegram_user_id,
+        "username": username_value,
+        "peer": peer_value,
+        "peer_id": peer_id_value,
+        "message": nested,
+    }
+
+    for key in ("from_id", "to", "ts"):
         value = data.get(key)
         if not _is_empty_value(value):
             payload[key] = value
 
-    provider_raw = data.get("provider_raw")
     if not _is_empty_value(provider_raw):
         payload["provider_raw"] = provider_raw
-
-    telegram_user_id = message.telegram_user_id
-    if telegram_user_id is None:
-        raw_user_id = data.get("telegram_user_id")
-        if raw_user_id is not None:
-            telegram_user_id = int(raw_user_id)
-    if telegram_user_id is not None:
-        payload["telegram_user_id"] = int(telegram_user_id)
-
-    username_value = message.username or data.get("username")
-    if isinstance(username_value, str):
-        username_value = username_value.strip()
-    if not _is_empty_value(username_value):
-        payload["username"] = username_value
-
-    peer_id_value = message.peer_id
-    if peer_id_value is None:
-        raw_peer_id = data.get("peer_id")
-        if raw_peer_id is not None:
-            peer_id_value = int(raw_peer_id)
-    if peer_id_value is not None:
-        payload["peer_id"] = int(peer_id_value)
-
-    peer_value = message.peer or data.get("peer")
-    if isinstance(peer_value, str) and not peer_value.strip():
-        peer_value = None
-    if peer_value is None and peer_id_value is not None:
-        peer_value = str(peer_id_value)
-    if peer_value is None and telegram_user_id is not None:
-        peer_value = str(telegram_user_id)
-    if peer_value is not None and not _is_empty_value(peer_value):
-        payload["peer"] = str(peer_value)
-
-    nested: dict[str, Any] = {}
-
-    message_id_value = message.message_id
-    if message_id_value is None:
-        raw_message_id = data.get("message_id")
-        if raw_message_id is not None:
-            message_id_value = int(raw_message_id)
-    if message_id_value is not None:
-        nested["id"] = int(message_id_value)
-
-    text_value = data.get("text")
-    if not _is_empty_value(text_value):
-        nested["text"] = text_value
-
-    attachments_value = data.get("attachments")
-    if not _is_empty_value(attachments_value):
-        nested["attachments"] = attachments_value
-
-    if telegram_user_id is not None:
-        nested["telegram_user_id"] = int(telegram_user_id)
-
-    if not _is_empty_value(username_value):
-        nested["telegram_username"] = username_value
-
-    if peer_value is not None and not _is_empty_value(peer_value):
-        nested["peer"] = str(peer_value)
-
-    if peer_id_value is not None:
-        nested["peer_id"] = int(peer_id_value)
-        nested["chat_id"] = int(peer_id_value)
-
-    if nested:
-        payload["message"] = nested
 
     return payload
 
