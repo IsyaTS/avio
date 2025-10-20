@@ -27,6 +27,7 @@ from app.db import (
     lead_exists,
     find_lead_by_telegram,
     get_telegram_user_id_by_lead,
+    get_lead_peer,
     update_message_status,
     has_recent_incoming_message,
     resolve_or_create_contact,
@@ -43,6 +44,7 @@ from app.common import (
 )
 from app.core import build_llm_messages, ask_llm
 from app.transport import WhatsAppAddressError, normalize_e164_digits
+from app.transport import telegram as telegram_transport
 
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
@@ -71,7 +73,6 @@ APP_BASE_URL = (
 ).strip().rstrip("/")
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 SEND       = (os.getenv("SEND_ENABLED","true").lower() == "true")
-TGWORKER_SEND_URL = f"{TGWORKER_BASE_URL}/send"
 TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
@@ -275,6 +276,17 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
 
     telegram_user_id = _coerce_int(event.get("telegram_user_id"))
     peer_id = _coerce_int(event.get("peer_id"))
+    peer_raw = event.get("peer")
+    peer_value: Optional[str] = None
+    if isinstance(peer_raw, str):
+        peer_value = peer_raw.strip() or None
+    elif peer_raw is not None:
+        peer_value = str(peer_raw).strip() or None
+    if peer_value and peer_id is None:
+        try:
+            peer_id = int(peer_value)
+        except Exception:
+            peer_id = None
     username_raw = event.get("username")
     username = None
     if username_raw is not None:
@@ -306,10 +318,14 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         if found_lead and found_lead > 0:
             resolved_lead_id = int(found_lead)
 
+    contact_hint = normalized_username or username
+
     upsert_kwargs: Dict[str, Any] = {
         "channel": "telegram",
         "tenant_id": tenant_id,
         "peer_id": peer_id,
+        "peer": peer_value,
+        "contact": contact_hint,
         "title": title_hint,
         "telegram_username": username,
     }
@@ -338,8 +354,11 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
 
     lead_id = resolved_lead_id if resolved_lead_id is not None else 0
 
+    peer_log_hint = peer_value or (str(peer_id) if peer_id is not None else None)
+    if peer_log_hint is None and telegram_user_id is not None:
+        peer_log_hint = str(telegram_user_id)
     log(
-        f"event=inbox_lead_resolved channel=telegram tenant={tenant_id} lead_id={lead_id}"
+        f"event=inbox_lead_resolved channel=telegram tenant={tenant_id} lead_id={lead_id} peer={peer_log_hint or '-'}"
     )
 
     if lead_id <= 0:
@@ -513,7 +532,12 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     stored_incoming = False
     if contact_id:
         try:
-            await link_lead_contact(lead_id, contact_id)
+            await link_lead_contact(
+                lead_id,
+                contact_id,
+                channel="whatsapp",
+                peer=sender_digits or None,
+            )
         except Exception as exc:
             DB_ERRORS_COUNTER.labels("link_lead_contact").inc()
             log(
@@ -744,49 +768,55 @@ async def send_telegram(
     *,
     chat_id: int,
     peer_id: int | None,
+    peer: str | None,
     telegram_user_id: int | None,
     username: str | None,
     text: str | None,
     attachments: list[dict[str, Any]] | None = None,
     reply_to: str | None = None,
+    lead_id: int | None = None,
 ) -> tuple[int, str]:
+
     target = int(chat_id)
     normalized_attachments = _normalize_attachments(attachments or [])
-    payload: Dict[str, Any] = {
-        "tenant": int(tenant_id),
-        "channel": "telegram",
-        "to": target,
-    }
+    text_value = str(text or "").strip()
+
     meta: Dict[str, Any] = {}
     if reply_to:
         meta["reply_to"] = reply_to
     if peer_id is not None:
         meta["peer_id"] = peer_id
-    if meta:
-        payload["meta"] = meta
-    text_value = str(text) if text is not None else ""
-    text_value = text_value.strip()
-    if text_value:
-        payload["text"] = text_value
-    if normalized_attachments:
-        payload["attachments"] = normalized_attachments
 
     headers: Dict[str, str] = {}
     if TG_WORKER_TOKEN:
         headers["X-Auth-Token"] = TG_WORKER_TOKEN
     headers["X-Admin-Token"] = ADMIN_TOKEN
 
-    payload_log = json.dumps(payload, ensure_ascii=False)
+    peer_hint = peer or str(target)
+    payload_preview = {
+        "tenant": tenant_id,
+        "peer": peer_hint,
+        "text": text_value,
+        "has_attachments": bool(normalized_attachments),
+        "meta": meta,
+    }
     log(f"[worker] telegram send target send_target={target}")
-    log(f"[worker] telegram send payload={payload_log}")
+    log(f"[worker] telegram send payload={json.dumps(payload_preview, ensure_ascii=False)}")
 
     last_status, last_body = 0, ""
     last_error: Optional[str] = None
     unauthorized_checked = False
 
     for attempt in range(3):
-        last_status, last_body = await asyncio.to_thread(
-            _http_json, "POST", TGWORKER_SEND_URL, payload, 15.0, headers
+        last_status, last_body = await telegram_transport.send(
+            tenant=tenant_id,
+            text=text_value,
+            peer=peer_hint,
+            attachments=normalized_attachments or None,
+            meta=meta or None,
+            headers=headers,
+            lead_id=lead_id,
+            timeout=15.0,
         )
         if 200 <= last_status < 300:
             MESSAGE_OUT_COUNTER.labels("telegram", "success").inc()
@@ -865,7 +895,15 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     lead_id = lead_candidate if lead_candidate and lead_candidate > 0 else 0
     phone = _digits(item.get("to") or "")
     raw_to = item.get("to")
+    to_peer_raw = item.get("to_peer")
+    peer_field = item.get("peer")
     peer_raw = item.get("peer_id")
+    peer_value: Optional[str] = None
+    for candidate in (to_peer_raw, peer_field, peer_raw):
+        if candidate is not None and peer_value is None:
+            peer_value = str(candidate).strip() or None
+    if peer_raw is None and peer_value is not None:
+        peer_raw = peer_value
     username_raw = item.get("username")
     username = None
     if username_raw is not None:
@@ -966,6 +1004,21 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         if from_candidate is not None and from_candidate <= 0:
             from_candidate = None
 
+        if peer_value is None and lead_id > 0:
+            try:
+                stored_peer = await get_lead_peer(lead_id, channel="telegram")
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("get_lead_peer").inc()
+                log(
+                    "event=send_peer_lookup_failed channel=%s lead_id=%s error=%s"
+                    % (channel, lead_id, exc)
+                )
+                stored_peer = None
+            if stored_peer:
+                peer_value = stored_peer
+        if peer_value and not to_peer_raw:
+            item["to_peer"] = peer_value
+
         db_lookup_result: Optional[int] = None
         if primary_telegram_user_id is None and lead_id > 0:
             try:
@@ -984,6 +1037,14 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             chat_candidates.append(int(db_lookup_result))
         if from_candidate is not None and from_candidate > 0:
             chat_candidates.append(int(from_candidate))
+        if peer_value:
+            try:
+                peer_candidate = int(peer_value)
+            except Exception:
+                peer_candidate = None
+            else:
+                if peer_candidate and peer_candidate > 0:
+                    chat_candidates.append(int(peer_candidate))
 
         chat_id: Optional[int] = None
         for candidate in chat_candidates:
@@ -1027,6 +1088,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             "telegram_username": username,
             "title": title_hint,
             "peer_id": telegram_user_id,
+            "peer": peer_value,
+            "contact": normalized_username or username,
         }
         if telegram_user_id is not None:
             upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
@@ -1093,7 +1156,12 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         st, body = await send_avito(tenant, lead_id, text)
     elif channel == "telegram":
         peer_id = None
-        if peer_raw is not None:
+        if peer_value:
+            try:
+                peer_id = int(peer_value)
+            except Exception:
+                peer_id = None
+        elif peer_raw is not None:
             try:
                 peer_id = int(peer_raw)
             except Exception:
@@ -1102,11 +1170,13 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             tenant,
             chat_id=int(chat_id),
             peer_id=peer_id,
+            peer=peer_value,
             telegram_user_id=telegram_user_id,
             username=username,
             text=text or None,
             attachments=attachments or None,
             reply_to=reply_to,
+            lead_id=actual_lead_id,
         )
     else:
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
@@ -1158,10 +1228,24 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
         text = f"[attachment] {fname}".strip()
 
     telegram_user_id = None
+    peer_value: Optional[str] = None
+    for candidate in (
+        item.get("to_peer"),
+        item.get("peer"),
+        item.get("telegram_user_id"),
+        item.get("peer_id"),
+    ):
+        if candidate is not None and peer_value is None:
+            peer_value = str(candidate).strip() or None
     raw_peer = item.get("telegram_user_id") or item.get("peer_id")
     if raw_peer is not None:
         try:
             telegram_user_id = int(raw_peer)
+        except Exception:
+            telegram_user_id = None
+    if telegram_user_id is None and peer_value is not None:
+        try:
+            telegram_user_id = int(peer_value)
         except Exception:
             telegram_user_id = None
     username = item.get("username") if isinstance(item.get("username"), str) else None
@@ -1183,6 +1267,8 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
                 "tenant_id": tenant_id,
                 "telegram_username": username,
                 "peer_id": telegram_user_id,
+                "peer": peer_value,
+                "contact": username,
             }
             if telegram_user_id is not None:
                 upsert_kwargs["telegram_user_id"] = int(telegram_user_id)

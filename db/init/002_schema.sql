@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS leads (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   telegram_user_id  BIGINT,
-  telegram_username TEXT
+  telegram_username TEXT,
+  peer              TEXT,
+  contact           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_tenant_updated_at

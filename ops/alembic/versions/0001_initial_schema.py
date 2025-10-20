@@ -33,6 +33,8 @@ def upgrade() -> None:
         ),
         sa.Column("telegram_user_id", sa.BigInteger(), nullable=True),
         sa.Column("telegram_username", sa.Text(), nullable=True),
+        sa.Column("peer", sa.Text(), nullable=True),
+        sa.Column("contact", sa.Text(), nullable=True),
     )
     op.create_index(
         "idx_leads_tenant_updated_at",
@@ -201,6 +203,8 @@ def upgrade() -> None:
             sa.ForeignKey("contacts.id", ondelete="CASCADE"),
             nullable=False,
         ),
+        sa.Column("channel", sa.Text(), nullable=True),
+        sa.Column("peer", sa.Text(), nullable=True),
         sa.Column(
             "linked_at",
             sa.DateTime(timezone=True),

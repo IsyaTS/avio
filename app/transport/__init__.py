@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Tuple
 
+from .telegram import send as send_telegram, aclose as close_telegram
+
 _WHATSAPP_JID_SUFFIX = "@c.us"
 
 
@@ -22,23 +24,7 @@ def _normalize_digits(raw: str) -> str:
 
 
 def normalize_e164_digits(value: str | int) -> str:
-    """Normalize arbitrary recipient value to bare E.164 digits.
-
-    Parameters
-    ----------
-    value:
-        Recipient identifier that may include ``+`` prefix or a JID suffix.
-
-    Returns
-    -------
-    str
-        Digits representing the E.164 number without the leading ``+``.
-
-    Raises
-    ------
-    WhatsAppAddressError
-        If the value cannot be parsed into a valid E.164 number.
-    """
+    """Normalize arbitrary recipient value to bare E.164 digits."""
 
     if value is None:
         raise WhatsAppAddressError("empty")
@@ -73,4 +59,6 @@ __all__ = [
     "normalize_e164_digits",
     "normalize_whatsapp_recipient",
     "WhatsAppAddressError",
+    "send_telegram",
+    "close_telegram",
 ]

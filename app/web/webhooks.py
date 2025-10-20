@@ -179,8 +179,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     text = (msg.get("text") or msg.get("body") or body.get("text") or "").strip()
     whatsapp_phone = ""
     telegram_user_id: int | None = None
-    telegram_username = None
+    telegram_username: str | None = None
     peer_id: int | None = None
+    peer_value: str | None = None
+    contact_value: str | None = None
     attachments: list[dict[str, Any]] = []
 
     raw_attachments = msg.get("attachments") or body.get("attachments")
@@ -198,21 +200,31 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 telegram_user_id = int(raw_id)
             except Exception:
                 telegram_user_id = None
-        telegram_username = msg.get("telegram_username") or body.get("username")
+        raw_username = msg.get("telegram_username") or body.get("username")
+        if isinstance(raw_username, str):
+            telegram_username = raw_username.strip() or None
+        else:
+            telegram_username = None
+        contact_value = telegram_username
         peer_candidate = (
-            msg.get("peer_id")
+            msg.get("peer")
+            or body.get("peer")
+            or msg.get("peer_id")
             or body.get("peer_id")
             or msg.get("chat_id")
             or body.get("chat_id")
         )
         if peer_candidate is not None:
-            try:
-                peer_id = int(peer_candidate)
-            except Exception:
-                peer_id = None
+            peer_value = str(peer_candidate).strip() or None
+            if peer_value is not None:
+                try:
+                    peer_id = int(peer_value)
+                except Exception:
+                    peer_id = None
     else:
         from_id = msg.get("from") or msg.get("author") or body.get("from") or ""
         whatsapp_phone = _digits(from_id.split("@", 1)[0] if from_id else "")
+        contact_value = whatsapp_phone or None
 
     lead_hint = _coerce_int(body.get("leadId") or body.get("lead_id"))
     ts_fallback = int(time.time() * 1000)
@@ -227,12 +239,23 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     lead_id = int(lead_id_value)
 
     channel = provider or "whatsapp"
+    peer_for_log = ""
+    if provider == "telegram":
+        if peer_value is not None:
+            peer_for_log = peer_value
+        elif peer_id is not None:
+            peer_for_log = str(peer_id)
+        elif telegram_user_id is not None:
+            peer_for_log = str(telegram_user_id)
+    elif whatsapp_phone:
+        peer_for_log = whatsapp_phone
     logger.info(
-        "webhook_received channel=%s tenant=%s lead_id=%s message_id=%s",
+        "webhook_received channel=%s tenant=%s lead_id=%s message_id=%s peer=%s",
         channel,
         tenant,
         lead_id,
         message_id or "",
+        peer_for_log or "-",
     )
 
     if not text and provider != "telegram":
@@ -282,6 +305,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         normalized_event["username"] = telegram_username
     if peer_id is not None:
         normalized_event["peer_id"] = peer_id
+    if provider == "telegram":
+        if peer_value is None and telegram_user_id is not None:
+            peer_value = str(telegram_user_id)
+        if peer_value is not None:
+            normalized_event["peer"] = peer_value
+            lead_contacts = normalized_event.setdefault("lead_contacts", {})
+            telegram_contact: dict[str, Any] = {"peer": peer_value}
+            if contact_value:
+                telegram_contact["contact"] = contact_value
+            lead_contacts["telegram"] = telegram_contact
     if provider != "telegram":
         normalized_event["auto_reply_handled"] = True
 
@@ -308,6 +341,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "tenant_id": tenant,
             "telegram_username": telegram_username,
             "peer_id": peer_id,
+            "peer": peer_value,
+            "contact": contact_value,
         }
         if telegram_user_id is not None:
             upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
@@ -344,7 +379,12 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             telegram_username=telegram_username,
         )
         if contact_id:
-            await link_lead_contact(lead_id, contact_id)
+            await link_lead_contact(
+                lead_id,
+                contact_id,
+                channel=provider,
+                peer=peer_value if provider == "telegram" else None,
+            )
             if text:
                 await insert_message_in(
                     lead_id,
@@ -739,6 +779,16 @@ async def telegram_webhook(request: Request):
         payload = {}
 
     tenant = int(payload.get("tenant_id") or os.getenv("TENANT_ID", "1"))
+    raw_peer_value = (
+        payload.get("peer")
+        or payload.get("peer_id")
+        or payload.get("chat_id")
+        or payload.get("to_peer")
+    )
+    if raw_peer_value is not None:
+        peer_value = str(raw_peer_value).strip() or None
+    else:
+        peer_value = None
     body = {
         "source": {"type": "telegram", "tenant": tenant},
         "message": {
@@ -749,6 +799,10 @@ async def telegram_webhook(request: Request):
         },
         "telegram": payload,
     }
+    if peer_value is not None:
+        body["peer"] = peer_value
+        body["message"]["peer"] = peer_value
+        body["message"]["peer_id"] = raw_peer_value
 
     return await process_incoming(body, request)
 
