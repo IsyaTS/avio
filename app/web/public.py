@@ -734,37 +734,37 @@ def _find_username(value: Any) -> str | None:
 
 @router.get("/connect/wa")
 def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | None = None):
-    tenant = int(tenant)
     query_candidate = (
         k or key or request.query_params.get("k") or request.query_params.get("key") or ""
     )
-    header_candidate = request.headers.get("X-Admin-Token")
+    guard = _ensure_valid_qr_request(tenant, query_candidate, request)
+    if guard is None:
+        return _invalid_key_response()
 
-    resolved_key = _ensure_public_key(header_candidate, request)
+    tenant_id, resolved = guard
+    tenant_id = int(tenant_id)
+    resolved_key = resolved or ""
+
     if not resolved_key:
-        resolved_key = _ensure_public_key(query_candidate, request)
+        items = common.list_keys(tenant_id)
+        if items:
+            resolved_key = items[0].get("key", "")
 
-    if not resolved_key:
-        candidate = _resolve_public_key_candidate(query_candidate, request)
-        if not (candidate and common.valid_key(tenant, candidate)):
-            return _invalid_key_response()
-        resolved_key = candidate
-
-    common.ensure_tenant_files(tenant)
-    cfg = common.read_tenant_config(tenant)
-    persona = common.read_persona(tenant)
+    common.ensure_tenant_files(tenant_id)
+    cfg = common.read_tenant_config(tenant_id)
+    persona = common.read_persona(tenant_id)
     passport = cfg.get("passport", {})
     subtitle = passport.get("brand") or "Подключение WhatsApp" if passport else "Подключение WhatsApp"
     persona_preview = "\n".join((persona or "").splitlines()[:6])
 
     settings_link = ""
     if resolved_key:
-        raw_settings = request.url_for('client_settings', tenant=str(tenant))
+        raw_settings = request.url_for('client_settings', tenant=str(tenant_id))
         settings_link = common.public_url(request, f"{raw_settings}?k={quote_plus(resolved_key)}")
 
     context = {
         "request": request,
-        "tenant": tenant,
+        "tenant": tenant_id,
         "key": resolved_key,
         "k": resolved_key,
         "timestamp": int(time.time()),
@@ -1240,16 +1240,29 @@ def _ensure_valid_qr_request(
     except ValueError:
         return None
 
+    if request is not None and _admin_token_valid(request):
+        items = common.list_keys(tenant_id)
+        if items:
+            return tenant_id, items[0].get("key", "") or ""
+        primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
+        return tenant_id, primary_key
+
     candidate = _resolve_public_key_candidate(raw_key, request)
     if not candidate:
         return None
 
     expected = _expected_public_key_value()
     if expected and candidate == expected:
-        return tenant_id, candidate
-
+        items = common.list_keys(tenant_id)
+        if items:
+            return tenant_id, items[0].get("key", candidate)
+        primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
+        return tenant_id, primary_key or candidate
 
     if common.valid_key(tenant_id, candidate):
+        items = common.list_keys(tenant_id)
+        if items:
+            return tenant_id, items[0].get("key", candidate)
         return tenant_id, candidate
 
     return None

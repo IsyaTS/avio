@@ -256,6 +256,139 @@ def tg_http(
 
 
 # --- keys registry in Redis ---
+def _normalize_key(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def key_meta_key(tenant: int) -> str:
+    return f"tenant:{int(tenant)}:key_meta"
+
+
+def _load_key_meta(tenant: int) -> dict[str, Any]:
+    raw = _with_redis(lambda client: client.get(key_meta_key(tenant)) or "", "")
+    if not raw:
+        return {}
+    try:
+        meta = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    key_value = _normalize_key(meta.get("key"))
+    normalized = _normalize_key(meta.get("normalized") or key_value).lower()
+    label = str(meta.get("label") or "")
+    ts_raw = meta.get("ts")
+    try:
+        ts_value = int(ts_raw)
+    except Exception:
+        ts_value = 0
+    return {
+        "key": meta.get("key") or key_value,
+        "label": label,
+        "ts": ts_value,
+        "normalized": normalized,
+    }
+
+
+def _save_key_meta(tenant: int, meta: dict[str, Any] | None) -> None:
+    def _apply(client: redis.Redis) -> bool:
+        normalized_value = _normalize_key((meta or {}).get("key"))
+        key_name = key_meta_key(tenant)
+        if not normalized_value:
+            client.delete(key_name)
+            client.delete(keys_hkey(tenant))
+            return True
+        try:
+            ts_value = int((meta or {}).get("ts") or int(time.time()))
+        except Exception:
+            ts_value = int(time.time())
+        payload = json.dumps(
+            {
+                "key": (meta or {}).get("key") or normalized_value,
+                "label": (meta or {}).get("label") or "",
+                "ts": ts_value,
+                "normalized": normalized_value.lower(),
+            },
+            ensure_ascii=False,
+        )
+        client.set(key_name, payload)
+        client.delete(keys_hkey(tenant))
+        return True
+
+    _with_redis(_apply, True)
+
+
+def _migrate_legacy_keys(tenant: int, current_meta: dict[str, Any]) -> dict[str, Any]:
+    legacy = _with_redis(lambda client: client.hgetall(keys_hkey(tenant)) or {}, {})
+    if not legacy:
+        return current_meta
+
+    primary_value = _normalize_key(get_tenant_pubkey(tenant))
+    primary_norm = primary_value.lower()
+    best: dict[str, Any] | None = None
+    best_ts = -1
+
+    for stored_key, raw_meta in legacy.items():
+        try:
+            parsed = json.loads(raw_meta) if raw_meta else {}
+        except Exception:
+            parsed = {}
+        candidate_display = parsed.get("value") or parsed.get("key") or stored_key
+        candidate_value = _normalize_key(candidate_display)
+        if not candidate_value:
+            continue
+        candidate_norm = candidate_value.lower()
+        try:
+            ts_value = int(parsed.get("ts") or 0)
+        except Exception:
+            ts_value = 0
+        entry = {
+            "key": candidate_display,
+            "label": parsed.get("label") or "",
+            "ts": ts_value,
+            "normalized": candidate_norm,
+        }
+        if primary_norm and candidate_norm == primary_norm:
+            best = entry
+            break
+        if ts_value >= best_ts:
+            best = entry
+            best_ts = ts_value
+
+    if best is None:
+        for stored_key in legacy:
+            candidate_value = _normalize_key(stored_key)
+            if candidate_value:
+                best = {
+                    "key": stored_key,
+                    "label": "",
+                    "ts": int(time.time()),
+                    "normalized": candidate_value.lower(),
+                }
+                break
+
+    _with_redis(lambda client: client.delete(keys_hkey(tenant)), 0)
+
+    if best is None:
+        return current_meta
+
+    if not primary_value:
+        candidate_normalized = _normalize_key(best.get("key"))
+        set_tenant_pubkey(tenant, candidate_normalized)
+        stored = _normalize_key(get_tenant_pubkey(tenant))
+        best["normalized"] = stored.lower()
+        if not best.get("key"):
+            best["key"] = stored
+    else:
+        best["normalized"] = primary_norm
+        if not best.get("key"):
+            best["key"] = primary_value
+
+    best["key"] = _normalize_key(best.get("key")) or (primary_value if primary_value else "")
+
+    return best
+
+
 def valid_key(tenant: int, kk: str) -> bool:
     want = (get_tenant_pubkey(int(tenant)) or "").strip().lower()
     return bool(kk) and kk.strip().lower() == want
@@ -266,43 +399,90 @@ def keys_hkey(tenant: int) -> str:
 
 
 def list_keys(tenant: int):
-    raw = _with_redis(lambda client: client.hgetall(keys_hkey(tenant)) or {}, {})
-    primary = (get_tenant_pubkey(int(tenant)) or "").strip().lower()
-    out: list[dict[str, Any]] = []
-    for k, v in raw.items():
+    tenant_id = int(tenant)
+    meta = _load_key_meta(tenant_id)
+    primary_value = _normalize_key(get_tenant_pubkey(tenant_id))
+    if not primary_value:
+        meta = _migrate_legacy_keys(tenant_id, meta)
+        primary_value = _normalize_key(get_tenant_pubkey(tenant_id))
+
+    if not primary_value:
+        _save_key_meta(tenant_id, {})
+        return []
+
+    normalized = primary_value.lower()
+    if not meta or meta.get("normalized") != normalized:
+        meta = {
+            "key": meta.get("key") if isinstance(meta, dict) else primary_value,
+            "label": (meta.get("label") if isinstance(meta, dict) else "") or "",
+            "ts": int((meta.get("ts") if isinstance(meta, dict) else 0) or int(time.time())),
+            "normalized": normalized,
+        }
+    else:
+        meta = dict(meta)
+        meta["key"] = meta.get("key") or primary_value
+        meta["label"] = meta.get("label") or ""
         try:
-            meta = json.loads(v) if v else {}
+            meta["ts"] = int(meta.get("ts") or int(time.time()))
         except Exception:
-            meta = {}
-        encoded_key = urllib.parse.quote_plus(k)
-        out.append(
-            {
-                "key": k,
-                "label": meta.get("label", ""),
-                "ts": meta.get("ts", 0),
-                "primary": (k.strip().lower() == primary),
-                "link": f"/connect/wa?tenant={int(tenant)}&k={encoded_key}",
-                "settings_link": f"/client/{int(tenant)}/settings?k={encoded_key}",
-            }
-        )
-    out.sort(key=lambda x: (not x["primary"], -(x["ts"] or 0)))
-    return out
+            meta["ts"] = int(time.time())
+        meta["normalized"] = normalized
+
+    _save_key_meta(tenant_id, meta)
+
+    display_key = meta.get("key") or primary_value
+    encoded = urllib.parse.quote_plus(display_key)
+    return [
+        {
+            "key": display_key,
+            "label": meta.get("label", ""),
+            "ts": meta.get("ts", 0),
+            "primary": True,
+            "link": f"/connect/wa?tenant={tenant_id}&k={encoded}",
+            "settings_link": f"/client/{tenant_id}/settings?k={encoded}",
+        }
+    ]
 
 
 def add_key(tenant: int, key: str, label: str | None = ""):
-    meta = {"label": label or "", "ts": int(time.time())}
-    return _with_redis(
-        lambda client: client.hset(keys_hkey(tenant), key, json.dumps(meta, ensure_ascii=False)),
-        0,
-    )
+    tenant_id = int(tenant)
+    key_value = _normalize_key(key)
+    if not key_value:
+        return 0
+    meta = _load_key_meta(tenant_id)
+    meta = dict(meta) if isinstance(meta, dict) and meta else {}
+    meta.update({"key": key_value, "label": label or "", "ts": int(time.time())})
+    _save_key_meta(tenant_id, meta)
+    return 1
 
 
 def del_key(tenant: int, key: str):
-    return _with_redis(lambda client: client.hdel(keys_hkey(tenant), key), 0)
+    tenant_id = int(tenant)
+
+    def _apply(client: redis.Redis) -> int:
+        removed = client.delete(key_meta_key(tenant_id))
+        client.delete(keys_hkey(tenant_id))
+        return removed
+
+    return _with_redis(_apply, 0)
 
 
 def set_primary(tenant: int, key: str):
-    set_tenant_pubkey(int(tenant), key.strip())
+    tenant_id = int(tenant)
+    key_value = _normalize_key(key)
+    if not key_value:
+        set_tenant_pubkey(tenant_id, "")
+        _save_key_meta(tenant_id, {})
+        return True
+
+    meta = _load_key_meta(tenant_id)
+    meta = dict(meta) if meta else {}
+    if "ts" not in meta or not meta["ts"]:
+        meta["ts"] = int(time.time())
+    meta.setdefault("label", meta.get("label", ""))
+    meta["key"] = key_value
+    _save_key_meta(tenant_id, meta)
+    set_tenant_pubkey(tenant_id, key_value)
     return True
 
 
@@ -324,6 +504,7 @@ __all__ = [
     "add_key",
     "del_key",
     "set_primary",
+    "key_meta_key",
     "tenant_dir",
     "ensure_tenant_files",
     "read_tenant_config",

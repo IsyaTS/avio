@@ -37,8 +37,7 @@
 
   const dashboardState = {
     currentTenant: tenant,
-    keys: Array.isArray(state.keys) ? state.keys : [],
-    primary: state.primary || null
+    keys: Array.isArray(state.keys) ? state.keys : []
   };
 
   function buildConnectLink(key) {
@@ -56,17 +55,6 @@
       messageBox.innerHTML = text || '';
     } else {
       messageBox.textContent = text || '';
-    }
-  }
-
-  function markPrimaryCell(td, key) {
-    const primaryKey = ((dashboardState.primary || {}).key || '').toLowerCase();
-    if (primaryKey && key && primaryKey === key.toLowerCase()) {
-      const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.style.marginLeft = '8px';
-      badge.textContent = 'primary';
-      td.appendChild(badge);
     }
   }
 
@@ -89,7 +77,6 @@
 
       const keyTd = document.createElement('td');
       keyTd.textContent = item.key || '';
-      markPrimaryCell(keyTd, item.key);
       tr.appendChild(keyTd);
 
       const linkTd = document.createElement('td');
@@ -145,13 +132,6 @@
       openSettingsBtn.textContent = 'Настройки';
       actionsTd.appendChild(openSettingsBtn);
 
-      const primaryBtn = document.createElement('button');
-      primaryBtn.type = 'button';
-      primaryBtn.className = 'btn btn--secondary';
-      primaryBtn.textContent = 'Сделать основным';
-      primaryBtn.addEventListener('click', () => updatePrimary(item.key));
-      actionsTd.appendChild(primaryBtn);
-
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
       deleteBtn.className = 'btn btn--danger';
@@ -165,14 +145,40 @@
   }
 
   async function fetchJSON(url, options) {
-    const response = await fetch(url, Object.assign({
-      headers: { 'Content-Type': 'application/json' }
-    }, options || {}));
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(detail || 'Ошибка запроса');
+    const opts = Object.assign({}, options || {});
+    opts.headers = Object.assign({}, opts.headers || {});
+    if (opts.body && typeof opts.body !== 'string') {
+      opts.body = JSON.stringify(opts.body);
     }
-    return await response.json();
+    if (opts.body && !opts.headers['Content-Type']) {
+      opts.headers['Content-Type'] = 'application/json';
+    }
+    const response = await fetch(url, opts);
+    const contentType = response.headers.get('Content-Type') || '';
+    let payload = null;
+    if (contentType.includes('application/json')) {
+      try {
+        payload = await response.json();
+      } catch (err) {
+        payload = null;
+      }
+    } else if (response.status !== 204) {
+      const text = await response.text();
+      payload = text ? { error: text } : null;
+    }
+    if (!response.ok) {
+      const message = payload && typeof payload === 'object' && payload.error ? payload.error : 'Ошибка запроса';
+      const error = new Error(message);
+      if (payload && typeof payload === 'object' && payload.error) {
+        error.code = payload.error;
+      }
+      error.status = response.status;
+      throw error;
+    }
+    if (payload && payload.error && typeof payload.error === 'string' && Object.keys(payload).length === 1) {
+      return {};
+    }
+    return payload || {};
   }
 
   async function refreshKeys() {
@@ -188,35 +194,23 @@
 
   async function generateKey() {
     try {
-      const data = await fetchJSON('/admin/keys/generate', {
-        method: 'POST',
-        body: JSON.stringify({ tenant: dashboardState.currentTenant, label: 'auto' })
-      });
+      const data = await fetchJSON(`/admin/key/get?tenant=${dashboardState.currentTenant}`);
       await refreshKeys();
-      const connectLink = absoluteUrl(data.link) || buildConnectLink(data.key);
-      const settingsLink = buildSettingsLink(data.key);
+      const keyItem = Array.isArray(dashboardState.keys) && dashboardState.keys.length ? dashboardState.keys[0] : null;
+      const keyValue = (keyItem && keyItem.key) || (data && data.key) || '';
+      const connectLink = buildConnectLink(keyValue);
+      const settingsLink = buildSettingsLink(keyValue);
       setMessage(
-        `Новый ключ создан · <a href="${connectLink}" target="_blank" rel="noopener">подключение</a> · <a href="${settingsLink}" target="_blank" rel="noopener">настройки</a>`,
+        `Ключ готов · <a href="${connectLink}" target="_blank" rel="noopener">подключение</a> · <a href="${settingsLink}" target="_blank" rel="noopener">настройки</a>`,
         'muted',
         true
       );
     } catch (error) {
-      setMessage(error.message || 'Не удалось создать ключ', 'alert');
-    }
-  }
-
-  async function updatePrimary(key) {
-    if (!key) return;
-    try {
-      await fetchJSON('/admin/keys/set_primary', {
-        method: 'POST',
-        body: JSON.stringify({ tenant: dashboardState.currentTenant, key })
-      });
-      dashboardState.primary = { key };
-      renderKeys();
-      setMessage('Основной ключ обновлён');
-    } catch (error) {
-      setMessage(error.message || 'Не удалось обновить ключ', 'alert');
+      if (error && error.code === 'key_already_exists') {
+        setMessage('Ключ уже существует для этого арендатора', 'alert');
+      } else {
+        setMessage((error && error.message) || 'Не удалось создать ключ', 'alert');
+      }
     }
   }
 
@@ -228,13 +222,9 @@
     try {
       await fetchJSON('/admin/keys/delete', {
         method: 'POST',
-        body: JSON.stringify({ tenant: dashboardState.currentTenant, key })
+        body: { tenant: dashboardState.currentTenant, key }
       });
-      dashboardState.keys = (dashboardState.keys || []).filter((item) => item.key !== key);
-      if (dashboardState.primary && dashboardState.primary.key === key) {
-        dashboardState.primary = null;
-      }
-      renderKeys();
+      await refreshKeys();
       setMessage('Ключ удалён');
     } catch (error) {
       setMessage(error.message || 'Не удалось удалить ключ', 'alert');
@@ -248,7 +238,6 @@
       tenant: dashboardState.currentTenant,
       key: form.key.value.trim(),
       label: form.label.value.trim(),
-      primary: form.primary.checked
     };
     if (!payload.key) {
       setMessage('Укажите ключ перед сохранением', 'alert');
@@ -257,19 +246,25 @@
     try {
       const data = await fetchJSON('/admin/keys/save', {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: payload
       });
       form.reset();
       await refreshKeys();
-      const connectLink = absoluteUrl(data.link) || buildConnectLink(payload.key);
-      const settingsLink = buildSettingsLink(payload.key);
+      const keyItem = Array.isArray(dashboardState.keys) && dashboardState.keys.length ? dashboardState.keys[0] : null;
+      const keyValue = (keyItem && keyItem.key) || payload.key;
+      const connectLink = buildConnectLink(keyValue);
+      const settingsLink = buildSettingsLink(keyValue);
       setMessage(
         `Ключ сохранён · <a href="${connectLink}" target="_blank" rel="noopener">подключение</a> · <a href="${settingsLink}" target="_blank" rel="noopener">настройки</a>`,
         'muted',
         true
       );
     } catch (error) {
-      setMessage(error.message || 'Не удалось сохранить ключ', 'alert');
+      if (error && error.code === 'key_already_exists') {
+        setMessage('Перед сохранением удалите текущий ключ', 'alert');
+      } else {
+        setMessage((error && error.message) || 'Не удалось сохранить ключ', 'alert');
+      }
     }
   }
 

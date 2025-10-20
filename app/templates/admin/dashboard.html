@@ -17,12 +17,12 @@
     </div>
     {% if primary_key %}
     <div class="hint" style="display: inline-flex; align-items: center; gap: 12px;">
-        <span class="badge">Основной ключ</span>
+        <span class="badge">Ключ арендатора</span>
         <code class="code-inline">{{ primary_key.key }}</code>
         {% if primary_key.label %}<span class="badge tag-neutral">{{ primary_key.label }}</span>{% endif %}
     </div>
     {% else %}
-    <div class="alert-box">У арендатора ещё нет основного ключа. Сгенерируйте его, чтобы клиенты могли подключаться.</div>
+    <div class="alert-box">У арендатора ещё нет ключа доступа. Сгенерируйте его, чтобы клиенты могли подключаться.</div>
     {% endif %}
 </section>
 
@@ -30,7 +30,7 @@
     <div class="toolbar">
         <div class="stack" style="gap: 6px;">
             <h2 class="section-title" style="font-size: 1.35rem;">Ключи доступа</h2>
-            <p class="section-subtitle">Поддерживайте актуальный набор ключей. Основной ключ используется для клиентского кабинета и API.</p>
+            <p class="section-subtitle">Для каждого арендатора доступен один ключ доступа. Он используется для клиентского кабинета и API.</p>
         </div>
         <div class="actions" style="display:flex; gap: 12px; flex-wrap: wrap;">
             <button id="generate-key" type="button">Создать ключ</button>
@@ -62,9 +62,6 @@
             <span class="label">Метка</span>
             <input name="label" placeholder="Например: demo" maxlength="32">
         </label>
-        <label style="display:flex;align-items:flex-end;gap:8px;">
-            <input type="checkbox" name="primary" value="1" style="width:auto;"> Сделать основным
-        </label>
         <button type="submit" class="btn btn--secondary">Сохранить ключ</button>
     </form>
     <div id="keys-message" class="status-text"></div>
@@ -86,9 +83,9 @@
         <h2 class="section-title" style="font-size: 1.35rem;">Подсказки</h2>
         <div class="hint">
             <ul style="margin:0; padding-left: 18px; display: grid; gap: 8px;">
-                <li>Держите один ключ с меткой <strong>primary</strong> — его использует клиентский кабинет.</li>
+                <li>Используйте один ключ — ссылка на подключение всегда берётся из блока выше.</li>
                 <li>Если waweb потерял сессию, откройте QR и войдите заново в WhatsApp Business.</li>
-                <li>Удаляйте устаревшие ключи: это не влияет на активные подключения клиентов.</li>
+                <li>Перед созданием нового ключа удалите текущий, чтобы сохранить доступ.</li>
             </ul>
         </div>
     </div>

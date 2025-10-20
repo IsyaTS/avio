@@ -26,6 +26,17 @@ class _DummyRedis:
     def get(self, key: str):  # pragma: no cover - simple test helper
         return self.store.get(key)
 
+    def set(self, key: str, value: str):  # pragma: no cover - simple test helper
+        self.store[key] = value
+        return True
+
+    def delete(self, key: str):  # pragma: no cover - simple test helper
+        self.store.pop(key, None)
+        return 1
+
+    def hgetall(self, key: str):  # pragma: no cover - simple test helper
+        return {}
+
 
 def test_wa_qr_svg_serves_cached_value(monkeypatch):
     _configure_retry(monkeypatch, attempts=1, delay=0.0)
