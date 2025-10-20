@@ -87,7 +87,7 @@ class MessageIn(BaseModel):
     text: str | None = None
     attachments: List[Attachment] = Field(default_factory=list)
     ts: int | None = None
-    message_id: int | None = None
+    message_id: int | str | None = None
     provider_raw: Dict[str, Any] = Field(default_factory=dict)
     telegram_user_id: int | None = None
     username: str | None = None
