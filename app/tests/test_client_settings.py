@@ -60,10 +60,6 @@ def test_save_form_normalizes_and_writes(monkeypatch):
         "brand": "Brand",
         "agent": "Agent",
         "city": "City",
-        "currency": "USD",
-        "tone": "friendly",
-        "cta_primary": "Go",
-        "cta_fallback": "Fallback",
     }
 
     response = test_client.post("/client/1/settings/save?k=abc", json=payload)
@@ -74,7 +70,5 @@ def test_save_form_normalizes_and_writes(monkeypatch):
     saved_cfg = written["cfg"]
     assert saved_cfg["passport"]["brand"] == "Brand"
     assert saved_cfg["passport"]["agent_name"] == "Agent"
-    assert saved_cfg["passport"]["currency"] == "USD"
-    assert saved_cfg["behavior"]["tone"] == "friendly"
-    assert saved_cfg["cta"]["primary"] == "Go"
-    assert saved_cfg["cta"]["fallback"] == "Fallback"
+    assert saved_cfg["passport"]["city"] == "City"
+    assert "currency" not in saved_cfg["passport"]

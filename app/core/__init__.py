@@ -25,6 +25,13 @@ except Exception:  # pragma: no cover
     quality = importlib.import_module("app.brain.quality")  # type: ignore
 
 try:
+    from ..agents import presets as agent_presets
+except Exception:  # pragma: no cover
+    import importlib
+
+    agent_presets = importlib.import_module("app.agents.presets")  # type: ignore
+
+try:
     from ..catalog import retriever as catalog_retriever  # type: ignore
 except Exception:  # pragma: no cover
     catalog_retriever = None
@@ -578,7 +585,6 @@ DEFAULT_TENANT_JSON = {
         "brand": "Мой Бренд",
         "agent_name": "Менеджер",
         "city": "Город",
-        "currency": "₽",
         "channel": "WhatsApp",
         "whatsapp_link": "https://wa.me/7XXXXXXXXXX",
     },
@@ -673,7 +679,7 @@ DEFAULT_TENANT_JSON = {
     },
 }
 
-DEFAULT_PERSONA_MD = """{AGENT_NAME} из {BRAND}, {CITY}. Канал: {CHANNEL}. Валюта: {CURRENCY}.\nПравила:\n- Говори живо и предметно: 2–3 коротких абзаца или списки.\n- Показывай конкретные товары с их выгодами, держи фокус на продаже.\n- Максимум один уточняющий вопрос в ответе.\n- Один понятный CTA в финале, без длинных сценариев.\n- Если клиент просит каталог — предложи лучшие позиции и ссылку.\n\nТактика: активное слушание, выгоды «что получите», уместное соцдоказательство и мягкая допродажа (≤1 за ответ). Антидублирование: не повторяй вступление и одинаковые товары подряд.\n"""
+DEFAULT_PERSONA_MD = agent_presets.DEFAULT_PERSONA_RU
 
 
 def tenant_dir(tenant: int) -> pathlib.Path:
@@ -923,11 +929,14 @@ def read_persona(tenant: int) -> str:
 def write_persona(tenant: int, text: str) -> None:
     ensure_tenant_files(tenant)
     path = tenant_dir(tenant) / "persona.md"
+    payload = text if isinstance(text, str) else str(text or "")
+    if not payload.strip():
+        payload = DEFAULT_PERSONA_MD
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text or "")
+        fh.write(payload)
     try:
         mtime = path.stat().st_mtime
-        _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text or "")
+        _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, payload)
     except Exception:
         _TENANT_PERSONA_CACHE.pop(int(tenant), None)
 
@@ -943,20 +952,62 @@ def load_tenant(tenant: int) -> dict:
 
 def _branding_for_tenant(tenant: int | None = None) -> Dict[str, str]:
     passport: Dict[str, Any] = {}
+    integrations: Dict[str, Any] = {}
     if tenant is not None:
         try:
             cfg = read_tenant_config(tenant)
-            passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
+            if isinstance(cfg, dict):
+                passport = cfg.get("passport", {}) if isinstance(cfg.get("passport"), dict) else {}
+                integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
         except Exception:
             passport = {}
+            integrations = {}
+
+    agent_name = (passport.get("agent_name") or settings.AGENT_NAME).strip() or settings.AGENT_NAME
+    brand_name = (passport.get("brand") or settings.BRAND_NAME).strip() or settings.BRAND_NAME
+    whatsapp_link = (passport.get("whatsapp_link") or settings.WHATSAPP_LINK).strip() or settings.WHATSAPP_LINK
+    city = (passport.get("city") or settings.CITY).strip() or settings.CITY
+    channel = (passport.get("channel") or "WhatsApp").strip() or "WhatsApp"
+
+    catalog_url = ""
+    if integrations:
+        raw_pdf_url = str(integrations.get("pdf_catalog_url") or "").strip()
+        if raw_pdf_url:
+            catalog_url = raw_pdf_url
+        else:
+            meta = integrations.get("uploaded_catalog")
+            if tenant is not None and isinstance(meta, dict):
+                raw_path = str(meta.get("path") or "").replace("\\", "/").strip()
+                if raw_path:
+                    try:
+                        safe = pathlib.PurePosixPath(raw_path)
+                    except Exception:
+                        safe = None
+                    if safe and not safe.is_absolute() and ".." not in safe.parts:
+                        try:
+                            tenant_root = tenant_dir(tenant)
+                            target = tenant_root / str(safe)
+                        except Exception:
+                            target = None
+                        if target and target.exists():
+                            base_root = settings.APP_INTERNAL_URL or settings.APP_PUBLIC_URL or "http://app:8000"
+                            base = f"{base_root.rstrip('/')}/internal/tenant/{tenant}/catalog-file"
+                            from urllib.parse import quote
+
+                            catalog_url = f"{base}?path={quote(str(safe), safe='/')}"
+                            token = (settings.WEBHOOK_SECRET or "").strip()
+                            if token:
+                                catalog_url += f"&token={quote(token)}"
+
     return {
-        "AGENT_NAME": (passport.get("agent_name") or settings.AGENT_NAME).strip() or settings.AGENT_NAME,
-        "BRAND": (passport.get("brand") or settings.BRAND_NAME).strip() or settings.BRAND_NAME,
-        "BRAND_NAME": (passport.get("brand") or settings.BRAND_NAME).strip() or settings.BRAND_NAME,
-        "WHATSAPP_LINK": (passport.get("whatsapp_link") or settings.WHATSAPP_LINK).strip() or settings.WHATSAPP_LINK,
-        "CITY": (passport.get("city") or settings.CITY).strip() or settings.CITY,
-        "CHANNEL": (passport.get("channel") or "WhatsApp").strip() or "WhatsApp",
-        "CURRENCY": (passport.get("currency") or "₽").strip() or "₽",
+        "AGENT_NAME": agent_name,
+        "BRAND": brand_name,
+        "BRAND_NAME": brand_name,
+        "WHATSAPP_LINK": whatsapp_link,
+        "CITY": city,
+        "CHANNEL": channel,
+        "CURRENCY": "RUB",
+        "CATALOG_URL": catalog_url,
     }
 
 # ------------------------------ промпты --------------------------------------
@@ -1621,12 +1672,18 @@ def paginate_catalog_text(
     if page_size <= 0:
         page_size = 10
 
-    currency = "₽"
+    currency = "RUB"
     if isinstance(cfg, dict):
-        passport = cfg.get("passport") if isinstance(cfg.get("passport"), dict) else {}
-        cur = passport.get("currency")
-        if cur:
-            currency = str(cur)
+        try:
+            tenant_id = cfg.get("passport", {}).get("tenant_id")  # type: ignore[index]
+        except Exception:
+            tenant_id = None
+        if tenant_id is not None:
+            try:
+                branding = _branding_for_tenant(int(tenant_id))
+            except Exception:
+                branding = {}
+            currency = branding.get("CURRENCY", currency)
 
     formatted_lines = format_items_for_prompt(items, currency).splitlines()
     pages: List[str] = []
@@ -2017,7 +2074,7 @@ def search_catalog(
 
     return _legacy_rank_catalog(items, needs, limit, query)
 
-def format_items_for_prompt(items: List[Dict[str, Any]], currency: str = "₽") -> str:
+def format_items_for_prompt(items: List[Dict[str, Any]], currency: str = "RUB") -> str:
     if not items:
         return "— подходящих позиций не найдено."
     out = []
@@ -2590,7 +2647,7 @@ class SalesConversationEngine:
         for key in ("budget", "need", "timeline", "authority"):
             if not self.state.bant.get(key):
                 template = BANT_TEMPLATES[key][0]
-                return template.format(currency=self.branding.get("CURRENCY", "₽"), focus=focus, city=self.branding.get("CITY", ""))
+                return template.format(currency=self.branding.get("CURRENCY", "RUB"), focus=focus, city=self.branding.get("CITY", ""))
         return None
 
     def _challenger_block(self) -> Tuple[str, str, str]:

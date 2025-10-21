@@ -1,6 +1,8 @@
 import importlib
 from pathlib import Path
 
+import importlib
+
 import core
 
 
@@ -40,3 +42,18 @@ def test_write_persona_uses_resolved_tenants_dir(monkeypatch, tmp_path):
 
     tenant_cfg = resolved / "5" / "tenant.json"
     assert tenant_cfg.exists()
+
+
+def test_write_persona_uses_default_on_empty(monkeypatch, tmp_path):
+    tenant_dir = tmp_path / "tenants"
+    monkeypatch.setenv("TENANTS_DIR", str(tenant_dir))
+    monkeypatch.delenv("APP_DATA_DIR", raising=False)
+
+    importlib.reload(core)
+
+    core.write_persona(tenant=7, text="   ")
+
+    persona_path = tenant_dir / "7" / "persona.md"
+    assert persona_path.exists()
+    content = persona_path.read_text(encoding="utf-8")
+    assert content == core.DEFAULT_PERSONA_MD

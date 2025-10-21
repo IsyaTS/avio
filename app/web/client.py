@@ -290,12 +290,6 @@ def client_settings(tenant: int, request: Request):
     passport_raw = cfg.get("passport", {})
     passport = passport_raw if isinstance(passport_raw, dict) else {}
 
-    behavior_raw = cfg.get("behavior", {})
-    behavior = behavior_raw if isinstance(behavior_raw, dict) else {}
-
-    cta_raw = cfg.get("cta", {})
-    cta = cta_raw if isinstance(cta_raw, dict) else {}
-
     integrations_raw = cfg.get("integrations", {})
     integrations = integrations_raw if isinstance(integrations_raw, dict) else {}
     uploaded_meta = integrations.get("uploaded_catalog", {})
@@ -335,10 +329,6 @@ def client_settings(tenant: int, request: Request):
         "brand": passport.get("brand", ""),
         "agent": passport.get("agent_name", ""),
         "city": passport.get("city", ""),
-        "currency": passport.get("currency", "₽"),
-        "tone": behavior.get("tone", ""),
-        "cta_primary": cta.get("primary", ""),
-        "cta_fallback": cta.get("fallback", ""),
         "catalog_file": uploaded_display,
     }
 
@@ -383,30 +373,9 @@ async def save_form(tenant: int, request: Request):
             "brand": payload.get("brand") or passport.get("brand", ""),
             "agent_name": payload.get("agent") or passport.get("agent_name", ""),
             "city": payload.get("city") or passport.get("city", ""),
-            "currency": payload.get("currency") or passport.get("currency", "₽"),
         }
     )
 
-    behavior_cfg = cfg.get("behavior")
-    if not isinstance(behavior_cfg, dict):
-        behavior_cfg = {}
-    cfg["behavior"] = behavior_cfg
-    behavior_cfg.update(
-        {
-            "tone": payload.get("tone") or behavior_cfg.get("tone", ""),
-        }
-    )
-
-    cta_cfg = cfg.get("cta")
-    if not isinstance(cta_cfg, dict):
-        cta_cfg = {}
-    cfg["cta"] = cta_cfg
-    cta_cfg.update(
-        {
-            "primary": payload.get("cta_primary") or "",
-            "fallback": payload.get("cta_fallback") or "",
-        }
-    )
     C.write_tenant_config(tenant, cfg)
     return {"ok": True}
 
