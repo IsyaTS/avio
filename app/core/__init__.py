@@ -673,7 +673,74 @@ DEFAULT_TENANT_JSON = {
     },
 }
 
-DEFAULT_PERSONA_MD = """{AGENT_NAME} из {BRAND}, {CITY}. Канал: {CHANNEL}. Валюта: {CURRENCY}.\nПравила:\n- Говори живо и предметно: 2–3 коротких абзаца или списки.\n- Показывай конкретные товары с их выгодами, держи фокус на продаже.\n- Максимум один уточняющий вопрос в ответе.\n- Один понятный CTA в финале, без длинных сценариев.\n- Если клиент просит каталог — предложи лучшие позиции и ссылку.\n\nТактика: активное слушание, выгоды «что получите», уместное соцдоказательство и мягкая допродажа (≤1 за ответ). Антидублирование: не повторяй вступление и одинаковые товары подряд.\n"""
+PERSONA_DEFAULT_PATH = pathlib.Path(__file__).resolve().parent.parent / "agents" / "persona_default_ru.md"
+try:
+    DEFAULT_PERSONA_MD = PERSONA_DEFAULT_PATH.read_text(encoding="utf-8")
+except Exception:
+    DEFAULT_PERSONA_MD = (
+        "Контекст: {AGENT_NAME} из {BRAND}, {CITY}. Канал: {CHANNEL}. Цель: быстрый переход к покупке. Минимум трения. Максимум ясности.\n\n"
+        "Базовые правила:\n"
+        "-Обращение на «Вы». Тон — вежливый, деловой, дружелюбный.\n"
+        "-Сообщение: 1–3 коротких предложения или список на 3–5 пунктов.\n"
+        "-За сообщение: ≤1 вопрос, ≤1 CTA.\n"
+        "-Фокус на выгодах, не на характеристиках.\n"
+        "-Без повторов вступлений и одинаковых товаров подряд.\n"
+        "-Не выдавать себя за ИИ. Честность, без ложного дефицита.\n\n"
+        "Алгоритм диалога:\n"
+        "-Приветствие → потребность\n"
+        "«Здравствуйте. Чем помочь? Что важно в {категория}? бюджет/сроки/использование?»\n"
+        "-Квалификация (1–2 уточнения)\n"
+        "«Правильно понимаю: для {цель}, бюджет ~{сумма}?»\n"
+        "-Предложение (до 3 вариантов)\n"
+        "Шаблон варианта: Название → 2–3 выгоды → ориентир цены → соцдоказательство/гарантия → CTA.\n"
+        "-Возражения → снятие сомнений\n"
+        "Эмпатия → факт/выгода/гарантия/альтернатива → мини-рекап → CTA.\n"
+        "-Закрытие\n"
+        "«Готовы оформить? Нужны ФИО, телефон, адрес/самовывоз, способ оплаты.»\n"
+        "-Мягкая допродажа (1 попытка)\n"
+        "Только релевантный доп. Выгода в 1 фразе. Опциональность.\n"
+        "-Фоллоу-ап, если тишина\n"
+        "1 напоминание с новой формулировкой и ценностью.\n\n"
+        "Паттерны сообщений:\n"
+        "-Приветствие:\n"
+        "«Здравствуйте. Помогу выбрать {категория}. Что для вас важнее: цена, качество или сроки?»\n"
+        "-Уточнение:\n"
+        "«Для кого/какой задачи берёте? Есть ориентир по бюджету?»\n\n"
+        "Предложение товара/услуги:\n"
+        "-«Рекомендую {Модель/Услуга A}. Получите: {выгода1}, {выгода2}. Сейчас {цена}{CURRENCY}. Отзывы 4.8/5. Оформим?»\n"
+        "«Если надо дешевле — {B}: ключевое отличие {…}. Если мощнее — {C}: добавите {…}. Что выбираем?»\n\n"
+        "Каталог по запросу:\n"
+        "«Топ-позиции по вашему запросу:\n"
+        "{A} — {2 выгоды}\n"
+        "{B} — {2 выгоды}\n"
+        "{C} — {2 выгоды}\n"
+        "Полный каталог: {CATALOG_URL}. Нужна отправка лучших в чат с фото?»\n\n"
+        "Возражения:\n"
+        "-Цена: «Понимаю. Здесь платите за {ключевая ценность}, в итоге экономите на {издержка}. Есть рассрочка/акция {…}. Оформим по спеццене сегодня?»\n"
+        "-Качество/доверие: «Понимаю. Сертификация {…}, гарантия {…}, отзывы {…}. Этого достаточно, чтобы решиться?»\n"
+        "-«Надо подумать»: «С чем сомневаетесь: цена/срок/функции? Отвечу точечно, чтобы решить верно.»\n\n"
+        "Закрытие:\n"
+        "-«Готовы оформить? Напишите ФИО, телефон, адрес/самовывоз, удобную оплату. Сразу зафиксирую цену.»\n\n"
+        "Допродажа:\n"
+        "-«К этому {товару} обычно берут {аксессуар/услуга} — {выгода в 1 фразе}. Сейчас {цена}. Добавить?»\n\n"
+        "Фоллоу-ап:\n"
+        "-«Актуально ли закрыть вопрос по {товару}? Могу удержать цену/наличие сегодня. Какие остались вопросы?»\n\n"
+        "Тактики:\n"
+        "-Выгоды вместо ТТХ: «что получите/сэкономите/избежите».\n"
+        "-Соцдоказательство: «бестселлер», «N клиентов выбрали», «рейтинг/кейс».\n"
+        "-Срочность/дефицит (честно): «акция до {дата}», «осталось N шт.».\n"
+        "-Якорение цены: «обычно {выше}, сейчас {цена}.»\n"
+        "-Гарантии: «возврат/обмен {условия}», «официальная гарантия {срок}».\n\n"
+        "Антидублирование:\n"
+        "-Память о: имя, задача, бюджет, показанные модели, закрытые возражения.\n"
+        "-Не повторять приветствие и одинаковые CTA.\n"
+        "-Повторять мысль только перефразом и с новой ценностью.\n\n"
+        "Канальные нюансы:\n"
+        "-Avito: короче тексты, ссылку даём аккуратно; при интересе — «удобно продолжить в WhatsApp?» → {WHATSAPP_LINK}.\n"
+        "-WhatsApp/Telegram: можно списки, фото, документы. Каталог — сразу ключевые позиции + ссылка.\n\n"
+        "Политика честности:\n"
+        "-Не занижать сроки/цену. Не очернять конкурентов. Не обещать того, чего нет.\n"
+    )
 
 
 def tenant_dir(tenant: int) -> pathlib.Path:
@@ -941,22 +1008,60 @@ def load_tenant(tenant: int) -> dict:
         return cfg
 
 
-def _branding_for_tenant(tenant: int | None = None) -> Dict[str, str]:
+def _branding_for_tenant(tenant: int | None = None, channel: str | None = None) -> Dict[str, str]:
     passport: Dict[str, Any] = {}
+    integrations: Dict[str, Any] = {}
     if tenant is not None:
         try:
             cfg = read_tenant_config(tenant)
-            passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
         except Exception:
-            passport = {}
+            cfg = {}
+    else:
+        cfg = {}
+
+    if isinstance(cfg, dict):
+        raw_passport = cfg.get("passport")
+        if isinstance(raw_passport, dict):
+            passport = raw_passport
+        raw_integrations = cfg.get("integrations")
+        if isinstance(raw_integrations, dict):
+            integrations = raw_integrations
+
+    agent_name = str(passport.get("agent_name") or "").strip()
+    brand = str(passport.get("brand") or "").strip()
+    city = str(passport.get("city") or "").strip()
+    whatsapp_link = str(
+        passport.get("whatsapp_link")
+        or integrations.get("whatsapp_link")
+        or ""
+    ).strip()
+    catalog_url = str(
+        integrations.get("catalog_url")
+        or integrations.get("pdf_catalog_url")
+        or passport.get("catalog_url")
+        or ""
+    ).strip()
+
+    if tenant is None:
+        agent_name = agent_name or getattr(settings, "AGENT_NAME", "")
+        brand = brand or getattr(settings, "BRAND_NAME", "")
+        city = city or getattr(settings, "CITY", "")
+        whatsapp_link = whatsapp_link or getattr(settings, "WHATSAPP_LINK", "")
+
+    currency = str(passport.get("currency") or "₽").strip() or "₽"
+    resolved_channel = str(channel or passport.get("channel") or "").strip()
+    if not resolved_channel:
+        resolved_channel = "WhatsApp"
+
     return {
-        "AGENT_NAME": (passport.get("agent_name") or settings.AGENT_NAME).strip() or settings.AGENT_NAME,
-        "BRAND": (passport.get("brand") or settings.BRAND_NAME).strip() or settings.BRAND_NAME,
-        "BRAND_NAME": (passport.get("brand") or settings.BRAND_NAME).strip() or settings.BRAND_NAME,
-        "WHATSAPP_LINK": (passport.get("whatsapp_link") or settings.WHATSAPP_LINK).strip() or settings.WHATSAPP_LINK,
-        "CITY": (passport.get("city") or settings.CITY).strip() or settings.CITY,
-        "CHANNEL": (passport.get("channel") or "WhatsApp").strip() or "WhatsApp",
-        "CURRENCY": (passport.get("currency") or "₽").strip() or "₽",
+        "AGENT_NAME": agent_name,
+        "BRAND": brand,
+        "BRAND_NAME": brand,
+        "WHATSAPP_LINK": whatsapp_link,
+        "CATALOG_URL": catalog_url,
+        "CITY": city,
+        "CHANNEL": resolved_channel,
+        "CURRENCY": currency,
     }
 
 # ------------------------------ промпты --------------------------------------
@@ -984,7 +1089,7 @@ cta:
 
 
 # ---------------------------- персонализация ---------------------------------
-def load_persona(tenant: int | None = None) -> str:
+def load_persona(tenant: int | None = None, channel: str | None = None) -> str:
     """Возвращает persona.md с подстановкой брендинга."""
     if tenant is not None:
         try:
@@ -1000,10 +1105,9 @@ def load_persona(tenant: int | None = None) -> str:
         except Exception:
             persona = PERSONA_MD
 
-    tokens = _branding_for_tenant(tenant)
-    tokens.setdefault("WHATSAPP_LINK", settings.WHATSAPP_LINK)
+    tokens = _branding_for_tenant(tenant, channel)
     for key, value in tokens.items():
-        persona = persona.replace(f"{{{key}}}", value)
+        persona = persona.replace(f"{{{key}}}", value or "")
     return persona
 
 
@@ -2825,7 +2929,7 @@ def observe_user_message(
     cfg = tenant_cfg
     if cfg is None:
         cfg = load_tenant(tenant or 0)
-    brand = branding or _branding_for_tenant(tenant)
+    brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
     hints = persona_hints or load_persona_hints(tenant)
     engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
@@ -2842,7 +2946,7 @@ def summarize_sales_state(
     branding: Optional[Dict[str, str]] = None,
 ) -> str:
     cfg = tenant_cfg if tenant_cfg is not None else load_tenant(tenant or 0)
-    brand = branding or _branding_for_tenant(tenant)
+    brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
     hints = load_persona_hints(tenant)
     engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
@@ -2858,7 +2962,7 @@ def record_bot_reply(
     branding: Optional[Dict[str, str]] = None,
 ) -> None:
     cfg = tenant_cfg if tenant_cfg is not None else load_tenant(tenant or 0)
-    brand = branding or _branding_for_tenant(tenant)
+    brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
     hints = load_persona_hints(tenant)
     engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
@@ -2873,7 +2977,7 @@ def make_rule_based_reply(
     contact_id: int,
     tenant: int | None = None,
 ) -> str:
-    branding = _branding_for_tenant(tenant)
+    branding = _branding_for_tenant(tenant, channel)
     channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
 
     cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
@@ -2909,7 +3013,7 @@ async def build_llm_messages(
     tenant: int | None = None,
 ):
     """Собираем системный промпт с учётом брендинга арендатора."""
-    persona = load_persona(tenant)
+    persona = load_persona(tenant, channel)
     persona_hints = extract_persona_hints(persona)
     cache_key: int | None
     try:
@@ -2918,7 +3022,7 @@ async def build_llm_messages(
         cache_key = None
     fingerprint = hashlib.sha1(persona.encode("utf-8")).hexdigest() if persona else ""
     _PERSONA_HINTS_CACHE[cache_key] = (fingerprint, persona_hints)
-    branding = _branding_for_tenant(tenant)
+    branding = _branding_for_tenant(tenant, channel)
 
     cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
     if tenant is not None:
