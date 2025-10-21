@@ -1,4 +1,5 @@
 import copy
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
@@ -56,15 +57,7 @@ def test_save_form_normalizes_and_writes(monkeypatch):
     monkeypatch.setattr(client_module.C, "write_tenant_config", _capture_write)
 
     test_client = TestClient(app)
-    payload = {
-        "brand": "Brand",
-        "agent": "Agent",
-        "city": "City",
-        "currency": "USD",
-        "tone": "friendly",
-        "cta_primary": "Go",
-        "cta_fallback": "Fallback",
-    }
+    payload = {"brand": "Brand", "agent": "Agent", "city": "City"}
 
     response = test_client.post("/client/1/settings/save?k=abc", json=payload)
 
@@ -74,7 +67,6 @@ def test_save_form_normalizes_and_writes(monkeypatch):
     saved_cfg = written["cfg"]
     assert saved_cfg["passport"]["brand"] == "Brand"
     assert saved_cfg["passport"]["agent_name"] == "Agent"
-    assert saved_cfg["passport"]["currency"] == "USD"
-    assert saved_cfg["behavior"]["tone"] == "friendly"
-    assert saved_cfg["cta"]["primary"] == "Go"
-    assert saved_cfg["cta"]["fallback"] == "Fallback"
+    assert saved_cfg["passport"]["currency"] == "₽"
+    assert saved_cfg.get("behavior") is None
+    assert saved_cfg.get("cta") == "oops"

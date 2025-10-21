@@ -733,11 +733,9 @@ def _find_username(value: Any) -> str | None:
 
 
 @router.get("/connect/wa")
-def connect_wa(tenant: int, request: Request, k: str | None = None, key: str | None = None):
-    query_candidate = (
-        k or key or request.query_params.get("k") or request.query_params.get("key") or ""
-    )
-    guard = _ensure_valid_qr_request(tenant, query_candidate, request)
+def connect_wa(tenant: int, request: Request, k: str | None = None):
+    query_candidate = k or request.query_params.get("k") or ""
+    guard = _ensure_valid_qr_request(tenant, query_candidate, request, query_param_only=True)
     if guard is None:
         return _invalid_key_response()
 
@@ -842,7 +840,7 @@ async def wa_status(
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request)
+    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
     if ok is None:
         response = _invalid_key_response()
         return _as_head_response(response, request)
@@ -891,7 +889,7 @@ async def wa_start(
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request)
+    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
     if ok is None:
         return _invalid_key_response()
     tenant_id, validated_key = ok
@@ -1234,6 +1232,8 @@ def _ensure_valid_qr_request(
     raw_tenant: int | str | None,
     raw_key: str | None,
     request: Request | None = None,
+    *,
+    query_param_only: bool = False,
 ) -> tuple[int, str] | None:
     try:
         tenant_id = _coerce_tenant(raw_tenant)
@@ -1247,7 +1247,11 @@ def _ensure_valid_qr_request(
         primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
         return tenant_id, primary_key
 
-    candidate = _resolve_public_key_candidate(raw_key, request)
+    candidate = _resolve_public_key_candidate(
+        raw_key,
+        request,
+        query_param_only=query_param_only,
+    )
     if not candidate:
         return None
 
@@ -1840,7 +1844,7 @@ async def wa_qr_svg(
     k: str = Query(..., description="PUBLIC_KEY access token"),
     qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request)
+    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
     if ok is None:
         response = _invalid_key_response()
         return _as_head_response(response, request)
@@ -2472,7 +2476,7 @@ def wa_qr_png(
     k: str = Query(..., description="PUBLIC_KEY access token"),
     qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request)
+    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
     if ok is None:
         return _invalid_key_response()
     tenant_id, _ = ok
