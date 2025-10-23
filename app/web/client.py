@@ -1,13 +1,11 @@
 import csv
 import importlib
-import hashlib
 import io
 import json
 import mimetypes
 import os
 import pathlib
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -64,7 +62,6 @@ _log = logging.getLogger("training")
 _LOG_PREFIX = "[training]"
 _wa_log = logging.getLogger("wa_export")
 
-_CLIENT_SETTINGS_VERSION: str | None = None
 _CLIENT_SETTINGS_JS: str | None = None
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB safety cap for catalog uploads
@@ -80,26 +77,6 @@ if EXPORT_MAX_DAYS <= 0:
 WHATSAPP_LIMIT_DIALOGS_MAX = 2000
 WHATSAPP_PER_LIMIT_MAX = 20000
 DEFAULT_WHATSAPP_BATCH_SIZE = 200
-
-
-def _compute_client_settings_digest() -> str | None:
-    bundle_root = pathlib.Path(__file__).resolve().parents[1] / "static" / "js"
-    sha1 = hashlib.sha1()
-    files_found = False
-    for filename in ("boot.js", "client-settings.js"):
-        path = bundle_root / filename
-        if not path.exists():
-            continue
-        try:
-            sha1.update(path.read_bytes())
-            files_found = True
-        except OSError:
-            continue
-    if not files_found:
-        return None
-    return sha1.hexdigest()[:12]
-
-
 def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
     try:
         return str(request.url_for("whatsapp_export", tenant=tenant))
@@ -112,46 +89,6 @@ def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
             return base_url
         except Exception:
             return "/export/whatsapp"
-
-
-def _client_settings_static_version() -> str:
-    global _CLIENT_SETTINGS_VERSION
-    if _CLIENT_SETTINGS_VERSION:
-        return _CLIENT_SETTINGS_VERSION
-
-    build_rev = (os.getenv("BUILD_REV") or os.getenv("CLIENT_SETTINGS_VERSION") or "").strip()
-    base_version = build_rev
-
-    if not base_version:
-        for env_name in ("APP_GIT_SHA", "GIT_SHA", "HEROKU_SLUG_COMMIT"):
-            value = (os.getenv(env_name) or "").strip()
-            if value:
-                base_version = value[:8] or value
-                break
-
-    if not base_version:
-        try:
-            repo_root = pathlib.Path(__file__).resolve().parents[2]
-            output = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(repo_root),
-                stderr=subprocess.DEVNULL,
-            )
-            base_version = output.decode("utf-8").strip()
-        except Exception:
-            base_version = ""
-
-    digest = _compute_client_settings_digest()
-    if digest:
-        base_version = f"{base_version}-{digest}" if base_version else digest
-
-    if not base_version:
-        base_version = str(int(time.time()))
-
-    _CLIENT_SETTINGS_VERSION = base_version
-    return _CLIENT_SETTINGS_VERSION
-
-
 def _load_client_settings_js() -> str:
     global _CLIENT_SETTINGS_JS
     if _CLIENT_SETTINGS_JS is not None:
@@ -401,7 +338,7 @@ def client_settings(tenant: int, request: Request):
         "state_payload": state_payload,
         "primary_key": primary_key,
         "max_days": EXPORT_MAX_DAYS,
-        "client_settings_version": _client_settings_static_version(),
+        "client_settings_version": C.client_settings_version(),
     }
     response = templates.TemplateResponse("client/settings.html", context)
     response.headers["Cache-Control"] = "no-store"

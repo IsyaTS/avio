@@ -1,38 +1,22 @@
-from types import SimpleNamespace
-
 from app.web.ui import templates
 
 
-def _missing_url_for(name: str, **kwargs):  # pragma: no cover - helper
-    raise KeyError(name)
-
-
-def test_static_url_fallback_when_route_missing():
-    dummy_request = SimpleNamespace(url_for=_missing_url_for)
+def test_static_url_defaults_to_static_prefix(monkeypatch):
+    monkeypatch.delenv("STATIC_PUBLIC_BASE", raising=False)
     static_url = templates.env.globals["static_url"]
-    result = static_url(dummy_request, "css/portal.css")
-    assert result.endswith("/css/portal.css")
-    assert result.startswith("/static")
+    assert static_url(None, "css/portal.css") == "/static/css/portal.css"
 
 
-def test_static_url_prefers_app_mount_when_present():
-    class DummyApp:
-        def url_path_for(self, name: str, **kwargs):
-            assert name == "static"
-            assert kwargs == {"path": "css/portal.css"}
-            return "/app-static/css/portal.css"
-
-    dummy_request = SimpleNamespace(app=DummyApp())
+def test_static_url_uses_env_prefix_without_double_slash(monkeypatch):
+    monkeypatch.setenv("STATIC_PUBLIC_BASE", "https://static.avio.website/static/")
     static_url = templates.env.globals["static_url"]
-    assert static_url(dummy_request, "css/portal.css") == "/app-static/css/portal.css"
+    assert (
+        static_url(None, "/css/portal.css")
+        == "https://static.avio.website/static/css/portal.css"
+    )
 
 
-def test_static_url_uses_request_when_available():
-    def stub_url_for(name: str, **kwargs):
-        assert name == "static"
-        assert kwargs == {"path": "css/portal.css"}
-        return "/mounted/static/css/portal.css"
-
-    dummy_request = SimpleNamespace(url_for=stub_url_for)
+def test_static_url_handles_empty_path(monkeypatch):
+    monkeypatch.setenv("STATIC_PUBLIC_BASE", "https://cdn.example/static")
     static_url = templates.env.globals["static_url"]
-    assert static_url(dummy_request, "css/portal.css") == "/mounted/static/css/portal.css"
+    assert static_url(None, "") == "https://cdn.example/static"
