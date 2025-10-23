@@ -164,15 +164,5 @@
   window.state = {{ state_json }};
 </script>
 <script src="{{ static_url(request,'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
-<script>
-(function executeClientSettings(run) {
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', run, { once: true });
-  } else {
-    run();
-  }
-})(function clientSettingsBundle() {
-{{ client_settings_js | safe }}
-});
-</script>
+<script src="{{ static_url(request,'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
 {% endblock %}

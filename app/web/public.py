@@ -3008,14 +3008,43 @@ async def wa_restart(
         return JSONResponse({"error": "wa_unavailable"}, status_code=502)
 
 
-@router.get("/pub/settings/get")
-def settings_get(tenant: int | str | None = None, k: str | None = None):
+def _resolve_public_settings_key(request: Request, key_candidate: str | None) -> str:
+    candidate = (key_candidate or "").strip()
+    if candidate:
+        return candidate
+
+    query_value = (request.query_params.get("k") or "").strip()
+    if query_value:
+        return query_value
+
+    cookies = getattr(request, "cookies", None) or {}
+    return (cookies.get("client_key") or "").strip()
+
+
+def _authorize_public_settings_request(
+    request: Request,
+    tenant: int | str | None,
+    key_candidate: str | None,
+) -> tuple[int, str] | Response:
     try:
         tenant_id = _coerce_tenant(tenant)
     except ValueError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=400)
-    if not common.valid_key(tenant_id, k or ""):
+
+    resolved_key = _resolve_public_settings_key(request, key_candidate)
+    if not resolved_key or not common.valid_key(tenant_id, resolved_key):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
+
+    return tenant_id, resolved_key
+
+
+@router.get("/pub/settings/get")
+def settings_get(request: Request, tenant: int | str | None = None, k: str | None = None):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+
+    tenant_id, _ = auth
     common.ensure_tenant_files(tenant_id)
     cfg = common.read_tenant_config(tenant_id)
     persona = common.read_persona(tenant_id)
@@ -3024,12 +3053,11 @@ def settings_get(tenant: int | str | None = None, k: str | None = None):
 
 @router.post("/pub/settings/save")
 async def settings_save(request: Request, tenant: int | str | None = None, k: str | None = None):
-    try:
-        tenant_id = _coerce_tenant(tenant)
-    except ValueError as exc:
-        return JSONResponse({"detail": str(exc)}, status_code=400)
-    if not common.valid_key(tenant_id, k or ""):
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+
+    tenant_id, _ = auth
     common.ensure_tenant_files(tenant_id)
     try:
         payload = await request.json()
