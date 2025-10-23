@@ -39,3 +39,6 @@ tmp_extract/
 node_modules/
 # уже есть:
 # __pycache__/, *.pyc, .venv/
+# runtime extra
+data/wa_state/
+waweb/.wwebjs_cache/
