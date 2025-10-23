@@ -89,20 +89,12 @@ try {
     const perInput = document.getElementById('exp-per');
 
     const resolveEndpoint = (raw) => {
-      const locationInfo = getLocation();
-      const origin = locationInfo.origin || '';
-      try {
-        const url = new URL(raw || '/export/whatsapp', origin || undefined);
-        const targetHostname = locationInfo.hostname || '';
-        if (targetHostname && url.hostname !== targetHostname) {
-          url.hostname = targetHostname;
-          if (locationInfo.protocol) url.protocol = locationInfo.protocol;
-          if (locationInfo.port) url.port = locationInfo.port;
-        }
-        return url.toString();
-      } catch (error) {
-        return raw || '/export/whatsapp';
+      const candidate = resolveEndpointUrl(raw, {}, endpoints.whatsappExport);
+      if (candidate) {
+        return candidate;
       }
+      const fallbackUrl = resolveEndpointUrl(endpoints.whatsappExport);
+      return fallbackUrl || '/pub/wa/export';
     };
 
     const updateStatus = (message, variant = 'muted') => {
@@ -282,6 +274,10 @@ try {
       const tenant = tenantValue;
       const key = typeof state.key === 'string' ? state.key : '';
       const endpoint = resolveEndpoint(urls.whatsapp_export);
+      if (!endpoint) {
+        updateStatus('Ссылка для экспорта недоступна', 'alert');
+        return;
+      }
 
       let days = parseNumber(daysInput ? daysInput.value : '', { min: 0, fallback: 0 });
       if (maxDays !== null && days > maxDays) {
@@ -434,25 +430,102 @@ try {
     const resolvedMaxDays = resolveMaxDays(state);
     const maxDays = resolvedMaxDays != null ? resolvedMaxDays : 30;
 
-  const endpoints = {
-    saveSettings: urls.save_settings || `/client/${tenant}/settings/save`,
-    savePersona: urls.save_persona || `/client/${tenant}/persona`,
-    uploadCatalog: urls.upload_catalog || `/client/${tenant}/catalog/upload`,
-    csvGet: urls.csv_get || `/client/${tenant}/catalog/csv`,
-    csvSave: urls.csv_save || `/client/${tenant}/catalog/csv`,
-    trainingUpload: urls.training_upload || `/client/${tenant}/training/upload`,
-    trainingStatus: urls.training_status || `/client/${tenant}/training/status`,
-    whatsappExport: urls.whatsapp_export || `/export/whatsapp`,
-  };
+    const ABSOLUTE_URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
-  const telegram = {
-    startUrl: urls.tg_start || `/pub/tg/start`,
-    statusUrl: urls.tg_status || `/pub/tg/status`,
-    logoutUrl: urls.tg_logout || `/pub/tg/logout`,
-    qrUrl: urls.tg_qr_png || urls.tg_qr || `/pub/tg/qr.png`,
-    qrTxtUrl: urls.tg_qr_txt || `/pub/tg/qr.txt`,
-    passwordUrl: urls.tg_2fa_url || urls.tg_password || `/pub/tg/2fa`,
-  };
+    const normalizeEndpointPath = (value, fallback = '') => {
+      const raw = typeof value === 'string' ? value.trim() : '';
+      const fallbackRaw = typeof fallback === 'string' ? fallback.trim() : '';
+      if (raw) {
+        if (fallbackRaw && fallbackRaw.startsWith('/pub/') && raw.startsWith('/client/')) {
+          return fallbackRaw;
+        }
+        if (fallbackRaw && fallbackRaw.startsWith('/pub/') && !ABSOLUTE_URL_RE.test(raw)) {
+          const candidatePath = raw.startsWith('/') ? raw : `/${raw}`;
+          if (!candidatePath.startsWith('/pub/')) {
+            return fallbackRaw;
+          }
+        }
+        if (ABSOLUTE_URL_RE.test(raw)) {
+          return raw;
+        }
+        if (raw.startsWith('//')) {
+          const protocol = getLocation().protocol || 'https:';
+          return `${protocol}${raw}`;
+        }
+        if (raw.startsWith('/')) {
+          return raw;
+        }
+        if (raw.startsWith('pub/')) {
+          return `/${raw}`;
+        }
+        if (raw.startsWith('client/')) {
+          return `/${raw}`;
+        }
+        if (raw.startsWith('./') || raw.startsWith('../')) {
+          return raw;
+        }
+        return `/${raw}`;
+      }
+      if (!fallbackRaw) {
+        return '';
+      }
+      return normalizeEndpointPath(fallbackRaw, '');
+    };
+
+    function resolveEndpointUrl(raw, extraParams = {}, fallback = '') {
+      const base = normalizeEndpointPath(raw, fallback);
+      if (!base) {
+        return '';
+      }
+      const built = buildUrl(base);
+      const candidate = built || base;
+      const locationInfo = getLocation();
+      let url;
+      try {
+        url = new URL(candidate, locationInfo.origin || 'https://localhost');
+      } catch (error) {
+        url = new URL(candidate, locationInfo.href || 'https://localhost');
+      }
+      const tenantId = tenant != null ? String(tenant).trim() : '';
+      const pathName = url.pathname || '';
+      if (tenantId && pathName.startsWith('/pub/')) {
+        url.searchParams.set('tenant', tenantId);
+      }
+      Object.entries(extraParams || {}).forEach(([key, value]) => {
+        if (value === undefined || value === null) return;
+        url.searchParams.set(key, String(value));
+      });
+      const baseIsAbsolute = ABSOLUTE_URL_RE.test(base);
+      const candidateIsAbsolute = ABSOLUTE_URL_RE.test(candidate);
+      const isRootRelative = !baseIsAbsolute && base.startsWith('/');
+      if (isRootRelative && !candidateIsAbsolute) {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+      if (!isRootRelative && !baseIsAbsolute && base.startsWith('pub/')) {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+      return url.toString();
+    }
+
+    const endpoints = {
+      saveSettings: normalizeEndpointPath(urls.save_settings, '/pub/settings/save'),
+      savePersona: normalizeEndpointPath(urls.save_persona, `/client/${tenant}/persona`),
+      uploadCatalog: normalizeEndpointPath(urls.upload_catalog, '/pub/catalog/upload'),
+      csvGet: normalizeEndpointPath(urls.csv_get, '/pub/catalog/csv'),
+      csvSave: normalizeEndpointPath(urls.csv_save, '/pub/catalog/csv'),
+      trainingUpload: normalizeEndpointPath(urls.training_upload, '/pub/training/upload'),
+      trainingStatus: normalizeEndpointPath(urls.training_status, '/pub/training/status'),
+      whatsappExport: normalizeEndpointPath(urls.whatsapp_export, '/pub/wa/export'),
+    };
+
+    const telegram = {
+      startUrl: normalizeEndpointPath(urls.tg_start, '/pub/tg/start'),
+      statusUrl: normalizeEndpointPath(urls.tg_status, '/pub/tg/status'),
+      logoutUrl: normalizeEndpointPath(urls.tg_logout, '/pub/tg/logout'),
+      qrUrl: normalizeEndpointPath(urls.tg_qr_png || urls.tg_qr, '/pub/tg/qr.png'),
+      qrTxtUrl: normalizeEndpointPath(urls.tg_qr_txt, '/pub/tg/qr.txt'),
+      passwordUrl: normalizeEndpointPath(urls.tg_2fa_url || urls.tg_password, '/pub/tg/2fa'),
+    };
 
   const dom = {
     settingsForm: document.getElementById('settings-form'),
@@ -517,6 +590,10 @@ try {
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
   const HIDDEN_CLASS = 'hidden';
+  const TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS = 5;
+  const TELEGRAM_STATUS_RETRY_BASE_DELAY = 4000;
+  const TELEGRAM_STATUS_RETRY_MAX_DELAY = 60000;
+  let telegramStatusErrorAttempts = 0;
 
   function toBoolean(value) {
     if (value === true) return true;
@@ -547,58 +624,17 @@ try {
 
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
-    const locationInfo = getLocation();
-    const resolvedBase = buildUrl(base);
-    const candidate = resolvedBase || base;
-    if (!candidate) return '';
-    let url;
-    try {
-      url = new URL(candidate, locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL(candidate, locationInfo.href || 'https://localhost');
-    }
-    const tenantId = tenant != null ? String(tenant).trim() : '';
-    if (tenantId) {
-      url.searchParams.set('tenant', tenantId);
-    }
-    Object.entries(extraParams || {}).forEach(([key, value]) => {
-      if (value === undefined || value === null) return;
-      url.searchParams.set(key, String(value));
-    });
-    return url.toString();
+    return resolveEndpointUrl(base, extraParams, base);
   }
 
   function buildTelegramQrUrl(qrId) {
     if (!telegram.qrUrl || !qrId) return '';
-    const locationInfo = getLocation();
-    const resolved = buildUrl(telegram.qrUrl);
-    const candidate = resolved || telegram.qrUrl;
-    if (!candidate) return '';
-    let url;
-    try {
-      url = new URL(candidate, locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL(candidate, locationInfo.href || 'https://localhost');
-    }
-    url.searchParams.set('qr_id', qrId);
-    url.searchParams.set('t', String(Date.now()));
-    return url.toString();
+    return resolveEndpointUrl(telegram.qrUrl, { qr_id: qrId, t: Date.now() }, telegram.qrUrl);
   }
 
   function buildTelegramQrTextUrl(qrId) {
     if (!telegram.qrTxtUrl || !qrId) return '';
-    const locationInfo = getLocation();
-    const resolved = buildUrl(telegram.qrTxtUrl);
-    const candidate = resolved || telegram.qrTxtUrl;
-    if (!candidate) return '';
-    let url;
-    try {
-      url = new URL(candidate, locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL(candidate, locationInfo.href || 'https://localhost');
-    }
-    url.searchParams.set('qr_id', qrId);
-    return url.toString();
+    return resolveEndpointUrl(telegram.qrTxtUrl, { qr_id: qrId }, telegram.qrTxtUrl);
   }
 
   function updateTelegramQrLink(qrId) {
@@ -690,6 +726,9 @@ try {
     }
     if (dom.tgQrBlock) {
       showElement(dom.tgQrBlock);
+    }
+    if (!fromPoll) {
+      telegramStatusErrorAttempts = 0;
     }
     stopTelegramPolling();
     refreshTelegramStatus({ fromPoll: true });
@@ -829,12 +868,38 @@ try {
     }
   }
 
-  function scheduleTelegramPolling(delayMs) {
+  function scheduleTelegramPolling(delayMs, options = {}) {
+    const { resetErrors = false } = options || {};
     stopTelegramPolling();
+    if (resetErrors) {
+      telegramStatusErrorAttempts = 0;
+    }
     telegramStatusPollTimer = window.setTimeout(() => {
       telegramStatusPollTimer = null;
       refreshTelegramStatus({ fromPoll: true });
     }, Math.max(500, Number(delayMs) || 0));
+  }
+
+  function scheduleTelegramErrorRetry() {
+    if (telegramStatusErrorAttempts >= TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS) {
+      try {
+        console.warn('[client-settings] telegram status retry limit reached', TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS);
+      } catch (_) {}
+      stopTelegramPolling();
+      return;
+    }
+    telegramStatusErrorAttempts += 1;
+    const exponent = telegramStatusErrorAttempts - 1;
+    const delay = Math.min(
+      TELEGRAM_STATUS_RETRY_BASE_DELAY * (2 ** Math.max(0, exponent)),
+      TELEGRAM_STATUS_RETRY_MAX_DELAY,
+    );
+    try {
+      const attemptInfo = `${telegramStatusErrorAttempts}/${TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS}`;
+      const retryMessage = `[client-settings] telegram status retry in ${delay}ms (attempt ${attemptInfo})`;
+      console.warn(retryMessage);
+    } catch (_) {}
+    scheduleTelegramPolling(delay);
   }
 
   function evaluateTelegramPolling(statusValue) {
@@ -848,7 +913,7 @@ try {
       return;
     }
     const delay = normalized === 'waiting_qr' ? waitingPollInterval : fallbackPollInterval;
-    scheduleTelegramPolling(delay);
+    scheduleTelegramPolling(delay, { resetErrors: true });
   }
 
   function setStatus(element, message, variant = 'muted') {
@@ -857,8 +922,12 @@ try {
     element.textContent = message || '';
   }
 
-  async function postJSON(endpoint, payload) {
-    const response = await fetch(buildUrl(endpoint), {
+  async function postJSON(targetUrl, payload) {
+    const resolvedUrl = typeof targetUrl === 'string' ? targetUrl.trim() : '';
+    if (!resolvedUrl) {
+      throw new Error('URL сервиса не задан');
+    }
+    const response = await fetch(resolvedUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -909,7 +978,8 @@ try {
       const formData = new FormData(dom.settingsForm);
       const payload = Object.fromEntries(formData.entries());
       try {
-        await postJSON(endpoints.saveSettings, payload);
+        const targetUrl = resolveEndpointUrl(endpoints.saveSettings);
+        await postJSON(targetUrl, payload);
         setStatus(dom.settingsMessage, 'Паспорт сохранён', 'muted');
       } catch (error) {
         setStatus(dom.settingsMessage, `Не удалось сохранить: ${error.message}`, 'alert');
@@ -920,7 +990,8 @@ try {
   if (dom.savePersona && dom.personaTextarea) {
     dom.savePersona.addEventListener('click', async () => {
       try {
-        await postJSON(endpoints.savePersona, { text: dom.personaTextarea.value });
+        const targetUrl = resolveEndpointUrl(endpoints.savePersona);
+        await postJSON(targetUrl, { text: dom.personaTextarea.value });
         setStatus(dom.personaMessage, 'Персона обновлена', 'muted');
       } catch (error) {
         setStatus(dom.personaMessage, `Не удалось обновить: ${error.message}`, 'alert');
@@ -931,7 +1002,11 @@ try {
   if (dom.downloadConfig) {
     dom.downloadConfig.addEventListener('click', async () => {
       try {
-        const response = await fetch(buildUrl(`/pub/settings/get?tenant=${tenant}`));
+        const settingsUrl = resolveEndpointUrl('/pub/settings/get');
+        if (!settingsUrl) {
+          throw new Error('Ссылка недоступна');
+        }
+        const response = await fetch(settingsUrl, { cache: 'no-store' });
         if (!response.ok) throw new Error(await response.text());
         const data = await response.json();
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -967,8 +1042,12 @@ function performCatalogUpload(event) {
   const formData = new FormData();
   formData.append('file', file);
 
-  const targetUrlRaw = dom.uploadForm.dataset.uploadUrl || endpoints.uploadCatalog;
-  const targetUrl = buildUrl(targetUrlRaw);
+  const targetUrlRaw = (dom.uploadForm.dataset.uploadUrl || '').trim();
+  const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.uploadCatalog, {}, endpoints.uploadCatalog);
+  if (!targetUrl) {
+    setStatus(dom.uploadMessage, 'Не найдён адрес загрузки каталога', 'alert');
+    return;
+  }
 
   setStatus(dom.uploadMessage, `Загрузка ${file.name}...`, 'muted');
   if (dom.progress) dom.progress.hidden = false;
@@ -1063,7 +1142,11 @@ function performCatalogUpload(event) {
   async function refreshTrainingStatus() {
     if (!dom.trainingStatus) return;
     try {
-      const response = await fetch(buildUrl(endpoints.trainingStatus));
+      const url = resolveEndpointUrl(endpoints.trainingStatus);
+      if (!url) {
+        throw new Error('Сервис недоступен');
+      }
+      const response = await fetch(url, { cache: 'no-store' });
       if (!response.ok) throw new Error(await response.text());
       const data = await response.json();
       const info = data.info || {};
@@ -1098,8 +1181,12 @@ function performCatalogUpload(event) {
       }
       const formData = new FormData();
       formData.append('file', file);
-      const targetUrlRaw = dom.trainingUploadForm.dataset.uploadUrl || endpoints.trainingUpload;
-      const targetUrl = buildUrl(targetUrlRaw);
+      const targetUrlRaw = (dom.trainingUploadForm.dataset.uploadUrl || '').trim();
+      const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.trainingUpload, {}, endpoints.trainingUpload);
+      if (!targetUrl) {
+        setStatus(dom.trainingUploadMessage, 'Не найдён адрес загрузки данных', 'alert');
+        return;
+      }
       dom.trainingUploadForm.dataset.state = 'uploading';
       try {
         const response = await fetch(targetUrl, {
@@ -1237,7 +1324,11 @@ function performCatalogUpload(event) {
 
   async function loadCsv({ quiet = false } = {}) {
     try {
-      const response = await fetch(buildUrl(endpoints.csvGet));
+      const url = resolveEndpointUrl(endpoints.csvGet);
+      if (!url) {
+        throw new Error('Сервис недоступен');
+      }
+      const response = await fetch(url, { cache: 'no-store' });
       if (response.status === 404) {
         csvState.columns = [];
         csvState.rows = [];
@@ -1311,7 +1402,8 @@ function performCatalogUpload(event) {
       }
       const rows = collectCsvRows();
       try {
-        const result = await postJSON(endpoints.csvSave, {
+        const targetUrl = resolveEndpointUrl(endpoints.csvSave);
+        const result = await postJSON(targetUrl, {
           columns: csvState.columns,
           rows,
         });
@@ -1398,6 +1490,7 @@ function performCatalogUpload(event) {
         variant = 'alert';
       }
       updateTelegramStatus(message, variant);
+      telegramStatusErrorAttempts = 0;
       evaluateTelegramPolling(normalized);
     } catch (error) {
       console.error('[client-settings] telegram status error', error);
@@ -1405,11 +1498,7 @@ function performCatalogUpload(event) {
       hideTelegramQr();
       setQrRefreshVisibility(false);
       setQrRefreshDisabled(true);
-      if (!fromPoll) {
-        scheduleTelegramPolling(6000);
-      } else {
-        scheduleTelegramPolling(8000);
-      }
+      scheduleTelegramErrorRetry();
     }
   }
 
@@ -1577,7 +1666,7 @@ function performCatalogUpload(event) {
         console.error('[client-settings] telegram password request failed', error?.message || error);
       } catch (_) {}
       updatePasswordStatus('Не удалось отправить пароль. Попробуйте ещё раз.', 'alert');
-      scheduleTelegramPolling(6000);
+      scheduleTelegramPolling(6000, { resetErrors: true });
     } finally {
       if (dom.tgPasswordSubmit) dom.tgPasswordSubmit.disabled = false;
       if (passwordAccepted && dom.tgPasswordInput) {
