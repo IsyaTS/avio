@@ -105,46 +105,103 @@
     return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path);
   }
 
-  function buildUrl(path, options = {}) {
-    const { includeKey = true } = options || {};
-    const raw = path == null ? '' : String(path);
-    const locationLike = safeLocation();
-    const baseOrigin = resolveOrigin(locationLike);
-    let url;
+  function appendKeyToPath(value, key, { origin, rootRelative }) {
+    if (!value || !key) {
+      return value;
+    }
+    const safeOrigin = origin || 'https://localhost';
     try {
-      url = new URL(raw || '', baseOrigin);
-    } catch (error) {
-      url = new URL(baseOrigin);
-      if (raw) {
-        url.pathname = raw;
-      }
-    }
-
-    if (locationLike && locationLike.hostname && url.hostname !== locationLike.hostname) {
-      if (url.origin === baseOrigin || !isAbsoluteUrl(raw)) {
-        url = new URL(url.pathname + url.search + url.hash, baseOrigin);
-      }
-    }
-
-    if (locationLike && url.hostname === locationLike.hostname) {
-      if (locationLike.protocol && url.protocol !== locationLike.protocol) {
-        url.protocol = locationLike.protocol;
-      }
-      if (locationLike.port && url.port !== locationLike.port) {
-        url.port = locationLike.port;
-      }
-    }
-
-    const alreadyHasKey = url.searchParams.has('k');
-    if (includeKey && !alreadyHasKey) {
-      const key = resolveClientKey();
-      const sameOrigin = !isAbsoluteUrl(raw) || url.origin === baseOrigin;
-      if (key && sameOrigin) {
+      const url = new URL(value, safeOrigin);
+      if (!url.searchParams.has('k')) {
         url.searchParams.set('k', key);
       }
+      if (rootRelative) {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+      return url.toString();
+    } catch (error) {
+      if (value.includes('?')) {
+        const [pathPart, queryPart] = value.split('?');
+        const params = new URLSearchParams(queryPart);
+        if (!params.has('k')) {
+          params.set('k', key);
+        }
+        return `${pathPart}?${params.toString()}`;
+      }
+      return `${value}?k=${encodeURIComponent(key)}`;
+    }
+  }
+
+  function needsClientKey(value, { origin, rootRelative, absolute }) {
+    if (!value) {
+      return false;
+    }
+    const safeOrigin = origin || 'https://localhost';
+    if (rootRelative) {
+      if (!value.startsWith('/pub/')) {
+        return false;
+      }
+      try {
+        const paramsIndex = value.indexOf('?');
+        if (paramsIndex >= 0) {
+          const params = new URLSearchParams(value.slice(paramsIndex + 1));
+          if (params.has('k')) {
+            return false;
+          }
+        }
+      } catch (_) {
+        return !value.includes('k=');
+      }
+      return true;
+    }
+    if (absolute) {
+      return false;
+    }
+    try {
+      const url = new URL(value, safeOrigin);
+      if (!url.pathname.startsWith('/pub/')) {
+        return false;
+      }
+      return !url.searchParams.has('k');
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function buildUrl(path, options = {}) {
+    const { includeKey = true } = options || {};
+    const rawInput = path == null ? '' : String(path);
+    const locationLike = safeLocation();
+    const origin = resolveOrigin(locationLike);
+    const absolute = isAbsoluteUrl(rawInput);
+    const rootRelative = !absolute && rawInput.startsWith('/');
+    let output = rawInput;
+
+    if (!absolute && !rootRelative) {
+      try {
+        const url = new URL(rawInput || '', origin);
+        output = url.toString();
+      } catch (error) {
+        const normalizedOrigin = origin.replace(/\/$/, '');
+        const normalizedPath = rawInput.replace(/^\/+/, '');
+        output = `${normalizedOrigin}/${normalizedPath}`;
+      }
     }
 
-    return url.toString();
+    if (!includeKey) {
+      return output;
+    }
+
+    const key = resolveClientKey();
+    if (!key) {
+      return output;
+    }
+
+    if (needsClientKey(output, { origin, rootRelative, absolute })) {
+      return appendKeyToPath(output, key, { origin, rootRelative });
+    }
+
+    return output;
   }
 
   buildUrl.getKey = resolveClientKey;
