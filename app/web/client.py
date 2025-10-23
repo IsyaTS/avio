@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, ValidationError
 from zoneinfo import ZoneInfo
 
 from . import common as C
-from .ui import templates
+from .ui import render_template
 
 
 def _import_alias(module: str):
@@ -340,7 +340,7 @@ def client_settings(tenant: int, request: Request):
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": C.client_settings_version(),
     }
-    response = templates.TemplateResponse("client/settings.html", context)
+    response = render_template("client/settings.html", context)
     response.headers["Cache-Control"] = "no-store"
     if key:
         try:

@@ -86,7 +86,7 @@ except ImportError:  # pragma: no cover - fallback when module alias missing
         from app.web import webhooks as webhook_module  # type: ignore
     except ImportError:
         webhook_module = None  # type: ignore[assignment]
-from .ui import templates
+from .ui import render_template
 from .webhooks import router as webhook_router, process_incoming
 
 logger = logging.getLogger(__name__)
@@ -522,7 +522,7 @@ def connect_avito(tenant: int, request: Request, k: str | None = None, key: str 
         "avito": avito_info,
         "settings_link": settings_link,
     }
-    return templates.TemplateResponse(request, "connect/avito.html", context)
+    return render_template("connect/avito.html", context)
 
 
 def _tg_base_url() -> str:
@@ -1164,7 +1164,7 @@ def connect_wa(tenant: int, request: Request, k: str | None = None):
         "settings_link": settings_link,
         "public_base": common.public_base_url(request),
     }
-    return templates.TemplateResponse(request, "connect/wa.html", context)
+    return render_template("connect/wa.html", context)
 
 
 @router.get("/connect/tg")
@@ -1222,7 +1222,7 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
         "persona_preview": persona_preview,
         "tg_connect_config": tg_connect_config,
     }
-    return templates.TemplateResponse(request, "connect/tg.html", context)
+    return render_template("connect/tg.html", context)
 
 
 @router.get("/pub/wa/status")

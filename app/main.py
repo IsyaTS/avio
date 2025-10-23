@@ -651,7 +651,10 @@ async def internal_tenant_wa_qr(tenant: int, request: Request):
 # Basic health endpoint for Docker healthcheck
 @app.get("/health")
 async def health():
-    return JSONResponse({"ok": True, "status": "healthy"}, status_code=200)
+    return JSONResponse(
+        {"ok": True, "status": "healthy", "version": C.asset_version()},
+        status_code=200,
+    )
 
 # Mount Ops admin under /admin if available
 try:

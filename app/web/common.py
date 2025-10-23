@@ -71,7 +71,7 @@ TG_WORKER_URL = tg_worker_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
 
-_CLIENT_SETTINGS_VERSION: str | None = None
+_ASSET_VERSION: str | None = None
 
 
 def _static_base_prefix() -> str:
@@ -99,60 +99,72 @@ def _client_settings_bundle_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1] / "static" / "js"
 
 
-def _compute_client_settings_digest() -> str | None:
-    bundle_root = _client_settings_bundle_root()
+def _asset_files() -> tuple[pathlib.Path, pathlib.Path]:
+    root = _client_settings_bundle_root()
+    return root / "boot.js", root / "client-settings.js"
+
+
+def _compute_asset_fingerprint() -> tuple[str | None, int | None]:
     sha1 = hashlib.sha1()
+    newest_mtime: int | None = None
     files_found = False
-    for filename in ("boot.js", "client-settings.js"):
-        path = bundle_root / filename
+    for path in _asset_files():
         if not path.exists():
             continue
         try:
-            sha1.update(path.read_bytes())
-            files_found = True
+            data = path.read_bytes()
         except OSError:
             continue
-    if not files_found:
-        return None
-    return sha1.hexdigest()[:12]
+        sha1.update(data)
+        files_found = True
+        try:
+            mtime = int(path.stat().st_mtime)
+        except OSError:
+            mtime = None
+        if mtime is not None and (newest_mtime is None or mtime > newest_mtime):
+            newest_mtime = mtime
+    digest = sha1.hexdigest()[:12] if files_found else None
+    return digest, newest_mtime
+
+
+def _git_short_sha() -> str:
+    try:
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--short=10", "HEAD"],
+            cwd=str(repo_root),
+            stderr=subprocess.DEVNULL,
+        )
+        return output.decode("utf-8").strip()
+    except Exception:
+        return ""
+
+
+def asset_version() -> str:
+    global _ASSET_VERSION
+    if _ASSET_VERSION:
+        return _ASSET_VERSION
+
+    version = (os.getenv("ASSET_VERSION") or "").strip()
+    if not version:
+        version = _git_short_sha()
+
+    if not version:
+        digest, newest_mtime = _compute_asset_fingerprint()
+        if digest:
+            version = digest
+        elif newest_mtime:
+            version = str(newest_mtime)
+
+    if not version:
+        version = str(int(time.time()))
+
+    _ASSET_VERSION = version
+    return version
 
 
 def client_settings_version() -> str:
-    global _CLIENT_SETTINGS_VERSION
-    if _CLIENT_SETTINGS_VERSION:
-        return _CLIENT_SETTINGS_VERSION
-
-    build_rev = (os.getenv("BUILD_REV") or os.getenv("CLIENT_SETTINGS_VERSION") or "").strip()
-    base_version = build_rev
-
-    if not base_version:
-        for env_name in ("APP_GIT_SHA", "GIT_SHA", "HEROKU_SLUG_COMMIT"):
-            value = (os.getenv(env_name) or "").strip()
-            if value:
-                base_version = value[:8] or value
-                break
-
-    if not base_version:
-        try:
-            repo_root = pathlib.Path(__file__).resolve().parents[2]
-            output = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(repo_root),
-                stderr=subprocess.DEVNULL,
-            )
-            base_version = output.decode("utf-8").strip()
-        except Exception:
-            base_version = ""
-
-    digest = _compute_client_settings_digest()
-    if digest:
-        base_version = f"{base_version}-{digest}" if base_version else digest
-
-    if not base_version:
-        base_version = str(int(time.time()))
-
-    _CLIENT_SETTINGS_VERSION = base_version
-    return _CLIENT_SETTINGS_VERSION
+    return asset_version()
 
 
 def _admin_token() -> str:

@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Set asset version
+        run: echo "ASSET_VERSION=${GITHUB_SHA:0:10}" >> "$GITHUB_ENV"
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
@@ -50,6 +52,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Set asset version
+        run: echo "ASSET_VERSION=${GITHUB_SHA:0:10}" >> "$GITHUB_ENV"
       - name: Build app image
         run: docker build --target app -t avio/app:ci .
 
@@ -59,6 +63,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Set asset version
+        run: echo "ASSET_VERSION=${GITHUB_SHA:0:10}" >> "$GITHUB_ENV"
       - name: Prepare environment file
         run: |
           cat <<'ENV' > .env
