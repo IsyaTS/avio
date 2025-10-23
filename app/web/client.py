@@ -374,7 +374,6 @@ def client_settings(tenant: int, request: Request):
         "primary_key": primary_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": _client_settings_static_version(),
-        "client_settings_js": _load_client_settings_js(),
     }
     response = templates.TemplateResponse("client/settings.html", context)
     response.headers["Cache-Control"] = "no-store"

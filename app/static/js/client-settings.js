@@ -17,8 +17,8 @@ function getLocation() {
 try {
   (function initClientSettings() {
   console.info('client-settings loaded');
-  window.__CATALOG_WIDGET_VERSION__ = '2025-02-05T18:30:00Z';
-  window.__client_settings_build = '20250205';
+  window.__CATALOG_WIDGET_VERSION__ = '2025-02-10T12:00:00Z';
+  window.__client_settings_build = '20250210';
 
   window.__EXPORT_ERROR__ = undefined;
 
@@ -380,55 +380,59 @@ try {
     const hasDomState = domState && typeof domState === 'object' && Object.keys(domState).length > 0;
     const state = hasDomState ? domState : (globalState && typeof globalState === 'object' ? globalState : {});
     const tenant = determineTenant(state, { fallbackDefault: true });
-    const accessKey = typeof state.key === 'string' ? state.key : '';
+    const stateAccessKey = typeof state.key === 'string' ? state.key.trim() : '';
+    const fallbackBuildUrl = (path, options = {}) => {
+      const { includeKey = true } = options || {};
+      const locationInfo = getLocation();
+      let origin = locationInfo.origin || '';
+      if (!origin) {
+        try {
+          origin = new URL(locationInfo.href || '/', 'https://localhost').origin;
+        } catch (_) {
+          origin = 'https://localhost';
+        }
+      }
+      const protocol = locationInfo.protocol || '';
+      const host = locationInfo.host || '';
+      const hostname = locationInfo.hostname || '';
+      const port = locationInfo.port || '';
+      let url;
+      try {
+        url = new URL(path, origin);
+      } catch (error) {
+        try {
+          console.error('Failed to resolve URL', path, error);
+        } catch (_) {}
+        url = new URL(origin);
+      }
+
+      if (url.hostname !== hostname) {
+        url = new URL(url.pathname + url.search + url.hash, origin);
+      }
+
+      if (url.hostname === hostname && url.protocol !== protocol) {
+        url.protocol = protocol;
+        url.port = port;
+      } else if (url.host === host && url.protocol !== protocol) {
+        url.protocol = protocol;
+      }
+
+      if (includeKey && stateAccessKey) {
+        url.searchParams.set('k', stateAccessKey);
+      }
+      return url.toString();
+    };
+
+    const buildUrl = (typeof window !== 'undefined' && typeof window.buildUrl === 'function')
+      ? window.buildUrl
+      : fallbackBuildUrl;
+
+    const builderAccessKey = typeof buildUrl.getKey === 'function' ? (buildUrl.getKey() || '') : '';
+    const accessKey = (stateAccessKey || builderAccessKey || '').trim();
     const urls = state && typeof state === 'object' ? state.urls || {} : {};
     const initialQrId = typeof state.qr_id === 'string' ? state.qr_id.trim() : '';
     const resolvedMaxDays = resolveMaxDays(state);
     const maxDays = resolvedMaxDays != null ? resolvedMaxDays : 30;
-
-  function buildUrl(path, options = {}) {
-    const { includeKey = true } = options || {};
-    const locationInfo = getLocation();
-    let origin = locationInfo.origin || '';
-    if (!origin) {
-      try {
-        origin = new URL(locationInfo.href || '/', 'https://localhost').origin;
-      } catch (_) {
-        origin = 'https://localhost';
-      }
-    }
-    const protocol = locationInfo.protocol || '';
-    const host = locationInfo.host || '';
-    const hostname = locationInfo.hostname || '';
-    const port = locationInfo.port || '';
-    let url;
-    try {
-      url = new URL(path, origin);
-    } catch (error) {
-      console.error('Failed to resolve URL', path, error);
-      url = new URL(origin);
-    }
-
-    // Force same-origin for app routes: some servers generate absolute URLs like
-    // http://app:8000/... that are unreachable from the browser. Preserve
-    // pathname/search/hash but pin to the current page origin.
-    if (url.hostname !== hostname) {
-      url = new URL(url.pathname + url.search + url.hash, origin);
-    }
-
-    // Normalize protocol/port if anything still differs on same host
-    if (url.hostname === hostname && url.protocol !== protocol) {
-      url.protocol = protocol;
-      url.port = port;
-    } else if (url.host === host && url.protocol !== protocol) {
-      url.protocol = protocol;
-    }
-
-    if (includeKey && accessKey) {
-      url.searchParams.set('k', accessKey);
-    }
-    return url.toString();
-  }
 
   const endpoints = {
     saveSettings: urls.save_settings || `/client/${tenant}/settings/save`,
@@ -544,18 +548,18 @@ try {
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
     const locationInfo = getLocation();
+    const resolvedBase = buildUrl(base);
+    const candidate = resolvedBase || base;
+    if (!candidate) return '';
     let url;
     try {
-      url = new URL(base, locationInfo.origin || 'https://localhost');
+      url = new URL(candidate, locationInfo.origin || 'https://localhost');
     } catch (error) {
-      url = new URL(base, locationInfo.href || 'https://localhost');
+      url = new URL(candidate, locationInfo.href || 'https://localhost');
     }
     const tenantId = tenant != null ? String(tenant).trim() : '';
     if (tenantId) {
       url.searchParams.set('tenant', tenantId);
-    }
-    if (accessKey) {
-      url.searchParams.set('k', accessKey);
     }
     Object.entries(extraParams || {}).forEach(([key, value]) => {
       if (value === undefined || value === null) return;
@@ -566,32 +570,34 @@ try {
 
   function buildTelegramQrUrl(qrId) {
     if (!telegram.qrUrl || !qrId) return '';
+    const locationInfo = getLocation();
+    const resolved = buildUrl(telegram.qrUrl);
+    const candidate = resolved || telegram.qrUrl;
+    if (!candidate) return '';
     let url;
     try {
-      url = new URL(telegram.qrUrl, getLocation().origin || 'https://localhost');
+      url = new URL(candidate, locationInfo.origin || 'https://localhost');
     } catch (error) {
-      url = new URL(telegram.qrUrl, getLocation().href || 'https://localhost');
+      url = new URL(candidate, locationInfo.href || 'https://localhost');
     }
     url.searchParams.set('qr_id', qrId);
-    if (accessKey) {
-      url.searchParams.set('k', accessKey);
-    }
     url.searchParams.set('t', String(Date.now()));
     return url.toString();
   }
 
   function buildTelegramQrTextUrl(qrId) {
     if (!telegram.qrTxtUrl || !qrId) return '';
+    const locationInfo = getLocation();
+    const resolved = buildUrl(telegram.qrTxtUrl);
+    const candidate = resolved || telegram.qrTxtUrl;
+    if (!candidate) return '';
     let url;
     try {
-      url = new URL(telegram.qrTxtUrl, getLocation().origin || 'https://localhost');
+      url = new URL(candidate, locationInfo.origin || 'https://localhost');
     } catch (error) {
-      url = new URL(telegram.qrTxtUrl, getLocation().href || 'https://localhost');
+      url = new URL(candidate, locationInfo.href || 'https://localhost');
     }
     url.searchParams.set('qr_id', qrId);
-    if (accessKey) {
-      url.searchParams.set('k', accessKey);
-    }
     return url.toString();
   }
 
@@ -962,7 +968,7 @@ function performCatalogUpload(event) {
   formData.append('file', file);
 
   const targetUrlRaw = dom.uploadForm.dataset.uploadUrl || endpoints.uploadCatalog;
-  const targetUrl = buildUrl(targetUrlRaw, { includeKey: !String(targetUrlRaw || '').includes('k=') });
+  const targetUrl = buildUrl(targetUrlRaw);
 
   setStatus(dom.uploadMessage, `Загрузка ${file.name}...`, 'muted');
   if (dom.progress) dom.progress.hidden = false;
@@ -1093,7 +1099,7 @@ function performCatalogUpload(event) {
       const formData = new FormData();
       formData.append('file', file);
       const targetUrlRaw = dom.trainingUploadForm.dataset.uploadUrl || endpoints.trainingUpload;
-      const targetUrl = buildUrl(targetUrlRaw, { includeKey: !String(targetUrlRaw || '').includes('k=') });
+      const targetUrl = buildUrl(targetUrlRaw);
       dom.trainingUploadForm.dataset.state = 'uploading';
       try {
         const response = await fetch(targetUrl, {
