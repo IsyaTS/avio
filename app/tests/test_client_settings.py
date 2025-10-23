@@ -95,11 +95,12 @@ def test_list_keys_settings_link_includes_query(monkeypatch):
 
 
 def test_client_settings_template_includes_scripts_in_order(monkeypatch):
-    monkeypatch.setattr(common_module, "client_settings_version", lambda: "v-test")
-    monkeypatch.setattr(common_module, "_CLIENT_SETTINGS_VERSION", None)
-    from app.web.ui import templates
+    monkeypatch.setattr(common_module, "asset_version", lambda: "v-test")
+    monkeypatch.setattr(common_module, "_ASSET_VERSION", None)
+    import app.web.ui as ui_module
 
-    templates.env.globals["client_settings_version"] = "v-test"
+    monkeypatch.setattr(ui_module, "asset_version", lambda: "v-test")
+    ui_module.templates.env.globals["client_settings_version"] = "v-test"
 
     cfg = {"passport": {"brand": "Brand"}}
     client = _build_client(monkeypatch, cfg, persona="persona")

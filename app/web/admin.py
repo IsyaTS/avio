@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
 from . import common as C
-from .ui import templates
+from .ui import render_template
 import secrets
 
 from app.repo import provider_tokens as provider_tokens_repo
@@ -55,7 +55,7 @@ def login(request: Request, token: str | None = None):
         "subtitle": "Доступ для команды",
         "error": error,
     }
-    return templates.TemplateResponse("admin/login.html", context)
+    return render_template("admin/login.html", context)
 
 
 @router.get("/admin")
@@ -76,7 +76,7 @@ def dashboard(request: Request, tenant: int = 1):
         "title": f"Админка · Tenant {tenant}",
         "public_base": public_base,
     }
-    return templates.TemplateResponse("admin/dashboard.html", context)
+    return render_template("admin/dashboard.html", context)
 
 
 @router.get("/admin/keys/list")
