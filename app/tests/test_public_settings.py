@@ -27,3 +27,21 @@ def test_settings_get_accepts_cookie_key(monkeypatch):
     assert response.json() == {"ok": True, "cfg": {"tenant": 7}, "persona": "persona"}
 
     client.close()
+
+
+def test_settings_get_accepts_query_key(monkeypatch):
+    monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: tenant == 5 and key == "query-secret")
+    monkeypatch.setattr(public_module.common, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(public_module.common, "read_tenant_config", lambda tenant: {"tenant": tenant})
+    monkeypatch.setattr(public_module.common, "read_persona", lambda tenant: "persona")
+
+    client = _build_app()
+    response = client.get(
+        "/pub/settings/get",
+        params={"tenant": 5, "k": "query-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "cfg": {"tenant": 5}, "persona": "persona"}
+
+    client.close()

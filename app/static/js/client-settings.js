@@ -17,8 +17,11 @@ function getLocation() {
 try {
   (function initClientSettings() {
   console.info('client-settings loaded');
-  window.__CATALOG_WIDGET_VERSION__ = '2025-02-10T12:00:00Z';
-  window.__client_settings_build = '20250210';
+  window.__CATALOG_WIDGET_VERSION__ = '2025-03-20T15:30:00Z';
+  window.__client_settings_build = '20250320';
+
+  const SETTINGS_FETCH_MAX_ATTEMPTS = 5;
+  const SETTINGS_FETCH_BACKOFF_BASE_MS = 600;
 
   window.__EXPORT_ERROR__ = undefined;
 
@@ -71,6 +74,41 @@ try {
     return fallbackDefault ? 1 : null;
   };
 
+  const sleep = (ms) => new Promise((resolve) => {
+    const safeMs = Math.max(0, Number(ms) || 0);
+    setTimeout(resolve, safeMs);
+  });
+
+  async function fetchSettingsJsonWithRetry(url) {
+    const targetUrl = typeof url === 'string' ? url.trim() : '';
+    if (!targetUrl) {
+      throw new Error('URL сервиса не задан');
+    }
+    let attempt = 0;
+    let lastError = null;
+    while (attempt < SETTINGS_FETCH_MAX_ATTEMPTS) {
+      attempt += 1;
+      try {
+        const response = await fetch(targetUrl, { cache: 'no-store' });
+        if (!response.ok) {
+          const text = await response.text();
+          const status = response.status;
+          const message = (text && text.trim()) || `Ошибка загрузки настроек (HTTP ${status})`;
+          throw new Error(message);
+        }
+        return await response.json();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt >= SETTINGS_FETCH_MAX_ATTEMPTS) {
+          break;
+        }
+        const delayMs = SETTINGS_FETCH_BACKOFF_BASE_MS * (2 ** Math.max(0, attempt - 1));
+        await sleep(delayMs);
+      }
+    }
+    throw lastError || new Error('Не удалось загрузить настройки');
+  }
+
   function bindExportClicks() {
     const button = document.getElementById('export-download');
     if (!button) {
@@ -89,11 +127,11 @@ try {
     const perInput = document.getElementById('exp-per');
 
     const resolveEndpoint = (raw) => {
-      const candidate = resolveEndpointUrl(raw, {}, endpoints.whatsappExport);
+      const candidate = resolveEndpointUrl(raw, withTenant(), endpoints.whatsappExport);
       if (candidate) {
         return candidate;
       }
-      const fallbackUrl = resolveEndpointUrl(endpoints.whatsappExport);
+      const fallbackUrl = resolveEndpointUrl(endpoints.whatsappExport, withTenant());
       return fallbackUrl || '/pub/wa/export';
     };
 
@@ -430,6 +468,15 @@ try {
     const resolvedMaxDays = resolveMaxDays(state);
     const maxDays = resolvedMaxDays != null ? resolvedMaxDays : 30;
 
+    const tenantString = Number.isFinite(tenant) && tenant > 0 ? String(tenant) : '';
+    const withTenant = (params = {}) => {
+      const baseParams = params && typeof params === 'object' ? { ...params } : {};
+      if (tenantString && baseParams.tenant == null) {
+        baseParams.tenant = tenantString;
+      }
+      return baseParams;
+    };
+
     const ABSOLUTE_URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
     const normalizeEndpointPath = (value, fallback = '') => {
@@ -486,13 +533,12 @@ try {
       } catch (error) {
         url = new URL(candidate, locationInfo.href || 'https://localhost');
       }
-      const tenantId = tenant != null ? String(tenant).trim() : '';
       const pathName = url.pathname || '';
-      if (tenantId && pathName.startsWith('/pub/')) {
-        url.searchParams.set('tenant', tenantId);
-      }
       Object.entries(extraParams || {}).forEach(([key, value]) => {
         if (value === undefined || value === null) return;
+        if (key === 'tenant' && !pathName.startsWith('/pub/')) {
+          return;
+        }
         url.searchParams.set(key, String(value));
       });
       const baseIsAbsolute = ABSOLUTE_URL_RE.test(base);
@@ -624,17 +670,17 @@ try {
 
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
-    return resolveEndpointUrl(base, extraParams, base);
+    return resolveEndpointUrl(base, withTenant(extraParams), base);
   }
 
   function buildTelegramQrUrl(qrId) {
     if (!telegram.qrUrl || !qrId) return '';
-    return resolveEndpointUrl(telegram.qrUrl, { qr_id: qrId, t: Date.now() }, telegram.qrUrl);
+    return resolveEndpointUrl(telegram.qrUrl, withTenant({ qr_id: qrId, t: Date.now() }), telegram.qrUrl);
   }
 
   function buildTelegramQrTextUrl(qrId) {
     if (!telegram.qrTxtUrl || !qrId) return '';
-    return resolveEndpointUrl(telegram.qrTxtUrl, { qr_id: qrId }, telegram.qrTxtUrl);
+    return resolveEndpointUrl(telegram.qrTxtUrl, withTenant({ qr_id: qrId }), telegram.qrTxtUrl);
   }
 
   function updateTelegramQrLink(qrId) {
@@ -978,7 +1024,7 @@ try {
       const formData = new FormData(dom.settingsForm);
       const payload = Object.fromEntries(formData.entries());
       try {
-        const targetUrl = resolveEndpointUrl(endpoints.saveSettings);
+        const targetUrl = resolveEndpointUrl(endpoints.saveSettings, withTenant());
         await postJSON(targetUrl, payload);
         setStatus(dom.settingsMessage, 'Паспорт сохранён', 'muted');
       } catch (error) {
@@ -990,7 +1036,7 @@ try {
   if (dom.savePersona && dom.personaTextarea) {
     dom.savePersona.addEventListener('click', async () => {
       try {
-        const targetUrl = resolveEndpointUrl(endpoints.savePersona);
+        const targetUrl = resolveEndpointUrl(endpoints.savePersona, withTenant());
         await postJSON(targetUrl, { text: dom.personaTextarea.value });
         setStatus(dom.personaMessage, 'Персона обновлена', 'muted');
       } catch (error) {
@@ -1002,13 +1048,11 @@ try {
   if (dom.downloadConfig) {
     dom.downloadConfig.addEventListener('click', async () => {
       try {
-        const settingsUrl = resolveEndpointUrl('/pub/settings/get');
+        const settingsUrl = resolveEndpointUrl('/pub/settings/get', withTenant());
         if (!settingsUrl) {
           throw new Error('Ссылка недоступна');
         }
-        const response = await fetch(settingsUrl, { cache: 'no-store' });
-        if (!response.ok) throw new Error(await response.text());
-        const data = await response.json();
+        const data = await fetchSettingsJsonWithRetry(settingsUrl);
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
@@ -1043,7 +1087,7 @@ function performCatalogUpload(event) {
   formData.append('file', file);
 
   const targetUrlRaw = (dom.uploadForm.dataset.uploadUrl || '').trim();
-  const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.uploadCatalog, {}, endpoints.uploadCatalog);
+  const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.uploadCatalog, withTenant(), endpoints.uploadCatalog);
   if (!targetUrl) {
     setStatus(dom.uploadMessage, 'Не найдён адрес загрузки каталога', 'alert');
     return;
@@ -1142,7 +1186,7 @@ function performCatalogUpload(event) {
   async function refreshTrainingStatus() {
     if (!dom.trainingStatus) return;
     try {
-      const url = resolveEndpointUrl(endpoints.trainingStatus);
+      const url = resolveEndpointUrl(endpoints.trainingStatus, withTenant());
       if (!url) {
         throw new Error('Сервис недоступен');
       }
@@ -1182,7 +1226,7 @@ function performCatalogUpload(event) {
       const formData = new FormData();
       formData.append('file', file);
       const targetUrlRaw = (dom.trainingUploadForm.dataset.uploadUrl || '').trim();
-      const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.trainingUpload, {}, endpoints.trainingUpload);
+      const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.trainingUpload, withTenant(), endpoints.trainingUpload);
       if (!targetUrl) {
         setStatus(dom.trainingUploadMessage, 'Не найдён адрес загрузки данных', 'alert');
         return;
@@ -1324,7 +1368,7 @@ function performCatalogUpload(event) {
 
   async function loadCsv({ quiet = false } = {}) {
     try {
-      const url = resolveEndpointUrl(endpoints.csvGet);
+      const url = resolveEndpointUrl(endpoints.csvGet, withTenant());
       if (!url) {
         throw new Error('Сервис недоступен');
       }
@@ -1402,7 +1446,7 @@ function performCatalogUpload(event) {
       }
       const rows = collectCsvRows();
       try {
-        const targetUrl = resolveEndpointUrl(endpoints.csvSave);
+        const targetUrl = resolveEndpointUrl(endpoints.csvSave, withTenant());
         const result = await postJSON(targetUrl, {
           columns: csvState.columns,
           rows,
