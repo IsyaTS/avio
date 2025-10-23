@@ -92,3 +92,23 @@ def test_list_keys_settings_link_includes_query(monkeypatch):
     assert items
     assert items[0]["settings_link"].endswith("/client/9/settings?k=secret-key")
     assert captured_meta.get("tenant") == 9
+
+
+def test_client_settings_template_includes_scripts_in_order(monkeypatch):
+    client_module._CLIENT_SETTINGS_VERSION = None
+    monkeypatch.setattr(client_module, "_client_settings_static_version", lambda: "v-test")
+
+    cfg = {"passport": {"brand": "Brand"}}
+    client = _build_client(monkeypatch, cfg, persona="persona")
+
+    response = client.get("/client/1/settings?k=abc")
+
+    assert response.status_code == 200
+
+    html = response.text
+    boot_tag = "/static/js/boot.js?v=v-test"
+    settings_tag = "/static/js/client-settings.js?v=v-test"
+
+    assert boot_tag in html
+    assert settings_tag in html
+    assert html.index(boot_tag) < html.index(settings_tag)

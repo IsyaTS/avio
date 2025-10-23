@@ -163,6 +163,6 @@
 <script>
   window.state = {{ state_json }};
 </script>
-<script src="{{ static_url(request,'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
-<script src="{{ static_url(request,'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
+<script src="/static/js/boot.js?v={{ client_settings_version }}" defer></script>
+<script src="/static/js/client-settings.js?v={{ client_settings_version }}" defer></script>
 {% endblock %}

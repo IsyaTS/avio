@@ -14,6 +14,18 @@
     };
   }
 
+  function resolveOrigin(locationLike) {
+    if (locationLike && typeof locationLike.origin === 'string' && locationLike.origin) {
+      return locationLike.origin;
+    }
+    const href = locationLike && typeof locationLike.href === 'string' ? locationLike.href : '/';
+    try {
+      return new URL(href, 'https://localhost').origin;
+    } catch (error) {
+      return 'https://localhost';
+    }
+  }
+
   function readQueryKey(locationLike) {
     if (!locationLike || typeof locationLike.search !== 'string') {
       return '';
@@ -78,130 +90,78 @@
     return '';
   }
 
-  function resolveOrigin(locationLike) {
-    if (!locationLike) {
-      return 'https://localhost';
+  function ensureAbsoluteUrl(raw) {
+    const input = raw == null ? '' : String(raw).trim();
+    if (!input) {
+      return '';
     }
-    if (locationLike.origin) {
-      return locationLike.origin;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(input)) {
+      return input;
     }
-    if (locationLike.protocol && locationLike.host) {
-      return `${locationLike.protocol}//${locationLike.host}`;
-    }
-    if (locationLike.href) {
-      try {
-        return new URL(locationLike.href, 'https://localhost').origin;
-      } catch (error) {
-        return 'https://localhost';
-      }
-    }
-    return 'https://localhost';
-  }
-
-  function isAbsoluteUrl(path) {
-    if (typeof path !== 'string') {
-      return false;
-    }
-    return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path);
-  }
-
-  function appendKeyToPath(value, key, { origin, rootRelative }) {
-    if (!value || !key) {
-      return value;
-    }
-    const safeOrigin = origin || 'https://localhost';
-    try {
-      const url = new URL(value, safeOrigin);
-      if (!url.searchParams.has('k')) {
-        url.searchParams.set('k', key);
-      }
-      if (rootRelative) {
-        return `${url.pathname}${url.search}${url.hash}`;
-      }
-      return url.toString();
-    } catch (error) {
-      if (value.includes('?')) {
-        const [pathPart, queryPart] = value.split('?');
-        const params = new URLSearchParams(queryPart);
-        if (!params.has('k')) {
-          params.set('k', key);
-        }
-        return `${pathPart}?${params.toString()}`;
-      }
-      return `${value}?k=${encodeURIComponent(key)}`;
-    }
-  }
-
-  function needsClientKey(value, { origin, rootRelative, absolute }) {
-    if (!value) {
-      return false;
-    }
-    const safeOrigin = origin || 'https://localhost';
-    if (rootRelative) {
-      if (!value.startsWith('/pub/')) {
-        return false;
-      }
-      try {
-        const paramsIndex = value.indexOf('?');
-        if (paramsIndex >= 0) {
-          const params = new URLSearchParams(value.slice(paramsIndex + 1));
-          if (params.has('k')) {
-            return false;
-          }
-        }
-      } catch (_) {
-        return !value.includes('k=');
-      }
-      return true;
-    }
-    if (absolute) {
-      return false;
-    }
-    try {
-      const url = new URL(value, safeOrigin);
-      if (!url.pathname.startsWith('/pub/')) {
-        return false;
-      }
-      return !url.searchParams.has('k');
-    } catch (error) {
-      return false;
-    }
-  }
-
-  function buildUrl(path, options = {}) {
-    const { includeKey = true } = options || {};
-    const rawInput = path == null ? '' : String(path);
     const locationLike = safeLocation();
     const origin = resolveOrigin(locationLike);
-    const absolute = isAbsoluteUrl(rawInput);
-    const rootRelative = !absolute && rawInput.startsWith('/');
-    let output = rawInput;
-
-    if (!absolute && !rootRelative) {
+    if (input.startsWith('//')) {
+      const protocol = locationLike && typeof locationLike.protocol === 'string' && locationLike.protocol
+        ? locationLike.protocol
+        : 'https:';
+      return `${protocol}${input}`;
+    }
+    try {
+      return new URL(input, origin).toString();
+    } catch (error) {
       try {
-        const url = new URL(rawInput || '', origin);
-        output = url.toString();
-      } catch (error) {
-        const normalizedOrigin = origin.replace(/\/$/, '');
-        const normalizedPath = rawInput.replace(/^\/+/, '');
-        output = `${normalizedOrigin}/${normalizedPath}`;
+        const normalizedOrigin = origin.endsWith('/') ? origin : `${origin}/`;
+        const normalizedPath = input.replace(/^\/+/, '');
+        return new URL(normalizedPath, normalizedOrigin).toString();
+      } catch (_) {
+        const safeOrigin = origin.replace(/\/$/, '');
+        const safePath = input.replace(/^\/+/, '');
+        return `${safeOrigin}/${safePath}`;
       }
+    }
+  }
+
+  function shouldAttachKey(url, includeKey) {
+    if (!includeKey) {
+      return false;
+    }
+    if (!url || typeof url.pathname !== 'string') {
+      return false;
+    }
+    if (!url.pathname.startsWith('/pub/')) {
+      return false;
+    }
+    return !url.searchParams.has('k');
+  }
+
+  function buildUrl(pathOrUrl, options = {}) {
+    const includeKey = options && Object.prototype.hasOwnProperty.call(options, 'includeKey')
+      ? options.includeKey !== false
+      : true;
+
+    const absolute = ensureAbsoluteUrl(pathOrUrl);
+    if (!absolute) {
+      return '';
     }
 
     if (!includeKey) {
-      return output;
+      return absolute;
     }
 
     const key = resolveClientKey();
     if (!key) {
-      return output;
+      return absolute;
     }
 
-    if (needsClientKey(output, { origin, rootRelative, absolute })) {
-      return appendKeyToPath(output, key, { origin, rootRelative });
+    try {
+      const url = new URL(absolute);
+      if (shouldAttachKey(url, includeKey)) {
+        url.searchParams.set('k', key);
+      }
+      return url.toString();
+    } catch (error) {
+      return absolute;
     }
-
-    return output;
   }
 
   buildUrl.getKey = resolveClientKey;
