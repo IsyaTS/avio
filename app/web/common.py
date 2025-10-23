@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import pathlib
+import subprocess
 import sys
 
 module_obj = sys.modules.get(__name__)
@@ -66,6 +69,90 @@ WA_INTERNAL_TOKEN = (
 )
 TG_WORKER_URL = tg_worker_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
+
+
+_CLIENT_SETTINGS_VERSION: str | None = None
+
+
+def _static_base_prefix() -> str:
+    base = (os.getenv("STATIC_PUBLIC_BASE") or "").strip()
+    if not base:
+        base = "/static"
+    if base != "/":
+        base = base.rstrip("/")
+    return base or "/static"
+
+
+def static_url(request: Any | None, path: str) -> str:
+    cleaned = str(path or "").lstrip("/")
+    base = _static_base_prefix()
+    if not cleaned:
+        return base
+    if base.endswith("/"):
+        base = base.rstrip("/")
+    if not base:
+        return f"/{cleaned}"
+    return f"{base}/{cleaned}"
+
+
+def _client_settings_bundle_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[1] / "static" / "js"
+
+
+def _compute_client_settings_digest() -> str | None:
+    bundle_root = _client_settings_bundle_root()
+    sha1 = hashlib.sha1()
+    files_found = False
+    for filename in ("boot.js", "client-settings.js"):
+        path = bundle_root / filename
+        if not path.exists():
+            continue
+        try:
+            sha1.update(path.read_bytes())
+            files_found = True
+        except OSError:
+            continue
+    if not files_found:
+        return None
+    return sha1.hexdigest()[:12]
+
+
+def client_settings_version() -> str:
+    global _CLIENT_SETTINGS_VERSION
+    if _CLIENT_SETTINGS_VERSION:
+        return _CLIENT_SETTINGS_VERSION
+
+    build_rev = (os.getenv("BUILD_REV") or os.getenv("CLIENT_SETTINGS_VERSION") or "").strip()
+    base_version = build_rev
+
+    if not base_version:
+        for env_name in ("APP_GIT_SHA", "GIT_SHA", "HEROKU_SLUG_COMMIT"):
+            value = (os.getenv(env_name) or "").strip()
+            if value:
+                base_version = value[:8] or value
+                break
+
+    if not base_version:
+        try:
+            repo_root = pathlib.Path(__file__).resolve().parents[2]
+            output = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(repo_root),
+                stderr=subprocess.DEVNULL,
+            )
+            base_version = output.decode("utf-8").strip()
+        except Exception:
+            base_version = ""
+
+    digest = _compute_client_settings_digest()
+    if digest:
+        base_version = f"{base_version}-{digest}" if base_version else digest
+
+    if not base_version:
+        base_version = str(int(time.time()))
+
+    _CLIENT_SETTINGS_VERSION = base_version
+    return _CLIENT_SETTINGS_VERSION
 
 
 def _admin_token() -> str:
