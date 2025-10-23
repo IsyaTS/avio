@@ -1,3 +1,3 @@
-v4.api.avio.website {
-  reverse_proxy app:8000
+api.avio.website, v4.api.avio.website {
+  reverse_proxy http://app:8000
 }
