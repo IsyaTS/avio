@@ -8,11 +8,12 @@ WORKDIR /app
 RUN apk add --no-cache chromium nss freetype harfbuzz ttf-freefont
 
 # не скачивать chromium при установке puppeteer
-ENV PUPPETEER_SKIP_DOWNLOAD=1
+ENV PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
 
 # deps JS
-COPY waweb/package.json ./
-RUN npm install --omit=dev
+COPY waweb/package.json waweb/package-lock.json* waweb/.npmrc ./
+RUN npm ci --omit=dev || npm i --omit=dev
 
 # код
 COPY waweb/ .
@@ -36,8 +37,6 @@ RUN mkdir -p /data && chown -R $(id -u):$(id -g) /data
 COPY app/requirements.txt ./
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 COPY . .
-RUN sed -i 's/\r$//' /app/scripts/diag.sh \
-    && chmod +x /app/scripts/diag.sh
 
 ######## app ########
 FROM python-base AS app
@@ -45,7 +44,7 @@ WORKDIR /app
 ENV PYTHONPATH=/app
 EXPOSE 8000
 HEALTHCHECK CMD curl -fsS http://localhost:8000/health || exit 1
-CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
+CMD ["gunicorn","-k","uvicorn.workers.UvicornWorker","-w","4","-b","0.0.0.0:8000","app.main:app","--timeout","60","--keep-alive","20"]
 
 ######## worker ########
 FROM python-base AS worker

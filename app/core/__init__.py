@@ -63,16 +63,16 @@ def _resolve_tenants_dir() -> pathlib.Path:
     if env_value:
         return pathlib.Path(env_value)
 
-    app_tenants = ROOT_DIR / "app" / "tenants"
+    data_tenants = ROOT_DIR / "data" / "tenants"
     try:
-        app_tenants.mkdir(parents=True, exist_ok=True)
-        return app_tenants
+        data_tenants.mkdir(parents=True, exist_ok=True)
+        return data_tenants
     except OSError:
         pass
 
-    default_parent = ROOT_DIR / "data"
-    if default_parent.exists():
-        return default_parent / "tenants"
+    app_tenants = ROOT_DIR / "app" / "tenants"
+    if app_tenants.exists():
+        return app_tenants
 
     fallback = DATA_DIR / "tenants"
     fallback.mkdir(parents=True, exist_ok=True)
@@ -136,6 +136,18 @@ class Settings:
     TGWORKER_BASE_URL = (os.getenv("TGWORKER_BASE_URL") or "http://tgworker:9000").strip().rstrip("/")
     PUBLIC_KEY    = _resolve_public_key(ADMIN_TOKEN)
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
+
+    # Avito OAuth
+    AVITO_CLIENT_ID = (os.getenv("AVITO_CLIENT_ID") or "1OuyOIqOV6Pi6ewYI3mi").strip()
+    AVITO_CLIENT_SECRET = (os.getenv("AVITO_CLIENT_SECRET") or "t-JCi261jbPfuvx1d5x0EP8Y9wKxyvDBwKU8sdTe").strip()
+    AVITO_REDIRECT_URL = (os.getenv("AVITO_REDIRECT_URL") or "https://hub.avio.website/v1/oauth/avito/callback").strip()
+    AVITO_AUTH_URL = (os.getenv("AVITO_AUTH_URL") or "https://www.avito.ru/oauth").strip()
+    AVITO_TOKEN_URL = (os.getenv("AVITO_TOKEN_URL") or "https://api.avito.ru/token/").strip()
+    AVITO_SCOPE = (os.getenv("AVITO_SCOPE") or "messenger:read,messenger:write,user:read").strip()
+    try:
+        AVITO_TIMEOUT = float(os.getenv("AVITO_TIMEOUT", "10"))
+    except ValueError:
+        AVITO_TIMEOUT = 10.0
 
     # LLM
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -305,6 +317,7 @@ class SalesState:
     profile: Dict[str, Any] = field(default_factory=dict)
     sentiment_score: float = 0.0
     user_message_count: int = 0
+    last_question_text: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -332,6 +345,7 @@ class SalesState:
             "profile": self.profile,
             "sentiment_score": self.sentiment_score,
             "user_message_count": self.user_message_count,
+            "last_question_text": self.last_question_text,
         }
 
     @classmethod
@@ -365,6 +379,7 @@ class SalesState:
         except Exception:
             obj.sentiment_score = 0.0
         obj.user_message_count = int(payload.get("user_message_count", 0))
+        obj.last_question_text = payload.get("last_question_text", "") or ""
         return obj
 
     def append_history(self, role: str, content: str) -> None:
@@ -398,6 +413,7 @@ class PersonaHints:
     max_questions: Optional[int] = None
     style_short: bool = False
     style_friendly: bool = False
+    no_emoji: bool = False
 
     def wants_short(self) -> bool:
         if self.style_short:
@@ -482,6 +498,8 @@ def extract_persona_hints(persona: str) -> PersonaHints:
         hints.style_short = True
     if any(token in persona_lower for token in ("дружелюб", "тепл", "friendly", "улыб")):
         hints.style_friendly = True
+    if any(token in persona_lower for token in ("без смай", "без эмодзи", "без emoji", "без эмоджи", "без эмодзи")):
+        hints.no_emoji = True
 
     return hints
 
@@ -586,7 +604,6 @@ DEFAULT_TENANT_JSON = {
         "always_full_catalog": True,
         "send_catalog_as_pages": True,
         "max_clarifying_questions": 1,
-        "single_cta_per_reply": True,
         "tone": "коротко-дружелюбно",
         "anti_repeat_window": 6,
         "dedupe_catalog_titles": True,
@@ -984,6 +1001,10 @@ def read_persona(tenant: int) -> str:
         _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text)
     except Exception:
         pass
+    try:
+        _PERSONA_HINTS_CACHE.pop(int(tenant), None)
+    except Exception:
+        _PERSONA_HINTS_CACHE.clear()
     return text
 
 
@@ -997,6 +1018,7 @@ def write_persona(tenant: int, text: str) -> None:
         _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text or "")
     except Exception:
         _TENANT_PERSONA_CACHE.pop(int(tenant), None)
+    _PERSONA_HINTS_CACHE.pop(int(tenant), None)
 
 
 def load_tenant(tenant: int) -> dict:
@@ -2347,7 +2369,6 @@ CHALLENGER_PLAYBOOK = {
     ],
 }
 
-
 class SalesConversationEngine:
     def __init__(
         self,
@@ -2374,6 +2395,8 @@ class SalesConversationEngine:
         self.state.append_history("user", incoming)
         self.state.last_updated_ts = time.time()
         self.state.user_message_count += 1
+        if self.state.last_question_text:
+            self.state.last_question_text = self.state.last_question_text.strip()
 
         self._touch_profile()
 
@@ -2682,8 +2705,14 @@ class SalesConversationEngine:
         question = self._next_spin_question()
         if not question:
             question = self._next_bant_question(currency)
-        if question and question not in self.state.asked_questions:
-            self.state.asked_questions.append(question)
+        if not question:
+            return None
+        if question in self.state.asked_questions:
+            return None
+        if question.strip() == (self.state.last_question_text or "").strip():
+            return None
+        self.state.asked_questions.append(question)
+        self.state.last_question_text = question
         return question
 
     def pending_question(self) -> Optional[str]:
@@ -2772,7 +2801,7 @@ class SalesConversationEngine:
         greeting = (self.persona_hints.greeting or default_greeting).strip()
         if not greeting:
             greeting = default_greeting
-        friendly = self.persona_hints.wants_friendly()
+        friendly = self.persona_hints.wants_friendly() and not self.persona_hints.no_emoji
         if friendly and greeting and not re.search(r"[)☺😊🙂]$", greeting):
             greeting = greeting.rstrip(".") + " 🙂"
         visits = int((self.state.profile or {}).get("visits", 0))
@@ -2827,31 +2856,39 @@ class SalesConversationEngine:
                 max_questions_cfg = max(0, int(self.persona_hints.max_questions))
             except Exception:
                 pass
+        current_turn = max(1, self.state.user_message_count)
+
         question_line = self._choose_question(currency, max_questions_cfg)
-        teach, tailor, control = self._challenger_block()
+        greeting = self._personalized_greeting()
+        loyalty_line = self._loyalty_line()
+
+        if current_turn <= 1:
+            intro_parts = [greeting]
+            if loyalty_line:
+                intro_parts.append(loyalty_line)
+            if question_line:
+                intro_parts.append(question_line)
+            reply_intro = "\n\n".join(part.strip() for part in intro_parts if part and part.strip())
+            if not reply_intro:
+                reply_intro = greeting or (question_line or "")
+            reply_intro = reply_intro.strip()
+            self.state.last_bot_reply = reply_intro
+            self.state.append_history("assistant", reply_intro)
+            self.state.last_updated_ts = time.time()
+            return reply_intro
+
+        teach, tailor, _ = self._challenger_block()
         listening_line = self._active_listening_line(last_user_text)
         fab_block = self._fab_block(items, currency)
         social_proof = self._choose_social_proof(items)
         scarcity = self._choose_scarcity(items)
         reciprocity = self._choose_reciprocity()
         upsell = self._choose_upsell()
-        cta_line = self._choose_cta(cta_primary, cta_fallback)
-
-        greeting = self._personalized_greeting()
-        loyalty_line = self._loyalty_line()
-
-        action_lines = [control]
-        if question_line:
-            action_lines.append(question_line)
-        if cta_line:
-            action_lines.append(cta_line)
-
-        actions_block = "\n".join(line for line in action_lines if line)
-
         message_parts = {
             "greeting": greeting,
             "teach": teach,
             "listening": listening_line,
+            "question": question_line or "",
             "tailor": tailor,
             "loyalty": loyalty_line or "",
             "fab": fab_block,
@@ -2859,7 +2896,6 @@ class SalesConversationEngine:
             "scarcity": scarcity,
             "upsell": upsell,
             "reciprocity": reciprocity,
-            "actions": actions_block,
             "closing": self.persona_hints.closing or "",
         }
 
@@ -2867,6 +2903,7 @@ class SalesConversationEngine:
             "greeting",
             "teach",
             "listening",
+            "question",
             "loyalty",
             "tailor",
             "fab",
@@ -2874,7 +2911,6 @@ class SalesConversationEngine:
             "scarcity",
             "upsell",
             "reciprocity",
-            "actions",
             "closing",
         ]
 
@@ -2883,9 +2919,9 @@ class SalesConversationEngine:
             prioritized = [
                 message_parts.get("greeting", ""),
                 message_parts.get("listening", ""),
+                message_parts.get("question", ""),
                 message_parts.get("loyalty", ""),
                 message_parts.get("fab", ""),
-                message_parts.get("actions", ""),
                 message_parts.get("closing", ""),
             ]
             cleaned = [part.strip() for part in prioritized if part and part.strip()]
@@ -3144,6 +3180,8 @@ async def ask_llm(
         openai.api_key = settings.OPENAI_API_KEY  # type: ignore
 
         persona_hints = load_persona_hints(tenant)
+        behavior_cfg: Mapping[str, Any] | dict = {}
+        state = load_sales_state(tenant, contact_ref)
         try:
             plan, answer = await planner.generate_sales_reply(
                 messages,
@@ -3152,10 +3190,9 @@ async def ask_llm(
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
                 persona_language=persona_hints.language if persona_hints and persona_hints.language else None,
             )
-            state = load_sales_state(tenant, contact_ref)
+            refined = quality.enforce_plan_alignment(answer, plan, persona_hints)
             state.last_plan = plan.to_dict()
             save_sales_state(state)
-            refined = quality.enforce_plan_alignment(answer, plan, persona_hints)
             record_bot_reply(contact_ref, tenant, channel_name, refined)
             return refined
         except planner.PlannerError as exc:  # type: ignore[attr-defined]
@@ -3174,13 +3211,19 @@ async def ask_llm(
                 create_fn,
                 model=settings.OPENAI_MODEL,
                 messages=messages,
-                max_tokens=220,
-                temperature=0.6,
+                max_tokens=260,
+                temperature=0.7,
+                top_p=0.9,
+                frequency_penalty=0.2,
+                presence_penalty=0.05,
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
             )
             answer = resp.choices[0].message.content.strip()  # type: ignore
-            record_bot_reply(contact_ref, tenant, channel_name, answer)
-            return answer
+            dummy_plan = planner.GeneratedPlan()
+            refined_answer = quality.enforce_plan_alignment(answer, dummy_plan, persona_hints)
+            save_sales_state(state)
+            record_bot_reply(contact_ref, tenant, channel_name, refined_answer)
+            return refined_answer
         except Exception as exc:
             logger.exception("direct llm call failed", exc_info=exc)
             return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)

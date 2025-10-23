@@ -32,6 +32,11 @@
         </form>
     </div>
 
+    <div class="btn-row" style="gap: 8px; flex-wrap: wrap;">
+        <a class="btn secondary" href="/connect/wa?tenant={{ tenant }}&k={{ tenant_key or key }}">Подключить WhatsApp</a>
+        <a class="btn secondary" href="/connect/avito?tenant={{ tenant }}&k={{ tenant_key or key }}">Подключить Avito</a>
+    </div>
+
     {% if persona_preview %}
     <!-- Persona preview: {{ persona_preview }} -->
     {% endif %}

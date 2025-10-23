@@ -9,6 +9,8 @@ import urllib.error
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlparse
 
+import httpx
+
 import redis.asyncio as redis
 from redis import exceptions as redis_ex
 
@@ -26,6 +28,7 @@ from app.db import (
     upsert_lead,
     lead_exists,
     find_lead_by_telegram,
+    find_lead_by_peer,
     get_telegram_user_id_by_lead,
     get_lead_peer,
     update_message_status,
@@ -44,6 +47,7 @@ from app.common import (
     whitelist_contains_number,
 )
 from app.core import build_llm_messages, ask_llm
+from app.integrations import avito as avito_integration
 from app.transport import WhatsAppAddressError, normalize_e164_digits
 from app.transport import telegram as telegram_transport
 
@@ -78,6 +82,7 @@ TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
 OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW not in {"0", "false"}
+AVITO_TIMEOUT = getattr(core_settings, "AVITO_TIMEOUT", 10.0)
 _INBOX_ENABLED_RAW = (os.getenv("INBOX_ENABLED") or "").strip().lower()
 INBOX_ENABLED = _INBOX_ENABLED_RAW not in {"", "0", "false", "no", "off"}
 INCOMING_QUEUE_KEY = (
@@ -95,8 +100,13 @@ QUEUES = [OUTBOX_QUEUE_KEY]
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
 # ==== Utils ====
-def log(msg: str):
-    print(msg, flush=True)
+def log(*parts: object):
+    if len(parts) == 1:
+        print(parts[0], flush=True)
+    else:
+        print(" ".join(str(p) for p in parts), flush=True)
+
+AVITO_CHAT_CACHE: Dict[int, str] = {}
 
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
@@ -505,22 +515,35 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         lead_hint = conversation_id
     source_real_id = conversation_id if conversation_id and conversation_id > 0 else None
 
+    db_available = True
+    fallback_lead = None
+    if lead_hint and lead_hint > 0:
+        fallback_lead = lead_hint
+    elif sender_digits:
+        try:
+            fallback_lead = int(sender_digits)
+        except Exception:
+            fallback_lead = None
+    if fallback_lead is None:
+        fallback_lead = int(time.time() * 1000)
+
     try:
-        lead_id = await get_or_create_by_peer(
+        lead_lookup = await get_or_create_by_peer(
             tenant_id=tenant_id,
             channel="whatsapp",
             peer=sender_peer,
             lead_id_hint=lead_hint,
             source_real_id=source_real_id,
         )
-        lead_id = int(lead_id)
+        lead_id = int(lead_lookup)
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("get_or_create_lead_peer").inc()
         log(
-            "event=inbox_lead_resolve_failed channel=whatsapp tenant=%s error=%s"
-            % (tenant_id, exc)
+            "event=inbox_lead_resolve_failed channel=whatsapp tenant=%s error=%s fallback=%s"
+            % (tenant_id, exc, fallback_lead)
         )
-        return
+        db_available = False
+        lead_id = int(fallback_lead or int(time.time() * 1000))
 
     if lead_id <= 0:
         log(
@@ -533,7 +556,7 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     )
 
     contact_id = 0
-    if sender_digits:
+    if sender_digits and db_available:
         try:
             contact_id = await resolve_or_create_contact(whatsapp_phone=sender_digits)
         except Exception as exc:
@@ -545,7 +568,7 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
             contact_id = 0
 
     stored_incoming = False
-    if contact_id:
+    if contact_id and db_available:
         try:
             await link_lead_contact(
                 lead_id,
@@ -575,7 +598,7 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
                     % (tenant_id, lead_id, exc)
                 )
 
-    if text and not stored_incoming:
+    if text and not stored_incoming and db_available:
         try:
             await insert_message_in(
                 lead_id,
@@ -671,11 +694,211 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     )
 
 
+async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
+    tenant_raw = event.get("tenant") or event.get("tenant_id") or os.getenv("TENANT_ID", "1")
+    try:
+        tenant_id = int(tenant_raw)
+    except Exception:
+        tenant_id = int(os.getenv("TENANT_ID", "1"))
+
+    chat_id = str(
+        event.get("chat_id")
+        or event.get("peer")
+        or event.get("peer_id")
+        or ""
+    ).strip()
+    if chat_id:
+        AVITO_CHAT_CACHE[int(tenant_id)] = chat_id
+    else:
+        cached = AVITO_CHAT_CACHE.get(int(tenant_id))
+        if cached:
+            chat_id = cached
+    if not chat_id:
+        log(f"event=skip_invalid_chat channel=avito tenant={tenant_id}")
+        return
+
+    message_id_raw = event.get("message_id") or event.get("id")
+    message_id = str(message_id_raw) if message_id_raw is not None else ""
+
+    text_raw = event.get("text")
+    if text_raw is None and isinstance(event.get("message"), Mapping):
+        text_raw = event["message"].get("text")  # type: ignore[index]
+    text = str(text_raw or "").strip()
+
+    attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
+    if not text and not attachments:
+        log(
+            f"event=skip_empty_message channel=avito tenant={tenant_id} chat_id={chat_id}"
+        )
+        return
+
+    account_id = _coerce_int(event.get("account_id") or (event.get("avito") or {}).get("account_id"))
+    user_id = _coerce_int(event.get("avito_user_id") or (event.get("avito") or {}).get("user_id"))
+    login_value = event.get("avito_login") or (event.get("avito") or {}).get("login")
+    login = login_value.strip() if isinstance(login_value, str) else None
+
+    if account_id is not None:
+        try:
+            avito_integration.update_integration(int(tenant_id), {"account_id": account_id})
+            AVITO_CHAT_CACHE[int(tenant_id)] = chat_id
+        except Exception as exc:
+            log(
+                "event=avito_account_cache_failed tenant=%s account_id=%s error=%s"
+                % (tenant_id, account_id, exc)
+            )
+    if account_id is not None and login:
+        try:
+            avito_integration.update_integration(int(tenant_id), {"account_login": login})
+        except Exception:
+            pass
+
+    lead_id = _coerce_int(event.get("lead_id"))
+    if not lead_id or lead_id <= 0:
+        lead_row = None
+        try:
+            lead_row = await find_lead_by_peer(tenant_id, "avito", chat_id)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("find_lead_by_peer").inc()
+            log(
+                "event=warning reason=db_error operation=find_lead_by_peer channel=avito tenant=%s chat_id=%s error=%s"
+                % (tenant_id, chat_id, exc)
+            )
+        if lead_row and lead_row.get("id"):
+            lead_id = int(lead_row["id"])
+        else:
+            account_hint = account_id if account_id is not None else tenant_id
+            lead_id = avito_integration.stable_lead_id(account_hint, chat_id)
+
+    contact_id = 0
+    try:
+        contact_id = await resolve_or_create_contact(
+            avito_user_id=user_id,
+            avito_login=login,
+        )
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("resolve_contact").inc()
+        log(
+            "event=contact_resolve_failed channel=avito tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+
+    if contact_id:
+        try:
+            await link_lead_contact(
+                lead_id,
+                contact_id,
+                channel="avito",
+                peer=chat_id,
+            )
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("link_lead_contact").inc()
+            log(
+                "event=link_lead_contact_failed channel=avito tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    try:
+        await insert_message_in(
+            lead_id,
+            text,
+            status="received",
+            tenant_id=tenant_id,
+        )
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("insert_message_in").inc()
+        log(
+            "event=store_incoming_failed channel=avito tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+
+    if not text:
+        return
+
+    if not smart_reply_enabled(tenant_id):
+        log(
+            f"event=smart_reply_disabled channel=avito tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    refer_id = contact_id if contact_id and contact_id > 0 else lead_id
+
+    try:
+        messages = await build_llm_messages(
+            refer_id,
+            text,
+            "avito",
+            tenant=tenant_id,
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=build_messages error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    try:
+        reply = await ask_llm(
+            messages,
+            tenant=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="avito",
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=ask_llm error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    reply_text = (reply or "").strip()
+    if not reply_text:
+        log(
+            f"event=smart_reply_empty channel=avito tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    out_payload: Dict[str, Any] = {
+        "lead_id": int(lead_id),
+        "tenant": int(tenant_id),
+        "tenant_id": int(tenant_id),
+        "provider": "avito",
+        "ch": "avito",
+        "channel": "avito",
+        "text": reply_text,
+        "attachments": [],
+        "chat_id": chat_id,
+        "peer": chat_id,
+        "peer_id": chat_id,
+    }
+    if account_id is not None:
+        out_payload["account_id"] = account_id
+    if message_id:
+        out_payload["message_id"] = message_id
+    if user_id is not None:
+        out_payload["avito_user_id"] = user_id
+    if login:
+        out_payload["avito_login"] = login
+
+    try:
+        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
+    except Exception as exc:
+        log(
+            "event=smart_reply_enqueue_failed channel=avito tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    log(
+        f"event=smart_reply_enqueued channel=avito tenant={tenant_id} lead_id={lead_id}"
+    )
+
+
 _INCOMING_EVENT_HANDLERS: dict[
     str, Callable[[Mapping[str, Any]], Awaitable[None]]
 ] = {
     "telegram": _handle_telegram_incoming,
     "whatsapp": _handle_whatsapp_incoming,
+    "avito": _handle_avito_incoming,
 }
 
 
@@ -744,10 +967,88 @@ async def send_whatsapp(
         await asyncio.sleep(0.5 * (attempt + 1))
     return last_status, last_body
 
-async def send_avito(tenant_id: int, lead_id: int, text: str) -> tuple[int,str]:
-    # заглушка, если есть WA — шлём туда; при необходимости заменить на Avito API
-    phone = ""
-    return await send_whatsapp(tenant_id, phone, text)
+async def send_avito(
+    tenant_id: int,
+    lead_id: int,
+    text: str,
+    *,
+    chat_id: Optional[str] = None,
+    account_id: Optional[int] = None,
+) -> tuple[int, str]:
+    text_value = (text or "").strip()
+    if not text_value:
+        return (0, "empty")
+
+    try:
+        token, integration = await avito_integration.ensure_access_token(int(tenant_id))
+    except avito_integration.AvitoOAuthError as exc:
+        log(
+            "event=send_result status=skipped reason=token_unavailable channel=avito tenant=%s error=%s"
+            % (tenant_id, exc)
+        )
+        return (0, str(exc))
+
+    account_hint = account_id if account_id is not None else integration.get("account_id")
+    account_value = _coerce_int(account_hint)
+    if account_value is None:
+        log(
+            f"event=send_result status=skipped reason=missing_account channel=avito tenant={tenant_id}"
+        )
+        return (0, "missing_account")
+
+    chat_candidate = chat_id or await get_lead_peer(lead_id, channel="avito")
+    chat_text = str(chat_candidate).strip() if chat_candidate else ""
+    if not chat_text:
+        log(
+            f"event=send_result status=skipped reason=missing_chat channel=avito tenant={tenant_id} lead_id={lead_id}"
+        )
+        return (0, "missing_chat")
+
+    url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages"
+    payload = {"type": "text", "message": {"text": text_value}}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    async def _post_message(current_token: str) -> httpx.Response:
+        headers["Authorization"] = f"Bearer {current_token}"
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, json=payload, headers=headers)
+
+    response = await _post_message(token)
+
+    if response.status_code == 401 and integration.get("refresh_token"):
+        try:
+            refreshed = await avito_integration.refresh_access_token(int(tenant_id))
+            new_token = str(refreshed.get("access_token") or "").strip()
+        except avito_integration.AvitoOAuthError as exc:
+            log(
+                "event=send_result status=error reason=token_refresh_failed channel=avito tenant=%s error=%s"
+                % (tenant_id, exc)
+            )
+            return (response.status_code, response.text)
+
+        if new_token:
+            response = await _post_message(new_token)
+
+    log(
+        "event=send_result channel=avito tenant=%s lead_id=%s status=%s",
+        tenant_id,
+        lead_id,
+        response.status_code,
+    )
+
+    if 200 <= response.status_code < 300:
+        MESSAGE_OUT_COUNTER.labels("avito", "success").inc()
+        try:
+            AVITO_CHAT_CACHE[int(tenant_id)] = chat_text
+        except Exception:
+            pass
+    else:
+        MESSAGE_OUT_COUNTER.labels("avito", "error").inc()
+
+    return response.status_code, response.text
 
 
 async def _fetch_authorized_status(tenant_id: int) -> Optional[bool]:
@@ -949,6 +1250,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     if attachment:
         attachments.append(attachment)
     reply_to = item.get("reply_to") if isinstance(item.get("reply_to"), str) else None
+    avito_account_id = _coerce_int(item.get("account_id"))
+    avito_chat_id_hint = item.get("chat_id") or item.get("peer") or item.get("peer_id")
 
     if not text and not attachment:
         log(
@@ -988,21 +1291,20 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             return ("skipped", "whitelist", "", 0)
 
     if channel != "telegram":
+        lead_known = False
         try:
             lead_known = await lead_exists(lead_id, tenant_id=tenant)
         except Exception as exc:
             DB_ERRORS_COUNTER.labels("lead_exists").inc()
             log(
-                "event=send_result status=skipped reason=db_error operation=lead_exists "
+                "event=send_result status=warning reason=db_error operation=lead_exists "
                 f"channel={channel} lead_id={lead_id} error={exc}"
             )
-            return ("skipped", "db_error", "", 0)
 
         if not lead_known:
             log(
-                f"event=send_result status=skipped reason=err:no_lead channel={channel} lead_id={lead_id}"
+                f"event=send_result status=warning reason=err:no_lead channel={channel} lead_id={lead_id}"
             )
-            return ("skipped", "err:no_lead", "", 0)
 
     if not SEND:
         log(
@@ -1168,7 +1470,16 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     if channel == "whatsapp":
         st, body = await send_whatsapp(tenant, phone, text or None, attachment)
     elif channel == "avito":
-        st, body = await send_avito(tenant, lead_id, text)
+        chat_hint = avito_chat_id_hint
+        if chat_hint is not None:
+            chat_hint = str(chat_hint).strip() or None
+        st, body = await send_avito(
+            tenant,
+            lead_id,
+            text,
+            chat_id=chat_hint,
+            account_id=avito_account_id,
+        )
     elif channel == "telegram":
         peer_id = None
         if peer_value:
@@ -1496,3 +1807,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+AVITO_CHAT_CACHE: Dict[int, str] = {}

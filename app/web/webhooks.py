@@ -6,7 +6,7 @@ import time
 import pathlib
 import logging
 import random
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -37,6 +37,8 @@ try:
     from . import common as C  # type: ignore
 except ImportError:  # pragma: no cover
     from app.web import common as C  # type: ignore
+
+from app.integrations import avito
 
 from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
 from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
@@ -183,6 +185,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     peer_id: int | None = None
     peer_value: str | None = None
     contact_value: str | None = None
+    avito_user_id: int | None = None
+    avito_login: str | None = None
+    avito_chat_id: str | None = None
+    avito_account_id = _coerce_int(body.get("account_id") or src.get("account_id"))
     attachments: list[dict[str, Any]] = []
 
     raw_attachments = msg.get("attachments") or body.get("attachments")
@@ -221,6 +227,42 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     peer_id = int(peer_value)
                 except Exception:
                     peer_id = None
+    elif provider == "avito":
+        chat_candidate = (
+            msg.get("chat_id")
+            or body.get("chat_id")
+            or msg.get("conversation_id")
+            or payload.get("chat_id")
+            or payload.get("conversation_id")
+        )
+        if isinstance(chat_candidate, dict):
+            chat_candidate = chat_candidate.get("id")
+        if chat_candidate is not None:
+            chat_text = str(chat_candidate).strip()
+            avito_chat_id = chat_text or None
+            if avito_chat_id:
+                peer_value = avito_chat_id
+
+        author_info = msg.get("author") or msg.get("sender") or body.get("author") or {}
+        if not isinstance(author_info, Mapping):
+            author_info = {}
+        avito_user_id = _coerce_int(
+            author_info.get("id")
+            or author_info.get("user_id")
+            or msg.get("author_id")
+            or body.get("avito_user_id")
+        )
+        login_candidate = (
+            author_info.get("login")
+            or author_info.get("username")
+            or author_info.get("name")
+            or msg.get("author_login")
+            or body.get("avito_login")
+        )
+        if isinstance(login_candidate, str):
+            login_candidate = login_candidate.strip()
+        avito_login = login_candidate or None
+        contact_value = avito_login or (str(avito_user_id) if avito_user_id else None)
     else:
         from_id = msg.get("from") or msg.get("author") or body.get("from") or ""
         whatsapp_phone = _digits(from_id.split("@", 1)[0] if from_id else "")
@@ -234,6 +276,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             lead_id_value = telegram_user_id
         elif peer_id is not None:
             lead_id_value = peer_id
+    elif provider == "avito":
+        account_hint = avito_account_id if avito_account_id is not None else tenant
+        if avito_chat_id:
+            lead_id_value = avito.stable_lead_id(account_hint, avito_chat_id)
     if lead_id_value in (None, 0):
         lead_id_value = ts_fallback
     lead_id = int(lead_id_value)
@@ -278,6 +324,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             to_addr = str(telegram_user_id)
         elif peer_id is not None:
             to_addr = str(peer_id)
+    elif provider == "avito":
+        from_addr = avito_login or (str(avito_user_id) if avito_user_id else "")
+        to_addr = ""
     else:
         from_addr = whatsapp_phone
         to_candidate = (
@@ -315,7 +364,23 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             if contact_value:
                 telegram_contact["contact"] = contact_value
             lead_contacts["telegram"] = telegram_contact
-    if provider != "telegram":
+    if provider == "avito":
+        if avito_chat_id:
+            normalized_event["peer"] = avito_chat_id
+            lead_contacts = normalized_event.setdefault("lead_contacts", {})
+            avito_contact: dict[str, Any] = {"peer": avito_chat_id}
+            if contact_value:
+                avito_contact["contact"] = contact_value
+            lead_contacts["avito"] = avito_contact
+        if avito_account_id is not None:
+            normalized_event["account_id"] = avito_account_id
+        normalized_event["avito"] = {
+            "account_id": avito_account_id,
+            "chat_id": avito_chat_id,
+            "user_id": avito_user_id,
+            "login": avito_login,
+        }
+    if provider not in {"telegram", "avito"}:
         normalized_event["auto_reply_handled"] = True
 
     try:
@@ -326,6 +391,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             await _redis_queue.incrby("metrics:telegram:incoming", 1)
         elif channel == "whatsapp":
             await _redis_queue.incrby("metrics:whatsapp:incoming", 1)
+        elif channel == "avito":
+            await _redis_queue.incrby("metrics:avito:incoming", 1)
         logger.info(
             "stage=incoming_enqueued ch=%s tenant=%s message_id=%s", channel, tenant, normalized_event["message_id"]
         )
@@ -346,6 +413,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         }
         if telegram_user_id is not None:
             upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
+        if provider == "avito":
+            if avito_chat_id:
+                upsert_kwargs["peer"] = avito_chat_id
+            if avito_account_id is not None:
+                upsert_kwargs["source_real_id"] = avito_account_id
+            if avito_login and not upsert_kwargs.get("title"):
+                upsert_kwargs["title"] = f"Avito · {avito_login}"
         resolved_lead = await upsert_lead(
             lead_id,
             **upsert_kwargs,
@@ -375,6 +449,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     try:
         contact_id = await resolve_or_create_contact(
             whatsapp_phone=whatsapp_phone or None,
+            avito_user_id=avito_user_id,
+            avito_login=avito_login,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
         )
@@ -383,7 +459,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 lead_id,
                 contact_id,
                 channel=provider,
-                peer=peer_value if provider == "telegram" else None,
+                peer=peer_value if provider in {"telegram", "avito"} else None,
             )
             if text:
                 await insert_message_in(

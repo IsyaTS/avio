@@ -96,3 +96,27 @@ def test_internal_ensure_db_error(monkeypatch):
     resp = client.post("/internal/tenant/42/ensure", headers={"X-Auth-Token": "secret"})
     assert resp.status_code == 500
     assert resp.json()["detail"] == "db_error"
+
+
+def test_internal_ensure_accepts_admin_token(monkeypatch):
+    async def _fake_get_by_tenant(tenant_id: int):
+        return SimpleNamespace(token="token-from-db")
+
+    async def _noop_schema() -> None:
+        return None
+
+    monkeypatch.setattr(tenant_module.common_module, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(tenant_module.provider_tokens, "ensure_schema", _noop_schema, raising=False)
+    monkeypatch.setattr(tenant_module.provider_tokens, "get_by_tenant", _fake_get_by_tenant)
+    monkeypatch.setattr(tenant_module.settings, "WEBHOOK_SECRET", "", raising=False)
+    monkeypatch.setattr(tenant_module.settings, "ADMIN_TOKEN", "admin-secret", raising=False)
+
+    app = _build_app()
+    client = TestClient(app)
+
+    resp = client.post("/internal/tenant/7/ensure", headers={"X-Auth-Token": "admin-secret"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["tenant"] == 7
+    assert payload["provider_token"] == "token-from-db"

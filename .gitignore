@@ -1,8 +1,41 @@
+# secrets
 .env
 .env.*
-!.env.example
+*.env
+ops/secrets/**
+secrets/**
+*.key
+*.pem
+
+# local state
+__pycache__/
+*.pyc
 .venv/
-app/.venv/
-app/tenants/
-tgworker/sessions/
-docker-compose.override.yml
+.venv*/
+*.sqlite*
+*.db
+
+# docker artifacts
+*.log
+*.pid
+*.sock
+
+# build/outputs
+dist/
+build/
+.coverage
+htmlcov/
+# runtime volumes
+# redis, tenants, экспорты, временные
+data/
+tg-sessions/
+wa_sessions/
+waweb/sessions/
+tmp_extract/
+*.rdb
+*.aof
+.pytest_cache/
+.mypy_cache/
+node_modules/
+# уже есть:
+# __pycache__/, *.pyc, .venv/

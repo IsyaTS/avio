@@ -54,6 +54,8 @@ const sendFailTotal = Object.create(null);
 const waSendTotal = Object.create(null);
 const waToAppTotals = Object.create(null);
 const deprecatedNoticeTs = Object.create(null);
+/** tenants[tenant] = { client, webhook, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
+const tenants = Object.create(null);
 function logProviderWebhook(eventName, tenantKey, statusCode, tokenPresent) {
   const flag = tokenPresent ? 'true' : 'false';
   try {
@@ -283,7 +285,16 @@ function sessionStatusPayload(tenant, session) {
   return payload;
 }
 
+let requestJsonOverride = null;
+
+function setRequestJsonOverride(fn) {
+  requestJsonOverride = typeof fn === 'function' ? fn : null;
+}
+
 function requestJson(method, url, payload, extraHeaders) {
+  if (requestJsonOverride) {
+    return requestJsonOverride(method, url, payload, extraHeaders);
+  }
   return new Promise((resolve, reject) => {
     try {
       const u = new URL(url);
@@ -325,6 +336,51 @@ function requestJson(method, url, payload, extraHeaders) {
   });
 }
 
+async function ensureProviderTokenViaInternalEnsure(tenant, nowTs) {
+  const key = String(tenant || '');
+  const encodedKey = encodeURIComponent(key);
+  let url;
+  try {
+    url = new URL(`/internal/tenant/${encodedKey}/ensure`, APP_BASE_URL).toString();
+  } catch (_) {
+    url = `${APP_BASE_URL.replace(/\/$/, '')}/internal/tenant/${encodedKey}/ensure`;
+  }
+
+  const headers = {};
+  const authToken = INTERNAL_SYNC_TOKEN || ADMIN_TOKEN;
+  if (authToken) {
+    headers['X-Auth-Token'] = authToken;
+  }
+
+  try {
+    const { statusCode, body } = await requestJson('POST', url, null, headers);
+    if (statusCode >= 200 && statusCode < 300 && body) {
+      try {
+        const parsed = JSON.parse(body);
+        const nextToken = parsed && typeof parsed === 'object'
+          ? (parsed.provider_token || parsed.token || '')
+          : '';
+        if (nextToken) {
+          const ts = typeof nowTs === 'number' && nowTs > 0 ? nowTs : Date.now();
+          providerTokenCache[key] = { token: String(nextToken), ts };
+          console.log('[waweb]', `provider_token_ensure_ok tenant=${key}`);
+          return providerTokenCache[key].token;
+        }
+      } catch (err) {
+        console.warn('[waweb]', `provider_token_ensure_parse_error tenant=${key} reason=${err && err.message ? err.message : err}`);
+      }
+    } else if (statusCode === 401) {
+      console.warn('[waweb]', `provider_token_ensure_unauthorized tenant=${key}`);
+    } else {
+      console.warn('[waweb]', `provider_token_ensure_http tenant=${key} status=${statusCode}`);
+    }
+  } catch (err) {
+    const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
+    console.warn('[waweb]', `provider_token_ensure_failed tenant=${key} reason=${reason}`);
+  }
+  return '';
+}
+
 async function ensureProviderToken(tenant, force = false) {
   const key = String(tenant || '');
   const cached = providerTokenCache[key];
@@ -364,14 +420,20 @@ async function ensureProviderToken(tenant, force = false) {
       }
     } else if (statusCode === 404) {
       console.warn('[waweb]', `provider_token_missing tenant=${key}`);
+      const ensured = await ensureProviderTokenViaInternalEnsure(key, now);
+      if (ensured) return ensured;
     } else if (statusCode === 401) {
       console.warn('[waweb]', `provider_token_unauthorized tenant=${key}`);
+      const ensured = await ensureProviderTokenViaInternalEnsure(key, now);
+      if (ensured) return ensured;
     } else {
       console.warn('[waweb]', `provider_token_http tenant=${key} status=${statusCode}`);
     }
   } catch (err) {
     const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
     console.warn('[waweb]', `provider_token_request_failed tenant=${key} reason=${reason}`);
+    const ensured = await ensureProviderTokenViaInternalEnsure(key, now);
+    if (ensured) return ensured;
   }
 
   if (cached && cached.token) {
@@ -734,10 +796,6 @@ refreshProviderTokens(true).catch((err) => {
   const reason = err && err.message ? err.message : err;
   console.warn('[waweb]', `provider_token_initial_refresh_failed reason=${reason}`);
 });
-
-/* ---------- state ---------- */
-/** tenants[tenant] = { client, webhook, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
-const tenants = Object.create(null);
 
 async function refreshProviderTokens(force = false) {
   const list = new Set(Object.keys(tenants));
@@ -1184,4 +1242,15 @@ app.post('/session/:tenant/reset', (req,res)=>{
   return res.json({ ok:true, reset:true, qr: !!s.qrSvg, ready: !!s.ready });
 });
 
-app.listen(PORT, ()=> console.log('waweb on :'+PORT));
+if (require.main === module) {
+  app.listen(PORT, () => console.log('waweb on :' + PORT));
+}
+
+module.exports = {
+  app,
+  ensureProviderToken,
+  ensureProviderTokenViaInternalEnsure,
+  requestJson,
+  setRequestJsonOverride,
+  providerTokenCache,
+};

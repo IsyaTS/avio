@@ -46,14 +46,27 @@ class StaticFiles:
         target = self._resolve_path(path)
         data = target.read_bytes()
         media_type, _ = mimetypes.guess_type(target.name)
-        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+        cache_headers: dict[str, str] = {}
+        if not (media_type or "").startswith("text/html"):
+            cache_headers["Cache-Control"] = "public, max-age=31536000, immutable"
 
         if method.upper() == "HEAD":
-            response = Response(b"", status_code=200, headers=headers, media_type=media_type or "application/octet-stream")
+            response = Response(
+                b"",
+                status_code=200,
+                headers=cache_headers,
+                media_type=media_type or "application/octet-stream",
+            )
             response.headers["content-length"] = str(len(data))
             return response
 
-        return Response(data, status_code=200, headers=headers, media_type=media_type or "application/octet-stream")
+        return Response(
+            data,
+            status_code=200,
+            headers=cache_headers,
+            media_type=media_type or "application/octet-stream",
+        )
 
 
 __all__ = ["StaticFiles"]

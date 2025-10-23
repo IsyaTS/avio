@@ -132,6 +132,120 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
 
 ## Outbox: отправка
 
+## Наблюдения и технические заметки (октябрь 2025)
+
+- **LLM и промпты.** Ключи `OPENAI_API_KEY` и `OPENAI_MODEL` задаются через `.env`. В `app/core/__init__.py` реализован автоматический сброс `_PERSONA_HINTS_CACHE`, поэтому после обновления `persona.md` достаточно сохранить файл — перезапуск не нужен. Текущие параметры генерации: `temperature≈0.7`, `top_p=0.9`, `frequency_penalty=0.2`, `presence_penalty=0.05`, `max_tokens=260`.
+- **Каталоги арендаторов.** Активный `TENANTS_DIR` — `data/tenants`. Все редакции `tenant.json`, `persona.md` и загруженных каталогов делаем тут; каталог `app/tenants` больше не используется.
+- **Локальная проверка диалогов.** Команда `test` (обёртка над `scripts/chat_simulator.py`) работает из `.venv`. Полезные параметры: `--tenant`, `--contact`, `--channel`, `--reset`, `--show-messages`. Внутри сессии команда `reset` очищает состояние текущего контакта.
+- **Состояния диалогов.** Redis-хранилище (`sales_state:<tenant>:<contact>`) монтируется на хост в `data/redis`. Для ручного сброса:  
+  ```bash
+  docker-compose exec -T redis redis-cli keys 'sales_state:1:*'
+  docker-compose exec -T redis redis-cli del sales_state:1:<CONTACT_ID>
+  ```  
+  либо из Python:  
+  ```bash
+  .venv/bin/python - <<'PY'
+  from app import core
+  core.reset_sales_state(tenant=1, contact_id=<CONTACT_ID>)
+  PY
+  ```
+- **Связка каналов.** `resolve_or_create_contact` ищет существующий контакт по `whatsapp_phone`, `avito_user_id`, `avito_login`, `telegram_user_id`. Если при переходе с Avito на WhatsApp передавать `leadId` от авито-чата или заранее сохранять номер телефона, бот продолжит диалог в рамках одного контакта.
+- **Персонализация.** Плейсхолдеры `{BRAND}`, `{AGENT_NAME}`, `{CITY}` и др. берутся из `tenant.json`. При изменении бренда обновляйте паспорт, иначе в ответах останутся старые названия.
+
+## Avito Messenger Интеграция
+
+### OAuth и токены
+- Ссылка авторизации (страница `/connect/avito`) всегда формируется со scope `messenger:read,messenger:write,user:read`.
+- После успешной авторизации в `tenants/<ID>/tenant.json` автоматически сохраняются `access_token`, `refresh_token`, `expires_at`, `account_id`, `account_login`.
+- Автоответ включается автоматически: `behavior.auto_reply = true`, `behavior.auto_reply_enabled = true`.
+- Token refresh выполняется автоматически воркером при каждом запросе; при 401 выполняется повторный обмен по `refresh_token`.
+
+### Webhook
+- Avito требует активировать Messenger API в кабинете разработчика (подтверждение партнёра).
+- Автоматическая регистрация: после OAuth и при нажатии «Обновить статус» вызывается `POST https://api.avito.ru/messenger/v3/webhook` с целью `https://hub.avio.website/webhook/avito` и типом `messages`.
+- Если маршрут ещё недоступен (Avito возвращает 404), webhook можно зарегистрировать вручную:
+  ```bash
+  curl -X POST https://api.avito.ru/messenger/v3/webhook        -H "Authorization: Bearer <ACCESS_TOKEN>"        -H "Content-Type: application/json"        -d '{"url":"https://hub.avio.website/webhook/avito","types":["messages"]}'
+  ```
+- Проверка текущих подписок:
+  ```bash
+  curl -X POST https://api.avito.ru/messenger/v1/subscriptions        -H "Authorization: Bearer <ACCESS_TOKEN>"
+  ```
+- Снять подписку:
+  ```bash
+  curl -X POST https://api.avito.ru/messenger/v1/webhook/unsubscribe        -H "Authorization: Bearer <ACCESS_TOKEN>"        -H "Content-Type: application/json"        -d '{"url":"https://hub.avio.website/webhook/avito"}'
+  ```
+
+### Структура входящих событий
+Avito присылает JSON вида:
+```json
+{
+  "id": "evt-…",
+  "timestamp": "2024-…",
+  "payload": {
+    "type": "message",
+    "value": {
+      "account_id": 400040070,
+      "chat_id": "987654",
+      "type": "text",
+      "content": { "text": "Здравствуйте" },
+      "author_id": 123456,
+      "published_at": "2024-…"
+    }
+  }
+}
+```
+- Используется `payload.value.chat_id`, `payload.value.type`, `payload.value.content.*` для текста и вложений.
+- `payload.value.author_id` — отправитель; `payload.value.user_id` совпадает с нашим аккаунтом.
+- Мы создаём лиды с `avito.s table_lead_id(account_id, chat_id)` и обновляем поле `peer`.
+
+### Логика webhook (/webhook/avito)
+- Парсим `payload.value`: извлекаем `chat_id`, текст, вложения, `author_id`, `account_id`.
+- Заполняем `incoming_body`: `peer`, `attachments`, `lead_contacts`, `account_id`, `auto_reply_handled = False`, чтобы воркер запустил автоответ.
+- Контакты сохраняются через `resolve_or_create_contact` (поля `avito_user_id`, `avito_login`).
+- В логах для входящих сообщений: `webhook_received ch=avito…`, `stage=incoming_enqueued…`, `lead_upsert_ok…`.
+
+### Воркер (автоответ)
+- Хранит кеш `AVITO_CHAT_CACHE` `{tenant: chat_id}`. После каждого webhook и успешной отправки `chat_id` обновляется.
+- При ответе (`send_avito`) используем `chat_id` из payload (`item['chat_id']`/`peer`), иначе читаем из кеша. Если `chat_id` отсутствует и в кеше, доставка прерывается с `missing_chat`.
+- Формат отправки (соответствует Avito API v1):
+  ```json
+  {
+    "type": "text",
+    "message": { "text": "Спасибо за обращение" }
+  }
+  ```
+  Запрос: `POST https://api.avito.ru/messenger/v1/accounts/{account_id}/chats/{chat_id}/messages`.
+- Отправка считаем успешной при `status 200`. Логи: `event=send_result status=sent reason=ok channel=avito…`.
+
+### Ручные команды Avito (для отладки)
+```bash
+# зарегистрировать webhook
+curl -X POST https://api.avito.ru/messenger/v3/webhook      -H "Authorization: Bearer $AT"      -H "Content-Type: application/json"      -d '{"url":"https://hub.avio.website/webhook/avito","types":["messages"]}'
+
+# список подписок
+curl -X POST https://api.avito.ru/messenger/v1/subscriptions      -H "Authorization: Bearer $AT"
+
+# отписка
+curl -X POST https://api.avito.ru/messenger/v1/webhook/unsubscribe      -H "Authorization: Bearer $AT"      -H "Content-Type: application/json"      -d '{"url":"https://hub.avio.website/webhook/avito"}'
+```
+
+### Типичные ошибки
+| Сообщение в логах | Причина / решение |
+|-------------------|--------------------|
+| `avito_webhook_set_failed status=404 …` | Messenger API ещё не включён. Нужно дождаться подтверждения партнёра или активировать webhook вручную.
+| `avito_webhook_skip reason=no_chat` | В событии не пришёл `chat_id` — теперь кеш используется, но если случится повторно, проверить payload или доступ accountants.
+| `send_result status=skipped reason=missing_chat` | Кеш ещё не заполнен и нет `chat_id`. Проверь, что первый ответ прошёл успешно (2xx). |
+| `send_result status=status_400` | Avito вернул ошибку (пустой текст, недоступный чат и т.п.). см. `body=` в логе. |
+| `unauthorized` | `access_token` устарел или потерян — перепройти OAuth и провернуть регистрацию webhook. |
+
+```bash
+# тестовая посылка события в /webhook/avito
+curl -X POST https://hub.avio.website/webhook/avito   -H 'Content-Type: application/json'   -d '{"id":"evt-1","timestamp":"2024-01-01T00:00:00Z","payload":{"type":"message","value":{"account_id":400040070,"chat_id":"987654","type":"text","content":{"text":"Здравствуйте"},"author_id":123456,"published_at":"2024-01-01T00:00:00Z"}}}'
+```
+
+После этих правок Avito бот автоматически отвечает на каждое входящее сообщение.
+
 - Единственная точка отправки — `POST /send` на сервисе `app`.
 - Авторизация строго через заголовок `X-Admin-Token: ${ADMIN_TOKEN}`.
 - Тело должно содержать `tenant`, `channel`, `to` и хотя бы один из `text`/`attachments`.
@@ -184,6 +298,7 @@ curl -sS -X POST "http://127.0.0.1:8000/send" \
   - `OUTBOX_ENABLED` — включает REST-эндпойнт `/send`. При `false` возвращается `403 outbox_disabled`.
   - `OUTBOX_WHITELIST` — список разрешённых получателей (числа, `+E164`, JID). Иные значения приводят к `403 not_whitelisted`.
   - `WAWEB_ADMIN_TOKEN` — должен совпадать с `ADMIN_TOKEN` и используется для внутреннего API `waweb`.
+  - Для входящих событий `waweb` обязателен доступ либо к `ADMIN_TOKEN`, либо к `WA_WEB_TOKEN`/`WEBHOOK_SECRET`. Без токена сервис не сможет получить `provider_token`, в логах появится `provider_token_unauthorized`, и бот перестанет отвечать. При ручном запуске `node index.js` заранее экспортируйте нужный токен (например, `ADMIN_TOKEN` из `.env`).
 
 #### `curl`-примеры для `/send`
 
@@ -245,6 +360,7 @@ curl -sS -X POST "http://127.0.0.1:8000/send" \
 ### Provider token
 
 - Для аутентификации событий `waweb → app` используется `provider_token`, закреплённый за каждым tenant.
+- Токен хранится не только в БД, но и на диске: `app/tenants/<TENANT>/provider_token.json`. При отсутствии PostgreSQL приложение читает/создаёт файл автоматически, поэтому **важно монтировать каталог `app/tenants` для `app`, `worker` и `waweb`**.
 - Генерация: `POST /internal/tenant/{tenant}/ensure` с заголовком `X-Auth-Token: ${WA_WEB_TOKEN}` (или `?token=`). Ответ:
 
   ```json
@@ -301,6 +417,20 @@ QR события отправляются тем же маршрутом `POST 
 ```
 
 Если SVG отсутствует, обработчик вернёт `422 invalid_qr`. Валидные SVG кэшируются в Redis по ключам `wa:qr:{tenant}:{qr_id}:svg` и `wa:qr:last:{tenant}` (TTL ≥ 180 секунд), чтобы публичные маршруты `/pub/wa/status` и `/pub/wa/qr.svg` могли отдавать актуальный код без повторной генерации.
+
+### Автоответ и outbox
+
+- Обязательно включите очереди: `INBOX_ENABLED=true`, `OUTBOX_ENABLED=true`. Без этого воркер воркера мгновенно пропускает сообщения со статусом `outbox_disabled`.
+- `OUTBOX_WHITELIST` должен содержать `*` либо список разрешённых номеров (`+7999…`, `7999…`, `7999…@c.us`). Пустое значение означает «запретить все отправки» и приводит к `reason=whitelist_miss`.
+- При недоступной БД воркер всё равно сгенерирует автоответ: lead_id берётся из номера отправителя, а проверка `lead_exists` переводится в предупреждение вместо жёсткого отказа. Поэтому записи вида `event=send_result status=warning reason=err:no_lead` допустимы при «офлайн»-режиме — сообщение всё равно ставится в очередь `outbox:send`.
+- Проверьте, что WA token актуален: `curl -H "X-Admin-Token: ${ADMIN_TOKEN}" http://app:8000/admin/provider-token/<TENANT>` → ответ `{"ok": true, ...}`. Если `500`, подмонтируйте `app/tenants` и перезапустите `app`, чтобы пересоздался `provider_token.json`.
+- `waweb` должен поднимать сессию с тем же токеном (`ADMIN_TOKEN` или `WA_WEB_TOKEN`). После обновления токена перезапустите `waweb`, иначе появится `provider_token_unauthorized`.
+- Проверка цепочки:
+  1. Написать тестовое сообщение → в логах `app` увидеть `incoming_enqueued`/`webhook_received`.
+  2. В `worker` найти `event=smart_reply_generated` и `event=smart_reply_enqueued`.
+  3. В `worker` после отправки должен появиться `event=send_result status=sent` (или `status=warning …` при деградированном режиме).
+  4. В `waweb` — `event=message_out channel=whatsapp … result=success`.
+- Для удобства диагностики есть скрипт `deploy/diag/wa.sh`, который проверяет токены, переменные `OUTBOX_*`, выполняет тестовую отправку и собирает свежие логи `app`/`waweb`.
 
 ## Guardrails и самопроверки
 

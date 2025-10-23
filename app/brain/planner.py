@@ -77,6 +77,9 @@ async def generate_sales_reply(
         timeout,
         temperature=0.2,
         max_tokens=320,
+        top_p=0.7,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
     )
 
     plan = _parse_plan_response(_get_message_content(plan_response))
@@ -87,8 +90,11 @@ async def generate_sales_reply(
         model,
         final_prompt,
         timeout,
-        temperature=0.6,
-        max_tokens=360,
+        temperature=0.7,
+        max_tokens=260,
+        top_p=0.9,
+        frequency_penalty=0.2,
+        presence_penalty=0.05,
     )
 
     reply = (_get_message_content(final_response) or "").strip()
@@ -106,6 +112,9 @@ async def _call_chat_completion(
     *,
     temperature: float,
     max_tokens: int,
+    top_p: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
 ) -> Any:
     """Invoke the OpenAI chat completion API in a thread executor."""
 
@@ -116,6 +125,9 @@ async def _call_chat_completion(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        top_p=top_p if top_p is not None else 1.0,
+        frequency_penalty=frequency_penalty if frequency_penalty is not None else 0.0,
+        presence_penalty=presence_penalty if presence_penalty is not None else 0.0,
     )
 
 

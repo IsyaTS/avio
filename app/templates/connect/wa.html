@@ -54,12 +54,20 @@
                 <a id="open-settings" href="{{ settings_link }}" target="_blank" rel="noopener" class="secondary">Открыть настройки</a>
                 {% endif %}
             </div>
-            <a
-                id="link-tg-connect"
-                href="/connect/tg?tenant={{ tenant }}&k={{ key }}"
-                class="btn btn--secondary"
-                style="display: inline-flex; margin-top: 12px;"
-            >Подключить Telegram</a>
+            <div class="btn-row" style="margin-top: 12px; gap: 8px; flex-wrap: wrap;">
+                <a
+                    id="link-tg-connect"
+                    href="/connect/tg?tenant={{ tenant }}&k={{ key }}"
+                    class="btn btn--secondary"
+                    style="display: inline-flex;"
+                >Подключить Telegram</a>
+                <a
+                    id="link-avito-connect"
+                    href="/connect/avito?tenant={{ tenant }}&k={{ key }}"
+                    class="btn btn--secondary"
+                    style="display: inline-flex;"
+                >Подключить Avito</a>
+            </div>
         </div>
         <div>
             <h3>Информация о бренде</h3>

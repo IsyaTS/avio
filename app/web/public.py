@@ -17,13 +17,15 @@ import uuid
 import asyncio
 import base64
 import random
-from typing import Any, Iterable, Mapping
+import secrets
+import html
+from typing import Any, Iterable, Mapping, Optional
 
 import qrcode
 from qrcode.image.svg import SvgImage
 
 from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException, Query
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse
 import httpx
 import urllib.request
 import urllib.error
@@ -56,9 +58,11 @@ except Exception:  # pragma: no cover - openpyxl is optional in some environment
 
 try:
     from app.core import _normalize_catalog_items, settings  # type: ignore[attr-defined]
+    import app.core as core_module  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - fallback for legacy layout
     try:
         from core import _normalize_catalog_items, settings  # type: ignore[attr-defined]
+        core_module = _import_alias("core")
     except ImportError:
         core_module = _import_alias("core")
         _normalize_catalog_items = core_module._normalize_catalog_items
@@ -73,6 +77,7 @@ from config import tg_worker_url
 from app.core import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.db import insert_message_in, upsert_lead
+from app.integrations import avito
 from . import common as common
 try:  # pragma: no cover - optional webhooks import
     from . import webhooks as webhook_module  # type: ignore
@@ -82,6 +87,7 @@ except ImportError:  # pragma: no cover - fallback when module alias missing
     except ImportError:
         webhook_module = None  # type: ignore[assignment]
 from .ui import templates
+from .webhooks import router as webhook_router, process_incoming
 
 logger = logging.getLogger(__name__)
 wa_logger = logging.getLogger("wa")
@@ -104,6 +110,11 @@ _LOCAL_PASSWORD_ATTEMPTS: dict[tuple[int, str], list[float]] = {}
 WA_QR_CACHE_TTL_MIN = 30  # seconds
 WA_QR_CACHE_TTL_MAX = 60  # seconds
 
+AVITO_STATE_PREFIX = "oauth:avito:state:"
+AVITO_STATE_TTL = 600  # seconds
+
+router = APIRouter()
+
 
 def _qr_cache_ttl() -> int:
     return random.randint(WA_QR_CACHE_TTL_MIN, WA_QR_CACHE_TTL_MAX)
@@ -123,13 +134,395 @@ def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     return headers
 
 
-class TgWorkerCallError(RuntimeError):
-    __slots__ = ("url", "detail")
+def _resolve_client_key(request: Request | None) -> str:
+    candidates: list[str | None] = []
+    if request is not None:
+        query_params = getattr(request, "query_params", None)
+        if query_params is not None:
+            candidates.append(query_params.get("k"))
+            candidates.append(query_params.get("key"))
+        headers = getattr(request, "headers", {}) or {}
+        for header_name in ("X-Access-Key", "X-Client-Key", "X-Auth-Key"):
+            candidates.append(headers.get(header_name))
+        auth_header = headers.get("Authorization")
+        if auth_header:
+            token = auth_header.strip()
+            if token.lower().startswith("bearer "):
+                token = token[7:]
+            candidates.append(token)
+        cookies = getattr(request, "cookies", None) or {}
+        if cookies:
+            candidates.append(cookies.get("client_key"))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        value = str(candidate).strip()
+        if value:
+            return value
+    return ""
 
-    def __init__(self, url: str, detail: str):
-        super().__init__(f"{url}: {detail}")
-        self.url = url
-        self.detail = detail
+
+def _avito_state_key(state: str) -> str:
+    return f"{AVITO_STATE_PREFIX}{state}"
+
+
+def _avito_public_payload(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {"connected": False}
+    access = str(raw.get("access_token") or "").strip()
+    expires_at = raw.get("expires_at")
+    try:
+        expires_at_int = int(expires_at)
+    except Exception:
+        expires_at_int = None
+    obtained_at = raw.get("obtained_at")
+    try:
+        obtained_at_int = int(obtained_at)
+    except Exception:
+        obtained_at_int = None
+    info = {
+        "connected": bool(access),
+        "expires_at": expires_at_int,
+        "obtained_at": obtained_at_int,
+    }
+    scope = raw.get("scope")
+    if isinstance(scope, str) and scope.strip():
+        info["scope"] = scope.strip()
+    account_id = raw.get("account_id")
+    if account_id is not None:
+        try:
+            info["account_id"] = int(account_id)
+        except Exception:
+            info["account_id"] = str(account_id)
+    return info
+
+
+def _avito_callback_html(ok: bool, message: str, payload: Mapping[str, Any]) -> str:
+    safe_message = html.escape(message, quote=False)
+    try:
+        data_json = json.dumps(dict(payload), ensure_ascii=False)
+    except Exception:
+        data_json = json.dumps({"source": "avito-oauth", "ok": ok})
+    status_class = "success" if ok else "error"
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>Avito OAuth</title>
+    <style>
+      body {{
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        padding: 32px;
+        background: #f9fafb;
+        color: #111827;
+      }}
+      .card {{
+        max-width: 460px;
+        margin: 0 auto;
+        padding: 24px;
+        background: #fff;
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      }}
+      .card h1 {{
+        margin: 0 0 12px;
+        font-size: 20px;
+        font-weight: 700;
+      }}
+      .card p {{
+        margin: 0 0 16px;
+        line-height: 1.5;
+      }}
+      .status {{
+        display: inline-block;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 600;
+      }}
+      .status.success {{
+        background: #dcfce7;
+        color: #166534;
+      }}
+      .status.error {{
+        background: #fee2e2;
+        color: #b91c1c;
+      }}
+      .hint {{
+        font-size: 13px;
+        color: #6b7280;
+      }}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="status {status_class}">{'Успешно' if ok else 'Ошибка'}</div>
+      <h1>Avito OAuth</h1>
+      <p>{safe_message}</p>
+      <p class="hint">Окно закроется автоматически. Если этого не произошло — закройте его вручную.</p>
+    </div>
+    <script>
+      (function() {{
+        var payload = {data_json};
+        try {{
+          if (typeof payload === 'object' && payload) {{
+            payload.source = 'avito-oauth';
+            payload.ok = { 'true' if ok else 'false' };
+          }}
+          if (window.opener && window.opener !== window) {{
+            window.opener.postMessage(payload, '*');
+          }}
+        }} catch (err) {{}}
+        setTimeout(function() {{
+          try {{
+            window.close();
+          }} catch (err) {{}}
+        }}, 2000);
+      }})();
+    </script>
+  </body>
+</html>"""
+
+
+@router.post("/webhook/avito")
+async def avito_webhook(request: Request) -> JSONResponse:
+    try:
+        raw_payload = await request.json()
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=422, detail="invalid_json") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid_payload") from exc
+
+    events = raw_payload if isinstance(raw_payload, list) else [raw_payload]
+    processed = 0
+    for entry in events:
+        if not isinstance(entry, Mapping):
+            continue
+        try:
+            handled = await _handle_avito_webhook_event(entry, request)
+        except HTTPException:
+            raise
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("avito_webhook_processing_failed")
+            continue
+        if handled:
+            processed += 1
+
+    return JSONResponse({"ok": True, "processed": processed})
+
+
+
+async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request) -> bool:
+    payload_raw = event.get("payload")
+    payload = payload_raw if isinstance(payload_raw, Mapping) else {}
+
+    tenant: Optional[int] = None
+    account_id = _coerce_int(
+        payload.get("account_id")
+        or event.get("account_id")
+        or (payload.get("account") or {}).get("id")
+        or (event.get("account") or {}).get("id")
+    )
+    if account_id is not None:
+        tenant = avito.find_tenant_by_account(account_id)
+
+    if tenant is None:
+        tenant = _coerce_int(payload.get("tenant") or event.get("tenant"))
+    if tenant is None:
+        tenant = _coerce_int(os.getenv("TENANT", "1"))
+
+    if tenant is None or tenant <= 0:
+        logger.warning("avito_webhook_skip reason=unknown_tenant account_id=%s", account_id)
+        return False
+
+    tenant = int(tenant)
+
+    if account_id is None:
+        integration = avito.get_integration(tenant)
+        if integration and integration.get("account_id"):
+            account_id = _coerce_int(integration.get("account_id"))
+        if account_id is None:
+            logger.warning("avito_webhook_skip reason=no_account_id tenant=%s", tenant)
+            return False
+
+    value_raw = payload.get("value") or event.get("value") or {}
+    value = value_raw if isinstance(value_raw, Mapping) else {}
+    if not value:
+        logger.warning("avito_webhook_skip reason=no_value tenant=%s account_id=%s", tenant, account_id)
+        return False
+
+    content_raw = value.get("content") if isinstance(value.get("content"), Mapping) else {}
+
+    chat_candidate = value.get("chat_id") or value.get("conversation_id")
+    if isinstance(chat_candidate, Mapping):
+        chat_candidate = chat_candidate.get("id")
+    if chat_candidate is None:
+        chat_candidate = payload.get("chat_id") or payload.get("conversation_id")
+    if isinstance(chat_candidate, Mapping):
+        chat_candidate = chat_candidate.get("id")
+    chat_id = str(chat_candidate).strip() if chat_candidate else ""
+    if not chat_id:
+        logger.warning("avito_webhook_skip reason=no_chat account_id=%s tenant=%s", account_id, tenant)
+        return False
+
+    message_type = str(value.get("type") or "").strip().lower()
+    text_candidate = ""
+    if isinstance(content_raw, Mapping):
+        text_candidate = content_raw.get("text") or ""
+    if not text_candidate:
+        text_candidate = value.get("text") or payload.get("text") or ""
+    text = str(text_candidate or "").strip()
+
+    attachments: list[dict[str, Any]] = []
+    if isinstance(content_raw, Mapping):
+        if message_type == "image":
+            image = content_raw.get("image") if isinstance(content_raw.get("image"), Mapping) else {}
+            sizes = image.get("sizes") if isinstance(image.get("sizes"), list) else []
+            url = ""
+            for entry in sizes:
+                if isinstance(entry, Mapping) and entry.get("url"):
+                    url = entry["url"]
+            if url:
+                attachments.append({"type": "image", "url": url, "name": image.get("name") or "image"})
+        elif message_type == "voice":
+            voice = content_raw.get("voice") if isinstance(content_raw.get("voice"), Mapping) else {}
+            voice_id = voice.get("voice_id") or voice.get("id")
+            if voice_id:
+                attachments.append({"type": "voice", "url": voice_id})
+
+    avito_user_id = _coerce_int(
+        content_raw.get("author_id")
+        or value.get("author_id")
+        or value.get("sender_id")
+        or payload.get("user_id")
+    )
+    if account_id is not None and avito_user_id is not None and avito_user_id == account_id:
+        return False
+
+    avito_login = None
+    login_candidate = value.get("author_login") or payload.get("user_login")
+    if isinstance(login_candidate, str) and login_candidate.strip():
+        avito_login = login_candidate.strip()
+
+    if not text and not attachments:
+        logger.info("avito_webhook_skip reason=empty_message tenant=%s account_id=%s chat_id=%s", tenant, account_id, chat_id)
+        return False
+
+    message_id = value.get("id") or event.get("event_id") or event.get("id")
+    message_id_str = str(message_id) if message_id is not None else None
+
+    lead_id = avito.stable_lead_id(account_id, chat_id)
+
+    incoming_body: dict[str, Any] = {
+        "provider": "avito",
+        "channel": "avito",
+        "tenant": tenant,
+        "tenant_id": tenant,
+        "account_id": account_id,
+        "chat_id": chat_id,
+        "lead_id": lead_id,
+        "avito_user_id": avito_user_id,
+        "avito_login": avito_login,
+        "source": {"type": "avito", "tenant": tenant, "account_id": account_id, "chat_id": chat_id},
+        "message": {
+            "id": message_id_str,
+            "message_id": message_id_str,
+            "text": text,
+            "chat_id": chat_id,
+            "direction": message_type,
+            "attachments": attachments,
+            "author_id": avito_user_id,
+        },
+        "attachments": attachments,
+        "peer": chat_id,
+        "auto_reply_handled": False,
+    }
+
+    created_at = value.get("created") or content_raw.get("created") or payload.get("created")
+    if created_at is not None:
+        incoming_body["message"]["created_at"] = created_at
+    published_at = value.get("published_at") or payload.get("published_at")
+    if published_at is not None:
+        incoming_body["message"]["published_at"] = published_at
+
+    lead_contacts = {"avito": {"peer": chat_id}}
+    if avito_login:
+        lead_contacts["avito"]["contact"] = avito_login
+    incoming_body["lead_contacts"] = lead_contacts
+
+    await process_incoming(incoming_body, request)
+    return True
+
+
+async def _ensure_avito_webhook(tenant: int, request: Request) -> None:
+    target_url = common.public_url(request, "/webhook/avito")
+    try:
+        success = await avito.ensure_webhook(int(tenant), target_url)
+    except avito.AvitoOAuthError as exc:
+        logger.warning("avito_webhook_register_failed tenant=%s error=%s", tenant, exc)
+    except Exception:
+        logger.exception("avito_webhook_register_failed tenant=%s", tenant)
+    else:
+        if not success:
+            logger.warning("avito_webhook_register_failed tenant=%s error=unexpected_response", tenant)
+
+
+@router.get("/connect/avito")
+def connect_avito(tenant: int, request: Request, k: str | None = None, key: str | None = None):
+    tenant_id = int(tenant)
+    access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
+    if not common.valid_key(tenant_id, access_key):
+        return JSONResponse({"detail": "invalid_key"}, status_code=401)
+
+    common.ensure_tenant_files(tenant_id)
+    cfg = common.read_tenant_config(tenant_id) or {}
+    passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
+    brand = ""
+    if isinstance(passport, dict):
+        brand = str(passport.get("brand") or "").strip()
+
+    avito_integration = avito.get_integration(tenant_id)
+    avito_info = _avito_public_payload(avito_integration)
+
+    behavior = cfg.setdefault("behavior", {})
+    changed_behavior = False
+    if behavior.get("auto_reply") is not True:
+        behavior["auto_reply"] = True
+        changed_behavior = True
+    if behavior.get("auto_reply_enabled") is not True:
+        behavior["auto_reply_enabled"] = True
+        changed_behavior = True
+    if changed_behavior:
+        try:
+            common.write_tenant_config(tenant_id, cfg)
+        except Exception:
+            logger.exception("avito_behavior_update_failed tenant=%s", tenant_id)
+
+    primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
+    resolved_key = primary_key or access_key
+
+    settings_link = ""
+    try:
+        raw_settings = request.url_for("client_settings", tenant=str(tenant_id))
+        if resolved_key:
+            settings_link = common.public_url(
+                request,
+                f"{raw_settings}?k={quote_plus(resolved_key)}",
+            )
+    except Exception:
+        settings_link = ""
+
+    context = {
+        "request": request,
+        "tenant": tenant_id,
+        "key": resolved_key,
+        "tenant_key": access_key,
+        "subtitle": brand,
+        "passport": passport if isinstance(passport, Mapping) else {},
+        "avito": avito_info,
+        "settings_link": settings_link,
+    }
+    return templates.TemplateResponse(request, "connect/avito.html", context)
 
 
 def _tg_base_url() -> str:
@@ -675,8 +1068,6 @@ def _process_pdf(
     }
     normalized = _normalize_catalog_items(items, meta)
     return normalized, meta, manifest_rel
-
-router = APIRouter()
 
 
 def _coerce_int(value: Any) -> int | None:

@@ -1,0 +1,30 @@
+services:
+  app:
+    volumes:
+      - ./:/app
+      - /opt/avio-var/wa_state:/app/data/wa_state
+      - /opt/avio-var/tenants:/app/data/tenants
+      - /opt/avio-var/tg-sessions:/app/tg-sessions
+  worker:
+    volumes:
+      - ./:/app
+      - /opt/avio-var/wa_state:/app/data/wa_state
+      - /opt/avio-var/tenants:/app/data/tenants
+      - /opt/avio-var/tg-sessions:/app/tg-sessions
+  tgworker:
+    volumes:
+      - ./:/app
+      - /opt/avio-var/wa_state:/app/data/wa_state
+      - /opt/avio-var/tenants:/app/data/tenants
+      - /opt/avio-var/tg-sessions:/app/tg-sessions
+  waweb:
+    working_dir: /app
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./waweb:/app
+      - waweb_node_modules:/app/node_modules
+      - /opt/avio-var/wa_state:/data/wa_state
+
+volumes:
+  waweb_node_modules:

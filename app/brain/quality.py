@@ -4,8 +4,6 @@ import re
 from typing import Optional, Protocol
 
 from .planner import GeneratedPlan
-
-
 class PersonaHintsProtocol(Protocol):
     cta: str
 
@@ -30,17 +28,9 @@ def enforce_plan_alignment(
 
     existing_lower = text.lower()
 
-    cta_candidates = [plan.cta]
-    if persona_hints:
-        cta_candidates.append(persona_hints.cta)
-    cta_candidates = [token.strip() for token in cta_candidates if token and token.strip()]
+    plan.cta = ""
 
     appended_parts: list[str] = []
-    for candidate in cta_candidates:
-        candidate_clean = candidate.strip()
-        if candidate_clean and candidate_clean.lower() not in existing_lower:
-            appended_parts.append(candidate_clean)
-            existing_lower += "\n" + candidate_clean.lower()
 
     question_to_add: Optional[str] = None
     for question in plan.next_questions:
@@ -60,8 +50,9 @@ def enforce_plan_alignment(
         text = text.rstrip() + "\n\n" + "\n".join(appended_parts)
 
     if persona_hints and persona_hints.wants_friendly():
-        if not re.search(r"[\)\]»☺😊😀😄😃😉😎❤️]", text):
-            text = text + " \U0001F60A"
+        if not getattr(persona_hints, "no_emoji", False):
+            if not re.search(r"[\)\]»☺😊😀😄😃😉😎❤️]", text):
+                text = text + " \U0001F60A"
 
     return text
 
@@ -69,3 +60,4 @@ def enforce_plan_alignment(
 def _question_present(question: str, reply: str) -> bool:
     pattern = re.escape(question.strip())
     return bool(re.search(pattern, reply, flags=re.IGNORECASE))
+

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[clean] docker prune..."
+sudo docker system prune -af >/dev/null
+
+echo "[clean] shrink journals..."
+sudo journalctl --vacuum-size=100M >/dev/null
+
+echo "[clean] purge apt cache..."
+sudo apt-get clean
+
+echo "[clean] remove local caches..."
+rm -rf "${HOME}/.cache/puppeteer" \
+       "${HOME}/.cache/pip" \
+       "${HOME}/.npm" 2>/dev/null || true
+
+echo "[clean] done."

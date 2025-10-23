@@ -12,6 +12,7 @@ app/tenants/
 data/tenants/*/uploads/
 data/tenants/*/exports/
 data/tenants/*/recordings/
+data/redis/
 tmp_extract/
 tgworker/sessions/
 waweb/node_modules/

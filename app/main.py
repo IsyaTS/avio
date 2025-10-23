@@ -198,6 +198,16 @@ def _transport_client(channel: str) -> httpx.AsyncClient:
     return client
 
 app = FastAPI(title="avio-api")
+
+
+@app.get("/")
+async def root_ping() -> dict[str, bool]:
+    return {"ok": True}
+
+
+@app.head("/")
+async def root_head() -> Response:
+    return Response(status_code=200)
 static_dir = ROOT / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

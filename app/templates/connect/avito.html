@@ -1,0 +1,291 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Подключение Avito' %}
+{% set extra_head %}
+<style>
+  .integration-card {
+    display: grid;
+    gap: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    align-items: flex-start;
+  }
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .status-chip.connected {
+    background: rgba(34, 197, 94, 0.16);
+    color: #166534;
+  }
+  .status-chip.disconnected {
+    background: rgba(220, 38, 38, 0.14);
+    color: #991b1b;
+  }
+</style>
+{% endset %}
+{% block content %}
+<section class="surface">
+  <h2>Подключение Avito</h2>
+  <p class="muted">Авторизуйте аккаунт Avito, чтобы сообщения покупателей попадали напрямую в Avio Hub.</p>
+
+  <div class="integration-card" style="margin-top: 20px;">
+    <div>
+      <div id="avito-status"
+           class="status-chip {{ 'connected' if avito.connected else 'disconnected' }}">
+        {% if avito.connected %}
+          Подключено{% if avito.expires_at %} · истекает {{ avito.expires_at|datetimeformat }}{% endif %}
+        {% else %}
+          Не подключено
+        {% endif %}
+      </div>
+      <div class="btn-row" style="margin-top: 16px;">
+        <button class="btn" id="avito-connect" type="button">
+          {% if avito.connected %}Обновить авторизацию{% else %}Подключить Avito{% endif %}
+        </button>
+        <button class="btn secondary" id="avito-refresh" type="button">Проверить статус</button>
+        <button class="btn secondary" id="avito-disconnect" type="button"
+                {% if not avito.connected %}style="display:none;"{% endif %}>
+          Отключить
+        </button>
+      </div>
+      <span id="avito-message" class="status-text" style="margin-top: 12px; display: block;"></span>
+      <p class="muted" style="margin-top: 18px;">
+        После нажатия «Подключить Avito» откроется новое окно с OAuth-страницей. Завершите вход,
+        и вкладка закроется автоматически.
+      </p>
+      <p class="muted" style="margin-top: 12px;">
+        <strong>Tenant:</strong> {{ tenant }}<br>
+        <strong>Ключ:</strong> <code class="inline">{{ key }}</code>
+      </p>
+      {% if settings_link %}
+      <a class="btn secondary" href="{{ settings_link }}" target="_blank" rel="noopener"
+         style="margin-top: 12px; display: inline-flex;">Открыть настройки клиента</a>
+      {% endif %}
+    </div>
+    <div>
+      <h3>Информация о бренде</h3>
+      <ul class="muted" style="padding-left: 18px; line-height: 1.6; margin: 12px 0 0;">
+        {% if passport.brand %}<li><strong>Бренд:</strong> {{ passport.brand }}</li>{% endif %}
+        {% if passport.agent_name %}<li><strong>Менеджер:</strong> {{ passport.agent_name }}</li>{% endif %}
+        {% if passport.city %}<li><strong>Город:</strong> {{ passport.city }}</li>{% endif %}
+      </ul>
+      <p class="muted" style="margin-top: 18px;">
+        Уже подключены WhatsApp и Telegram?
+      </p>
+      <div class="btn-row" style="margin-top: 8px;">
+        <a class="btn secondary" href="/connect/wa?tenant={{ tenant }}&k={{ key }}" rel="noopener">WhatsApp</a>
+        <a class="btn secondary" href="/connect/tg?tenant={{ tenant }}&k={{ key }}" rel="noopener">Telegram</a>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+{% set extra_scripts %}
+<script>
+(() => {
+  const tenant = {{ tenant | tojson }};
+  const key = {{ key | tojson }};
+  const statusNode = document.getElementById('avito-status');
+  const messageNode = document.getElementById('avito-message');
+  const connectButton = document.getElementById('avito-connect');
+  const refreshButton = document.getElementById('avito-refresh');
+  const disconnectButton = document.getElementById('avito-disconnect');
+
+  if (!tenant || !key) {
+    if (messageNode) {
+      messageNode.textContent = 'Нет доступа: отсутствует ключ подключения.';
+      messageNode.className = 'status-text alert';
+    }
+    if (connectButton) connectButton.disabled = true;
+    if (refreshButton) refreshButton.disabled = true;
+    if (disconnectButton) disconnectButton.disabled = true;
+    return;
+  }
+
+  const baseParams = new URLSearchParams({ tenant: tenant, k: key });
+  const statusUrl = `/v1/oauth/avito/status?${baseParams.toString()}`;
+  const authorizeUrl = `/v1/oauth/avito/authorize?${baseParams.toString()}`;
+  const disconnectUrl = `/v1/oauth/avito/disconnect?${baseParams.toString()}`;
+  const webhookUrl = `/v1/oauth/avito/webhook?${baseParams.toString()}`;
+
+  function formatTimestamp(value) {
+    if (value == null) return '';
+    let ms = value;
+    if (typeof value === 'string') {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return '';
+      ms = parsed;
+    }
+    if (typeof ms === 'number' && ms < 1e12) {
+      ms *= 1000;
+    }
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('ru-RU', { hour12: false });
+  }
+
+  function setStatus(payload) {
+    if (!statusNode) return;
+    const connected = Boolean(payload && payload.connected);
+    const parts = [];
+    if (connected) {
+      parts.push('Подключено');
+      const expires = formatTimestamp(payload && payload.expires_at);
+      if (expires) {
+        parts.push(`истекает ${expires}`);
+      }
+    } else {
+      parts.push('Не подключено');
+    }
+    statusNode.textContent = parts.join(' · ');
+    statusNode.className = `status-chip ${connected ? 'connected' : 'disconnected'}`.trim();
+    if (disconnectButton) {
+      disconnectButton.style.display = connected ? '' : 'none';
+      disconnectButton.disabled = !connected;
+    }
+    if (connectButton) {
+      connectButton.textContent = connected ? 'Обновить авторизацию' : 'Подключить Avito';
+      connectButton.disabled = false;
+    }
+  }
+
+  function setMessage(text, variant = 'muted') {
+    if (!messageNode) return;
+    messageNode.className = `status-text ${variant}`.trim();
+    messageNode.textContent = text || '';
+  }
+
+  async function ensureWebhook({ quiet = false } = {}) {
+    try {
+      const response = await fetch(webhookUrl, { method: 'POST' });
+      if (!response.ok) {
+        throw new Error((await response.text()) || 'Не удалось зарегистрировать webhook');
+      }
+      if (!quiet) {
+        setMessage('Webhook Avito синхронизирован', 'muted');
+      }
+    } catch (error) {
+      if (!quiet) {
+        setMessage(`Ошибка регистрации webhook: ${error && error.message ? error.message : error}`, 'alert');
+      }
+      throw error;
+    }
+  }
+
+  async function fetchStatus({ quiet = false, ensure = false } = {}) {
+    if (ensure) {
+      await ensureWebhook({ quiet: true }).catch(() => {});
+    }
+    try {
+      const response = await fetch(statusUrl, { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error((await response.text()) || 'Не удалось получить статус Avito');
+      }
+      const data = await response.json();
+      if (data && data.ok === false) {
+        throw new Error(data.detail || data.error || 'Авторизация отсутствует');
+      }
+      setStatus(data);
+      if (!quiet) {
+        setMessage('Статус получен', 'muted');
+      }
+      return data;
+    } catch (error) {
+      if (!quiet) {
+        setMessage(`Ошибка статуса Avito: ${error && error.message ? error.message : error}`, 'alert');
+      }
+      throw error;
+    }
+  }
+
+  function handleOAuthMessage(event) {
+    const data = event && event.data;
+    if (!data || typeof data !== 'object' || data.source !== 'avito-oauth') {
+      return;
+    }
+    if (data.ok) {
+      setStatus(data);
+      setMessage('Avito подключён', 'muted');
+    } else {
+      const detail = data.error ? String(data.error) : 'Авторизация Avito отменена';
+      setMessage(detail, 'alert');
+    }
+    fetchStatus({ quiet: true }).catch(() => {});
+  }
+
+  async function startAuthorization() {
+    if (connectButton) connectButton.disabled = true;
+    setMessage('Открываем окно авторизации…', 'muted');
+    try {
+      const response = await fetch(authorizeUrl, { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error((await response.text()) || 'Не удалось получить ссылку авторизации');
+      }
+      const data = await response.json();
+      const authUrl = data.authorize_url || data.url;
+      if (!authUrl) {
+        throw new Error('Ссылка авторизации не получена');
+      }
+      const popup = window.open(
+        authUrl,
+        'avito-oauth',
+        'width=640,height=760,noopener=yes,noreferrer=yes'
+      );
+      if (!popup) {
+        window.location.href = authUrl;
+      } else {
+        setMessage('Если окно не открылось, разрешите всплывающие окна и попробуйте снова.', 'muted');
+      }
+    } catch (error) {
+      setMessage(`Ошибка авторизации Avito: ${error && error.message ? error.message : error}`, 'alert');
+    } finally {
+      if (connectButton) connectButton.disabled = false;
+    }
+  }
+
+  async function disconnect() {
+    if (disconnectButton) disconnectButton.disabled = true;
+    setMessage('Отключаем Avito…', 'muted');
+    try {
+      const response = await fetch(disconnectUrl, { method: 'POST' });
+      if (!response.ok) {
+        throw new Error((await response.text()) || 'Не удалось отключить Avito');
+      }
+      await response.json().catch(() => ({}));
+      setStatus({ connected: false });
+      setMessage('Связь с Avito отключена', 'muted');
+    } catch (error) {
+      setMessage(`Ошибка отключения Avito: ${error && error.message ? error.message : error}`, 'alert');
+    } finally {
+      if (disconnectButton) disconnectButton.disabled = false;
+    }
+  }
+
+  if (connectButton) {
+    connectButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      startAuthorization();
+    });
+  }
+  if (refreshButton) {
+    refreshButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      ensureWebhook().then(() => fetchStatus({ ensure: false })).catch(() => {});
+    });
+  }
+  if (disconnectButton) {
+    disconnectButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      disconnect();
+    });
+  }
+
+  window.addEventListener('message', handleOAuthMessage);
+  ensureWebhook({ quiet: true }).then(() => fetchStatus({ quiet: true })).catch(() => {});
+})();
+</script>
+{% endset %}

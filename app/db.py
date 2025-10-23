@@ -87,7 +87,12 @@ async def _ensure_pool() -> Any:
     if asyncpg is None or not DATABASE_URL:
         return None
     try:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+        _pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=5,
+            max_size=20,
+            timeout=3.0,
+        )
         return _pool
     except Exception:
         _pool = None

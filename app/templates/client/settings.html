@@ -4,8 +4,9 @@
 <section class="surface stack" data-testid="client-hero">
     <div class="toolbar">
         <div class="stack" style="gap: 10px;">
-            <h1 class="section-title">Личный кабинет клиента</h1>
+            <h1 class="section-title">Личный кабинет клиента МАНДАРИНКА</h1>
             <p class="section-subtitle">Обновляйте паспорт бренда, голос ассистента и каталоги. Изменения активируются сразу после сохранения.</p>
+            <div class="status-text muted">Версия клиентских настроек: {{ client_settings_version }}</div>
         </div>
         <div class="hint" style="min-width: 220px;">
             <div style="font-size:0.85rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em;">Tenant</div>
@@ -15,7 +16,6 @@
         </div>
     </div>
 </section>
-
 
 <section class="surface stack" data-testid="client-passport">
     <div class="stack" style="gap: 6px;">
@@ -35,122 +35,144 @@
             <span class="label">Город</span>
             <input name="city" value="{{ form.city }}" placeholder="Москва">
         </label>
+        <label>
+            <span class="label">Валюта</span>
+            <input name="currency" value="{{ form.currency }}" placeholder="₽">
+        </label>
+        <label>
+            <span class="label">Тональность</span>
+            <input name="tone" value="{{ form.tone }}" placeholder="Дружелюбная, помогает и поддерживает">
+        </label>
     </form>
     <div style="display:flex; flex-wrap:wrap; gap:12px;">
-        <button id="save-settings" type="button">Сохранить паспорт</button>
+        <button id="save-settings" type="button" class="btn">Сохранить паспорт</button>
         <span id="settings-message" class="status-text"></span>
     </div>
 </section>
 
-<section class="grid grid--two">
-    <div class="surface stack" data-testid="client-persona">
-        <div class="stack" style="gap: 6px;">
-            <h2 class="section-title" style="font-size:1.35rem;">Персона ассистента</h2>
-            <p class="section-subtitle">Опишите стиль общения, запреты и задачи. Чем подробнее, тем точнее ответы.</p>
-        </div>
-        <textarea id="persona-text">{{ persona }}</textarea>
-        <div style="display:flex; flex-wrap:wrap; gap:12px;">
-            <button id="save-persona" type="button" class="btn btn--secondary">Сохранить персону</button>
-            <button id="download-config" type="button" class="btn btn--secondary">Скачать JSON</button>
-            <span id="persona-message" class="status-text"></span>
-        </div>
+<section class="surface stack" data-testid="client-persona">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Персона</h2>
+        <p class="section-subtitle">Полноценное описание ассистента. Лучше дать 1–2 абзаца.</p>
     </div>
+    <textarea id="persona-text" rows="10" class="textarea" placeholder="Опишите голос, цели и стиль общения ассистента">{{ persona }}</textarea>
+    <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <button id="save-persona" type="button" class="btn">Сохранить</button>
+        <button id="download-config" type="button" class="btn btn--secondary">Скачать JSON конфиг</button>
+        <span id="persona-message" class="status-text"></span>
+    </div>
+</section>
 
-    <div class="surface stack" data-testid="client-catalog">
-        <div class="stack" style="gap: 6px;">
-            <h2 class="section-title" style="font-size:1.35rem;">Каталог товаров</h2>
-            <p class="section-subtitle">Загружайте CSV, Excel или PDF. Мы построим индекс и покажем CSV для тонкой настройки.</p>
-        </div>
-        <form id="upload-form" class="stack" style="gap:12px;" enctype="multipart/form-data">
-            <label class="grid" style="grid-template-columns: 1fr;">
-                <span class="label">Файл каталога</span>
-                <input type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
-            </label>
-            <div class="progress" id="upload-progress" hidden>
-                <div class="progress__bar" id="upload-progress-bar"></div>
-            </div>
-            <div style="display:flex; gap:12px; flex-wrap:wrap;">
-                <button type="submit" class="btn btn--secondary">Загрузить</button>
-                {% if form.catalog_file %}
-                <span class="badge tag-neutral">Последний файл: {{ form.catalog_file }}</span>
-                {% endif %}
-            </div>
+<section class="surface stack" data-testid="client-catalog">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Каталог: загрузка и CSV</h2>
+        <p class="section-subtitle">Загрузите CSV, XLS(X) или PDF. После PDF создадим CSV автоматически.</p>
+    </div>
+    <form id="upload-form"
+          class="stack"
+          style="gap: 12px;"
+          method="post"
+          enctype="multipart/form-data"
+          action="/client/{{ tenant.id }}/catalog/upload{% if key %}?k={{ key }}{% endif %}"
+          data-upload-url="/client/{{ tenant.id }}/catalog/upload{% if key %}?k={{ key }}{% endif %}">
+        <label class="stack" style="gap: 6px;">
+            <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
+            <input id="upload-file" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
+        </label>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+            <button class="btn" type="button" id="upload-submit" data-role="upload-submit">Загрузить</button>
             <span id="upload-message" class="status-text"></span>
-        </form>
-        <div class="hint">
-            <ul style="margin:0; padding-left: 18px; display:grid; gap: 8px;">
-                <li>PDF автоматически индексируется и конвертируется в CSV для правок.</li>
-                <li>Максимальный размер файла — 25 МБ. Для больших каталогов используйте ссылки.</li>
-                <li>После загрузки бот переключится на свежие данные без перезапуска.</li>
-            </ul>
+        </div>
+        <div id="upload-progress" class="progress" hidden>
+            <div id="upload-progress-bar" class="progress-bar" style="width:0;"></div>
+        </div>
+    </form>
+
+    <div class="surface stack" style="gap: 12px;">
+        <h3 class="section-title" style="font-size:1.1rem;">CSV редактор</h3>
+        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            <button class="btn btn--secondary" id="csv-refresh" type="button">Обновить данные</button>
+            <button class="btn btn--secondary" id="csv-add-row" type="button">Добавить строку</button>
+            <button class="btn" id="csv-save" type="button">Сохранить CSV</button>
+            <span id="csv-message" class="status-text"></span>
+        </div>
+        <div id="csv-container" class="surface" style="padding:0; overflow:auto;">
+            <div id="csv-empty" class="status-text">CSV ещё не готов — загрузите PDF или CSV файл</div>
+            <table id="csv-table" class="table" style="display:none;">
+                <thead></thead>
+                <tbody></tbody>
+            </table>
         </div>
     </div>
 </section>
 
-<section class="surface stack" data-testid="client-csv-editor">
-    <div class="stack" style="gap:6px;">
-        <h2 class="section-title" style="font-size:1.35rem;">Редактор каталога</h2>
-        <p class="section-subtitle">Правьте данные каталога прямо здесь — изменения сохраняются в CSV.</p>
-    </div>
-    <div id="csv-toolbar" style="display:flex; gap:12px; flex-wrap:wrap;">
-        <button id="csv-refresh" type="button" class="btn btn--secondary">Обновить данные</button>
-        <button id="csv-add-row" type="button" class="btn btn--secondary">Добавить строку</button>
-        <button id="csv-save" type="button">Сохранить CSV</button>
-        <span id="csv-message" class="status-text"></span>
-    </div>
-    <div id="csv-container" class="surface surface--muted" style="padding: 0; overflow:auto;">
-        <div id="csv-empty" class="table-empty">Загрузите PDF или CSV, чтобы редактировать данные каталога.</div>
-        <table id="csv-table" class="table" style="display:none;">
-            <thead></thead>
-            <tbody></tbody>
-        </table>
-    </div>
-</section>
-
-<section class="surface stack" data-testid="client-dialogs-training">
-    <div class="stack" style="gap:6px;">
+<section class="surface stack" data-testid="client-training">
+    <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Диалоги и обучение</h2>
-        <p class="section-subtitle">Загрузите собственные примеры или выгрузите недавние переписки из БД.</p>
+        <p class="section-subtitle">Добавляйте собственные примеры диалогов, чтобы ассистент отвечал по вашим сценариям.</p>
     </div>
 
-    <div class="grid grid--two" style="gap: 16px; align-items: start;">
-        <div class="surface stack" style="gap:12px;">
-            <h3 class="section-title" style="font-size:1.1rem;">Загрузка своих диалогов</h3>
-            <form id="training-upload-form" class="stack" style="gap:12px;" enctype="multipart/form-data">
-                <label class="grid" style="grid-template-columns: 1fr;">
-                    <span class="label">Файл (JSONL/JSON/CSV)</span>
-                    <input type="file" name="file" accept=".jsonl,.json,.csv" required>
-                </label>
-                <div style="display:flex; gap:12px; flex-wrap:wrap;">
-                    <button type="submit" class="btn btn--secondary">Загрузить диалоги</button>
-                    <button type="button" id="training-check-status" class="btn btn--secondary">Проверить статус</button>
-                </div>
-                <div id="training-status" class="status-text"></div>
-                <span id="training-upload-message" class="status-text"></span>
-            </form>
-        </div>
-
-        <div class="surface stack" style="gap:12px;">
-            <h3 class="section-title" style="font-size:1.1rem;">Экспорт переписок из БД</h3>
-            <div class="status-text">WhatsApp: ZIP с отдельными .txt по диалогу</div>
-            <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
-                <label class="grid" style="grid-template-columns: 1fr;">
-                    <span class="label">Дней назад</span>
-                    <input id="exp-days" type="number" value="30" min="0" step="1">
-                </label>
-                <label class="grid" style="grid-template-columns: 1fr;">
-                    <span class="label">Количество диалогов</span>
-                    <input id="exp-limit" type="number" value="200" min="1" step="1">
-                </label>
-            </div>
+    <div class="surface stack" style="gap:12px;">
+        <h3 class="section-title" style="font-size:1.1rem;">Загрузка своих диалогов</h3>
+        <form id="training-upload-form"
+              class="stack"
+              style="gap:12px;"
+              method="post"
+              enctype="multipart/form-data"
+              action="/client/{{ tenant.id }}/training/upload{% if key %}?k={{ key }}{% endif %}"
+              data-upload-url="/client/{{ tenant.id }}/training/upload{% if key %}?k={{ key }}{% endif %}">
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Файл (JSONL/JSON/CSV)</span>
+                <input id="training-upload-file" type="file" name="file" accept=".jsonl,.json,.csv" required>
+            </label>
             <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-                <button class="btn" id="export-download" type="button">Скачать архив</button>
-                <span id="export-status" class="status-text"></span>
+                <button type="submit" class="btn btn--secondary" id="training-upload-submit" data-role="training-upload-submit">Загрузить диалоги</button>
+                <button type="button" id="training-check-status" class="btn btn--secondary">Проверить статус</button>
+                <span id="training-upload-message" class="status-text"></span>
             </div>
+            <div id="training-status" class="status-text muted"></div>
+        </form>
+    </div>
+
+    <div class="surface stack" style="gap:12px;">
+        <h3 class="section-title" style="font-size:1.1rem;">Экспорт переписок из БД</h3>
+        <div class="status-text">WhatsApp: ZIP с отдельными .txt по диалогу</div>
+        <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Дней назад</span>
+                <input id="exp-days" type="number" value="30" min="0" step="1">
+            </label>
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Количество диалогов</span>
+                <input id="exp-limit" type="number" value="200" min="1" step="1">
+            </label>
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Сообщений на диалог</span>
+                <input id="exp-per" type="number" value="0" min="0" step="1">
+            </label>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+            <button class="btn" id="export-download" type="button">Скачать архив</button>
+            <span id="export-status" class="status-text"></span>
         </div>
     </div>
 </section>
 
-<script id="client-settings-state" type="application/json">{{ state_payload | tojson }}</script>
-<script src="{{ static_url(request, 'js/client-settings.js') }}" defer></script>
+{% set state_json = state | tojson %}
+<script id="client-settings-state" type="application/json">{{ state_json }}</script>
+<script>
+  window.state = {{ state_json }};
+</script>
+<script src="{{ static_url(request,'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
+<script>
+(function executeClientSettings(run) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run, { once: true });
+  } else {
+    run();
+  }
+})(function clientSettingsBundle() {
+{{ client_settings_js | safe }}
+});
+</script>
 {% endblock %}

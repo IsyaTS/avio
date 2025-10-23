@@ -1,5 +1,24 @@
+window.__cs_loaded = false;
+function getLocation() {
+  if (typeof globalThis !== 'undefined' && globalThis.location) {
+    return globalThis.location;
+  }
+  return {
+    origin: '',
+    protocol: '',
+    host: '',
+    hostname: '',
+    port: '',
+    pathname: '/',
+    href: '/',
+  };
+}
+
 try {
+  (function initClientSettings() {
   console.info('client-settings loaded');
+  window.__CATALOG_WIDGET_VERSION__ = '2025-02-05T18:30:00Z';
+  window.__client_settings_build = '20250205';
 
   window.__EXPORT_ERROR__ = undefined;
 
@@ -39,7 +58,8 @@ try {
   const determineTenant = (state, { fallbackDefault = true } = {}) => {
     let tenant = Number.parseInt(state && state.tenant, 10);
     if (!Number.isFinite(tenant) || tenant <= 0) {
-      const match = window.location.pathname.match(TENANT_PATH_REGEX);
+      const path = getLocation().pathname || '/';
+      const match = path.match(TENANT_PATH_REGEX);
       if (match && match[1]) {
         const parsed = Number.parseInt(match[1], 10);
         tenant = Number.isFinite(parsed) ? parsed : NaN;
@@ -69,13 +89,15 @@ try {
     const perInput = document.getElementById('exp-per');
 
     const resolveEndpoint = (raw) => {
-      const origin = window.location.origin;
+      const locationInfo = getLocation();
+      const origin = locationInfo.origin || '';
       try {
-        const url = new URL(raw || '/export/whatsapp', origin);
-        if (url.hostname !== window.location.hostname) {
-          url.hostname = window.location.hostname;
-          url.protocol = window.location.protocol;
-          url.port = window.location.port;
+        const url = new URL(raw || '/export/whatsapp', origin || undefined);
+        const targetHostname = locationInfo.hostname || '';
+        if (targetHostname && url.hostname !== targetHostname) {
+          url.hostname = targetHostname;
+          if (locationInfo.protocol) url.protocol = locationInfo.protocol;
+          if (locationInfo.port) url.port = locationInfo.port;
         }
         return url.toString();
       } catch (error) {
@@ -335,7 +357,8 @@ try {
   const extractVersion = (src) => {
     if (typeof src !== 'string' || !src) return 'unknown';
     try {
-      const url = new URL(src, window.location.origin);
+      const baseOrigin = getLocation().origin || undefined;
+      const url = new URL(src, baseOrigin);
       return url.searchParams.get('v') || 'unknown';
     } catch (error) {
       const match = src.match(/[?&]v=([^&]+)/);
@@ -356,7 +379,6 @@ try {
     const globalState = typeof window !== 'undefined' && window.state && typeof window.state === 'object' ? window.state : {};
     const hasDomState = domState && typeof domState === 'object' && Object.keys(domState).length > 0;
     const state = hasDomState ? domState : (globalState && typeof globalState === 'object' ? globalState : {});
-
     const tenant = determineTenant(state, { fallbackDefault: true });
     const accessKey = typeof state.key === 'string' ? state.key : '';
     const urls = state && typeof state === 'object' ? state.urls || {} : {};
@@ -366,7 +388,19 @@ try {
 
   function buildUrl(path, options = {}) {
     const { includeKey = true } = options || {};
-    const { origin, protocol, host, hostname, port } = window.location;
+    const locationInfo = getLocation();
+    let origin = locationInfo.origin || '';
+    if (!origin) {
+      try {
+        origin = new URL(locationInfo.href || '/', 'https://localhost').origin;
+      } catch (_) {
+        origin = 'https://localhost';
+      }
+    }
+    const protocol = locationInfo.protocol || '';
+    const host = locationInfo.host || '';
+    const hostname = locationInfo.hostname || '';
+    const port = locationInfo.port || '';
     let url;
     try {
       url = new URL(path, origin);
@@ -425,7 +459,9 @@ try {
     personaMessage: document.getElementById('persona-message'),
     downloadConfig: document.getElementById('download-config'),
     uploadForm: document.getElementById('upload-form'),
+    uploadInput: document.querySelector('#upload-form input[name="file"]'),
     uploadMessage: document.getElementById('upload-message'),
+    uploadSubmit: document.querySelector('#upload-form [data-role="upload-submit"], #upload-submit'),
     progress: document.getElementById('upload-progress'),
     progressBar: document.getElementById('upload-progress-bar'),
     csvTable: document.getElementById('csv-table'),
@@ -435,6 +471,8 @@ try {
     csvSave: document.getElementById('csv-save'),
     csvRefresh: document.getElementById('csv-refresh'),
     trainingUploadForm: document.getElementById('training-upload-form'),
+    trainingUploadInput: document.querySelector('#training-upload-form input[name="file"]'),
+    trainingUploadSubmit: document.querySelector('#training-upload-form [data-role="training-upload-submit"], #training-upload-submit'),
     trainingUploadMessage: document.getElementById('training-upload-message'),
     trainingCheckStatus: document.getElementById('training-check-status'),
     trainingStatus: document.getElementById('training-status'),
@@ -505,11 +543,12 @@ try {
 
   function buildTelegramTenantUrl(base, extraParams = {}) {
     if (!base) return '';
+    const locationInfo = getLocation();
     let url;
     try {
-      url = new URL(base, window.location.origin);
+      url = new URL(base, locationInfo.origin || 'https://localhost');
     } catch (error) {
-      url = new URL(base, window.location.href);
+      url = new URL(base, locationInfo.href || 'https://localhost');
     }
     const tenantId = tenant != null ? String(tenant).trim() : '';
     if (tenantId) {
@@ -529,9 +568,9 @@ try {
     if (!telegram.qrUrl || !qrId) return '';
     let url;
     try {
-      url = new URL(telegram.qrUrl, window.location.origin);
+      url = new URL(telegram.qrUrl, getLocation().origin || 'https://localhost');
     } catch (error) {
-      url = new URL(telegram.qrUrl, window.location.href);
+      url = new URL(telegram.qrUrl, getLocation().href || 'https://localhost');
     }
     url.searchParams.set('qr_id', qrId);
     if (accessKey) {
@@ -545,9 +584,9 @@ try {
     if (!telegram.qrTxtUrl || !qrId) return '';
     let url;
     try {
-      url = new URL(telegram.qrTxtUrl, window.location.origin);
+      url = new URL(telegram.qrTxtUrl, getLocation().origin || 'https://localhost');
     } catch (error) {
-      url = new URL(telegram.qrTxtUrl, window.location.href);
+      url = new URL(telegram.qrTxtUrl, getLocation().href || 'https://localhost');
     }
     url.searchParams.set('qr_id', qrId);
     if (accessKey) {
@@ -908,50 +947,110 @@ try {
     if (dom.progressBar) dom.progressBar.style.width = '0%';
   }
 
-  if (dom.uploadForm) {
+function performCatalogUpload(event) {
+  if (event) event.preventDefault();
+  if (!dom.uploadForm) return;
+  if (dom.uploadForm.dataset.state === 'uploading') return;
+
+  const file = dom.uploadInput && dom.uploadInput.files && dom.uploadInput.files[0];
+  if (!file) {
+    setStatus(dom.uploadMessage, 'Выберите файл перед загрузкой', 'alert');
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const targetUrlRaw = dom.uploadForm.dataset.uploadUrl || endpoints.uploadCatalog;
+  const targetUrl = buildUrl(targetUrlRaw, { includeKey: !String(targetUrlRaw || '').includes('k=') });
+
+  setStatus(dom.uploadMessage, `Загрузка ${file.name}...`, 'muted');
+  if (dom.progress) dom.progress.hidden = false;
+  if (dom.progressBar) dom.progressBar.style.width = '0%';
+  dom.uploadForm.dataset.state = 'uploading';
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', targetUrl);
+  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+  if (dom.uploadSubmit) dom.uploadSubmit.disabled = true;
+
+  xhr.upload.onprogress = (progressEvent) => {
+    if (!dom.progressBar || !progressEvent.lengthComputable) return;
+    const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
+    dom.progressBar.style.width = `${percent}%`;
+  };
+
+  xhr.onerror = () => {
+    resetProgress();
+    delete dom.uploadForm.dataset.state;
+    if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+    setStatus(dom.uploadMessage, 'Ошибка сети при загрузке файла', 'alert');
+  };
+
+  xhr.onload = async () => {
+    resetProgress();
+    delete dom.uploadForm.dataset.state;
+    if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+
+    try {
+      if (xhr.status >= 300 && xhr.status < 400) {
+        setStatus(dom.uploadMessage, 'Каталог принят, обновляем данные…', 'muted');
+        await loadCsv({ quiet: true });
+        setStatus(dom.uploadMessage, 'Каталог обновлён', 'muted');
+        if (dom.uploadInput) dom.uploadInput.value = '';
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const text = xhr.responseText || '';
+        throw new Error(text || `Ошибка загрузки (HTTP ${xhr.status})`);
+      }
+
+      const data = JSON.parse(xhr.responseText || '{}');
+      if (!data.ok) {
+        throw new Error(data.error || 'Не удалось загрузить файл');
+      }
+      setStatus(dom.uploadMessage, `Файл ${data.filename || file.name} загружен`, 'muted');
+      if (dom.uploadInput) dom.uploadInput.value = '';
+      await loadCsv({ quiet: true });
+    } catch (error) {
+      setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
+    }
+  };
+
+  try {
+    xhr.send(formData);
+  } catch (error) {
+    resetProgress();
+    delete dom.uploadForm.dataset.state;
+    if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+    setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
+  }
+}
+
+  function bindUploadWidget() {
+    if (!dom.uploadForm) return;
     dom.uploadForm.addEventListener('submit', (event) => {
       event.preventDefault();
-      const formData = new FormData(dom.uploadForm);
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', buildUrl(endpoints.uploadCatalog));
-
-      if (dom.progress) dom.progress.hidden = false;
-      if (dom.progressBar) dom.progressBar.style.width = '0%';
-
-      xhr.upload.onprogress = (progressEvent) => {
-        if (!dom.progressBar || !progressEvent.lengthComputable) return;
-        const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
-        dom.progressBar.style.width = `${percent}%`;
-      };
-
-      xhr.onerror = () => {
-        resetProgress();
-        setStatus(dom.uploadMessage, 'Ошибка сети при загрузке файла', 'alert');
-      };
-
-      xhr.onload = () => {
-        resetProgress();
-        try {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const data = JSON.parse(xhr.responseText || '{}');
-            if (!data.ok) {
-              throw new Error(data.error || 'Не удалось загрузить файл');
-            }
-            setStatus(dom.uploadMessage, `Файл ${data.filename} загружен`, 'muted');
-            dom.uploadForm.reset();
-            if (data.csv_path) {
-              loadCsv();
-            }
-          } else {
-            throw new Error(xhr.responseText || 'Ошибка загрузки');
-          }
-        } catch (error) {
-          setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
-        }
-      };
-
-      xhr.send(formData);
+      performCatalogUpload(event);
     });
+    if (dom.uploadSubmit) {
+      dom.uploadSubmit.addEventListener('click', (event) => {
+        event.preventDefault();
+        performCatalogUpload(event);
+      });
+    }
+    if (dom.uploadInput) {
+      dom.uploadInput.addEventListener('change', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const file = dom.uploadInput.files && dom.uploadInput.files[0];
+        if (file) {
+          setStatus(dom.uploadMessage, `Выбран файл ${file.name}`, 'muted');
+        }
+      });
+    }
   }
 
   // -------- Обучение: загрузка диалогов --------
@@ -982,39 +1081,80 @@ try {
 
   function bindTrainingUpload() {
     if (!dom.trainingUploadForm) return;
+
+    const sendTraining = async (event) => {
+      if (event) event.preventDefault();
+      if (dom.trainingUploadForm.dataset.state === 'uploading') return;
+      const file = dom.trainingUploadInput && dom.trainingUploadInput.files && dom.trainingUploadInput.files[0];
+      if (!file) {
+        setStatus(dom.trainingUploadMessage, 'Выберите файл перед загрузкой', 'alert');
+        return;
+      }
+      const formData = new FormData();
+      formData.append('file', file);
+      const targetUrlRaw = dom.trainingUploadForm.dataset.uploadUrl || endpoints.trainingUpload;
+      const targetUrl = buildUrl(targetUrlRaw, { includeKey: !String(targetUrlRaw || '').includes('k=') });
+      dom.trainingUploadForm.dataset.state = 'uploading';
+      try {
+        const response = await fetch(targetUrl, {
+          method: 'POST',
+          body: formData,
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            Accept: 'application/json, text/plain, */*',
+          },
+          redirect: 'manual',
+        });
+
+        if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+          setStatus(dom.trainingUploadMessage, 'Файл принят, обновляем статус…', 'muted');
+          await refreshTrainingStatus();
+          delete dom.trainingUploadForm.dataset.state;
+          return;
+        }
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || `Ошибка загрузки (HTTP ${response.status})`);
+        }
+
+        const data = await response.json();
+        if (!data.ok) throw new Error(data.error || 'Не удалось загрузить');
+        setStatus(dom.trainingUploadMessage, `Загружено примеров: ${data.pairs || ''}`, 'muted');
+        if (dom.trainingUploadInput) dom.trainingUploadInput.value = '';
+        await refreshTrainingStatus();
+      } catch (error) {
+        setStatus(dom.trainingUploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
+      } finally {
+        delete dom.trainingUploadForm.dataset.state;
+      }
+    };
+
     dom.trainingUploadForm.addEventListener('submit', (event) => {
       event.preventDefault();
-      const formData = new FormData(dom.trainingUploadForm);
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', buildUrl(endpoints.trainingUpload));
-      xhr.onerror = () => {
-        setStatus(dom.trainingUploadMessage, 'Ошибка сети при загрузке', 'alert');
-      };
-      xhr.onload = () => {
-        try {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const data = JSON.parse(xhr.responseText || '{}');
-            if (!data.ok) throw new Error(data.error || 'Не удалось загрузить');
-            setStatus(dom.trainingUploadMessage, `Загружено примеров: ${data.pairs || ''}`, 'muted');
-            dom.trainingUploadForm.reset();
-            refreshTrainingStatus();
-          } else {
-            throw new Error(xhr.responseText || 'Ошибка загрузки');
-          }
-        } catch (error) {
-          setStatus(dom.trainingUploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
-        }
-      };
-      xhr.send(formData);
+      sendTraining(event);
     });
+    if (dom.trainingUploadSubmit) {
+      dom.trainingUploadSubmit.addEventListener('click', (event) => {
+        event.preventDefault();
+        sendTraining(event);
+      });
+    }
+    if (dom.trainingUploadInput) {
+      dom.trainingUploadInput.addEventListener('change', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const file = dom.trainingUploadInput.files && dom.trainingUploadInput.files[0];
+        if (file) {
+          setStatus(dom.trainingUploadMessage, `Выбран файл ${file.name}`, 'muted');
+        }
+      });
+    }
   }
 
   if (dom.trainingCheckStatus) {
     dom.trainingCheckStatus.addEventListener('click', refreshTrainingStatus);
   }
-
-  bindTrainingUpload();
-  refreshTrainingStatus();
 
   if (dom.expDays) {
     dom.expDays.setAttribute('max', String(maxDays));
@@ -1055,6 +1195,7 @@ try {
 
     if (!csvState.columns.length) {
       ensureTableVisible(false);
+      updateCsvControls();
       return;
     }
 
@@ -1507,9 +1648,21 @@ try {
     dom.tgPasswordForm.addEventListener('submit', (event) => submitTelegramPassword(event));
   }
 
-  refreshTelegramStatus();
+  function bootstrapClientSettings() {
+    bindExportClicks();
+    bindUploadWidget();
+    bindTrainingUpload();
+    loadCsv({ quiet: true });
+    refreshTrainingStatus();
+    refreshTelegramStatus();
+    window.__cs_loaded = true;
+  }
 
-  bindExportClicks();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrapClientSettings, { once: true });
+  } else {
+    bootstrapClientSettings();
+  }
 })();
 } catch (error) {
   window.__EXPORT_ERROR__ = error;

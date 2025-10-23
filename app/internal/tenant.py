@@ -38,11 +38,22 @@ async def ensure_tenant(tenant: int, request: Request) -> JSONResponse:
 
     token_header = (request.headers.get("X-Auth-Token") or "").strip()
     token_query = (request.query_params.get("token") or "").strip()
-    allowed = (
-        (settings.WEBHOOK_SECRET or "").strip()
-        or (os.getenv("WA_WEB_TOKEN") or "").strip()
-    )
-    if allowed and token_header != allowed and token_query != allowed:
+
+    def _clean(value: object) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    candidates = [
+        _clean(getattr(settings, "WEBHOOK_SECRET", "")),
+        _clean(os.getenv("WA_WEB_TOKEN")),
+        _clean(getattr(settings, "ADMIN_TOKEN", "")),
+        _clean(os.getenv("ADMIN_TOKEN")),
+    ]
+    allowed_tokens = {value for value in candidates if value}
+    if allowed_tokens and token_header not in allowed_tokens and token_query not in allowed_tokens:
         INTERNAL_TENANT_COUNTER.labels("unauthorized").inc()
         raise HTTPException(status_code=401, detail="unauthorized")
 

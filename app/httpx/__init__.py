@@ -1,55 +1,43 @@
-"""Minimal httpx shim providing AsyncClient and Response."""
+"""httpx wrapper enforcing application defaults."""
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any, Dict, Optional
+import httpx as _httpx
+
+DEFAULT_TIMEOUT = _httpx.Timeout(connect=2.0, read=10.0, write=10.0, pool=10.0)
+DEFAULT_RETRIES = 2
 
 
-class HTTPError(Exception):
-    pass
+class _PatchedAsyncClient(_httpx.AsyncClient):
+    def __init__(self, *args, timeout: _httpx.Timeout | float | None = None, transport: _httpx.AsyncHTTPTransport | None = None, **kwargs) -> None:
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT
+        if transport is None and DEFAULT_RETRIES > 0:
+            transport = _httpx.AsyncHTTPTransport(retries=DEFAULT_RETRIES)
+        super().__init__(*args, timeout=timeout, transport=transport, **kwargs)
 
 
-class HTTPStatusError(HTTPError):
-    def __init__(self, message: str, response: "Response") -> None:
-        super().__init__(message)
-        self.response = response
+# Monkey patch the globally imported httpx.AsyncClient so any "import httpx"
+# consumers automatically inherit the sane defaults defined above.
+_httpx.AsyncClient = _PatchedAsyncClient  # type: ignore[assignment]
 
-
-class Response:
-    def __init__(self, status_code: int = 200, json_data: Optional[Dict[str, Any]] = None, text: str | None = None) -> None:
-        self.status_code = int(status_code)
-        self._json = json_data or {}
-        if text is None and json_data is not None:
-            import json
-
-            text = json.dumps(json_data, ensure_ascii=False)
-        self.text = text or ""
-        self.content = self.text.encode("utf-8")
-
-    def json(self) -> Dict[str, Any]:
-        return dict(self._json)
-
-
-class AsyncClient:
-    def __init__(self, timeout: float = 5.0) -> None:
-        self.timeout = timeout
-
-    async def __aenter__(self) -> "AsyncClient":
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - no cleanup required
-        return None
-
-    async def post(self, url: str, json: Any | None = None, headers: Dict[str, Any] | None = None) -> Response:
-        # Return a basic success response. Tests typically monkeypatch this client
-        # when they need to simulate errors.
-        return Response(status_code=200, json_data={"ok": True})
+# Re-export frequently used symbols for convenience.
+AsyncClient = _PatchedAsyncClient
+Timeout = _httpx.Timeout
+Response = _httpx.Response
+HTTPError = _httpx.HTTPError
+HTTPStatusError = _httpx.HTTPStatusError
+RequestError = _httpx.RequestError
+TimeoutException = _httpx.TimeoutException
 
 
 __all__ = [
     "AsyncClient",
+    "Timeout",
     "Response",
     "HTTPError",
     "HTTPStatusError",
+    "RequestError",
+    "TimeoutException",
+    "DEFAULT_TIMEOUT",
 ]

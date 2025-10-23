@@ -64,6 +64,7 @@ _LOG_PREFIX = "[training]"
 _wa_log = logging.getLogger("wa_export")
 
 _CLIENT_SETTINGS_VERSION: str | None = None
+_CLIENT_SETTINGS_JS: str | None = None
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB safety cap for catalog uploads
 
@@ -99,6 +100,11 @@ def _client_settings_static_version() -> str:
     if _CLIENT_SETTINGS_VERSION:
         return _CLIENT_SETTINGS_VERSION
 
+    build_rev = (os.getenv("BUILD_REV") or os.getenv("CLIENT_SETTINGS_VERSION") or "").strip()
+    if build_rev:
+        _CLIENT_SETTINGS_VERSION = build_rev
+        return _CLIENT_SETTINGS_VERSION
+
     for env_name in ("APP_GIT_SHA", "GIT_SHA", "HEROKU_SLUG_COMMIT"):
         value = (os.getenv(env_name) or "").strip()
         if value:
@@ -116,6 +122,25 @@ def _client_settings_static_version() -> str:
     except Exception:
         _CLIENT_SETTINGS_VERSION = str(int(time.time()))
     return _CLIENT_SETTINGS_VERSION
+
+
+def _load_client_settings_js() -> str:
+    global _CLIENT_SETTINGS_JS
+    if _CLIENT_SETTINGS_JS is not None:
+        return _CLIENT_SETTINGS_JS
+
+    bundle_path = (
+        pathlib.Path(__file__).resolve().parents[1] / "static" / "js" / "client-settings.js"
+    )
+    try:
+        _CLIENT_SETTINGS_JS = bundle_path.read_text("utf-8")
+    except Exception as exc:
+        try:
+            _log.warning("Failed to read client-settings.js bundle: %s", exc)
+        except Exception:
+            pass
+        _CLIENT_SETTINGS_JS = ""
+    return _CLIENT_SETTINGS_JS
 
 
 class WhatsAppExportPayload(BaseModel):
@@ -349,8 +374,22 @@ def client_settings(tenant: int, request: Request):
         "primary_key": primary_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": _client_settings_static_version(),
+        "client_settings_js": _load_client_settings_js(),
     }
-    return templates.TemplateResponse("client/settings.html", context)
+    response = templates.TemplateResponse("client/settings.html", context)
+    response.headers["Cache-Control"] = "no-store"
+    if key:
+        try:
+            response.set_cookie(
+                "client_key",
+                key,
+                max_age=14 * 24 * 3600,
+                httponly=True,
+                samesite="lax",
+            )
+        except Exception:
+            pass
+    return response
 
 
 @router.post("/client/{tenant}/settings/save")
@@ -527,23 +566,6 @@ async def catalog_upload(tenant: int, request: Request, file: UploadFile = File(
     C.write_tenant_config(tenant, cfg)
 
     # HTML form fallback: redirect back to settings
-    accept_header = (request.headers.get("accept") or "").lower()
-    sec_fetch_mode = (request.headers.get("sec-fetch-mode") or "").lower()
-    sec_fetch_dest = (request.headers.get("sec-fetch-dest") or "").lower()
-    wants_html = (
-        "text/html" in accept_header
-        or "application/xhtml+xml" in accept_header
-        or sec_fetch_mode == "navigate"
-        or sec_fetch_dest == "document"
-    )
-    if wants_html and (request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"):
-        wants_html = False
-    if wants_html:
-        redirect_url = request.url_for("client_settings", tenant=tenant)
-        if key:
-            redirect_url = f"{redirect_url}?k={quote_plus(key)}"
-        return RedirectResponse(url=redirect_url, status_code=303)
-
     return {
         "ok": True,
         "filename": filename,
@@ -649,14 +671,6 @@ async def training_upload(tenant: int, request: Request, file: UploadFile = File
         "original": filename,
     }
     C.write_tenant_config(tenant, cfg)
-
-    accept_header = (request.headers.get("accept") or "").lower()
-    wants_html = ("text/html" in accept_header)
-    if wants_html:
-        redirect_url = request.url_for("client_settings", tenant=tenant)
-        if key:
-            redirect_url = f"{redirect_url}?k={quote_plus(key)}"
-        return RedirectResponse(url=redirect_url, status_code=303)
 
     took = time.time() - started_at
     _log.info(f"{_LOG_PREFIX} upload complete tenant=%s pairs=%s index=%s took=%.3fs", tenant, len(index.items), str(index_path), took)

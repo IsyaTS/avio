@@ -1,6 +1,0 @@
-id,title,price,brand,category,color,material,stock,url,tags,description
-P-101,Настольная лампа Classic,10900,HomeLine,освещение,белый,металл,15,https://example.com/lamp-classic,хит,"Белая лампа с мягким светом"
-P-110,Офисный стул Nord,23900,NordTools,мебель,антрацит,ткань,8,https://example.com/chair-nord,топ,"Эргономичная спинка и регулировка высоты"
-P-205,Полка Loft 100,16900,LoftPro,хранение,чёрный,сталь,12,https://example.com/shelf-loft,новинка,"Комплект крепежа и направляющих для полок"
-P-230,Шкаф со стеклом Aura,18900,Aura,мебель,дуб,массив,10,https://example.com/cabinet-aura,склад,"Вставка из закалённого стекла, мягкое закрывание"
-P-320,Набор крепежа Premium,5900,Ferro,аксессуары,никель,металл,30,https://example.com/premium-kit,,"Винты, анкеры и уголки в одном наборе"
