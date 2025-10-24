@@ -111,8 +111,10 @@ def test_client_settings_template_includes_scripts_in_order(monkeypatch):
 
     html = response.text
     boot_tag = "/static/js/boot.js?v=v-test"
+    catalog_tag = "/static/js/catalog-upload.js?v=v-test"
     settings_tag = "/static/js/client-settings.js?v=v-test"
 
     assert boot_tag in html
+    assert catalog_tag in html
     assert settings_tag in html
-    assert html.index(boot_tag) < html.index(settings_tag)
+    assert html.index(boot_tag) < html.index(catalog_tag) < html.index(settings_tag)
