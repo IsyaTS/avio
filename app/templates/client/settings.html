@@ -83,15 +83,12 @@
             <input id="catalogFile" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
         </label>
         <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
-            <button class="btn" type="submit" id="uploadBtn">Загрузить</button>
-            <span id="catalogResult" class="status-text"></span>
+            <button class="btn" type="button" id="catalogUploadBtn">Загрузить</button>
         </div>
-        <div id="catalogProgress" class="stack" style="gap:6px;" hidden>
-            <div class="progress">
-                <div class="progress-bar" style="width:0;"></div>
-            </div>
-            <div class="status-text muted"></div>
+        <div id="catalogUploadProgress" class="progress" hidden>
+            <div id="catalogUploadProgressBar" class="progress-bar" style="width:0%;"></div>
         </div>
+        <div id="catalogUploadStatus" class="status-text"></div>
     </form>
 
     <div class="surface stack" style="gap: 12px;">

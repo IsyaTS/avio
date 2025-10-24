@@ -3478,6 +3478,10 @@ def _sanitize_catalog_status_public(payload: Any) -> Any:
             normalized = key_str.lower()
             if "path" in normalized and normalized not in allowed_path_keys:
                 continue
+            if normalized == "log" and isinstance(value, list):
+                trimmed = value[-50:]
+                sanitized[key] = [_sanitize_catalog_status_public(item) for item in trimmed]
+                continue
             sanitized[key] = _sanitize_catalog_status_public(value)
         return sanitized
     if isinstance(payload, list):
