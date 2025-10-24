@@ -44,6 +44,96 @@ curl -X POST "https://api.avio.website/pub/tg/2fa?k=${PUBLIC_KEY}" \
   -d '{"tenant": 1, "password": "<2FA>"}'
 ```
 
+## Загрузка PDF каталога
+
+### Эндпоинт
+`POST /pub/catalog/upload?k=<PUBLIC_KEY>&tenant=<TENANT>`
+
+- Формат: `multipart/form-data`
+- Поле файла: **file**  *(также принимается `catalog`, но используйте `file`)*
+- Допустимые расширения: `.pdf`, `.csv`, `.xlsx`, `.xls`
+- Лимит размера: см. `MAX_UPLOAD_SIZE_BYTES` в коде
+
+### Пример cURL
+```bash
+curl -F "file=@/path/to/catalog.pdf;type=application/pdf" \
+  "https://api.avio.website/pub/catalog/upload?k=YOUR_PUBLIC_KEY&tenant=1"
+
+
+Успешный ответ:
+
+{ "ok": true, "job_id": "<uuid>", "state": "queued" }
+
+Что делает бэкенд
+
+Сохраняет загруженный файл:
+/data/tenants/<TENANT>/uploads/<safe_name>.pdf
+
+Создаёт CSV из PDF:
+/data/tenants/<TENANT>/catalogs/<base_name>.csv
+
+Пишет статус джобы:
+/data/tenants/<TENANT>/catalog_jobs/<job_id>/status.json
+
+Обновляет конфиг арендатора:
+/data/tenants/<TENANT>/tenant.json → integrations.uploaded_catalog
+Поля: path, original, uploaded_at, type, size, mime, csv_path, pipeline, index
+
+Публичные настройки для фронтенда
+
+GET /pub/settings/get?k=<PUBLIC_KEY>&tenant=<TENANT>
+
+Ответ содержит:
+
+{ "ok": true, "cfg": { "integrations": { "uploaded_catalog": { ... } }, ... } }
+
+
+Фронтенд читает cfg.integrations.uploaded_catalog.
+После загрузки PDF поле заполнится, а путь к CSV будет в csv_path.
+
+Ошибки
+
+401 {"detail":"invalid_key"} — неверный ключ
+
+400 {"ok":false,"error":"empty_file"} — пустой файл
+
+400 {"ok":false,"error":"unsupported_type"} — неподдерживаемое расширение
+
+400 {"ok":false,"error":"file_too_large","max_size_bytes":...}
+
+422 {"ok":false,"error":"invalid_payload","reason":"invalid_tenant|missing_file"}
+
+Минимальный пример JS-загрузки
+<input id="catFile" type="file" accept=".pdf,.csv,.xlsx,.xls">
+<button id="uploadBtn">Загрузить</button>
+<progress id="catProgress" max="100" value="0" style="width:100%"></progress>
+<pre id="catStatus"></pre>
+<script>
+(() => {
+  const pub = window.CLIENT_SETTINGS?.public_key;
+  const ten = window.CLIENT_SETTINGS?.tenant || 1;
+  const url = `https://api.avio.website/pub/catalog/upload?k=${pub}&tenant=${ten}`;
+  const $f = document.getElementById('catFile');
+  const $b = document.getElementById('uploadBtn');
+  const $p = document.getElementById('catProgress');
+  const $s = document.getElementById('catStatus');
+
+  $b.addEventListener('click', async () => {
+    if (!$f.files[0]) { $s.textContent = 'Выберите файл'; return; }
+    $p.value = 0; $s.textContent = 'Загрузка...';
+    const fd = new FormData(); fd.append('file', $f.files[0]);
+    const r = await fetch(url, { method: 'POST', body: fd });
+    const t = await r.text(); $s.textContent = t;
+    try {
+      const j = JSON.parse(t);
+      if (j.ok) $s.textContent = `Принято. job_id=${j.job_id}`;
+    } catch {}
+    $p.value = 100;
+    // После завершения фронтенд перечитывает /pub/settings/get и берёт cfg.integrations.uploaded_catalog
+  });
+})();
+</script>
+
 ### Переменные окружения tgworker
 
 | Переменная | Назначение |
