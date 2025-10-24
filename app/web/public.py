@@ -86,8 +86,10 @@ except ImportError:  # pragma: no cover - fallback when module alias missing
         from app.web import webhooks as webhook_module  # type: ignore
     except ImportError:
         webhook_module = None  # type: ignore[assignment]
-from .ui import render_template
+from .ui import render_template, templates as _templates
 from .webhooks import router as webhook_router, process_incoming
+
+templates = _templates
 
 logger = logging.getLogger(__name__)
 wa_logger = logging.getLogger("wa")
