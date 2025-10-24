@@ -3544,4 +3544,11 @@ def catalog_status_public(
     sanitized = _sanitize_catalog_status_public(data)
     sanitized["ok"] = True
     sanitized.setdefault("job_id", safe_job)
+    sanitized.setdefault("state", str(data.get("state", "") or ""))
+    if "error" not in sanitized:
+        sanitized["error"] = data.get("error")
+    if "message" not in sanitized:
+        sanitized["message"] = data.get("message")
+    if "updated_at" not in sanitized:
+        sanitized["updated_at"] = data.get("updated_at")
     return JSONResponse(sanitized)

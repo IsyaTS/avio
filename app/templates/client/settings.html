@@ -71,13 +71,9 @@
     {% set tenant_id = state.tenant if state is defined and state.tenant is not none else (tenant.id if tenant is mapping else tenant) %}
     {% set upload_public_key = public_key if public_key is defined and public_key else (key if key else '') %}
     {% set upload_tenant = tenant_id if tenant_id is not none else tenant %}
-    {% set upload_query = 'k=' ~ (upload_public_key | urlencode) ~ '&tenant=' ~ (("%s" % upload_tenant) | urlencode) %}
     <form id="catalogForm"
           class="stack"
-          style="gap: 12px;"
-          method="post"
-          enctype="multipart/form-data"
-          action="/pub/catalog/upload?{{ upload_query }}">
+          style="gap: 12px;">
         <label class="stack" style="gap: 6px;">
             <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
             <input id="catalogFile" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
@@ -85,10 +81,8 @@
         <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
             <button class="btn" type="button" id="catalogUploadBtn">Загрузить</button>
         </div>
-        <div id="catalogUploadProgress" class="progress" hidden>
-            <div id="catalogUploadProgressBar" class="progress-bar" style="width:0%;"></div>
-        </div>
-        <div id="catalogUploadStatus" class="status-text"></div>
+        <div id="catalogUploadProgress" style="display:none"><div id="catalogUploadProgressBar" style="width:0%"></div></div>
+        <div id="catalogUploadStatus"></div>
     </form>
 
     <div class="surface stack" style="gap: 12px;">
@@ -171,6 +165,6 @@
     webhook_secret: {{ (webhook_secret | default('', true)) | tojson }}
   });
 </script>
-<script src="{{ static_url(request, 'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
-<script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>
+<script src="{{ static_url(request, 'js/boot.js') }}?v={{ ASSET_VERSION }}" defer></script>
+<script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ ASSET_VERSION }}" defer></script>
 {% endblock %}
