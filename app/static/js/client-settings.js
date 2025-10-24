@@ -1168,7 +1168,7 @@ try {
       dom.catalogUploadProgressBar.style.width = '0%';
     }
     if (dom.catalogUploadProgress) {
-      dom.catalogUploadProgress.hidden = true;
+      dom.catalogUploadProgress.style.display = 'none';
     }
   }
 
@@ -1176,7 +1176,7 @@ try {
     if (!dom.catalogUploadProgress || !dom.catalogUploadProgressBar) return;
     const numeric = Number(percent);
     const bounded = Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
-    dom.catalogUploadProgress.hidden = false;
+    dom.catalogUploadProgress.style.display = 'block';
     dom.catalogUploadProgressBar.style.width = `${bounded}%`;
   }
 
@@ -1566,7 +1566,7 @@ try {
     stopCatalogStatusPolling({ reset: true });
     disableCatalogUploadButton(true);
     updateCatalogProgress(0);
-    setCatalogStatus('Загрузка…', 'muted');
+    setCatalogStatus('Загрузка 0%', 'muted');
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', uploadUrl, true);
@@ -1578,7 +1578,7 @@ try {
       }
       if (!progressEvent.lengthComputable) {
         updateCatalogProgress(10);
-        setCatalogStatus('Загрузка…', 'muted');
+        setCatalogStatus('Загрузка 0%', 'muted');
         return;
       }
       const percent = progressEvent.total > 0
@@ -1632,8 +1632,13 @@ try {
 
       updateCatalogProgress(100);
       const context = { tenant: tenantValue, publicKey, webhookSecret };
+      const finishUploadPhase = () => {
+        catalogUploadInFlight = false;
+        disableCatalogUploadButton(false);
+      };
 
       if (responseData.job_id) {
+        finishUploadPhase();
         setCatalogStatus('Файл принят. Обработка…', 'muted');
         startCatalogStatusPolling(String(responseData.job_id), context);
         if (dom.uploadInput) {
@@ -1642,6 +1647,7 @@ try {
         return;
       }
 
+      finishUploadPhase();
       stopCatalogStatusPolling();
       handleCatalogCompleted(context, responseData);
       return;
@@ -1654,15 +1660,7 @@ try {
     }
   }
 
-  function bindCatalogForm() {
-    if (dom.catalogForm) {
-      dom.catalogForm.addEventListener('submit', (event) => {
-        if (event && typeof event.preventDefault === 'function') {
-          event.preventDefault();
-        }
-        performCatalogUpload(event);
-      });
-    }
+  function bindCatalogUpload() {
     if (dom.catalogUploadButton) {
       dom.catalogUploadButton.addEventListener('click', (event) => {
         if (event && typeof event.preventDefault === 'function') {
@@ -2297,7 +2295,7 @@ try {
 
   function bootstrapClientSettings() {
     bindExportClicks();
-    bindCatalogForm();
+    bindCatalogUpload();
     bindTrainingUpload();
     loadCsv({ quiet: true });
     refreshTrainingStatus();
