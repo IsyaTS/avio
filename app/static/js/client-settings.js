@@ -670,11 +670,10 @@ try {
     downloadConfig: document.getElementById('download-config'),
     catalogForm: document.getElementById('catalogForm'),
     uploadInput: document.getElementById('catalogFile'),
-    uploadMessage: document.getElementById('catalogResult'),
-    uploadSubmit: document.getElementById('uploadBtn'),
-    progress: document.getElementById('catalogProgress'),
-    progressBar: document.querySelector('#catalogProgress .progress-bar'),
-    progressText: document.querySelector('#catalogProgress .status-text'),
+    catalogUploadButton: document.getElementById('catalogUploadBtn'),
+    catalogUploadStatus: document.getElementById('catalogUploadStatus'),
+    catalogUploadProgress: document.getElementById('catalogUploadProgress'),
+    catalogUploadProgressBar: document.getElementById('catalogUploadProgressBar'),
     csvTable: document.getElementById('csv-table'),
     csvEmpty: document.getElementById('csv-empty'),
     csvMessage: document.getElementById('csv-message'),
@@ -1159,12 +1158,46 @@ try {
     });
   }
 
-  function resetProgress() {
-    if (dom.progress) dom.progress.hidden = true;
-    if (dom.progressBar) dom.progressBar.style.width = '0%';
-    if (dom.progressText) {
-      dom.progressText.className = 'status-text muted';
-      dom.progressText.textContent = '';
+  function disableCatalogUploadButton(disabled) {
+    if (!dom.catalogUploadButton) return;
+    dom.catalogUploadButton.disabled = Boolean(disabled);
+  }
+
+  function resetCatalogUploadUi() {
+    if (dom.catalogUploadProgressBar) {
+      dom.catalogUploadProgressBar.style.width = '0%';
+    }
+    if (dom.catalogUploadProgress) {
+      dom.catalogUploadProgress.hidden = true;
+    }
+  }
+
+  function updateCatalogProgress(percent) {
+    if (!dom.catalogUploadProgress || !dom.catalogUploadProgressBar) return;
+    const numeric = Number(percent);
+    const bounded = Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
+    dom.catalogUploadProgress.hidden = false;
+    dom.catalogUploadProgressBar.style.width = `${bounded}%`;
+  }
+
+  function setCatalogStatus(message, variant = 'muted', options = {}) {
+    if (!dom.catalogUploadStatus) return;
+    const link = options && options.link ? options.link : null;
+    dom.catalogUploadStatus.className = `status-text ${variant}`.trim();
+    dom.catalogUploadStatus.textContent = '';
+    if (message) {
+      dom.catalogUploadStatus.appendChild(document.createTextNode(message));
+    }
+    if (link && link.href) {
+      if (message) {
+        dom.catalogUploadStatus.appendChild(document.createTextNode(' '));
+      }
+      const anchor = document.createElement('a');
+      anchor.href = link.href;
+      anchor.textContent = link.label || link.href;
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+      dom.catalogUploadStatus.appendChild(anchor);
     }
   }
 
@@ -1176,40 +1209,7 @@ try {
     }
     catalogStatusContext = null;
     if (reset) {
-      resetProgress();
-    }
-  }
-
-  function setUploadMessage(message, variant = 'muted', options = {}) {
-    if (!dom.uploadMessage) return;
-    const link = options && options.link ? options.link : null;
-    dom.uploadMessage.className = `status-text ${variant}`.trim();
-    dom.uploadMessage.textContent = '';
-    if (message) {
-      dom.uploadMessage.appendChild(document.createTextNode(message));
-    }
-    if (link && link.href) {
-      if (message) {
-        dom.uploadMessage.appendChild(document.createTextNode(' '));
-      }
-      const anchor = document.createElement('a');
-      anchor.href = link.href;
-      anchor.textContent = link.label || link.href;
-      anchor.target = '_blank';
-      anchor.rel = 'noopener noreferrer';
-      dom.uploadMessage.appendChild(anchor);
-    }
-  }
-
-  function showProgressMessage(text, variant = 'muted') {
-    if (!dom.progress) return;
-    dom.progress.hidden = false;
-    if (dom.progressBar) {
-      dom.progressBar.style.width = '100%';
-    }
-    if (dom.progressText) {
-      dom.progressText.textContent = text || '';
-      dom.progressText.className = `status-text ${variant}`.trim();
+      resetCatalogUploadUi();
     }
   }
 
@@ -1262,6 +1262,23 @@ try {
     return url.toString();
   }
 
+  function buildCatalogStatusUrl(jobId, context) {
+    if (!jobId || !context || !context.publicKey || !context.tenant) {
+      return '';
+    }
+    const locationInfo = getLocation();
+    let url;
+    try {
+      url = new URL('/pub/catalog/status', locationInfo.origin || 'https://localhost');
+    } catch (error) {
+      url = new URL('/pub/catalog/status', locationInfo.href || 'https://localhost');
+    }
+    url.searchParams.set('k', context.publicKey);
+    url.searchParams.set('tenant', String(context.tenant));
+    url.searchParams.set('job', String(jobId));
+    return url.toString();
+  }
+
   function buildInternalFileUrl(pathValue, context) {
     if (!context || !context.tenant || !context.webhookSecret) return '';
     const safePath = typeof pathValue === 'string' ? pathValue.replace(/\\/g, '/') : '';
@@ -1277,31 +1294,6 @@ try {
     url.searchParams.set('path', safePath);
     url.searchParams.set('token', context.webhookSecret);
     return url.toString();
-  }
-
-  function buildInternalStatusUrl(jobId, context) {
-    if (!jobId || !context || !context.webhookSecret) return '';
-    return buildInternalFileUrl(`catalog_jobs/${jobId}/status.json`, context);
-  }
-
-  async function fetchInternalCatalogStatus(jobId, context) {
-    const url = buildInternalStatusUrl(jobId, context);
-    if (!url) {
-      throw new Error('status_url_unavailable');
-    }
-    const response = await fetch(url, { cache: 'no-store' });
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      const text = (await response.text()) || '';
-      throw new Error(text || `HTTP ${response.status}`);
-    }
-    try {
-      return await response.json();
-    } catch (error) {
-      throw new Error('invalid_status_payload');
-    }
   }
 
   async function refreshSettingsSnapshot(context) {
@@ -1321,40 +1313,38 @@ try {
   }
 
   function handleCatalogStatusPayload(payload, context) {
-    const state = typeof payload.state === 'string' ? payload.state.toLowerCase() : '';
-    if (!state) {
+    const stateRaw = typeof payload.state === 'string' ? payload.state.toLowerCase() : '';
+    if (!stateRaw) {
       scheduleCatalogStatusPoll();
       return;
     }
-    if (state === 'done') {
+    if (stateRaw === 'done') {
       stopCatalogStatusPolling();
-      catalogUploadInFlight = false;
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-      if (dom.uploadInput) dom.uploadInput.value = '';
-      const csvPath = payload.csv_path || (payload.result && payload.result.csv_path) || '';
-      if (csvPath && context && context.webhookSecret) {
-        const link = buildInternalFileUrl(csvPath, context);
-        setUploadMessage('Каталог обновлён.', 'success', { link: { href: link, label: 'Скачать CSV' } });
-      } else {
-        setUploadMessage('Каталог обновлён.', 'success');
-      }
-      resetProgress();
-      loadCsv({ quiet: true });
+      updateCatalogProgress(100);
+      handleCatalogCompleted(context, payload);
       return;
     }
-    if (state === 'failed') {
+    if (stateRaw === 'failed') {
       stopCatalogStatusPolling();
       catalogUploadInFlight = false;
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      disableCatalogUploadButton(false);
       const message = payload.error || payload.message || 'Ошибка обработки каталога';
-      setUploadMessage(`Ошибка: ${message}`, 'alert');
-      resetProgress();
+      setCatalogStatus(`Ошибка: ${message}`, 'alert');
+      resetCatalogUploadUi();
       return;
     }
-    setUploadMessage('Каталог принят. Идёт обработка.', 'muted');
-    const humanState = describeCatalogState(state);
-    const progressText = payload.updated_at ? `Статус: ${humanState} · обновлено ${formatCatalogTimestamp(payload.updated_at)}` : `Статус: ${humanState}`;
-    showProgressMessage(progressText, 'muted');
+    updateCatalogProgress(100);
+    const details = [];
+    const humanState = describeCatalogState(stateRaw || payload.state || '');
+    if (humanState) {
+      details.push(humanState);
+    }
+    const formattedTs = formatCatalogTimestamp(payload.updated_at);
+    if (formattedTs) {
+      details.push(`обновлено ${formattedTs}`);
+    }
+    const suffix = details.length ? ` (${details.join(' · ')})` : '';
+    setCatalogStatus(`Идёт обработка…${suffix}`, 'muted');
     scheduleCatalogStatusPoll();
   }
 
@@ -1390,6 +1380,87 @@ try {
     }
   }
 
+  function extractUploadedCatalogMeta(settings) {
+    if (!settings || typeof settings !== 'object') {
+      return null;
+    }
+    const cfg = settings.cfg && typeof settings.cfg === 'object' ? settings.cfg : {};
+    const integrations = cfg.integrations && typeof cfg.integrations === 'object' ? cfg.integrations : {};
+    if (integrations.uploaded_catalog && typeof integrations.uploaded_catalog === 'object') {
+      return integrations.uploaded_catalog;
+    }
+    const catalogs = Array.isArray(cfg.catalogs) ? cfg.catalogs : [];
+    if (catalogs.length) {
+      const entry = catalogs[0];
+      if (entry && typeof entry === 'object') {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  function resolveCatalogDownloadLink(settings, context, payload) {
+    const meta = extractUploadedCatalogMeta(settings);
+    const candidates = [];
+    if (payload && typeof payload.csv_path === 'string' && payload.csv_path) {
+      candidates.push(payload.csv_path);
+    }
+    if (meta && typeof meta.csv_path === 'string' && meta.csv_path) {
+      candidates.push(meta.csv_path);
+    }
+    if (meta && typeof meta.path === 'string' && meta.path) {
+      candidates.push(meta.path);
+    }
+    for (let idx = 0; idx < candidates.length; idx += 1) {
+      const href = buildInternalFileUrl(candidates[idx], context);
+      if (href) {
+        return href;
+      }
+    }
+    return '';
+  }
+
+  function resolveCatalogSuccessLabel(settings, payload) {
+    const meta = extractUploadedCatalogMeta(settings);
+    const csvPath = (meta && typeof meta.csv_path === 'string' && meta.csv_path)
+      || (payload && typeof payload.csv_path === 'string' && payload.csv_path)
+      || '';
+    const original = (meta && typeof meta.original === 'string' && meta.original)
+      || (payload && typeof payload.original === 'string' && payload.original)
+      || (payload && typeof payload.filename === 'string' && payload.filename)
+      || '';
+    let message = 'Готово';
+    if (csvPath) {
+      message += `. CSV: ${csvPath}`;
+    } else if (original) {
+      message += `. Файл: ${original}`;
+    }
+    return message;
+  }
+
+  async function handleCatalogCompleted(context, payload) {
+    try {
+      const settings = await refreshSettingsSnapshot(context);
+      const linkHref = resolveCatalogDownloadLink(settings, context, payload);
+      const message = resolveCatalogSuccessLabel(settings, payload);
+      if (dom.uploadInput) {
+        dom.uploadInput.value = '';
+      }
+      if (linkHref) {
+        setCatalogStatus(message, 'success', { link: { href: linkHref, label: 'Скачать CSV' } });
+      } else {
+        setCatalogStatus(message, 'success');
+      }
+      await loadCsv({ quiet: true });
+    } catch (error) {
+      setCatalogStatus(`Каталог обновлён, но не удалось получить данные: ${error.message}`, 'alert');
+    } finally {
+      disableCatalogUploadButton(false);
+      catalogUploadInFlight = false;
+      resetCatalogUploadUi();
+    }
+  }
+
   function scheduleCatalogStatusPoll(delay = CATALOG_STATUS_POLL_INTERVAL) {
     if (!catalogStatusContext || !catalogStatusContext.jobId) return;
     if (catalogStatusPollTimer) {
@@ -1403,8 +1474,8 @@ try {
           console.error('[client-settings] catalog status poll failed', error);
         } catch (_) {}
         catalogUploadInFlight = false;
-        if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-        setUploadMessage(`Ошибка статуса: ${error.message}`, 'alert');
+        disableCatalogUploadButton(false);
+        setCatalogStatus(`Ошибка статуса: ${error.message}`, 'alert');
         stopCatalogStatusPolling({ reset: true });
       });
     }, safeDelay);
@@ -1415,16 +1486,29 @@ try {
       return;
     }
     const context = catalogStatusContext;
-    if (!context.webhookSecret) {
-      stopCatalogStatusPolling();
-      catalogUploadInFlight = false;
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-      return;
+    const url = buildCatalogStatusUrl(context.jobId, context);
+    if (!url) {
+      throw new Error('status_url_unavailable');
     }
-    const data = await fetchInternalCatalogStatus(context.jobId, context);
-    if (!data) {
-      scheduleCatalogStatusPoll();
-      return;
+    const response = await fetch(url, { cache: 'no-store' });
+    let data = null;
+    try {
+      data = await response.clone().json();
+    } catch (error) {
+      data = null;
+    }
+    if (response.status === 404) {
+      throw new Error('not_found');
+    }
+    if (!response.ok) {
+      const detail = (data && (data.message || data.error)) || `HTTP ${response.status}`;
+      throw new Error(detail);
+    }
+    if (!data || typeof data !== 'object') {
+      throw new Error('invalid_status_payload');
+    }
+    if (data.ok === false) {
+      throw new Error(data.error || 'status_failed');
     }
     handleCatalogStatusPayload(data, context);
   }
@@ -1443,121 +1527,164 @@ try {
     scheduleCatalogStatusPoll(250);
   }
 
-  async function performCatalogUpload(event) {
-    if (event) event.preventDefault();
-    if (!dom.catalogForm) return;
+  function performCatalogUpload(event) {
+    if (event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
     if (catalogUploadInFlight) return;
 
     const file = dom.uploadInput && dom.uploadInput.files && dom.uploadInput.files[0];
     if (!file) {
-      setUploadMessage('Выберите файл перед загрузкой', 'alert');
+      setCatalogStatus('Выберите файл перед загрузкой', 'alert');
       return;
     }
 
     const clientConfig = getClientSettings();
     const tenantValue = resolveTenantForCatalog(clientConfig);
     if (!tenantValue) {
-      setUploadMessage('Не удалось определить tenant', 'alert');
+      setCatalogStatus('Не удалось определить tenant', 'alert');
       return;
     }
 
     const publicKey = resolvePublicKeyForCatalog(clientConfig);
     if (!publicKey) {
-      setUploadMessage('Нет публичного ключа клиента', 'alert');
+      setCatalogStatus('Нет публичного ключа клиента', 'alert');
       return;
     }
 
     const webhookSecret = resolveWebhookSecret(clientConfig);
     const uploadUrl = buildCatalogUploadUrl(publicKey, tenantValue);
     if (!uploadUrl) {
-      setUploadMessage('Не найден адрес загрузки каталога', 'alert');
+      setCatalogStatus('Не найден адрес загрузки каталога', 'alert');
       return;
     }
 
-    const formData = new FormData(dom.catalogForm);
+    const formData = new FormData();
+    formData.append('file', file);
+
     catalogUploadInFlight = true;
     stopCatalogStatusPolling({ reset: true });
-    setUploadMessage('Загружаем файл…', 'muted');
-    showProgressMessage('Файл отправляется…', 'muted');
-    if (dom.uploadSubmit) dom.uploadSubmit.disabled = true;
+    disableCatalogUploadButton(true);
+    updateCatalogProgress(0);
+    setCatalogStatus('Загрузка…', 'muted');
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', uploadUrl, true);
+    xhr.responseType = 'json';
+
+    xhr.upload.onprogress = (progressEvent) => {
+      if (!progressEvent) {
+        return;
+      }
+      if (!progressEvent.lengthComputable) {
+        updateCatalogProgress(10);
+        setCatalogStatus('Загрузка…', 'muted');
+        return;
+      }
+      const percent = progressEvent.total > 0
+        ? Math.round((progressEvent.loaded / progressEvent.total) * 100)
+        : 0;
+      updateCatalogProgress(percent);
+      setCatalogStatus(`Загрузка ${percent}%`, 'muted');
+    };
+
+    const fail = (message) => {
+      catalogUploadInFlight = false;
+      disableCatalogUploadButton(false);
+      setCatalogStatus(message, 'alert');
+      resetCatalogUploadUi();
+    };
+
+    xhr.onerror = () => {
+      fail('Не удалось загрузить файл. Проверьте соединение.');
+    };
+
+    xhr.onabort = () => {
+      fail('Загрузка прервана.');
+    };
+
+    xhr.onload = () => {
+      const { status } = xhr;
+      let responseData = null;
+      if (xhr.response && typeof xhr.response === 'object') {
+        responseData = xhr.response;
+      } else if (xhr.responseText) {
+        try {
+          responseData = JSON.parse(xhr.responseText);
+        } catch (error) {
+          responseData = null;
+        }
+      }
+
+      if (status >= 400) {
+        const errorMessage = (responseData && (responseData.message || responseData.error))
+          || `Ошибка загрузки (HTTP ${status})`;
+        fail(errorMessage);
+        return;
+      }
+
+      if (!responseData || responseData.ok === false) {
+        const errorMessage = (responseData && (responseData.error || responseData.message))
+          || 'Не удалось загрузить файл';
+        fail(errorMessage);
+        return;
+      }
+
+      updateCatalogProgress(100);
+      const context = { tenant: tenantValue, publicKey, webhookSecret };
+
+      if (responseData.job_id) {
+        setCatalogStatus('Файл принят. Обработка…', 'muted');
+        startCatalogStatusPolling(String(responseData.job_id), context);
+        if (dom.uploadInput) {
+          dom.uploadInput.value = '';
+        }
+        return;
+      }
+
+      stopCatalogStatusPolling();
+      handleCatalogCompleted(context, responseData);
+      return;
+    };
 
     try {
-      const response = await fetch(uploadUrl, {
-        method: 'POST',
-        body: formData,
-      });
-      if (!response.ok) {
-        const text = (await response.text()) || '';
-        throw new Error(text || `Ошибка загрузки (HTTP ${response.status})`);
-      }
-      let data = null;
-      try {
-        data = await response.clone().json();
-      } catch (jsonError) {
-        data = null;
-      }
-      if (!data || data.ok === false) {
-        throw new Error((data && data.error) || 'Не удалось загрузить файл');
-      }
-
-      if (data.job_id) {
-        setUploadMessage('Каталог принят. Идёт обработка.', 'muted');
-        showProgressMessage('Ожидаем завершение обработки…', 'muted');
-        const context = { tenant: tenantValue, publicKey, webhookSecret };
-        if (webhookSecret) {
-          startCatalogStatusPolling(String(data.job_id), context);
-        } else {
-          try {
-            await refreshSettingsSnapshot(context);
-            setUploadMessage('Каталог принят. Обновляем данные…', 'muted');
-            loadCsv({ quiet: true });
-            if (dom.uploadInput) dom.uploadInput.value = '';
-          } catch (refreshError) {
-            setUploadMessage(`Каталог принят, но не удалось обновить настройки: ${refreshError.message}`, 'alert');
-          }
-          catalogUploadInFlight = false;
-          if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-          resetProgress();
-        }
-      } else {
-        catalogUploadInFlight = false;
-        if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-        if (dom.uploadInput) dom.uploadInput.value = '';
-        setUploadMessage('Каталог обновлён.', 'success');
-        resetProgress();
-        loadCsv({ quiet: true });
-      }
+      xhr.send(formData);
     } catch (error) {
-      catalogUploadInFlight = false;
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-      setUploadMessage(`Ошибка загрузки: ${error.message}`, 'alert');
-      resetProgress();
+      fail(error && error.message ? error.message : 'Не удалось отправить файл');
     }
   }
 
   function bindCatalogForm() {
-    if (!dom.catalogForm) return;
-    dom.catalogForm.addEventListener('submit', (event) => {
-      event.preventDefault();
-      performCatalogUpload(event);
-    });
-    if (dom.uploadSubmit) {
-      dom.uploadSubmit.addEventListener('click', (event) => {
-        event.preventDefault();
+    if (dom.catalogForm) {
+      dom.catalogForm.addEventListener('submit', (event) => {
+        if (event && typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        performCatalogUpload(event);
+      });
+    }
+    if (dom.catalogUploadButton) {
+      dom.catalogUploadButton.addEventListener('click', (event) => {
+        if (event && typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (event && typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
         performCatalogUpload(event);
       });
     }
     if (dom.uploadInput) {
       dom.uploadInput.addEventListener('change', (event) => {
         if (event) {
-          event.preventDefault();
-          event.stopPropagation();
+          event.preventDefault?.();
+          event.stopPropagation?.();
         }
         const selected = dom.uploadInput.files && dom.uploadInput.files[0];
         if (selected) {
-          setUploadMessage(`Выбран файл ${selected.name}`, 'muted');
+          setCatalogStatus(`Выбран файл ${selected.name}`, 'muted');
         } else {
-          setUploadMessage('', 'muted');
+          setCatalogStatus('', 'muted');
         }
       });
     }
