@@ -69,19 +69,22 @@
         <p class="section-subtitle">Загрузите CSV, XLS(X) или PDF. После PDF создадим CSV автоматически.</p>
     </div>
     {% set tenant_id = state.tenant if state is defined and state.tenant is not none else (tenant.id if tenant is mapping else tenant) %}
+    {% set upload_public_key = public_key if public_key is defined and public_key else (key if key else '') %}
+    {% set upload_tenant = tenant_id if tenant_id is not none else tenant %}
+    {% set upload_query = 'k=' ~ (upload_public_key | urlencode) ~ '&tenant=' ~ (("%s" % upload_tenant) | urlencode) %}
     <form id="upload-form"
           class="stack"
           style="gap: 12px;"
           method="post"
           enctype="multipart/form-data"
-          action="/pub/catalog/upload{% if key %}?k={{ key }}{% if tenant_id %}&tenant={{ tenant_id }}{% endif %}{% elif tenant_id %}?tenant={{ tenant_id }}{% endif %}"
-          data-upload-url="/pub/catalog/upload{% if key %}?k={{ key }}{% if tenant_id %}&tenant={{ tenant_id }}{% endif %}{% elif tenant_id %}?tenant={{ tenant_id }}{% endif %}">
+          action="/pub/catalog/upload?{{ upload_query }}"
+          data-upload-url="/pub/catalog/upload?{{ upload_query }}">
         <label class="stack" style="gap: 6px;">
             <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
             <input id="upload-file" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
         </label>
         <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
-            <button class="btn" type="button" id="upload-submit" data-role="upload-submit">Загрузить</button>
+            <button class="btn" type="submit" id="upload-submit" data-role="upload-submit">Загрузить</button>
             <span id="upload-message" class="status-text"></span>
         </div>
         <div id="upload-progress" class="progress" hidden>
@@ -163,6 +166,10 @@
 <script id="client-settings-state" type="application/json">{{ state_json }}</script>
 <script>
   window.state = {{ state_json }};
+  window.CLIENT_SETTINGS = Object.assign({}, window.CLIENT_SETTINGS || {}, {
+    public_key: {{ (upload_public_key | default('', true)) | tojson }},
+    tenant: {{ upload_tenant | tojson }}
+  });
 </script>
 <script src="{{ static_url(request, 'js/boot.js') }}?v={{ client_settings_version }}" defer></script>
 <script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ client_settings_version }}" defer></script>

@@ -28,6 +28,14 @@ try {
   const STATE_NODE_ID = 'client-settings-state';
   const TENANT_PATH_REGEX = /\/client\/(\d+)(?:\/|$)/;
 
+  const getClientSettings = () => {
+    if (typeof window === 'undefined') {
+      return {};
+    }
+    const payload = window.CLIENT_SETTINGS;
+    return payload && typeof payload === 'object' ? payload : {};
+  };
+
   const readStateFromDom = () => {
     const node = document.getElementById(STATE_NODE_ID);
     if (!node) {
@@ -58,14 +66,36 @@ try {
     return null;
   };
 
-  const determineTenant = (state, { fallbackDefault = true } = {}) => {
+  const determineTenant = (state, options = {}) => {
+    const { fallbackDefault = true, globalConfig = null } = options || {};
     let tenant = Number.parseInt(state && state.tenant, 10);
+    if (!Number.isFinite(tenant) || tenant <= 0) {
+      const config = globalConfig && typeof globalConfig === 'object' ? globalConfig : getClientSettings();
+      const candidates = [];
+      if (config && Object.prototype.hasOwnProperty.call(config, 'tenant')) {
+        candidates.push(config.tenant);
+      }
+      if (config && Object.prototype.hasOwnProperty.call(config, 'tenant_id')) {
+        candidates.push(config.tenant_id);
+      }
+      for (let idx = 0; idx < candidates.length; idx += 1) {
+        const value = candidates[idx];
+        if (value == null) {
+          continue;
+        }
+        const parsed = Number.parseInt(value, 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          tenant = parsed;
+          break;
+        }
+      }
+    }
     if (!Number.isFinite(tenant) || tenant <= 0) {
       const path = getLocation().pathname || '/';
       const match = path.match(TENANT_PATH_REGEX);
       if (match && match[1]) {
         const parsed = Number.parseInt(match[1], 10);
-        tenant = Number.isFinite(parsed) ? parsed : NaN;
+        tenant = Number.isFinite(parsed) ? parsed : tenant;
       }
     }
     if (Number.isFinite(tenant) && tenant > 0) {
@@ -413,8 +443,39 @@ try {
     const globalState = typeof window !== 'undefined' && window.state && typeof window.state === 'object' ? window.state : {};
     const hasDomState = domState && typeof domState === 'object' && Object.keys(domState).length > 0;
     const state = hasDomState ? domState : (globalState && typeof globalState === 'object' ? globalState : {});
-    const tenant = determineTenant(state, { fallbackDefault: true });
+    const clientConfig = getClientSettings();
+    const tenant = determineTenant(state, { fallbackDefault: true, globalConfig: clientConfig });
     const stateAccessKey = typeof state.key === 'string' ? state.key.trim() : '';
+    const statePublicKey = typeof state.public_key === 'string' ? state.public_key.trim() : '';
+    const configPublicKey = (() => {
+      if (clientConfig && typeof clientConfig.public_key === 'string') {
+        const trimmed = clientConfig.public_key.trim();
+        if (trimmed) {
+          return trimmed;
+        }
+      }
+      if (clientConfig && typeof clientConfig.key === 'string') {
+        const trimmed = clientConfig.key.trim();
+        if (trimmed) {
+          return trimmed;
+        }
+      }
+      return '';
+    })();
+
+    const resolveEffectiveAccessKey = () => {
+      if (stateAccessKey) {
+        return stateAccessKey;
+      }
+      if (statePublicKey) {
+        return statePublicKey;
+      }
+      if (configPublicKey) {
+        return configPublicKey;
+      }
+      return '';
+    };
+
     const fallbackBuildUrl = (path, options = {}) => {
       const { includeKey = true } = options || {};
       const locationInfo = getLocation();
@@ -451,24 +512,50 @@ try {
         url.protocol = protocol;
       }
 
-      if (includeKey && stateAccessKey) {
-        url.searchParams.set('k', stateAccessKey);
+      if (includeKey) {
+        const keyValue = resolveEffectiveAccessKey();
+        if (keyValue) {
+          url.searchParams.set('k', keyValue);
+        }
       }
       return url.toString();
     };
+
+    fallbackBuildUrl.getKey = resolveEffectiveAccessKey;
 
     const buildUrl = (typeof window !== 'undefined' && typeof window.buildUrl === 'function')
       ? window.buildUrl
       : fallbackBuildUrl;
 
     const builderAccessKey = typeof buildUrl.getKey === 'function' ? (buildUrl.getKey() || '') : '';
-    const accessKey = (stateAccessKey || builderAccessKey || '').trim();
+    const accessKey = (resolveEffectiveAccessKey() || builderAccessKey || '').trim();
     const urls = state && typeof state === 'object' ? state.urls || {} : {};
     const initialQrId = typeof state.qr_id === 'string' ? state.qr_id.trim() : '';
     const resolvedMaxDays = resolveMaxDays(state);
     const maxDays = resolvedMaxDays != null ? resolvedMaxDays : 30;
 
-    const tenantString = Number.isFinite(tenant) && tenant > 0 ? String(tenant) : '';
+    const tenantCandidates = [];
+    if (Number.isFinite(tenant) && tenant > 0) {
+      tenantCandidates.push(String(tenant));
+    }
+    if (clientConfig && Object.prototype.hasOwnProperty.call(clientConfig, 'tenant')) {
+      tenantCandidates.push(clientConfig.tenant);
+    }
+    if (clientConfig && Object.prototype.hasOwnProperty.call(clientConfig, 'tenant_id')) {
+      tenantCandidates.push(clientConfig.tenant_id);
+    }
+    let tenantString = '';
+    for (let idx = 0; idx < tenantCandidates.length; idx += 1) {
+      const candidate = tenantCandidates[idx];
+      if (candidate == null) {
+        continue;
+      }
+      const normalized = String(candidate).trim();
+      if (normalized && normalized !== 'undefined' && normalized !== 'null') {
+        tenantString = normalized;
+        break;
+      }
+    }
     const withTenant = (params = {}) => {
       const baseParams = params && typeof params === 'object' ? { ...params } : {};
       if (tenantString && baseParams.tenant == null) {
@@ -635,6 +722,7 @@ try {
   const fallbackPollInterval = Math.max(500, waitingPollInterval + 500);
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
+  let catalogUploadInFlight = false;
   const HIDDEN_CLASS = 'hidden';
   const TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS = 5;
   const TELEGRAM_STATUS_RETRY_BASE_DELAY = 4000;
@@ -1101,7 +1189,7 @@ try {
 function performCatalogUpload(event) {
   if (event) event.preventDefault();
   if (!dom.uploadForm) return;
-  if (dom.uploadForm.dataset.state === 'uploading') return;
+  if (catalogUploadInFlight || dom.uploadForm.dataset.state === 'uploading') return;
 
   const file = dom.uploadInput && dom.uploadInput.files && dom.uploadInput.files[0];
   if (!file) {
@@ -1123,6 +1211,7 @@ function performCatalogUpload(event) {
   if (dom.progress) dom.progress.hidden = false;
   if (dom.progressBar) dom.progressBar.style.width = '0%';
   dom.uploadForm.dataset.state = 'uploading';
+  catalogUploadInFlight = true;
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', targetUrl);
@@ -1139,6 +1228,7 @@ function performCatalogUpload(event) {
   xhr.onerror = () => {
     resetProgress();
     delete dom.uploadForm.dataset.state;
+    catalogUploadInFlight = false;
     if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
     setStatus(dom.uploadMessage, 'Ошибка сети при загрузке файла', 'alert');
   };
@@ -1146,6 +1236,7 @@ function performCatalogUpload(event) {
   xhr.onload = async () => {
     resetProgress();
     delete dom.uploadForm.dataset.state;
+    catalogUploadInFlight = false;
     if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
 
     try {
@@ -1184,6 +1275,7 @@ function performCatalogUpload(event) {
   } catch (error) {
     resetProgress();
     delete dom.uploadForm.dataset.state;
+    catalogUploadInFlight = false;
     if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
     setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
   }
@@ -1195,7 +1287,7 @@ function performCatalogUpload(event) {
       event.preventDefault();
       performCatalogUpload(event);
     });
-    if (dom.uploadSubmit) {
+    if (dom.uploadSubmit && String(dom.uploadSubmit.type || '').toLowerCase() !== 'submit') {
       dom.uploadSubmit.addEventListener('click', (event) => {
         event.preventDefault();
         performCatalogUpload(event);
