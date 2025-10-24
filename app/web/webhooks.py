@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover
 
 from app.integrations import avito
 
-from .public import templates  # noqa: F401 - ensure templates loaded for compatibility
+from .ui import templates  # noqa: F401 - ensure templates loaded for compatibility
 from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
 from app.metrics import DB_ERRORS_COUNTER, WEBHOOK_PROVIDER_COUNTER
 from app.repo import provider_tokens as provider_tokens_repo
