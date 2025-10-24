@@ -68,13 +68,14 @@
         <h2 class="section-title" style="font-size:1.35rem;">Каталог: загрузка и CSV</h2>
         <p class="section-subtitle">Загрузите CSV, XLS(X) или PDF. После PDF создадим CSV автоматически.</p>
     </div>
+    {% set tenant_id = state.tenant if state is defined and state.tenant is not none else (tenant.id if tenant is mapping else tenant) %}
     <form id="upload-form"
           class="stack"
           style="gap: 12px;"
           method="post"
           enctype="multipart/form-data"
-          action="/client/{{ tenant.id }}/catalog/upload{% if key %}?k={{ key }}{% endif %}"
-          data-upload-url="/client/{{ tenant.id }}/catalog/upload{% if key %}?k={{ key }}{% endif %}">
+          action="/pub/catalog/upload{% if key %}?k={{ key }}{% if tenant_id %}&tenant={{ tenant_id }}{% endif %}{% elif tenant_id %}?tenant={{ tenant_id }}{% endif %}"
+          data-upload-url="/pub/catalog/upload">
         <label class="stack" style="gap: 6px;">
             <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
             <input id="upload-file" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>

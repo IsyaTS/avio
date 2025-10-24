@@ -1,6 +1,8 @@
 import importlib
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -89,6 +91,30 @@ def _write_pdf(path: Path, lines: list[str]) -> None:
     output.extend(b"%%EOF\n")
 
     path.write_bytes(output)
+
+
+def _wait_for_job_status(tenant_id: int, job_id: str, *, timeout: float = 3.0):
+    tenant_root = Path(os.getenv("TENANTS_DIR", ""))
+    status_path = tenant_root / str(tenant_id) / "catalog_jobs" / job_id / "status.json"
+    deadline = time.time() + timeout
+    last_payload = None
+    while time.time() < deadline:
+        if status_path.exists():
+            try:
+                payload = json.loads(status_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                time.sleep(0.05)
+                continue
+            state = str(payload.get("state") or "")
+            if state.lower() in {"done", "failed"}:
+                return status_path, payload
+            last_payload = payload
+        time.sleep(0.05)
+    if status_path.exists():
+        if last_payload is None:
+            last_payload = json.loads(status_path.read_text(encoding="utf-8"))
+        return status_path, last_payload
+    raise AssertionError(f"status.json not created for job {job_id}")
 
 def test_catalog_upload_accepts_header_only(api_client):
     response = api_client.post(
@@ -197,6 +223,84 @@ def test_catalog_upload_indexes_pdf(api_client, tmp_path):
 
     uploaded_meta = cfg.get("integrations", {}).get("uploaded_catalog", {})
     assert uploaded_meta.get("index", {}).get("chunks") == entry.get("chunk_count")
+
+
+def test_public_catalog_upload_csv_and_pdf_with_query_tenant(api_client, tmp_path):
+    csv_response = api_client.post(
+        "/pub/catalog/upload?k=secret&tenant=1",
+        files={"file": ("catalog.csv", "sku,price\nA1,1000\n", "text/csv")},
+    )
+    assert csv_response.status_code == 200, csv_response.text
+    csv_payload = csv_response.json()
+    assert csv_payload["ok"] is True
+    assert csv_payload.get("job_id")
+
+    _, csv_status = _wait_for_job_status(1, csv_payload["job_id"])
+    assert str(csv_status.get("tenant_source")) == "query"
+    assert str(csv_status.get("file_field")) == "file"
+    assert str(csv_status.get("state")).lower() == "done"
+    csv_rel = csv_status.get("csv_path")
+    if isinstance(csv_rel, str) and csv_rel:
+        tenant_root = Path(os.getenv("TENANTS_DIR", "")) / "1"
+        assert (tenant_root / csv_rel).exists()
+
+    pdf_path = tmp_path / "public-upload.pdf"
+    _write_pdf(pdf_path, ["Product ZETA", "Цена 500", "Статус: в наличии"])
+    with pdf_path.open("rb") as handle:
+        pdf_response = api_client.post(
+            "/pub/catalog/upload?k=secret&tenant=1",
+            files={"catalog": ("catalog.pdf", handle.read(), "application/pdf")},
+        )
+    assert pdf_response.status_code == 200, pdf_response.text
+    pdf_payload = pdf_response.json()
+    assert pdf_payload["ok"] is True
+    assert pdf_payload.get("job_id")
+
+    _, pdf_status = _wait_for_job_status(1, pdf_payload["job_id"])
+    assert str(pdf_status.get("tenant_source")) == "query"
+    assert str(pdf_status.get("file_field")) == "catalog"
+    assert str(pdf_status.get("state")).lower() == "done"
+    pdf_rel = pdf_status.get("csv_path")
+    assert isinstance(pdf_rel, str) and pdf_rel
+    tenant_root = Path(os.getenv("TENANTS_DIR", "")) / "1"
+    assert (tenant_root / pdf_rel).exists()
+
+
+def test_public_catalog_upload_accepts_form_tenant(api_client):
+    response = api_client.post(
+        "/pub/catalog/upload?k=secret",
+        data={"tenant": "1"},
+        files={"file": ("catalog.csv", "sku,price\nB2,2200\n", "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["ok"] is True
+    _, status = _wait_for_job_status(1, payload["job_id"])
+    assert str(status.get("tenant_source")) == "form"
+
+
+def test_public_catalog_upload_missing_tenant_returns_422(api_client, monkeypatch):
+    import core
+
+    setup_response = api_client.post(
+        "/pub/catalog/upload?k=secret&tenant=1",
+        files={"file": ("catalog.csv", "title,price\nModel ALPHA-100,1500\n", "text/csv")},
+    )
+    assert setup_response.status_code == 200, setup_response.text
+    setup_payload = setup_response.json()
+    assert setup_payload["ok"] is True
+    _wait_for_job_status(1, setup_payload["job_id"])
+
+    monkeypatch.setenv("TENANT", "")
+    response = api_client.post(
+        "/pub/catalog/upload?k=secret",
+        files={"file": ("catalog.csv", "sku,price\n", "text/csv")},
+    )
+    assert response.status_code == 422, response.text
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_payload"
+    assert payload["reason"] == "invalid_tenant"
 
     items = core._read_catalog(1)
     assert items

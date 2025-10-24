@@ -24,7 +24,7 @@ from typing import Any, Iterable, Mapping, Optional
 import qrcode
 from qrcode.image.svg import SvgImage
 
-from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException, Query, Form
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse
 import httpx
 import urllib.request
@@ -3082,16 +3082,56 @@ async def settings_save(request: Request, tenant: int | str | None = None, k: st
 
 # Move public catalog upload off the client namespace to avoid route collisions
 # with the client router. The tenant is accepted as a query parameter.
+
 @router.post("/pub/catalog/upload")
 async def catalog_upload(
-    tenant: int,
     request: Request,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    tenant: str | None = Query(None),
+    file: UploadFile | None = File(None),
+    catalog: UploadFile | None = File(None, alias="catalog"),
+    form_tenant: str | None = Form(None, alias="tenant"),
 ):
     from . import client as client_module
 
-    tenant_id = int(tenant)
+    def invalid_payload(reason: str) -> JSONResponse:
+        body = {"ok": False, "error": "invalid_payload", "reason": reason}
+        if reason == "invalid_tenant":
+            body["detail"] = reason
+        return JSONResponse(body, status_code=422)
+
+    tenant_candidate = (tenant or "").strip() if isinstance(tenant, str) else ""
+    tenant_source = "query"
+    if not tenant_candidate:
+        form_candidate = (form_tenant or "").strip() if isinstance(form_tenant, str) else ""
+        if form_candidate:
+            tenant_candidate = form_candidate
+            tenant_source = "form"
+        else:
+            env_candidate = (os.getenv("TENANT", "1") or "").strip()
+            if env_candidate:
+                tenant_candidate = env_candidate
+                tenant_source = "env"
+            else:
+                return invalid_payload("invalid_tenant")
+    try:
+        tenant_id = int(tenant_candidate)
+    except (TypeError, ValueError):
+        return invalid_payload("invalid_tenant")
+    if tenant_id <= 0:
+        return invalid_payload("invalid_tenant")
+
+    upload_file: UploadFile | None = None
+    file_field_name: str | None = None
+    if file is not None:
+        upload_file = file
+        file_field_name = "file"
+    elif catalog is not None:
+        upload_file = catalog
+        file_field_name = "catalog"
+    if upload_file is None:
+        return invalid_payload("missing_file")
+
     key = client_module._resolve_key(request, request.query_params.get("k"))
     authorized = client_module._auth(tenant_id, key)
     if not authorized:
@@ -3104,7 +3144,7 @@ async def catalog_upload(
     if not authorized:
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
-    filename = (file.filename or "").strip()
+    filename = (upload_file.filename or "").strip()
     if not filename:
         return JSONResponse({"ok": False, "error": "empty_file"}, status_code=400)
 
@@ -3112,7 +3152,7 @@ async def catalog_upload(
     if ext not in ALLOWED_EXTENSIONS:
         return JSONResponse({"ok": False, "error": "unsupported_type"}, status_code=400)
 
-    raw = await file.read()
+    raw = await upload_file.read()
     if not raw:
         return JSONResponse({"ok": False, "error": "empty_file"}, status_code=400)
     if len(raw) > MAX_UPLOAD_SIZE_BYTES:
@@ -3148,6 +3188,8 @@ async def catalog_upload(
         "log": [],
         "filename": filename,
         "message": "",
+        "tenant_source": tenant_source,
+        "file_field": file_field_name,
     }
 
     def write_status(status: str | None = None, **fields: Any) -> None:
@@ -3170,15 +3212,19 @@ async def catalog_upload(
         write_status("failed", error=error_key, message=error_key, **details)
         return JSONResponse({"ok": False, "error": error_key, "job_id": job_id, **details}, status_code=http_status)
 
+    write_status(None, tenant_source=tenant_source, file_field=file_field_name)
+    append_log("info", "tenant_resolved", source=tenant_source, tenant=tenant_id)
+    append_log("info", "upload_field_detected", field=file_field_name)
+
     mime_type, _ = mimetypes.guess_type(filename)
     write_status("received", size=len(raw), mime=mime_type, source_path=relative_path)
-    append_log("info", "file_received", size=len(raw), mime=mime_type)
+    append_log("info", "file_received", size=len(raw), mime=mime_type, field=file_field_name)
 
     # Build background job that performs heavy processing to avoid request timeouts
     def process_job() -> None:
         try:
             write_status("processing")
-            append_log("info", "job_started")
+            append_log("info", "job_started", source=tenant_source, field=file_field_name)
             base_name = pathlib.Path(filename).stem or f"catalog_{job_id}"
             normalized_rows: list[dict[str, Any]]
             meta: dict[str, Any]
@@ -3209,7 +3255,10 @@ async def catalog_upload(
                 fail("processing_failed", detail=str(exc))
                 return
 
-            parsed_count = len(normalized_rows)
+            try:
+                parsed_count = len(normalized_rows)
+            except Exception:
+                parsed_count = 0
             append_log("info", "rows_parsed", items=parsed_count)
 
             try:
@@ -3242,7 +3291,13 @@ async def catalog_upload(
             )
             if manifest_rel:
                 write_status(None, manifest_path=manifest_rel)
-            append_log("info", "csv_written", items=items, columns=len(ordered_columns), pipeline=pipeline_info)
+            append_log(
+                "info",
+                "csv_written",
+                items=items,
+                columns=len(ordered_columns),
+                pipeline=pipeline_info,
+            )
 
             # Persist config updates
             cfg = common.read_tenant_config(tenant_id)
@@ -3339,8 +3394,8 @@ async def catalog_upload(
             redirect_url = f"{redirect_url}?k={quote_plus(key)}"
         return RedirectResponse(url=redirect_url, status_code=303)
 
-    # Return job descriptor for polling client
-    return JSONResponse({"ok": True, "job_id": job_id, "state": "queued"})
+    return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "filename": filename})
+
 
 
 # Public job status endpoint aligned with the new public upload path
