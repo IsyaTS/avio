@@ -1081,28 +1081,21 @@ try {
     return resolveEndpointUrl(basePath, withTenant(), basePath);
   }
 
-  function showCatalogProcessingNotice(jobId, displayName) {
+  function showCatalogProcessingNotice(jobId) {
     if (!dom.uploadMessage) return;
     const statusUrl = buildCatalogUploadStatusUrl(jobId);
     dom.uploadMessage.className = 'status-text muted';
     dom.uploadMessage.textContent = '';
-    const prefix = displayName ? `Каталог ${displayName} принят. ` : 'Каталог принят. ';
-    dom.uploadMessage.appendChild(document.createTextNode(prefix));
-    const link = document.createElement('a');
-    link.textContent = 'Каталог обновляется';
+    dom.uploadMessage.appendChild(document.createTextNode('Каталог принят'));
     if (statusUrl) {
+      dom.uploadMessage.appendChild(document.createTextNode(' '));
+      const link = document.createElement('a');
+      link.textContent = 'Статус обработки';
       link.href = statusUrl;
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
-    } else {
-      link.href = '#';
-      link.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      });
+      dom.uploadMessage.appendChild(link);
     }
-
-    dom.uploadMessage.appendChild(link);
   }
 
 function performCatalogUpload(event) {
@@ -1173,11 +1166,11 @@ function performCatalogUpload(event) {
       if (!data.ok) {
         throw new Error(data.error || 'Не удалось загрузить файл');
       }
-      const displayName = data.filename || file.name;
       if (dom.uploadInput) dom.uploadInput.value = '';
       if (data.job_id) {
-        showCatalogProcessingNotice(data.job_id, displayName);
+        showCatalogProcessingNotice(data.job_id);
       } else {
+        const displayName = data.filename || file.name;
         setStatus(dom.uploadMessage, `Файл ${displayName} загружен`, 'muted');
         await loadCsv({ quiet: true });
       }
