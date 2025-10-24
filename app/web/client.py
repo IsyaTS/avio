@@ -307,6 +307,9 @@ def client_settings(tenant: int, request: Request):
         "whatsapp_export": whatsapp_export_url,
     }
 
+    webhook_secret = getattr(C.settings, "WEBHOOK_SECRET", "") if hasattr(C, "settings") else ""
+    webhook_secret = (webhook_secret or "").strip()
+
     state = {
         "tenant": tenant,
         "key": key,
@@ -314,6 +317,7 @@ def client_settings(tenant: int, request: Request):
         "primary_key": primary_key,
         "urls": urls,
         "max_days": EXPORT_MAX_DAYS,
+        "webhook_secret": webhook_secret,
     }
 
     form_payload = {
@@ -341,6 +345,7 @@ def client_settings(tenant: int, request: Request):
         "primary_key": primary_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": C.client_settings_version(),
+        "webhook_secret": webhook_secret,
     }
     response = render_template("client/settings.html", context)
     response.headers["Cache-Control"] = "no-store"
