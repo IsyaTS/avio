@@ -24,7 +24,8 @@ from typing import Any, Iterable, Mapping, Optional
 import qrcode
 from qrcode.image.svg import SvgImage
 
-from fastapi import APIRouter, File, Request, UploadFile, BackgroundTasks, HTTPException, Query, Form
+from fastapi import APIRouter, Request, UploadFile, BackgroundTasks, HTTPException, Query
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse
 import httpx
 import urllib.request
@@ -3088,9 +3089,6 @@ async def catalog_upload(
     request: Request,
     background_tasks: BackgroundTasks,
     tenant: str | None = Query(None),
-    file: UploadFile | None = File(None),
-    catalog: UploadFile | None = File(None, alias="catalog"),
-    form_tenant: str | None = Form(None, alias="tenant"),
 ):
     from . import client as client_module
 
@@ -3102,12 +3100,29 @@ async def catalog_upload(
 
     tenant_candidate = (tenant or "").strip() if isinstance(tenant, str) else ""
     tenant_source = "query"
+    form_data = None
     if not tenant_candidate:
-        form_candidate = (form_tenant or "").strip() if isinstance(form_tenant, str) else ""
-        if form_candidate:
-            tenant_candidate = form_candidate
-            tenant_source = "form"
-        else:
+        try:
+            form_data = await request.form()
+        except Exception as exc:  # pragma: no cover - Starlette form parsing edge cases
+            logger.warning("catalog_upload: failed to read form data", exc_info=exc)
+            form_data = None
+        if form_data is not None:
+            form_candidate_raw = form_data.get("tenant")
+            if isinstance(form_candidate_raw, UploadFile):
+                form_candidate = (form_candidate_raw.filename or "").strip()
+            elif isinstance(form_candidate_raw, bytes):
+                form_candidate = form_candidate_raw.decode(errors="ignore").strip()
+            elif isinstance(form_candidate_raw, str):
+                form_candidate = form_candidate_raw.strip()
+            elif form_candidate_raw is not None:
+                form_candidate = str(form_candidate_raw).strip()
+            else:
+                form_candidate = ""
+            if form_candidate:
+                tenant_candidate = form_candidate
+                tenant_source = "form"
+        if not tenant_candidate:
             env_candidate = (os.getenv("TENANT", "1") or "").strip()
             if env_candidate:
                 tenant_candidate = env_candidate
@@ -3121,14 +3136,36 @@ async def catalog_upload(
     if tenant_id <= 0:
         return invalid_payload("invalid_tenant")
 
-    upload_file: UploadFile | None = None
+    if form_data is None:
+        try:
+            form_data = await request.form()
+        except Exception as exc:  # pragma: no cover - Starlette form parsing edge cases
+            logger.warning("catalog_upload: failed to read form data for file", exc_info=exc)
+            form_data = None
+
+    upload_file: UploadFile | StarletteUploadFile | None = None
     file_field_name: str | None = None
-    if file is not None:
-        upload_file = file
-        file_field_name = "file"
-    elif catalog is not None:
-        upload_file = catalog
-        file_field_name = "catalog"
+    def _is_upload(value: Any) -> bool:
+        return isinstance(value, (UploadFile, StarletteUploadFile))
+
+    if form_data is not None:
+        candidates: list[tuple[str, UploadFile | StarletteUploadFile]] = []
+        possible_file = form_data.get("file")
+        possible_catalog = form_data.get("catalog") if upload_file is None else None
+
+        def _collect(candidate: str, value: Any) -> None:
+            if _is_upload(value):
+                candidates.append((candidate, value))
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    if _is_upload(item):
+                        candidates.append((candidate, item))
+
+        _collect("file", possible_file)
+        _collect("catalog", possible_catalog)
+
+        if candidates:
+            file_field_name, upload_file = candidates[0]
     if upload_file is None:
         return invalid_payload("missing_file")
 

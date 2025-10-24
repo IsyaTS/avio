@@ -75,7 +75,7 @@
           method="post"
           enctype="multipart/form-data"
           action="/pub/catalog/upload{% if key %}?k={{ key }}{% if tenant_id %}&tenant={{ tenant_id }}{% endif %}{% elif tenant_id %}?tenant={{ tenant_id }}{% endif %}"
-          data-upload-url="/pub/catalog/upload">
+          data-upload-url="/pub/catalog/upload{% if key %}?k={{ key }}{% if tenant_id %}&tenant={{ tenant_id }}{% endif %}{% elif tenant_id %}?tenant={{ tenant_id }}{% endif %}">
         <label class="stack" style="gap: 6px;">
             <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
             <input id="upload-file" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
