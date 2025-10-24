@@ -668,7 +668,7 @@ try {
     savePersona: document.getElementById('save-persona'),
     personaMessage: document.getElementById('persona-message'),
     downloadConfig: document.getElementById('download-config'),
-    uploadForm: document.getElementById('uploadForm'),
+    catalogForm: document.getElementById('catalogForm'),
     uploadInput: document.getElementById('catalogFile'),
     uploadMessage: document.getElementById('catalogResult'),
     uploadSubmit: document.getElementById('uploadBtn'),
@@ -726,8 +726,7 @@ try {
   let catalogUploadInFlight = false;
   let catalogStatusPollTimer = null;
   let catalogStatusContext = null;
-  const CATALOG_STATUS_POLL_INTERVAL = 1500;
-  const CATALOG_PROCESSING_STATES = new Set(['pending', 'processing', 'queued', 'received']);
+  const CATALOG_STATUS_POLL_INTERVAL = 2000;
   const HIDDEN_CLASS = 'hidden';
   const TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS = 5;
   const TELEGRAM_STATUS_RETRY_BASE_DELAY = 4000;
@@ -1181,6 +1180,184 @@ try {
     }
   }
 
+  function setUploadMessage(message, variant = 'muted', options = {}) {
+    if (!dom.uploadMessage) return;
+    const link = options && options.link ? options.link : null;
+    dom.uploadMessage.className = `status-text ${variant}`.trim();
+    dom.uploadMessage.textContent = '';
+    if (message) {
+      dom.uploadMessage.appendChild(document.createTextNode(message));
+    }
+    if (link && link.href) {
+      if (message) {
+        dom.uploadMessage.appendChild(document.createTextNode(' '));
+      }
+      const anchor = document.createElement('a');
+      anchor.href = link.href;
+      anchor.textContent = link.label || link.href;
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+      dom.uploadMessage.appendChild(anchor);
+    }
+  }
+
+  function showProgressMessage(text, variant = 'muted') {
+    if (!dom.progress) return;
+    dom.progress.hidden = false;
+    if (dom.progressBar) {
+      dom.progressBar.style.width = '100%';
+    }
+    if (dom.progressText) {
+      dom.progressText.textContent = text || '';
+      dom.progressText.className = `status-text ${variant}`.trim();
+    }
+  }
+
+  function resolveTenantForCatalog(clientConfig) {
+    if (clientConfig && clientConfig.tenant != null) {
+      const candidate = String(clientConfig.tenant).trim();
+      if (candidate) return candidate;
+    }
+    if (clientConfig && clientConfig.tenant_id != null) {
+      const candidate = String(clientConfig.tenant_id).trim();
+      if (candidate) return candidate;
+    }
+    if (tenantString) return tenantString;
+    if (Number.isFinite(tenant) && tenant > 0) {
+      return String(tenant);
+    }
+    return '';
+  }
+
+  function resolvePublicKeyForCatalog(clientConfig) {
+    if (clientConfig && typeof clientConfig.public_key === 'string' && clientConfig.public_key.trim()) {
+      return clientConfig.public_key.trim();
+    }
+    if (clientConfig && typeof clientConfig.key === 'string' && clientConfig.key.trim()) {
+      return clientConfig.key.trim();
+    }
+    const fallbackKey = resolveEffectiveAccessKey();
+    return fallbackKey ? String(fallbackKey).trim() : '';
+  }
+
+  function resolveWebhookSecret(clientConfig) {
+    if (clientConfig && typeof clientConfig.webhook_secret === 'string') {
+      const trimmed = clientConfig.webhook_secret.trim();
+      if (trimmed) return trimmed;
+    }
+    return '';
+  }
+
+  function buildCatalogUploadUrl(publicKey, tenantValue) {
+    if (!publicKey || !tenantValue) return '';
+    const locationInfo = getLocation();
+    let url;
+    try {
+      url = new URL('/pub/catalog/upload', locationInfo.origin || 'https://localhost');
+    } catch (error) {
+      url = new URL('/pub/catalog/upload', locationInfo.href || 'https://localhost');
+    }
+    url.searchParams.set('k', publicKey);
+    url.searchParams.set('tenant', String(tenantValue));
+    return url.toString();
+  }
+
+  function buildInternalFileUrl(pathValue, context) {
+    if (!context || !context.tenant || !context.webhookSecret) return '';
+    const safePath = typeof pathValue === 'string' ? pathValue.replace(/\\/g, '/') : '';
+    if (!safePath) return '';
+    const tenantId = encodeURIComponent(String(context.tenant).trim());
+    const locationInfo = getLocation();
+    let url;
+    try {
+      url = new URL(`/internal/tenant/${tenantId}/catalog-file`, locationInfo.origin || 'https://localhost');
+    } catch (error) {
+      url = new URL(`/internal/tenant/${tenantId}/catalog-file`, locationInfo.href || 'https://localhost');
+    }
+    url.searchParams.set('path', safePath);
+    url.searchParams.set('token', context.webhookSecret);
+    return url.toString();
+  }
+
+  function buildInternalStatusUrl(jobId, context) {
+    if (!jobId || !context || !context.webhookSecret) return '';
+    return buildInternalFileUrl(`catalog_jobs/${jobId}/status.json`, context);
+  }
+
+  async function fetchInternalCatalogStatus(jobId, context) {
+    const url = buildInternalStatusUrl(jobId, context);
+    if (!url) {
+      throw new Error('status_url_unavailable');
+    }
+    const response = await fetch(url, { cache: 'no-store' });
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      const text = (await response.text()) || '';
+      throw new Error(text || `HTTP ${response.status}`);
+    }
+    try {
+      return await response.json();
+    } catch (error) {
+      throw new Error('invalid_status_payload');
+    }
+  }
+
+  async function refreshSettingsSnapshot(context) {
+    if (!context || !context.publicKey || !context.tenant) {
+      throw new Error('invalid_context');
+    }
+    const locationInfo = getLocation();
+    let url;
+    try {
+      url = new URL('/pub/settings/get', locationInfo.origin || 'https://localhost');
+    } catch (error) {
+      url = new URL('/pub/settings/get', locationInfo.href || 'https://localhost');
+    }
+    url.searchParams.set('k', context.publicKey);
+    url.searchParams.set('tenant', String(context.tenant));
+    return fetchSettingsJsonWithRetry(url.toString());
+  }
+
+  function handleCatalogStatusPayload(payload, context) {
+    const state = typeof payload.state === 'string' ? payload.state.toLowerCase() : '';
+    if (!state) {
+      scheduleCatalogStatusPoll();
+      return;
+    }
+    if (state === 'done') {
+      stopCatalogStatusPolling();
+      catalogUploadInFlight = false;
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      if (dom.uploadInput) dom.uploadInput.value = '';
+      const csvPath = payload.csv_path || (payload.result && payload.result.csv_path) || '';
+      if (csvPath && context && context.webhookSecret) {
+        const link = buildInternalFileUrl(csvPath, context);
+        setUploadMessage('Каталог обновлён.', 'success', { link: { href: link, label: 'Скачать CSV' } });
+      } else {
+        setUploadMessage('Каталог обновлён.', 'success');
+      }
+      resetProgress();
+      loadCsv({ quiet: true });
+      return;
+    }
+    if (state === 'failed') {
+      stopCatalogStatusPolling();
+      catalogUploadInFlight = false;
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      const message = payload.error || payload.message || 'Ошибка обработки каталога';
+      setUploadMessage(`Ошибка: ${message}`, 'alert');
+      resetProgress();
+      return;
+    }
+    setUploadMessage('Каталог принят. Идёт обработка.', 'muted');
+    const humanState = describeCatalogState(state);
+    const progressText = payload.updated_at ? `Статус: ${humanState} · обновлено ${formatCatalogTimestamp(payload.updated_at)}` : `Статус: ${humanState}`;
+    showProgressMessage(progressText, 'muted');
+    scheduleCatalogStatusPoll();
+  }
+
   function formatCatalogTimestamp(value) {
     if (value == null) return '';
     const numeric = Number(value);
@@ -1209,56 +1386,8 @@ try {
       case 'failed':
         return 'Ошибка';
       default:
-        return normalized || 'Неизвестно';
+        return state || 'Неизвестно';
     }
-  }
-
-  function updateCatalogProgress(state, payload = {}) {
-    if (!dom.progress) return;
-    dom.progress.hidden = false;
-    const normalized = (state || '').toLowerCase();
-    const progressMap = {
-      pending: 15,
-      queued: 10,
-      received: 35,
-      processing: 65,
-      done: 100,
-      failed: 100,
-    };
-    const width = progressMap[normalized] != null ? progressMap[normalized] : 5;
-    if (dom.progressBar) {
-      const clamped = Math.max(0, Math.min(100, width));
-      dom.progressBar.style.width = `${clamped}%`;
-    }
-    if (dom.progressText) {
-      const parts = [`Статус: ${describeCatalogState(state)}`];
-      const timestamp = formatCatalogTimestamp(payload.updated_at);
-      if (timestamp) {
-        parts.push(`обновлено ${timestamp}`);
-      }
-      dom.progressText.textContent = parts.join(' · ');
-      const variant = normalized === 'failed' ? 'alert' : 'muted';
-      dom.progressText.className = `status-text ${variant}`.trim();
-    }
-  }
-
-  function buildCatalogStatusUrl(jobId, context) {
-    if (!jobId || !context) return '';
-    const { tenant: tenantValue, publicKey } = context;
-    if (!tenantValue || !publicKey) return '';
-    const params = new URLSearchParams();
-    params.set('k', publicKey);
-    params.set('tenant', String(tenantValue));
-    params.set('job', String(jobId));
-    const locationInfo = getLocation();
-    let url;
-    try {
-      url = new URL('/pub/catalog/status', locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL('/pub/catalog/status', locationInfo.href || 'https://localhost');
-    }
-    url.search = params.toString();
-    return url.toString();
   }
 
   function scheduleCatalogStatusPoll(delay = CATALOG_STATUS_POLL_INTERVAL) {
@@ -1267,12 +1396,16 @@ try {
       clearTimeout(catalogStatusPollTimer);
       catalogStatusPollTimer = null;
     }
-    const safeDelay = Math.max(250, Number(delay) || CATALOG_STATUS_POLL_INTERVAL);
+    const safeDelay = Math.max(500, Number(delay) || CATALOG_STATUS_POLL_INTERVAL);
     catalogStatusPollTimer = setTimeout(() => {
       pollCatalogStatusOnce().catch((error) => {
         try {
           console.error('[client-settings] catalog status poll failed', error);
         } catch (_) {}
+        catalogUploadInFlight = false;
+        if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+        setUploadMessage(`Ошибка статуса: ${error.message}`, 'alert');
+        stopCatalogStatusPolling({ reset: true });
       });
     }, safeDelay);
   }
@@ -1281,78 +1414,19 @@ try {
     if (!catalogStatusContext || !catalogStatusContext.jobId) {
       return;
     }
-    const url = buildCatalogStatusUrl(catalogStatusContext.jobId, catalogStatusContext);
-    if (!url) {
-      stopCatalogStatusPolling({ reset: false });
-      setStatus(dom.uploadMessage, 'Не удалось получить статус обработки', 'alert');
-      if (dom.uploadForm && dom.uploadForm.dataset) {
-        delete dom.uploadForm.dataset.state;
-      }
+    const context = catalogStatusContext;
+    if (!context.webhookSecret) {
+      stopCatalogStatusPolling();
+      catalogUploadInFlight = false;
       if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
       return;
     }
-    try {
-      const response = await fetch(url, { cache: 'no-store' });
-      if (!response.ok) {
-        const text = (await response.text()) || '';
-        throw new Error(text || `HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      if (data && data.ok === false) {
-        throw new Error(data.error || 'Статус недоступен');
-      }
-      if (!data) {
-        throw new Error('Пустой ответ статуса');
-      }
-      handleCatalogStatusPayload(data);
-    } catch (error) {
-      stopCatalogStatusPolling();
-      setStatus(dom.uploadMessage, `Ошибка статуса: ${error.message}`, 'alert');
-      if (dom.uploadForm && dom.uploadForm.dataset) {
-        delete dom.uploadForm.dataset.state;
-      }
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-    }
-  }
-
-  function handleCatalogStatusPayload(payload) {
-    const state = (payload.state || '').toLowerCase();
-    updateCatalogProgress(state, payload);
-    if (dom.uploadMessage && CATALOG_PROCESSING_STATES.has(state)) {
-      setStatus(dom.uploadMessage, 'Обработка…', 'muted');
-    }
-
-    if (state === 'done') {
-      stopCatalogStatusPolling();
-      setStatus(dom.uploadMessage, 'Готово', 'muted');
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-      if (dom.uploadForm && dom.uploadForm.dataset) {
-        delete dom.uploadForm.dataset.state;
-      }
-      if (dom.uploadInput) {
-        dom.uploadInput.value = '';
-      }
-      loadCsv({ quiet: true });
-      if (typeof window !== 'undefined') {
-        setTimeout(() => {
-          resetProgress();
-        }, 2000);
-      } else {
-        resetProgress();
-      }
-    } else if (state === 'failed') {
-      stopCatalogStatusPolling();
-      const message = payload.message || payload.error || 'Ошибка обработки каталога';
-      setStatus(dom.uploadMessage, `Ошибка: ${message}`, 'alert');
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-      if (dom.uploadForm && dom.uploadForm.dataset) {
-        delete dom.uploadForm.dataset.state;
-      }
-    } else if (CATALOG_PROCESSING_STATES.has(state)) {
+    const data = await fetchInternalCatalogStatus(context.jobId, context);
+    if (!data) {
       scheduleCatalogStatusPoll();
-    } else {
-      scheduleCatalogStatusPoll();
+      return;
     }
+    handleCatalogStatusPayload(data, context);
   }
 
   function startCatalogStatusPolling(jobId, context) {
@@ -1364,94 +1438,47 @@ try {
       jobId: String(jobId),
       tenant: context.tenant,
       publicKey: context.publicKey,
+      webhookSecret: context.webhookSecret || '',
     };
     scheduleCatalogStatusPoll(250);
   }
 
   async function performCatalogUpload(event) {
     if (event) event.preventDefault();
-    if (!dom.uploadForm) return;
-    const currentState = dom.uploadForm.dataset.state;
-    if (catalogUploadInFlight || currentState === 'uploading' || currentState === 'processing') return;
+    if (!dom.catalogForm) return;
+    if (catalogUploadInFlight) return;
 
     const file = dom.uploadInput && dom.uploadInput.files && dom.uploadInput.files[0];
     if (!file) {
-      setStatus(dom.uploadMessage, 'Выберите файл перед загрузкой', 'alert');
+      setUploadMessage('Выберите файл перед загрузкой', 'alert');
       return;
     }
 
     const clientConfig = getClientSettings();
-    const resolveTenantValue = () => {
-      if (clientConfig && clientConfig.tenant != null) {
-        const candidate = String(clientConfig.tenant).trim();
-        if (candidate) return candidate;
-      }
-      if (clientConfig && clientConfig.tenant_id != null) {
-        const candidate = String(clientConfig.tenant_id).trim();
-        if (candidate) return candidate;
-      }
-      if (tenantString) return tenantString;
-      if (Number.isFinite(tenant) && tenant > 0) {
-        return String(tenant);
-      }
-      return '';
-    };
-    const tenantValue = resolveTenantValue();
+    const tenantValue = resolveTenantForCatalog(clientConfig);
     if (!tenantValue) {
-      setStatus(dom.uploadMessage, 'Не удалось определить tenant', 'alert');
+      setUploadMessage('Не удалось определить tenant', 'alert');
       return;
     }
 
-    const resolvePublicKey = () => {
-      if (clientConfig && typeof clientConfig.public_key === 'string' && clientConfig.public_key.trim()) {
-        return clientConfig.public_key.trim();
-      }
-      if (clientConfig && typeof clientConfig.key === 'string' && clientConfig.key.trim()) {
-        return clientConfig.key.trim();
-      }
-      const fallbackKey = resolveEffectiveAccessKey();
-      return fallbackKey ? String(fallbackKey).trim() : '';
-    };
-    const publicKey = resolvePublicKey();
+    const publicKey = resolvePublicKeyForCatalog(clientConfig);
     if (!publicKey) {
-      setStatus(dom.uploadMessage, 'Нет публичного ключа клиента', 'alert');
+      setUploadMessage('Нет публичного ключа клиента', 'alert');
       return;
     }
 
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const locationInfo = getLocation();
-    const candidates = [];
-    const datasetUrlRaw = (dom.uploadForm.dataset.uploadUrl || '').trim();
-    if (datasetUrlRaw) {
-      candidates.push(datasetUrlRaw);
-    }
-    candidates.push('/pub/catalog/upload');
-    let uploadUrl = '';
-    for (let idx = 0; idx < candidates.length; idx += 1) {
-      const candidate = candidates[idx];
-      try {
-        const url = new URL(candidate, locationInfo.origin || locationInfo.href || 'https://localhost');
-        url.searchParams.set('k', publicKey);
-        url.searchParams.set('tenant', String(tenantValue));
-        uploadUrl = url.toString();
-        break;
-      } catch (error) {
-        continue;
-      }
-    }
-
+    const webhookSecret = resolveWebhookSecret(clientConfig);
+    const uploadUrl = buildCatalogUploadUrl(publicKey, tenantValue);
     if (!uploadUrl) {
-      setStatus(dom.uploadMessage, 'Не найден адрес загрузки каталога', 'alert');
+      setUploadMessage('Не найден адрес загрузки каталога', 'alert');
       return;
     }
 
-    setStatus(dom.uploadMessage, 'Загружаю…', 'muted');
-    updateCatalogProgress('pending', { updated_at: Math.floor(Date.now() / 1000) });
-    dom.uploadForm.dataset.state = 'uploading';
+    const formData = new FormData(dom.catalogForm);
     catalogUploadInFlight = true;
-    stopCatalogStatusPolling({ reset: false });
+    stopCatalogStatusPolling({ reset: true });
+    setUploadMessage('Загружаем файл…', 'muted');
+    showProgressMessage('Файл отправляется…', 'muted');
     if (dom.uploadSubmit) dom.uploadSubmit.disabled = true;
 
     try {
@@ -1463,49 +1490,54 @@ try {
         const text = (await response.text()) || '';
         throw new Error(text || `Ошибка загрузки (HTTP ${response.status})`);
       }
-      const data = await response.json();
+      let data = null;
+      try {
+        data = await response.clone().json();
+      } catch (jsonError) {
+        data = null;
+      }
       if (!data || data.ok === false) {
         throw new Error((data && data.error) || 'Не удалось загрузить файл');
       }
-      dom.uploadForm.dataset.state = 'processing';
-      setStatus(dom.uploadMessage, 'Обработка…', 'muted');
-      updateCatalogProgress(data.state || 'pending', data);
+
       if (data.job_id) {
-        startCatalogStatusPolling(data.job_id, { tenant: tenantValue, publicKey });
-      } else {
-        if (dom.uploadInput) dom.uploadInput.value = '';
-        setStatus(dom.uploadMessage, 'Каталог обновлён', 'muted');
-        loadCsv({ quiet: true });
-        if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-        if (dom.uploadForm && dom.uploadForm.dataset) {
-          delete dom.uploadForm.dataset.state;
-        }
-        if (typeof window !== 'undefined') {
-          setTimeout(() => { resetProgress(); }, 1500);
+        setUploadMessage('Каталог принят. Идёт обработка.', 'muted');
+        showProgressMessage('Ожидаем завершение обработки…', 'muted');
+        const context = { tenant: tenantValue, publicKey, webhookSecret };
+        if (webhookSecret) {
+          startCatalogStatusPolling(String(data.job_id), context);
         } else {
+          try {
+            await refreshSettingsSnapshot(context);
+            setUploadMessage('Каталог принят. Обновляем данные…', 'muted');
+            loadCsv({ quiet: true });
+            if (dom.uploadInput) dom.uploadInput.value = '';
+          } catch (refreshError) {
+            setUploadMessage(`Каталог принят, но не удалось обновить настройки: ${refreshError.message}`, 'alert');
+          }
+          catalogUploadInFlight = false;
+          if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
           resetProgress();
         }
+      } else {
+        catalogUploadInFlight = false;
+        if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+        if (dom.uploadInput) dom.uploadInput.value = '';
+        setUploadMessage('Каталог обновлён.', 'success');
+        resetProgress();
+        loadCsv({ quiet: true });
       }
     } catch (error) {
-      setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
-      resetProgress();
-      if (dom.uploadForm && dom.uploadForm.dataset) {
-        delete dom.uploadForm.dataset.state;
-      }
-      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-    } finally {
       catalogUploadInFlight = false;
-      if (dom.uploadForm && dom.uploadForm.dataset.state === 'processing') {
-        // keep disabled until статус завершён
-      } else if (dom.uploadSubmit) {
-        dom.uploadSubmit.disabled = false;
-      }
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      setUploadMessage(`Ошибка загрузки: ${error.message}`, 'alert');
+      resetProgress();
     }
   }
 
-  function bindUploadWidget() {
-    if (!dom.uploadForm) return;
-    dom.uploadForm.addEventListener('submit', (event) => {
+  function bindCatalogForm() {
+    if (!dom.catalogForm) return;
+    dom.catalogForm.addEventListener('submit', (event) => {
       event.preventDefault();
       performCatalogUpload(event);
     });
@@ -1523,9 +1555,9 @@ try {
         }
         const selected = dom.uploadInput.files && dom.uploadInput.files[0];
         if (selected) {
-          setStatus(dom.uploadMessage, `Выбран файл ${selected.name}`, 'muted');
+          setUploadMessage(`Выбран файл ${selected.name}`, 'muted');
         } else {
-          setStatus(dom.uploadMessage, '', 'muted');
+          setUploadMessage('', 'muted');
         }
       });
     }
@@ -2138,7 +2170,7 @@ try {
 
   function bootstrapClientSettings() {
     bindExportClicks();
-    bindUploadWidget();
+    bindCatalogForm();
     bindTrainingUpload();
     loadCsv({ quiet: true });
     refreshTrainingStatus();
