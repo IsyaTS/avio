@@ -668,12 +668,12 @@ try {
     savePersona: document.getElementById('save-persona'),
     personaMessage: document.getElementById('persona-message'),
     downloadConfig: document.getElementById('download-config'),
-    catalogForm: document.getElementById('catalogForm'),
-    uploadInput: document.getElementById('catalogFile'),
-    catalogUploadButton: document.getElementById('catalogUploadBtn'),
-    catalogUploadStatus: document.getElementById('catalogUploadStatus'),
-    catalogUploadProgress: document.getElementById('catalogUploadProgress'),
-    catalogUploadProgressBar: document.getElementById('catalogUploadProgressBar'),
+    catalogForm: document.getElementById('catalogForm') || document.getElementById('catalog-upload-form'),
+    uploadInput: document.getElementById('catalogFile') || document.getElementById('catalog-file'),
+    catalogUploadButton: document.getElementById('catalogUploadBtn') || document.getElementById('catalog-upload-btn'),
+    catalogUploadStatus: document.getElementById('catalogUploadStatus') || document.getElementById('catalog-upload-status'),
+    catalogUploadProgress: document.getElementById('catalogUploadProgress') || document.getElementById('catalog-upload-progress'),
+    catalogUploadProgressBar: document.getElementById('catalogUploadProgressBar') || document.getElementById('catalog-upload-progress'),
     csvTable: document.getElementById('csv-table'),
     csvEmpty: document.getElementById('csv-empty'),
     csvMessage: document.getElementById('csv-message'),
@@ -1164,20 +1164,34 @@ try {
   }
 
   function resetCatalogUploadUi() {
-    if (dom.catalogUploadProgressBar) {
-      dom.catalogUploadProgressBar.style.width = '0%';
+    const progressEl = dom.catalogUploadProgress;
+    const barEl = dom.catalogUploadProgressBar;
+    if (progressEl && progressEl.tagName === 'PROGRESS') {
+      progressEl.value = 0;
+      progressEl.hidden = true;
+      return;
     }
-    if (dom.catalogUploadProgress) {
-      dom.catalogUploadProgress.style.display = 'none';
+    if (barEl && barEl !== progressEl) {
+      barEl.style.width = '0%';
+    }
+    if (progressEl) {
+      progressEl.style.display = 'none';
     }
   }
 
   function updateCatalogProgress(percent) {
-    if (!dom.catalogUploadProgress || !dom.catalogUploadProgressBar) return;
+    const progressEl = dom.catalogUploadProgress;
+    const barEl = dom.catalogUploadProgressBar;
     const numeric = Number(percent);
     const bounded = Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
-    dom.catalogUploadProgress.style.display = 'block';
-    dom.catalogUploadProgressBar.style.width = `${bounded}%`;
+    if (progressEl && progressEl.tagName === 'PROGRESS') {
+      progressEl.hidden = false;
+      progressEl.value = bounded;
+      return;
+    }
+    if (!progressEl || !barEl || barEl === progressEl) return;
+    progressEl.style.display = 'block';
+    barEl.style.width = `${bounded}%`;
   }
 
   function setCatalogStatus(message, variant = 'muted', options = {}) {
@@ -1661,6 +1675,9 @@ try {
   }
 
   function bindCatalogUpload() {
+    if (typeof window !== 'undefined' && window.__catalogUploadV2) {
+      return;
+    }
     if (dom.catalogUploadButton) {
       dom.catalogUploadButton.addEventListener('click', (event) => {
         if (event && typeof event.preventDefault === 'function') {

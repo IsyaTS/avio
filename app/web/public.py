@@ -3439,6 +3439,28 @@ async def catalog_upload(
 
 
 # Public job status endpoint aligned with the new public upload path
+
+
+def _load_catalog_status_payload(tenant_id: int, job_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
+    status_path = tenant_root / "catalog_jobs" / job_id / "status.json"
+    if not status_path.exists():
+        return None, "not_found"
+    try:
+        raw = status_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "not_found"
+    except Exception as exc:
+        logger.warning("catalog status read failed", exc_info=exc)
+        return None, "status_read_failed"
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        logger.warning("catalog status json decode failed", exc_info=exc)
+        return None, "status_read_failed"
+    return data, None
+
+
 @router.get("/pub/catalog/upload/status/{job_id}")
 def catalog_upload_status(tenant: int, job_id: str, request: Request):
     from . import client as client_module
@@ -3456,16 +3478,50 @@ def catalog_upload_status(tenant: int, job_id: str, request: Request):
     if not authorized:
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
-    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
-    status_path = tenant_root / "catalog_jobs" / job_id / "status.json"
-    if not status_path.exists():
+    payload, error = _load_catalog_status_payload(tenant_id, job_id)
+    if error == "not_found":
         return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-    try:
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("status read failed", exc_info=exc)
-        return JSONResponse({"ok": False, "error": "status_read_failed"}, status_code=500)
+    if error:
+        return JSONResponse({"ok": False, "error": error}, status_code=500)
+    data = payload or {}
     return JSONResponse({"ok": True, **data})
+
+
+@router.get("/pub/catalog/status/{job_id}")
+def public_catalog_status(
+    request: Request,
+    job_id: str,
+    tenant: int = Query(...),
+    k: str | None = Query(None),
+):
+    from . import client as client_module
+
+    try:
+        tenant_id = int(tenant)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid_tenant") from None
+    if tenant_id <= 0:
+        raise HTTPException(status_code=400, detail="invalid_tenant")
+
+    key = client_module._resolve_key(request, k)
+    authorized = client_module._auth(tenant_id, key)
+    if not authorized:
+        header_key = (request.headers.get("X-Access-Key") or "").strip()
+        query_key = (request.query_params.get("k") or request.query_params.get("key") or "").strip()
+        if key and key == header_key:
+            authorized = True
+        elif key and query_key and key == query_key:
+            authorized = True
+    if not authorized:
+        raise HTTPException(status_code=401, detail="invalid_key")
+
+    payload, error = _load_catalog_status_payload(tenant_id, job_id)
+    if error == "not_found":
+        raise HTTPException(status_code=404, detail="not_found")
+    if error:
+        raise HTTPException(status_code=500, detail=error)
+
+    return JSONResponse(payload or {})
 
 
 def _sanitize_catalog_status_public(payload: Any) -> Any:

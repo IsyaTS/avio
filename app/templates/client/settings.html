@@ -71,18 +71,18 @@
     {% set tenant_id = state.tenant if state is defined and state.tenant is not none else (tenant.id if tenant is mapping else tenant) %}
     {% set upload_public_key = public_key if public_key is defined and public_key else (key if key else '') %}
     {% set upload_tenant = tenant_id if tenant_id is not none else tenant %}
-    <form id="catalogForm"
+    <form id="catalog-upload-form"
           class="stack"
           style="gap: 12px;">
         <label class="stack" style="gap: 6px;">
             <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
-            <input id="catalogFile" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
+            <input id="catalog-file" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
         </label>
         <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
-            <button class="btn" type="button" id="catalogUploadBtn">Загрузить</button>
+            <button class="btn" type="button" id="catalog-upload-btn">Загрузить</button>
         </div>
-        <div id="catalogUploadProgress" style="display:none"><div id="catalogUploadProgressBar" style="width:0%"></div></div>
-        <div id="catalogUploadStatus"></div>
+        <div id="catalog-upload-status" class="status-text"></div>
+        <progress id="catalog-upload-progress" value="0" max="100" hidden></progress>
     </form>
 
     <div class="surface stack" style="gap: 12px;">
@@ -166,5 +166,6 @@
   });
 </script>
 <script src="{{ static_url(request, 'js/boot.js') }}?v={{ ASSET_VERSION }}" defer></script>
+<script src="{{ static_url(request, 'js/catalog-upload.js') }}?v={{ ASSET_VERSION }}" defer></script>
 <script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ ASSET_VERSION }}" defer></script>
 {% endblock %}
