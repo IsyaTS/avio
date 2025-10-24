@@ -529,7 +529,21 @@ async def catalog_upload(tenant: int, request: Request, file: UploadFile = File(
     integrations["uploaded_catalog"] = uploaded_meta
     C.write_tenant_config(tenant, cfg)
 
-    # HTML form fallback: redirect back to settings
+    accept_header = (request.headers.get("accept") or "").lower()
+    sec_fetch_mode = (request.headers.get("sec-fetch-mode") or "").lower()
+    sec_fetch_dest = (request.headers.get("sec-fetch-dest") or "").lower()
+    wants_html = (
+        "text/html" in accept_header
+        or "application/xhtml+xml" in accept_header
+        or sec_fetch_mode == "navigate"
+        or sec_fetch_dest == "document"
+    )
+    if wants_html and (request.headers.get("x-requested-with", "").lower() != "xmlhttprequest"):
+        redirect_url = str(request.url_for("client_settings", tenant=str(tenant)))
+        if key:
+            redirect_url = f"{redirect_url}?k={quote_plus(key)}"
+        return RedirectResponse(url=redirect_url, status_code=303)
+
     return {
         "ok": True,
         "filename": filename,

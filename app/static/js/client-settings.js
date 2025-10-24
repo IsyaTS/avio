@@ -1072,6 +1072,39 @@ try {
     if (dom.progressBar) dom.progressBar.style.width = '0%';
   }
 
+  function buildCatalogUploadStatusUrl(jobId) {
+    if (!jobId) return '';
+    const safeId = String(jobId).trim();
+    if (!safeId) return '';
+    const encodedId = encodeURIComponent(safeId);
+    const basePath = `/pub/catalog/upload/status/${encodedId}`;
+    return resolveEndpointUrl(basePath, withTenant(), basePath);
+  }
+
+  function showCatalogProcessingNotice(jobId, displayName) {
+    if (!dom.uploadMessage) return;
+    const statusUrl = buildCatalogUploadStatusUrl(jobId);
+    dom.uploadMessage.className = 'status-text muted';
+    dom.uploadMessage.textContent = '';
+    const prefix = displayName ? `Каталог ${displayName} принят. ` : 'Каталог принят. ';
+    dom.uploadMessage.appendChild(document.createTextNode(prefix));
+    const link = document.createElement('a');
+    link.textContent = 'Каталог обновляется';
+    if (statusUrl) {
+      link.href = statusUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    } else {
+      link.href = '#';
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
+
+    dom.uploadMessage.appendChild(link);
+  }
+
 function performCatalogUpload(event) {
   if (event) event.preventDefault();
   if (!dom.uploadForm) return;
@@ -1140,9 +1173,14 @@ function performCatalogUpload(event) {
       if (!data.ok) {
         throw new Error(data.error || 'Не удалось загрузить файл');
       }
-      setStatus(dom.uploadMessage, `Файл ${data.filename || file.name} загружен`, 'muted');
+      const displayName = data.filename || file.name;
       if (dom.uploadInput) dom.uploadInput.value = '';
-      await loadCsv({ quiet: true });
+      if (data.job_id) {
+        showCatalogProcessingNotice(data.job_id, displayName);
+      } else {
+        setStatus(dom.uploadMessage, `Файл ${displayName} загружен`, 'muted');
+        await loadCsv({ quiet: true });
+      }
     } catch (error) {
       setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
     }
