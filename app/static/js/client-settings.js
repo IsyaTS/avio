@@ -668,12 +668,13 @@ try {
     savePersona: document.getElementById('save-persona'),
     personaMessage: document.getElementById('persona-message'),
     downloadConfig: document.getElementById('download-config'),
-    uploadForm: document.getElementById('upload-form'),
-    uploadInput: document.querySelector('#upload-form input[name="file"]'),
-    uploadMessage: document.getElementById('upload-message'),
-    uploadSubmit: document.querySelector('#upload-form [data-role="upload-submit"], #upload-submit'),
-    progress: document.getElementById('upload-progress'),
-    progressBar: document.getElementById('upload-progress-bar'),
+    uploadForm: document.getElementById('uploadForm'),
+    uploadInput: document.getElementById('catalogFile'),
+    uploadMessage: document.getElementById('catalogResult'),
+    uploadSubmit: document.getElementById('uploadBtn'),
+    progress: document.getElementById('catalogProgress'),
+    progressBar: document.querySelector('#catalogProgress .progress-bar'),
+    progressText: document.querySelector('#catalogProgress .status-text'),
     csvTable: document.getElementById('csv-table'),
     csvEmpty: document.getElementById('csv-empty'),
     csvMessage: document.getElementById('csv-message'),
@@ -723,6 +724,10 @@ try {
   let passwordPromptVisible = false;
   let qrImageReloadPending = false;
   let catalogUploadInFlight = false;
+  let catalogStatusPollTimer = null;
+  let catalogStatusContext = null;
+  const CATALOG_STATUS_POLL_INTERVAL = 1500;
+  const CATALOG_PROCESSING_STATES = new Set(['pending', 'processing', 'queued', 'received']);
   const HIDDEN_CLASS = 'hidden';
   const TELEGRAM_STATUS_MAX_ERROR_ATTEMPTS = 5;
   const TELEGRAM_STATUS_RETRY_BASE_DELAY = 4000;
@@ -1158,128 +1163,345 @@ try {
   function resetProgress() {
     if (dom.progress) dom.progress.hidden = true;
     if (dom.progressBar) dom.progressBar.style.width = '0%';
-  }
-
-  function buildCatalogUploadStatusUrl(jobId) {
-    if (!jobId) return '';
-    const safeId = String(jobId).trim();
-    if (!safeId) return '';
-    const encodedId = encodeURIComponent(safeId);
-    const basePath = `/pub/catalog/upload/status/${encodedId}`;
-    return resolveEndpointUrl(basePath, withTenant(), basePath);
-  }
-
-  function showCatalogProcessingNotice(jobId) {
-    if (!dom.uploadMessage) return;
-    const statusUrl = buildCatalogUploadStatusUrl(jobId);
-    dom.uploadMessage.className = 'status-text muted';
-    dom.uploadMessage.textContent = '';
-    dom.uploadMessage.appendChild(document.createTextNode('Каталог принят'));
-    if (statusUrl) {
-      dom.uploadMessage.appendChild(document.createTextNode(' '));
-      const link = document.createElement('a');
-      link.textContent = 'Статус обработки';
-      link.href = statusUrl;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      dom.uploadMessage.appendChild(link);
+    if (dom.progressText) {
+      dom.progressText.className = 'status-text muted';
+      dom.progressText.textContent = '';
     }
   }
 
-function performCatalogUpload(event) {
-  if (event) event.preventDefault();
-  if (!dom.uploadForm) return;
-  if (catalogUploadInFlight || dom.uploadForm.dataset.state === 'uploading') return;
-
-  const file = dom.uploadInput && dom.uploadInput.files && dom.uploadInput.files[0];
-  if (!file) {
-    setStatus(dom.uploadMessage, 'Выберите файл перед загрузкой', 'alert');
-    return;
+  function stopCatalogStatusPolling(options = {}) {
+    const { reset = false } = options || {};
+    if (catalogStatusPollTimer) {
+      clearTimeout(catalogStatusPollTimer);
+      catalogStatusPollTimer = null;
+    }
+    catalogStatusContext = null;
+    if (reset) {
+      resetProgress();
+    }
   }
 
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const targetUrlRaw = (dom.uploadForm.dataset.uploadUrl || '').trim();
-  const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.uploadCatalog, withTenant(), endpoints.uploadCatalog);
-  if (!targetUrl) {
-    setStatus(dom.uploadMessage, 'Не найдён адрес загрузки каталога', 'alert');
-    return;
+  function formatCatalogTimestamp(value) {
+    if (value == null) return '';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return '';
+    const date = new Date(numeric * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+    try {
+      return date.toLocaleTimeString();
+    } catch (error) {
+      return '';
+    }
   }
 
-  setStatus(dom.uploadMessage, `Загрузка ${file.name}...`, 'muted');
-  if (dom.progress) dom.progress.hidden = false;
-  if (dom.progressBar) dom.progressBar.style.width = '0%';
-  dom.uploadForm.dataset.state = 'uploading';
-  catalogUploadInFlight = true;
+  function describeCatalogState(state) {
+    const normalized = (state || '').toLowerCase();
+    switch (normalized) {
+      case 'pending':
+      case 'queued':
+        return 'В очереди';
+      case 'received':
+        return 'Получен';
+      case 'processing':
+        return 'Обработка';
+      case 'done':
+        return 'Готово';
+      case 'failed':
+        return 'Ошибка';
+      default:
+        return normalized || 'Неизвестно';
+    }
+  }
 
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', targetUrl);
-  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+  function updateCatalogProgress(state, payload = {}) {
+    if (!dom.progress) return;
+    dom.progress.hidden = false;
+    const normalized = (state || '').toLowerCase();
+    const progressMap = {
+      pending: 15,
+      queued: 10,
+      received: 35,
+      processing: 65,
+      done: 100,
+      failed: 100,
+    };
+    const width = progressMap[normalized] != null ? progressMap[normalized] : 5;
+    if (dom.progressBar) {
+      const clamped = Math.max(0, Math.min(100, width));
+      dom.progressBar.style.width = `${clamped}%`;
+    }
+    if (dom.progressText) {
+      const parts = [`Статус: ${describeCatalogState(state)}`];
+      const timestamp = formatCatalogTimestamp(payload.updated_at);
+      if (timestamp) {
+        parts.push(`обновлено ${timestamp}`);
+      }
+      dom.progressText.textContent = parts.join(' · ');
+      const variant = normalized === 'failed' ? 'alert' : 'muted';
+      dom.progressText.className = `status-text ${variant}`.trim();
+    }
+  }
 
-  if (dom.uploadSubmit) dom.uploadSubmit.disabled = true;
+  function buildCatalogStatusUrl(jobId, context) {
+    if (!jobId || !context) return '';
+    const { tenant: tenantValue, publicKey } = context;
+    if (!tenantValue || !publicKey) return '';
+    const params = new URLSearchParams();
+    params.set('k', publicKey);
+    params.set('tenant', String(tenantValue));
+    params.set('job', String(jobId));
+    const locationInfo = getLocation();
+    let url;
+    try {
+      url = new URL('/pub/catalog/status', locationInfo.origin || 'https://localhost');
+    } catch (error) {
+      url = new URL('/pub/catalog/status', locationInfo.href || 'https://localhost');
+    }
+    url.search = params.toString();
+    return url.toString();
+  }
 
-  xhr.upload.onprogress = (progressEvent) => {
-    if (!dom.progressBar || !progressEvent.lengthComputable) return;
-    const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
-    dom.progressBar.style.width = `${percent}%`;
-  };
+  function scheduleCatalogStatusPoll(delay = CATALOG_STATUS_POLL_INTERVAL) {
+    if (!catalogStatusContext || !catalogStatusContext.jobId) return;
+    if (catalogStatusPollTimer) {
+      clearTimeout(catalogStatusPollTimer);
+      catalogStatusPollTimer = null;
+    }
+    const safeDelay = Math.max(250, Number(delay) || CATALOG_STATUS_POLL_INTERVAL);
+    catalogStatusPollTimer = setTimeout(() => {
+      pollCatalogStatusOnce().catch((error) => {
+        try {
+          console.error('[client-settings] catalog status poll failed', error);
+        } catch (_) {}
+      });
+    }, safeDelay);
+  }
 
-  xhr.onerror = () => {
-    resetProgress();
-    delete dom.uploadForm.dataset.state;
-    catalogUploadInFlight = false;
-    if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-    setStatus(dom.uploadMessage, 'Ошибка сети при загрузке файла', 'alert');
-  };
+  async function pollCatalogStatusOnce() {
+    if (!catalogStatusContext || !catalogStatusContext.jobId) {
+      return;
+    }
+    const url = buildCatalogStatusUrl(catalogStatusContext.jobId, catalogStatusContext);
+    if (!url) {
+      stopCatalogStatusPolling({ reset: false });
+      setStatus(dom.uploadMessage, 'Не удалось получить статус обработки', 'alert');
+      if (dom.uploadForm && dom.uploadForm.dataset) {
+        delete dom.uploadForm.dataset.state;
+      }
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      return;
+    }
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) {
+        const text = (await response.text()) || '';
+        throw new Error(text || `HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      if (data && data.ok === false) {
+        throw new Error(data.error || 'Статус недоступен');
+      }
+      if (!data) {
+        throw new Error('Пустой ответ статуса');
+      }
+      handleCatalogStatusPayload(data);
+    } catch (error) {
+      stopCatalogStatusPolling();
+      setStatus(dom.uploadMessage, `Ошибка статуса: ${error.message}`, 'alert');
+      if (dom.uploadForm && dom.uploadForm.dataset) {
+        delete dom.uploadForm.dataset.state;
+      }
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+    }
+  }
 
-  xhr.onload = async () => {
-    resetProgress();
-    delete dom.uploadForm.dataset.state;
-    catalogUploadInFlight = false;
-    if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+  function handleCatalogStatusPayload(payload) {
+    const state = (payload.state || '').toLowerCase();
+    updateCatalogProgress(state, payload);
+    if (dom.uploadMessage && CATALOG_PROCESSING_STATES.has(state)) {
+      setStatus(dom.uploadMessage, 'Обработка…', 'muted');
+    }
+
+    if (state === 'done') {
+      stopCatalogStatusPolling();
+      setStatus(dom.uploadMessage, 'Готово', 'muted');
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      if (dom.uploadForm && dom.uploadForm.dataset) {
+        delete dom.uploadForm.dataset.state;
+      }
+      if (dom.uploadInput) {
+        dom.uploadInput.value = '';
+      }
+      loadCsv({ quiet: true });
+      if (typeof window !== 'undefined') {
+        setTimeout(() => {
+          resetProgress();
+        }, 2000);
+      } else {
+        resetProgress();
+      }
+    } else if (state === 'failed') {
+      stopCatalogStatusPolling();
+      const message = payload.message || payload.error || 'Ошибка обработки каталога';
+      setStatus(dom.uploadMessage, `Ошибка: ${message}`, 'alert');
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+      if (dom.uploadForm && dom.uploadForm.dataset) {
+        delete dom.uploadForm.dataset.state;
+      }
+    } else if (CATALOG_PROCESSING_STATES.has(state)) {
+      scheduleCatalogStatusPoll();
+    } else {
+      scheduleCatalogStatusPoll();
+    }
+  }
+
+  function startCatalogStatusPolling(jobId, context) {
+    if (!jobId || !context) {
+      return;
+    }
+    stopCatalogStatusPolling();
+    catalogStatusContext = {
+      jobId: String(jobId),
+      tenant: context.tenant,
+      publicKey: context.publicKey,
+    };
+    scheduleCatalogStatusPoll(250);
+  }
+
+  async function performCatalogUpload(event) {
+    if (event) event.preventDefault();
+    if (!dom.uploadForm) return;
+    const currentState = dom.uploadForm.dataset.state;
+    if (catalogUploadInFlight || currentState === 'uploading' || currentState === 'processing') return;
+
+    const file = dom.uploadInput && dom.uploadInput.files && dom.uploadInput.files[0];
+    if (!file) {
+      setStatus(dom.uploadMessage, 'Выберите файл перед загрузкой', 'alert');
+      return;
+    }
+
+    const clientConfig = getClientSettings();
+    const resolveTenantValue = () => {
+      if (clientConfig && clientConfig.tenant != null) {
+        const candidate = String(clientConfig.tenant).trim();
+        if (candidate) return candidate;
+      }
+      if (clientConfig && clientConfig.tenant_id != null) {
+        const candidate = String(clientConfig.tenant_id).trim();
+        if (candidate) return candidate;
+      }
+      if (tenantString) return tenantString;
+      if (Number.isFinite(tenant) && tenant > 0) {
+        return String(tenant);
+      }
+      return '';
+    };
+    const tenantValue = resolveTenantValue();
+    if (!tenantValue) {
+      setStatus(dom.uploadMessage, 'Не удалось определить tenant', 'alert');
+      return;
+    }
+
+    const resolvePublicKey = () => {
+      if (clientConfig && typeof clientConfig.public_key === 'string' && clientConfig.public_key.trim()) {
+        return clientConfig.public_key.trim();
+      }
+      if (clientConfig && typeof clientConfig.key === 'string' && clientConfig.key.trim()) {
+        return clientConfig.key.trim();
+      }
+      const fallbackKey = resolveEffectiveAccessKey();
+      return fallbackKey ? String(fallbackKey).trim() : '';
+    };
+    const publicKey = resolvePublicKey();
+    if (!publicKey) {
+      setStatus(dom.uploadMessage, 'Нет публичного ключа клиента', 'alert');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const locationInfo = getLocation();
+    const candidates = [];
+    const datasetUrlRaw = (dom.uploadForm.dataset.uploadUrl || '').trim();
+    if (datasetUrlRaw) {
+      candidates.push(datasetUrlRaw);
+    }
+    candidates.push('/pub/catalog/upload');
+    let uploadUrl = '';
+    for (let idx = 0; idx < candidates.length; idx += 1) {
+      const candidate = candidates[idx];
+      try {
+        const url = new URL(candidate, locationInfo.origin || locationInfo.href || 'https://localhost');
+        url.searchParams.set('k', publicKey);
+        url.searchParams.set('tenant', String(tenantValue));
+        uploadUrl = url.toString();
+        break;
+      } catch (error) {
+        continue;
+      }
+    }
+
+    if (!uploadUrl) {
+      setStatus(dom.uploadMessage, 'Не найден адрес загрузки каталога', 'alert');
+      return;
+    }
+
+    setStatus(dom.uploadMessage, 'Загружаю…', 'muted');
+    updateCatalogProgress('pending', { updated_at: Math.floor(Date.now() / 1000) });
+    dom.uploadForm.dataset.state = 'uploading';
+    catalogUploadInFlight = true;
+    stopCatalogStatusPolling({ reset: false });
+    if (dom.uploadSubmit) dom.uploadSubmit.disabled = true;
 
     try {
-      if (xhr.status >= 300 && xhr.status < 400) {
-        setStatus(dom.uploadMessage, 'Каталог принят, обновляем данные…', 'muted');
-        await loadCsv({ quiet: true });
-        setStatus(dom.uploadMessage, 'Каталог обновлён', 'muted');
-        if (dom.uploadInput) dom.uploadInput.value = '';
-        return;
+      const response = await fetch(uploadUrl, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        const text = (await response.text()) || '';
+        throw new Error(text || `Ошибка загрузки (HTTP ${response.status})`);
       }
-
-      if (xhr.status < 200 || xhr.status >= 300) {
-        const text = xhr.responseText || '';
-        throw new Error(text || `Ошибка загрузки (HTTP ${xhr.status})`);
+      const data = await response.json();
+      if (!data || data.ok === false) {
+        throw new Error((data && data.error) || 'Не удалось загрузить файл');
       }
-
-      const data = JSON.parse(xhr.responseText || '{}');
-      if (!data.ok) {
-        throw new Error(data.error || 'Не удалось загрузить файл');
-      }
-      if (dom.uploadInput) dom.uploadInput.value = '';
+      dom.uploadForm.dataset.state = 'processing';
+      setStatus(dom.uploadMessage, 'Обработка…', 'muted');
+      updateCatalogProgress(data.state || 'pending', data);
       if (data.job_id) {
-        showCatalogProcessingNotice(data.job_id);
+        startCatalogStatusPolling(data.job_id, { tenant: tenantValue, publicKey });
       } else {
-        const displayName = data.filename || file.name;
-        setStatus(dom.uploadMessage, `Файл ${displayName} загружен`, 'muted');
-        await loadCsv({ quiet: true });
+        if (dom.uploadInput) dom.uploadInput.value = '';
+        setStatus(dom.uploadMessage, 'Каталог обновлён', 'muted');
+        loadCsv({ quiet: true });
+        if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+        if (dom.uploadForm && dom.uploadForm.dataset) {
+          delete dom.uploadForm.dataset.state;
+        }
+        if (typeof window !== 'undefined') {
+          setTimeout(() => { resetProgress(); }, 1500);
+        } else {
+          resetProgress();
+        }
       }
     } catch (error) {
       setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
+      resetProgress();
+      if (dom.uploadForm && dom.uploadForm.dataset) {
+        delete dom.uploadForm.dataset.state;
+      }
+      if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
+    } finally {
+      catalogUploadInFlight = false;
+      if (dom.uploadForm && dom.uploadForm.dataset.state === 'processing') {
+        // keep disabled until статус завершён
+      } else if (dom.uploadSubmit) {
+        dom.uploadSubmit.disabled = false;
+      }
     }
-  };
-
-  try {
-    xhr.send(formData);
-  } catch (error) {
-    resetProgress();
-    delete dom.uploadForm.dataset.state;
-    catalogUploadInFlight = false;
-    if (dom.uploadSubmit) dom.uploadSubmit.disabled = false;
-    setStatus(dom.uploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
   }
-}
 
   function bindUploadWidget() {
     if (!dom.uploadForm) return;
@@ -1287,7 +1509,7 @@ function performCatalogUpload(event) {
       event.preventDefault();
       performCatalogUpload(event);
     });
-    if (dom.uploadSubmit && String(dom.uploadSubmit.type || '').toLowerCase() !== 'submit') {
+    if (dom.uploadSubmit) {
       dom.uploadSubmit.addEventListener('click', (event) => {
         event.preventDefault();
         performCatalogUpload(event);
@@ -1295,11 +1517,15 @@ function performCatalogUpload(event) {
     }
     if (dom.uploadInput) {
       dom.uploadInput.addEventListener('change', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const file = dom.uploadInput.files && dom.uploadInput.files[0];
-        if (file) {
-          setStatus(dom.uploadMessage, `Выбран файл ${file.name}`, 'muted');
+        if (event) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        const selected = dom.uploadInput.files && dom.uploadInput.files[0];
+        if (selected) {
+          setStatus(dom.uploadMessage, `Выбран файл ${selected.name}`, 'muted');
+        } else {
+          setStatus(dom.uploadMessage, '', 'muted');
         }
       });
     }
