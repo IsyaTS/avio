@@ -3191,7 +3191,10 @@ async def catalog_upload(
 
     raw = await upload_file.read()
     if not raw:
-        return JSONResponse({"ok": False, "error": "empty_file"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "error": "empty_file", "message": "Файл не содержит данных"},
+            status_code=400,
+        )
     if len(raw) > MAX_UPLOAD_SIZE_BYTES:
         return JSONResponse(
             {
@@ -3463,3 +3466,78 @@ def catalog_upload_status(tenant: int, job_id: str, request: Request):
         logger.warning("status read failed", exc_info=exc)
         return JSONResponse({"ok": False, "error": "status_read_failed"}, status_code=500)
     return JSONResponse({"ok": True, **data})
+
+
+def _sanitize_catalog_status_public(payload: Any) -> Any:
+    allowed_path_keys = {"source_path", "csv_path"}
+
+    if isinstance(payload, dict):
+        sanitized: dict[Any, Any] = {}
+        for key, value in payload.items():
+            key_str = str(key)
+            normalized = key_str.lower()
+            if "path" in normalized and normalized not in allowed_path_keys:
+                continue
+            sanitized[key] = _sanitize_catalog_status_public(value)
+        return sanitized
+    if isinstance(payload, list):
+        return [_sanitize_catalog_status_public(item) for item in payload]
+    return payload
+
+
+@router.get("/pub/catalog/status")
+def catalog_status_public(
+    request: Request,
+    tenant: str = Query(...),
+    job: str = Query(...),
+    k: str | None = Query(None),
+):
+    from . import client as client_module
+
+    tenant_raw = (tenant or "").strip()
+    if not tenant_raw:
+        return JSONResponse({"ok": False, "error": "invalid_tenant"}, status_code=422)
+    try:
+        tenant_id = int(tenant_raw)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "invalid_tenant"}, status_code=422)
+    if tenant_id <= 0:
+        return JSONResponse({"ok": False, "error": "invalid_tenant"}, status_code=422)
+
+    job_raw = (job or "").strip()
+    if not job_raw:
+        return JSONResponse({"ok": False, "error": "invalid_job"}, status_code=422)
+    safe_job = pathlib.Path(job_raw).name
+    if safe_job != job_raw:
+        return JSONResponse({"ok": False, "error": "invalid_job"}, status_code=422)
+
+    key_candidate = k if k is not None else request.query_params.get("k")
+    key = client_module._resolve_key(request, key_candidate)
+    authorized = client_module._auth(tenant_id, key)
+    if not authorized:
+        header_key = (request.headers.get("X-Access-Key") or "").strip()
+        query_key = (request.query_params.get("k") or request.query_params.get("key") or "").strip()
+        if key and key == header_key:
+            authorized = True
+        elif key and query_key and key == query_key:
+            authorized = True
+    if not authorized:
+        return JSONResponse({"detail": "invalid_key"}, status_code=401)
+
+    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
+    status_path = tenant_root / "catalog_jobs" / safe_job / "status.json"
+    if not status_path.exists():
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    try:
+        raw_data = status_path.read_text(encoding="utf-8")
+        data = json.loads(raw_data)
+        if not isinstance(data, dict):
+            data = {"state": data}
+    except Exception as exc:
+        logger.warning("catalog status read failed", exc_info=exc)
+        return JSONResponse({"ok": False, "error": "status_read_failed"}, status_code=500)
+
+    sanitized = _sanitize_catalog_status_public(data)
+    sanitized["ok"] = True
+    sanitized.setdefault("job_id", safe_job)
+    return JSONResponse(sanitized)
