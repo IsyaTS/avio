@@ -1839,6 +1839,7 @@ try {
   const csvState = {
     columns: [],
     rows: [],
+    loading: false,
   };
 
   function setCsvMessage(message, variant = 'muted') {
@@ -1938,6 +1939,13 @@ try {
       });
       tbody.appendChild(tr);
     });
+
+    if (dom.csvTable) {
+      dom.csvTable.style.display = '';
+    }
+    if (dom.csvEmpty) {
+      dom.csvEmpty.style.display = 'none';
+    }
   }
 
   function refreshCsvDomElements() {
@@ -1992,6 +2000,11 @@ try {
       return;
     }
 
+    if (csvState.loading) {
+      console.info('[client-settings] csv fetch skip', { quiet, reason: 'in-flight' });
+      return;
+    }
+
     const state = readStateFromDom() || {};
     const urls = state && typeof state === 'object' ? state.urls || {} : {};
     const fallbackTenant = state && Object.prototype.hasOwnProperty.call(state, 'tenant') ? state.tenant : '';
@@ -2022,6 +2035,7 @@ try {
       requestUrl.searchParams.set('k', key);
     }
 
+    csvState.loading = true;
     try {
       const response = await fetch(requestUrl.toString(), {
         headers: {
@@ -2072,7 +2086,13 @@ try {
       ensureTableVisible(false);
       updateCsvControls();
       setCsvMessage(`Не удалось загрузить CSV: ${err.message}`, 'alert');
+    } finally {
+      csvState.loading = false;
     }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.fetchCsvAndRender = fetchCsvAndRender;
   }
 
   function collectCsvRows() {
@@ -2159,6 +2179,9 @@ try {
     }
 
     updateCsvControls();
+    if (!csvState.columns.length) {
+      setTimeout(fetchCsvAndRender, 0);
+    }
     ensureTableVisible(csvState.columns.length > 0);
   }
 
@@ -2500,7 +2523,7 @@ try {
     safeInvoke('catalog-init', bindCatalogUpload);
     safeInvoke('training-init', bindTrainingUpload);
     safeInvoke('csv-controls', bindCsvControls);
-    fetchCsvAndRender({ quiet: true });
+    setTimeout(fetchCsvAndRender, 0);
     try {
       const trainingPromise = refreshTrainingStatus();
       if (trainingPromise && typeof trainingPromise.catch === 'function') {
@@ -2532,11 +2555,7 @@ try {
     window.__cs_loaded = true;
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootstrapClientSettings, { once: true });
-  } else {
-    bootstrapClientSettings();
-  }
+  document.addEventListener('DOMContentLoaded', bootstrapClientSettings, { once: true });
 })();
 } catch (error) {
   window.__EXPORT_ERROR__ = error;
