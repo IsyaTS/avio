@@ -487,7 +487,7 @@ def client_settings(tenant: int, request: Request):
 
     state = {
         "tenant": tenant,
-        "key": tenant_key,
+        "key": key,
         "public_key": tenant_key,
         "primary_key": tenant_key,
         "urls": urls,
@@ -505,6 +505,8 @@ def client_settings(tenant: int, request: Request):
     state_payload = dict(state)
     state_payload["form"] = form_payload
 
+    asset_version_value = C.asset_version()
+
     context = {
         "request": request,
         "tenant": tenant,
@@ -521,6 +523,7 @@ def client_settings(tenant: int, request: Request):
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": C.client_settings_version(),
         "webhook_secret": webhook_secret,
+        "asset_version": asset_version_value,
     }
     response = render_template("client/settings.html", context)
     response.headers["Cache-Control"] = "no-store"
