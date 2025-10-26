@@ -1858,29 +1858,12 @@ try {
     if (!dom.csvTable || !dom.csvEmpty) return;
     const table = dom.csvTable;
     const emptyState = dom.csvEmpty;
-    const section = dom.csvSection || table.closest('#csv-section');
     if (show) {
       table.style.display = '';
-      table.classList.remove(HIDDEN_CLASS);
       emptyState.style.display = 'none';
-      emptyState.classList.add(HIDDEN_CLASS);
-      if (section) {
-        section.classList.remove(HIDDEN_CLASS);
-      } else {
-        let container = table.parentElement;
-        while (container && container.classList) {
-          if (container.classList.contains(HIDDEN_CLASS)) {
-            container.classList.remove(HIDDEN_CLASS);
-            break;
-          }
-          container = container.parentElement;
-        }
-      }
     } else {
       table.style.display = 'none';
-      table.classList.add(HIDDEN_CLASS);
       emptyState.style.display = '';
-      emptyState.classList.remove(HIDDEN_CLASS);
     }
   }
 
