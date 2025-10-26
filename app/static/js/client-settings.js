@@ -1,4 +1,4 @@
-window.__client_settings_build = '20240503';
+window.__client_settings_build = '20240518';
 window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {
@@ -30,6 +30,13 @@ function getLocation() {
     trainingUpload: '/pub/training/upload',
     trainingStatus: '/pub/training/status',
   };
+
+  if (typeof window !== 'undefined') {
+    const hasEndpoints = window.__client_endpoints && typeof window.__client_endpoints === 'object';
+    if (!hasEndpoints) {
+      window.__client_endpoints = { ...DEFAULT_CLIENT_ENDPOINTS };
+    }
+  }
 
   const SETTINGS_FETCH_MAX_ATTEMPTS = 5;
   const SETTINGS_FETCH_BACKOFF_BASE_MS = 600;
@@ -1907,6 +1914,17 @@ function getLocation() {
         }
       });
     }
+    if (dom.catalogForm) {
+      dom.catalogForm.addEventListener('submit', (event) => {
+        if (event && typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (event && typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+        performCatalogUpload(event);
+      });
+    }
   }
 
   // -------- Обучение: загрузка диалогов --------
@@ -2765,7 +2783,7 @@ function getLocation() {
     window.__cs_loaded = true;
   }
 
-  function runClientSettingsBootstrap() {
+  function init() {
     if (window.__cs_loaded === true) {
       return;
     }
@@ -2784,13 +2802,11 @@ function getLocation() {
     }
   }
 
-  window.__client_settings_boot = function init() {
-    runClientSettingsBootstrap();
-  };
+  window.__client_settings_boot = init;
 
   if (typeof document !== 'undefined' && document.readyState !== 'loading') {
-    runClientSettingsBootstrap();
+    init();
   } else if (typeof document !== 'undefined') {
-    document.addEventListener('DOMContentLoaded', runClientSettingsBootstrap, { once: true });
+    document.addEventListener('DOMContentLoaded', init, { once: true });
   }
 })();
