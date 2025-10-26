@@ -443,12 +443,20 @@ def write_csv_table(
 
 @router.get("/client/{tenant}/settings")
 def client_settings(tenant: int, request: Request):
-    provided_key = _resolve_key(request, request.query_params.get("k"))
+    raw_query_key = (request.query_params.get("k") or "").strip()
+    raw_cookie_key = ""
+    try:
+        raw_cookie_key = (request.cookies.get("client_key") or "").strip() if request.cookies else ""
+    except Exception:
+        raw_cookie_key = ""
+
+    client_key = raw_query_key or raw_cookie_key
+    provided_key = _resolve_key(request, client_key)
     if not _auth(tenant, provided_key):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
     tenant_key = (C.get_tenant_pubkey(int(tenant)) or "").strip()
-    key = (tenant_key or provided_key or "").strip()
+    key = client_key
 
     C.ensure_tenant_files(tenant)
     cfg = C.read_tenant_config(tenant)
