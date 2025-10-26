@@ -166,7 +166,7 @@ main.shell {
 
 .hidden,
 .is-hidden {
-  display: none !important;
+  display: none;
 }
 
 .toolbar {

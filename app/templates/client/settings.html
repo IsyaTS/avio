@@ -85,7 +85,8 @@
         <progress id="catalog-upload-progress" value="0" max="100" hidden></progress>
     </form>
 
-    {# CSV editor container must stay visible: avoid hidden/display:none on parents #}
+    {# CSV editor placeholder is separate to keep message visible when таблица скрыта #}
+    <div id="csv-empty" class="surface status-text" style="padding: 16px;">CSV ещё не готов — загрузите PDF или CSV файл</div>
     <div id="csv-section" class="surface stack" style="gap: 12px;">
         <h3 class="section-title" style="font-size:1.1rem;">CSV редактор</h3>
         <div style="display:flex; flex-wrap:wrap; gap:12px;">
@@ -95,8 +96,7 @@
             <span id="csv-message" class="status-text"></span>
         </div>
         <div id="csv-container" class="surface" style="padding:0; overflow:auto;">
-            <div id="csv-empty" class="status-text">CSV ещё не готов — загрузите PDF или CSV файл</div>
-            <table id="csv-table" class="table" style="display:none;">
+            <table id="csv-table" class="table">
                 <thead></thead>
                 <tbody></tbody>
             </table>

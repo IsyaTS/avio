@@ -683,6 +683,7 @@ try {
     catalogUploadProgressBar: document.getElementById('catalogUploadProgressBar') || document.getElementById('catalog-upload-progress'),
     csvTable: document.getElementById('csv-table'),
     csvEmpty: document.getElementById('csv-empty'),
+    csvContainer: document.getElementById('csv-container'),
     csvSection: document.getElementById('csv-section'),
     csvMessage: document.getElementById('csv-message'),
     csvAddRow: document.getElementById('csv-add-row'),
@@ -1858,13 +1859,24 @@ try {
     if (!dom.csvTable || !dom.csvEmpty) return;
     const table = dom.csvTable;
     const emptyState = dom.csvEmpty;
-    if (show) {
-      table.style.display = '';
-      emptyState.style.display = 'none';
-    } else {
-      table.style.display = 'none';
-      emptyState.style.display = '';
-    }
+    const container = dom.csvContainer || table.parentElement;
+    const section = dom.csvSection;
+
+    const toggle = (element, visible) => {
+      if (!element) return;
+      if (visible) {
+        showElement(element);
+        element.style.display = '';
+      } else {
+        hideElement(element);
+        element.style.display = 'none';
+      }
+    };
+
+    toggle(table, show);
+    toggle(container, show);
+    toggle(section, show);
+    toggle(emptyState, !show);
   }
 
   function normalizeColumns(cols) {
@@ -1931,6 +1943,8 @@ try {
   function refreshCsvDomElements() {
     dom.csvTable = document.getElementById('csv-table');
     dom.csvEmpty = document.getElementById('csv-empty');
+    dom.csvContainer = document.getElementById('csv-container');
+    dom.csvSection = document.getElementById('csv-section');
     dom.csvMessage = document.getElementById('csv-message');
     dom.csvAddRow = document.getElementById('csv-add-row');
     dom.csvSave = document.getElementById('csv-save');
@@ -1997,8 +2011,7 @@ try {
       csvState.rows = [];
       thead.innerHTML = '';
       tbody.innerHTML = '';
-      dom.csvTable.style.display = 'none';
-      dom.csvEmpty.style.display = '';
+      ensureTableVisible(false);
       updateCsvControls();
       setCsvMessage('Не удалось загрузить CSV: некорректный адрес', 'alert');
       return;
@@ -2056,8 +2069,7 @@ try {
       csvState.rows = [];
       thead.innerHTML = '';
       tbody.innerHTML = '';
-      dom.csvTable.style.display = 'none';
-      dom.csvEmpty.style.display = '';
+      ensureTableVisible(false);
       updateCsvControls();
       setCsvMessage(`Не удалось загрузить CSV: ${err.message}`, 'alert');
     }
@@ -2147,6 +2159,7 @@ try {
     }
 
     updateCsvControls();
+    ensureTableVisible(csvState.columns.length > 0);
   }
 
   function updateTelegramStatus(message, variant = 'muted') {
