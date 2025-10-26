@@ -261,6 +261,186 @@ def _catalog_csv_path(tenant: int, cfg: dict | None = None) -> tuple[pathlib.Pat
     return None, None, None
 
 
+def read_csv_table(
+    tenant: int, cfg: dict | None = None
+) -> dict[str, list[list[str]] | list[str] | str]:
+    csv_path, encoding_hint, relative = _catalog_csv_path(tenant, cfg)
+    if not csv_path or not csv_path.exists():
+        raise FileNotFoundError("csv_not_ready")
+
+    raw = csv_path.read_bytes()
+    encoding = encoding_hint or _detect_encoding(raw)
+    text = raw.decode(encoding or "utf-8", errors="ignore")
+
+    sample = text[:2048]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        delimiter = dialect.delimiter
+    except Exception:
+        delimiter = ","
+
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+
+    header_raw: list[str] | None = None
+    for raw_header in reader:
+        if not raw_header or not any((cell or "").strip() for cell in raw_header):
+            continue
+        header_raw = raw_header
+        break
+
+    if not header_raw:
+        return {
+            "columns": [],
+            "rows": [],
+            "encoding": encoding or "utf-8",
+            "path": relative or "",
+        }
+
+    normalized: list[str] = []
+    seen: dict[str, int] = {}
+    for idx, cell in enumerate(header_raw):
+        name = (cell or "").strip().lstrip("\ufeff")
+        if not name:
+            name = f"column_{idx + 1}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+        normalized.append(name)
+
+    columns = normalized[:]
+    data_rows: list[list[str]] = []
+    for row in reader:
+        if not row or not any(
+            (v.strip() if isinstance(v, str) else str(v or "").strip()) for v in row
+        ):
+            continue
+        while len(columns) < len(row):
+            columns.append(f"column_{len(columns) + 1}")
+        ordered: list[str] = []
+        for idx_col in range(len(columns)):
+            if idx_col < len(row):
+                val = row[idx_col]
+                ordered.append(
+                    (val.strip() if isinstance(val, str) else str(val or "").strip())
+                )
+            else:
+                ordered.append("")
+        data_rows.append(ordered)
+
+    import re as _re
+
+    base_to_indices: dict[str, list[int]] = {}
+    for idx, col in enumerate(columns):
+        base = _re.sub(r"_(\d+)$", "", col)
+        base_to_indices.setdefault(base, []).append(idx)
+
+    merged_columns: list[str] = []
+    seen_bases: set[str] = set()
+    for col in columns:
+        base = _re.sub(r"_(\d+)$", "", col)
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        merged_columns.append(base)
+
+    if any(len(idxs) > 1 for idxs in base_to_indices.values()):
+        merged_rows: list[list[str]] = []
+        for row in data_rows:
+            merged_row: list[str] = []
+            for base in merged_columns:
+                indices = base_to_indices.get(base, [])
+                if not indices:
+                    merged_row.append("")
+                    continue
+                values: list[str] = []
+                for index in indices:
+                    if index < len(row):
+                        val = row[index]
+                        text = val.strip() if isinstance(val, str) else str(val or "").strip()
+                        if text and text not in values:
+                            values.append(text)
+                merged_row.append(" ".join(values))
+            merged_rows.append(merged_row)
+        columns = merged_columns
+        data_rows = merged_rows
+
+    if data_rows:
+        keep_idx: list[int] = []
+        for idx in range(len(columns)):
+            any_non_empty = any(
+                (row[idx].strip() if isinstance(row[idx], str) else str(row[idx] or "").strip())
+                for row in data_rows
+                if idx < len(row)
+            )
+            if any_non_empty:
+                keep_idx.append(idx)
+        if keep_idx and len(keep_idx) < len(columns):
+            columns = [columns[i] for i in keep_idx]
+            data_rows = [[(row[i] if i < len(row) else "") for i in keep_idx] for row in data_rows]
+
+    return {
+        "columns": columns,
+        "rows": data_rows,
+        "encoding": encoding or "utf-8",
+        "path": relative or "",
+    }
+
+
+def write_csv_table(
+    tenant: int,
+    columns: Any,
+    rows: Any,
+    cfg: dict | None = None,
+) -> int:
+    if not isinstance(columns, list) or not all(isinstance(col, str) for col in columns):
+        raise ValueError("invalid_columns")
+    if not isinstance(rows, list):
+        raise ValueError("invalid_rows")
+
+    csv_path, _, _ = _catalog_csv_path(tenant, cfg)
+    if not csv_path:
+        raise FileNotFoundError("csv_not_ready")
+
+    serializable_rows: list[list[str]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            ordered = [str(row.get(col, "") or "") for col in columns]
+            serializable_rows.append(ordered)
+        elif isinstance(row, list):
+            ordered = [str(row[idx]) if idx < len(row) else "" for idx in range(len(columns))]
+            serializable_rows.append(ordered)
+        else:
+            raise ValueError("invalid_row")
+
+    encoding = "utf-8-sig"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", encoding=encoding, newline="") as handle:
+        writer = csv.writer(handle, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+        clean_columns: list[str] = []
+        for col in columns:
+            name = (col or "").strip().lstrip("\ufeff")
+            clean_columns.append(name)
+        writer.writerow(clean_columns)
+        for row in serializable_rows:
+            out_row: list[str] = []
+            for cell in row:
+                text = str(cell or "")
+                if text:
+                    text = (
+                        text.replace("\r\n", " ")
+                        .replace("\r", " ")
+                        .replace("\n", " ")
+                        .replace("\t", " ")
+                    )
+                    text = re.sub(r"\s+", " ", text).strip()
+                out_row.append(text)
+            writer.writerow(out_row)
+
+    return len(serializable_rows)
+
+
 @router.get("/client/{tenant}/settings")
 def client_settings(tenant: int, request: Request):
     provided_key = _resolve_key(request, request.query_params.get("k"))
@@ -1331,137 +1511,12 @@ def catalog_csv_get(tenant: int, request: Request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
     cfg = C.read_tenant_config(tenant)
-    csv_path, encoding_hint, relative = _catalog_csv_path(tenant, cfg)
-    if not csv_path or not csv_path.exists():
+    try:
+        table = read_csv_table(tenant, cfg)
+    except FileNotFoundError:
         return JSONResponse({"detail": "csv_not_ready"}, status_code=404)
 
-    # Read and parse CSV robustly: detect encoding and delimiter, normalize header,
-    # and ensure each row matches the header length (pad/trim accordingly).
-    raw = csv_path.read_bytes()
-    encoding = encoding_hint or _detect_encoding(raw)
-    text = raw.decode(encoding or "utf-8", errors="ignore")
-
-    # Detect delimiter using a small sample to support "," ";" "\t" and "|"
-    sample = text[:2048]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        delimiter = dialect.delimiter
-    except Exception:
-        delimiter = ","
-
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-
-    # Find the first non-empty row as header
-    header_raw: list[str] | None = None
-    for raw_header in reader:
-        if not raw_header or not any((cell or "").strip() for cell in raw_header):
-            continue
-        header_raw = raw_header
-        break
-
-    if not header_raw:
-        return {
-            "ok": True,
-            "columns": [],
-            "rows": [],
-            "encoding": encoding or "utf-8",
-            "path": relative or "",
-        }
-
-    # Normalize header: trim, drop BOM, fill empties and de-duplicate with suffixes
-    normalized: list[str] = []
-    seen: dict[str, int] = {}
-    for idx, cell in enumerate(header_raw):
-        name = (cell or "").strip().lstrip("\ufeff")
-        if not name:
-            name = f"column_{idx + 1}"
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 0
-        normalized.append(name)
-
-    columns = normalized[:]
-    data_rows: list[list[str]] = []
-    for row in reader:
-        # Skip completely empty rows
-        if not row or not any(((v.strip() if isinstance(v, str) else str(v or "").strip())) for v in row):
-            continue
-        # Grow columns if row has more cells than header (rare but possible)
-        while len(columns) < len(row):
-            columns.append(f"column_{len(columns) + 1}")
-        # Build a trimmed row matching the number of columns
-        ordered: list[str] = []
-        for idx_col in range(len(columns)):
-            if idx_col < len(row):
-                val = row[idx_col]
-                ordered.append((val.strip() if isinstance(val, str) else str(val or "").strip()))
-            else:
-                ordered.append("")
-        data_rows.append(ordered)
-
-    # Merge duplicate columns that share the same base name (e.g., "name", "name_1").
-    # Preserve the first column order and join non-empty distinct values with a space.
-    # This reduces visual duplication and aligns with how we want characteristics grouped.
-    import re as _re
-    base_to_indices: dict[str, list[int]] = {}
-    for idx, col in enumerate(columns):
-        base = _re.sub(r"_(\d+)$", "", col)
-        base_to_indices.setdefault(base, []).append(idx)
-
-    # Build merged columns list preserving the first occurrence order
-    merged_columns: list[str] = []
-    seen_bases: set[str] = set()
-    for col in columns:
-        base = _re.sub(r"_(\d+)$", "", col)
-        if base in seen_bases:
-            continue
-        seen_bases.add(base)
-        merged_columns.append(base)
-
-    if any(len(idxs) > 1 for idxs in base_to_indices.values()):
-        merged_rows: list[list[str]] = []
-        for row in data_rows:
-            merged_row: list[str] = []
-            for base in merged_columns:
-                indices = base_to_indices.get(base, [])
-                if not indices:
-                    merged_row.append("")
-                    continue
-                values: list[str] = []
-                for i in indices:
-                    if i < len(row):
-                        val = row[i].strip() if isinstance(row[i], str) else str(row[i] or "").strip()
-                        if val and val not in values:
-                            values.append(val)
-                merged_row.append(" ".join(values))
-            merged_rows.append(merged_row)
-        columns = merged_columns
-        data_rows = merged_rows
-
-    # Drop columns that are completely empty across all rows (common with trailing delimiters)
-    if data_rows:
-        keep_idx: list[int] = []
-        for idx in range(len(columns)):
-            any_non_empty = any(
-                (row[idx].strip() if isinstance(row[idx], str) else str(row[idx] or "").strip())
-                for row in data_rows
-                if idx < len(row)
-            )
-            if any_non_empty:
-                keep_idx.append(idx)
-        if keep_idx and len(keep_idx) < len(columns):
-            columns = [columns[i] for i in keep_idx]
-            data_rows = [[(row[i] if i < len(row) else "") for i in keep_idx] for row in data_rows]
-
-    return {
-        "ok": True,
-        "columns": columns,
-        "rows": data_rows,
-        "encoding": encoding or "utf-8",
-        "path": relative or "",
-    }
+    return {"ok": True, **table}
 
 
 @router.post("/client/{tenant}/catalog/csv")
@@ -1473,49 +1528,16 @@ async def catalog_csv_save(tenant: int, request: Request):
     payload = await request.json()
     columns = payload.get("columns")
     rows = payload.get("rows")
-    if not isinstance(columns, list) or not all(isinstance(col, str) for col in columns):
-        return JSONResponse({"detail": "invalid_columns"}, status_code=400)
-    if not isinstance(rows, list):
-        return JSONResponse({"detail": "invalid_rows"}, status_code=400)
 
-    csv_path, encoding_hint, _ = _catalog_csv_path(tenant)
-    if not csv_path:
+    try:
+        written = write_csv_table(tenant, columns, rows)
+    except FileNotFoundError:
         return JSONResponse({"detail": "csv_not_ready"}, status_code=404)
+    except ValueError as exc:
+        detail = str(exc) or "invalid_rows"
+        return JSONResponse({"detail": detail}, status_code=400)
 
-    serializable_rows: list[list[str]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            ordered = [str(row.get(col, "") or "") for col in columns]
-            serializable_rows.append(ordered)
-        elif isinstance(row, list):
-            ordered = [str(row[idx]) if idx < len(row) else "" for idx in range(len(columns))]
-            serializable_rows.append(ordered)
-        else:
-            return JSONResponse({"detail": "invalid_row"}, status_code=400)
-
-    # Write CSV in Excel-friendly format: UTF-8 with BOM, semicolon delimiter
-    encoding = "utf-8-sig"
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", encoding=encoding, newline="") as handle:
-        writer = csv.writer(handle, delimiter=";", quoting=csv.QUOTE_MINIMAL)
-        # Sanitize header
-        clean_columns = []
-        for col in columns:
-            name = (col or "").strip().lstrip("\ufeff")
-            clean_columns.append(name)
-        writer.writerow(clean_columns)
-        # Sanitize cells: flatten newlines/tabs and collapse spaces
-        for row in serializable_rows:
-            out_row: list[str] = []
-            for cell in row:
-                text = str(cell or "")
-                if text:
-                    text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
-                    text = re.sub(r"\s+", " ", text).strip()
-                out_row.append(text)
-            writer.writerow(out_row)
-
-    return {"ok": True, "rows": len(serializable_rows)}
+    return {"ok": True, "rows": written}
 
 
 def _onboarding_error(reason: str, status_code: int = 400):
