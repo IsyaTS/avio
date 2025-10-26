@@ -20,6 +20,10 @@ import httpx
 from redis import exceptions as redis_ex
 
 project_root = pathlib.Path(__file__).resolve().parent.parent
+
+# Ensure JavaScript assets are served with the correct MIME type even if the
+# underlying system defaults to ``text/plain``.
+mimetypes.add_type("application/javascript", ".js")
 if __package__ in (None, ""):
     root_str = str(project_root)
     if root_str not in sys.path:
