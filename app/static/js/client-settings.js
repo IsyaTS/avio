@@ -683,6 +683,7 @@ try {
     catalogUploadProgressBar: document.getElementById('catalogUploadProgressBar') || document.getElementById('catalog-upload-progress'),
     csvTable: document.getElementById('csv-table'),
     csvEmpty: document.getElementById('csv-empty'),
+    csvSection: document.getElementById('csv-section'),
     csvMessage: document.getElementById('csv-message'),
     csvAddRow: document.getElementById('csv-add-row'),
     csvSave: document.getElementById('csv-save'),
@@ -1857,19 +1858,23 @@ try {
     if (!dom.csvTable || !dom.csvEmpty) return;
     const table = dom.csvTable;
     const emptyState = dom.csvEmpty;
+    const section = dom.csvSection || table.closest('#csv-section');
     if (show) {
       table.style.display = '';
       table.classList.remove(HIDDEN_CLASS);
       emptyState.style.display = 'none';
       emptyState.classList.add(HIDDEN_CLASS);
-
-      let container = table.parentElement;
-      while (container && container.classList) {
-        if (container.classList.contains(HIDDEN_CLASS)) {
-          container.classList.remove(HIDDEN_CLASS);
-          break;
+      if (section) {
+        section.classList.remove(HIDDEN_CLASS);
+      } else {
+        let container = table.parentElement;
+        while (container && container.classList) {
+          if (container.classList.contains(HIDDEN_CLASS)) {
+            container.classList.remove(HIDDEN_CLASS);
+            break;
+          }
+          container = container.parentElement;
         }
-        container = container.parentElement;
       }
     } else {
       table.style.display = 'none';
