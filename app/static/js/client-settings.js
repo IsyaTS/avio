@@ -1855,12 +1855,27 @@ try {
 
   function ensureTableVisible(show) {
     if (!dom.csvTable || !dom.csvEmpty) return;
+    const table = dom.csvTable;
+    const emptyState = dom.csvEmpty;
     if (show) {
-      dom.csvTable.style.display = '';
-      dom.csvEmpty.style.display = 'none';
+      table.style.display = '';
+      table.classList.remove(HIDDEN_CLASS);
+      emptyState.style.display = 'none';
+      emptyState.classList.add(HIDDEN_CLASS);
+
+      let container = table.parentElement;
+      while (container && container.classList) {
+        if (container.classList.contains(HIDDEN_CLASS)) {
+          container.classList.remove(HIDDEN_CLASS);
+          break;
+        }
+        container = container.parentElement;
+      }
     } else {
-      dom.csvTable.style.display = 'none';
-      dom.csvEmpty.style.display = '';
+      table.style.display = 'none';
+      table.classList.add(HIDDEN_CLASS);
+      emptyState.style.display = '';
+      emptyState.classList.remove(HIDDEN_CLASS);
     }
   }
 
