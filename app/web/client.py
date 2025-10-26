@@ -487,8 +487,8 @@ def client_settings(tenant: int, request: Request):
         "upload_catalog": "/pub/catalog/upload",
         "csv_get": "/pub/catalog/csv",
         "csv_save": "/pub/catalog/csv",
-        "training_upload": f"/client/{tenant}/training/upload",
-        "training_status": f"/client/{tenant}/training/status",
+        "training_upload": "/pub/training/upload",
+        "training_status": "/pub/training/status",
         "whatsapp_export": "/pub/wa/export",
     }
 
