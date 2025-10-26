@@ -90,3 +90,35 @@ def test_public_catalog_csv_returns_404_when_missing(tmp_path, monkeypatch):
     assert response_post.json() == {"detail": "csv_not_ready"}
 
     client.close()
+
+
+def test_public_catalog_csv_accepts_global_and_tenant_keys(tmp_path, monkeypatch):
+    sample = tmp_path / "catalog.csv"
+    sample.write_text("name;price\nChair;100\n", encoding="utf-8")
+
+    monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", "GLOBAL")
+    config = {"passport": {"public_key": "TENANT_KEY"}}
+    monkeypatch.setattr(public_module.common, "ensure_tenant_files", lambda tenant: None)
+    monkeypatch.setattr(public_module.common, "read_tenant_config", lambda tenant: dict(config))
+    monkeypatch.setattr(public_module.common, "get_tenant_pubkey", lambda tenant: "")
+    monkeypatch.setattr(client_module, "_catalog_csv_path", lambda tenant, cfg=None: (sample, "utf-8", "catalog.csv"))
+
+    client = _build_client()
+
+    ok_global = client.get("/pub/catalog/csv", params={"tenant": 1, "k": "GLOBAL"})
+    assert ok_global.status_code == 200
+
+    ok_tenant = client.get("/pub/catalog/csv", params={"tenant": 1, "k": "TENANT_KEY"})
+    assert ok_tenant.status_code == 200
+
+    payload = {"columns": ["name", "price"], "rows": [["Desk", "150"]]}
+    post_global = client.post("/pub/catalog/csv", params={"tenant": 1, "k": "GLOBAL"}, json=payload)
+    assert post_global.status_code == 200
+
+    post_tenant = client.post("/pub/catalog/csv", params={"tenant": 1, "k": "TENANT_KEY"}, json=payload)
+    assert post_tenant.status_code == 200
+
+    denied = client.get("/pub/catalog/csv", params={"tenant": 1, "k": "bad"})
+    assert denied.status_code == 401
+
+    client.close()

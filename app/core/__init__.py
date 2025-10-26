@@ -760,6 +760,33 @@ except Exception:
     )
 
 
+def _ensure_passport_public_key(cfg: dict[str, Any] | None) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+
+    public_key = str(getattr(settings, "PUBLIC_KEY", "") or "").strip()
+    if not public_key:
+        return False
+
+    passport = cfg.get("passport")
+    mutated = False
+    if not isinstance(passport, dict):
+        passport = {}
+        cfg["passport"] = passport
+        mutated = True
+
+    current_raw = passport.get("public_key")
+    current_value = str(current_raw).strip() if current_raw else ""
+    if current_value:
+        if isinstance(current_raw, str) and current_raw == current_value:
+            return mutated
+        passport["public_key"] = current_value
+        return True
+
+    passport["public_key"] = public_key
+    return True
+
+
 def tenant_dir(tenant: int) -> pathlib.Path:
     return TENANTS_DIR / str(int(tenant))
 
@@ -773,6 +800,7 @@ def ensure_tenant_files(tenant: int) -> pathlib.Path:
     if not tj.exists() or tj.stat().st_size == 0:
         cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
         cfg.setdefault("passport", {})["tenant_id"] = int(tenant)
+        _ensure_passport_public_key(cfg)
         with open(tj, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
     else:
@@ -782,6 +810,8 @@ def ensure_tenant_files(tenant: int) -> pathlib.Path:
         except Exception:
             existing_cfg = {}
 
+        if not isinstance(existing_cfg, dict):
+            existing_cfg = {}
         channels = existing_cfg.get("channels") if isinstance(existing_cfg, dict) else None
         mutated = False
         if not isinstance(channels, dict):
@@ -796,6 +826,9 @@ def ensure_tenant_files(tenant: int) -> pathlib.Path:
             elif "enabled" not in whatsapp_cfg:
                 whatsapp_cfg["enabled"] = True
                 mutated = True
+
+        if _ensure_passport_public_key(existing_cfg):
+            mutated = True
 
         if mutated:
             try:
@@ -910,6 +943,7 @@ def read_tenant_config(tenant: int) -> dict:
 def write_tenant_config(tenant: int, cfg: dict) -> None:
     ensure_tenant_files(tenant)
     path = tenant_dir(tenant) / "tenant.json"
+    _ensure_passport_public_key(cfg)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
     try:
