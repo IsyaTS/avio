@@ -1,4 +1,5 @@
-window.__cs_loaded = false;
+window.__client_settings_build = '20240503';
+window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {
     return globalThis.location;
@@ -14,16 +15,24 @@ function getLocation() {
   };
 }
 
-try {
-  (function initClientSettings() {
+(function initClientSettingsWrapper() {
+  'use strict';
+
   console.info('client-settings loaded');
   window.__CATALOG_WIDGET_VERSION__ = '2025-03-20T15:30:00Z';
-  window.__client_settings_build = '20250320';
+  window.__EXPORT_ERROR__ = undefined;
+
+  const DEFAULT_CLIENT_ENDPOINTS = {
+    settingsGet: '/pub/settings/get',
+    uploadCatalog: '/pub/catalog/upload',
+    csvGet: '/pub/catalog/csv',
+    csvSave: '/pub/catalog/csv',
+    trainingUpload: '/pub/training/upload',
+    trainingStatus: '/pub/training/status',
+  };
 
   const SETTINGS_FETCH_MAX_ATTEMPTS = 5;
   const SETTINGS_FETCH_BACKOFF_BASE_MS = 600;
-
-  window.__EXPORT_ERROR__ = undefined;
 
   const STATE_NODE_ID = 'client-settings-state';
   const TENANT_PATH_REGEX = /\/client\/(\d+)(?:\/|$)/;
@@ -38,6 +47,7 @@ try {
     const merged = { ...base, ...safePayload };
     if (typeof window !== 'undefined') {
       window.__client_settings_state = merged;
+      window.state = merged;
     }
     return merged;
   };
@@ -115,6 +125,84 @@ try {
     }
 
     return fallback;
+  };
+
+  const resolveEndpointOverrides = (urls) => {
+    const safeUrls = urls && typeof urls === 'object' ? urls : {};
+    return {
+      settingsGet: typeof safeUrls.settings_get === 'string' && safeUrls.settings_get
+        ? safeUrls.settings_get
+        : undefined,
+      uploadCatalog: typeof safeUrls.upload_catalog === 'string' && safeUrls.upload_catalog
+        ? safeUrls.upload_catalog
+        : undefined,
+      csvGet: typeof safeUrls.csv_get === 'string' && safeUrls.csv_get
+        ? safeUrls.csv_get
+        : undefined,
+      csvSave: typeof safeUrls.csv_save === 'string' && safeUrls.csv_save
+        ? safeUrls.csv_save
+        : undefined,
+      trainingUpload: typeof safeUrls.training_upload === 'string' && safeUrls.training_upload
+        ? safeUrls.training_upload
+        : undefined,
+      trainingStatus: typeof safeUrls.training_status === 'string' && safeUrls.training_status
+        ? safeUrls.training_status
+        : undefined,
+    };
+  };
+
+  const ensureBootstrapGlobals = () => {
+    const fallbackState = deriveFallbackState();
+    const existingState = (typeof window !== 'undefined'
+      && window.__client_settings_state
+      && typeof window.__client_settings_state === 'object')
+      ? window.__client_settings_state
+      : {};
+    const payload = Object.assign({}, existingState);
+
+    const fallbackTenant = Number.parseInt(fallbackState.tenant, 10);
+    const existingTenant = Number.parseInt(payload.tenant, 10);
+    if (!Number.isFinite(existingTenant) || existingTenant <= 0) {
+      if (Number.isFinite(fallbackTenant) && fallbackTenant > 0) {
+        payload.tenant = fallbackTenant;
+      }
+    }
+
+    const existingKey = typeof payload.key === 'string' ? payload.key.trim() : '';
+    if (existingKey) {
+      payload.key = existingKey;
+    } else if (fallbackState && typeof fallbackState.key === 'string' && fallbackState.key.trim()) {
+      payload.key = fallbackState.key.trim();
+    }
+
+    if (!payload.urls || typeof payload.urls !== 'object') {
+      payload.urls = (existingState && typeof existingState.urls === 'object') ? existingState.urls : {};
+    }
+
+    const state = mergeClientState(payload);
+    if (!state.urls || typeof state.urls !== 'object') {
+      state.urls = {};
+      if (typeof window !== 'undefined') {
+        window.__client_settings_state = state;
+      }
+    }
+
+    const currentEndpoints = (typeof window !== 'undefined'
+      && window.__client_endpoints
+      && typeof window.__client_endpoints === 'object')
+      ? window.__client_endpoints
+      : {};
+    const resolved = resolveEndpointOverrides(state.urls);
+    const merged = Object.assign({}, DEFAULT_CLIENT_ENDPOINTS, currentEndpoints);
+    Object.keys(resolved).forEach((key) => {
+      if (resolved[key]) {
+        merged[key] = resolved[key];
+      }
+    });
+    if (typeof window !== 'undefined') {
+      window.__client_endpoints = merged;
+    }
+    return { state, endpoints: merged };
   };
 
   const getClientSettings = () => {
@@ -2677,15 +2765,32 @@ try {
     window.__cs_loaded = true;
   }
 
-  document.addEventListener('DOMContentLoaded', bootstrapClientSettings, { once: true });
-})();
-} catch (error) {
-  window.__EXPORT_ERROR__ = error;
-  try {
-    console.error('[client-settings] init failed', error);
-  } catch (_) {
-    /* noop */
+  function runClientSettingsBootstrap() {
+    if (window.__cs_loaded === true) {
+      return;
+    }
+    window.__EXPORT_ERROR__ = undefined;
+    try {
+      ensureBootstrapGlobals();
+      bootstrapClientSettings();
+    } catch (error) {
+      window.__cs_loaded = false;
+      window.__EXPORT_ERROR__ = error;
+      try {
+        console.error('client-settings init error', error);
+      } catch (_) {}
+    } finally {
+      window.__EXPORT_LOADED__ = true;
+    }
   }
-} finally {
-  window.__EXPORT_LOADED__ = true;
-}
+
+  window.__client_settings_boot = function init() {
+    runClientSettingsBootstrap();
+  };
+
+  if (typeof document !== 'undefined' && document.readyState !== 'loading') {
+    runClientSettingsBootstrap();
+  } else if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', runClientSettingsBootstrap, { once: true });
+  }
+})();
