@@ -1465,7 +1465,7 @@ try {
       } else {
         setCatalogStatus(message, 'success');
       }
-      await loadCsv({ quiet: true });
+      await fetchCsvAndRender({ quiet: true });
     } catch (error) {
       setCatalogStatus(`Каталог обновлён, но не удалось получить данные: ${error.message}`, 'alert');
     } finally {
@@ -1847,6 +1847,23 @@ try {
     }
   }
 
+  function normalizeColumns(cols) {
+    const seen = Object.create(null);
+    const out = [];
+    (Array.isArray(cols) ? cols : []).forEach((raw, idx) => {
+      let name = (raw == null ? '' : String(raw)).trim();
+      if (!name) name = `column_${idx + 1}`;
+      if (seen[name] == null) {
+        seen[name] = 0;
+        out.push(name);
+      } else {
+        seen[name] += 1;
+        out.push(`${name}_${seen[name]}`);
+      }
+    });
+    return out;
+  }
+
   function renderCsvTable() {
     if (!dom.csvTable) return;
     const thead = dom.csvTable.querySelector('thead');
@@ -1854,6 +1871,8 @@ try {
     if (!thead || !tbody) return;
 
     if (!csvState.columns.length) {
+      thead.innerHTML = '';
+      tbody.innerHTML = '';
       ensureTableVisible(false);
       updateCsvControls();
       return;
@@ -1889,46 +1908,129 @@ try {
     });
   }
 
-  async function loadCsv({ quiet = false } = {}) {
+  function resolveCsvKey(state) {
+    const fromState = state && typeof state === 'object' ? state : {};
+    const clientConfig = getClientSettings();
+    const candidates = [
+      typeof fromState.key === 'string' ? fromState.key.trim() : '',
+      typeof fromState.public_key === 'string' ? fromState.public_key.trim() : '',
+      clientConfig && typeof clientConfig.key === 'string' ? clientConfig.key.trim() : '',
+    ];
+    for (let idx = 0; idx < candidates.length; idx += 1) {
+      const value = candidates[idx];
+      if (value) {
+        return value;
+      }
+    }
+    return '';
+  }
+
+  function resolveCsvUrl(state) {
+    const locationInfo = getLocation();
+    let origin = locationInfo.origin || '';
+    if (!origin) {
+      try {
+        origin = new URL(locationInfo.href || '/', 'https://localhost').origin;
+      } catch (error) {
+        origin = 'https://localhost';
+      }
+    }
+
+    const urls = state && typeof state === 'object' ? state.urls || {} : {};
+    const rawPath = typeof urls.csv_get === 'string' ? urls.csv_get : '';
+    let targetUrl = null;
+    if (rawPath) {
+      try {
+        targetUrl = new URL(rawPath, origin);
+      } catch (error) {
+        console.error('[client-settings] csv invalid url', rawPath, error);
+        targetUrl = null;
+      }
+    }
+
+    if (!targetUrl) {
+      const clientConfig = getClientSettings();
+      const tenant = determineTenant(state, { fallbackDefault: true, globalConfig: clientConfig });
+      const tenantId = Number.isFinite(tenant) && tenant > 0 ? tenant : 1;
+      const fallbackPath = `/client/${tenantId}/catalog/csv`;
+      try {
+        targetUrl = new URL(fallbackPath, origin);
+      } catch (error) {
+        console.error('[client-settings] csv failed to build fallback url', fallbackPath, error);
+        return '';
+      }
+    }
+
+    const key = resolveCsvKey(state);
+    targetUrl.searchParams.set('k', key || '');
+    return targetUrl.toString();
+  }
+
+  async function fetchCsvAndRender({ quiet = false } = {}) {
+    console.log('[client-settings] csv fetch start');
+
+    if (!dom.csvTable || !dom.csvEmpty) {
+      console.error('[client-settings] csv fetch fail: required elements missing', {
+        table: Boolean(dom.csvTable),
+        empty: Boolean(dom.csvEmpty),
+      });
+      setCsvMessage('Не удалось загрузить CSV: отсутствуют элементы таблицы', 'alert');
+      return;
+    }
+
+    const thead = dom.csvTable.querySelector('thead');
+    const tbody = dom.csvTable.querySelector('tbody');
+    if (!thead || !tbody) {
+      console.error('[client-settings] csv fetch fail: table missing thead/tbody');
+      setCsvMessage('Не удалось загрузить CSV: таблица повреждена', 'alert');
+      return;
+    }
+
+    const state = readStateFromDom();
+    const url = resolveCsvUrl(state);
+    if (!url) {
+      console.error('[client-settings] csv fetch fail', new Error('CSV URL не задан'));
+      setCsvMessage('Не удалось загрузить CSV: CSV URL не задан', 'alert');
+      ensureTableVisible(false);
+      thead.innerHTML = '';
+      tbody.innerHTML = '';
+      csvState.columns = [];
+      csvState.rows = [];
+      return;
+    }
+
     try {
-      const url = resolveEndpointUrl(endpoints.csvGet, withTenant());
-      if (!url) {
-        throw new Error('Сервис недоступен');
-      }
-      const response = await fetch(url, { cache: 'no-store' });
-      if (response.status === 404) {
-        csvState.columns = [];
-        csvState.rows = [];
-        ensureTableVisible(false);
-        if (!quiet) setCsvMessage('CSV ещё не готов — загрузите PDF или CSV файл', 'muted');
-        return;
-      }
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+        },
+        cache: 'no-store',
+      });
       if (!response.ok) {
-        throw new Error(await response.text());
+        let errorText = '';
+        try {
+          errorText = await response.text();
+        } catch (_) {
+          errorText = '';
+        }
+        const message = (errorText && errorText.trim()) || `status ${response.status}`;
+        throw new Error(message);
       }
-      const data = await response.json();
-      // Normalize headers to avoid visual duplicates in the editor
-      const normalizeColumns = (cols) => {
-        const seen = Object.create(null);
-        const out = [];
-        (Array.isArray(cols) ? cols : []).forEach((raw, idx) => {
-          let name = (raw == null ? '' : String(raw)).trim();
-          if (!name) name = `column_${idx + 1}`;
-          if (seen[name] == null) {
-            seen[name] = 0;
-            out.push(name);
-          } else {
-            seen[name] += 1;
-            out.push(`${name}_${seen[name]}`);
-          }
-        });
-        return out;
-      };
-      csvState.columns = normalizeColumns(data.columns);
-      csvState.rows = Array.isArray(data.rows) ? data.rows : [];
+      const payload = await response.json();
+      const columns = normalizeColumns(payload && payload.columns);
+      const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+      csvState.columns = columns;
+      csvState.rows = rows;
       renderCsvTable();
-      setCsvMessage(`Загружено ${csvState.rows.length} строк`, 'muted');
+      console.log('[client-settings] csv fetch ok');
+      setCsvMessage(`CSV загружен (${rows.length} строк)`, 'muted');
     } catch (error) {
+      console.error('[client-settings] csv fetch fail', error);
+      csvState.columns = [];
+      csvState.rows = [];
+      thead.innerHTML = '';
+      tbody.innerHTML = '';
+      ensureTableVisible(false);
       setCsvMessage(`Не удалось загрузить CSV: ${error.message}`, 'alert');
     }
   }
@@ -1982,11 +2084,10 @@ try {
   }
 
   if (dom.csvRefresh) {
-    dom.csvRefresh.addEventListener('click', () => loadCsv({ quiet: true }));
+    dom.csvRefresh.addEventListener('click', () => {
+      fetchCsvAndRender();
+    });
   }
-
-  // Автоподгрузка CSV при доступности
-  loadCsv({ quiet: true });
 
   function updateTelegramStatus(message, variant = 'muted') {
     if (!dom.tgStatus) return;
@@ -2314,7 +2415,7 @@ try {
     bindExportClicks();
     bindCatalogUpload();
     bindTrainingUpload();
-    loadCsv({ quiet: true });
+    fetchCsvAndRender({ quiet: true });
     refreshTrainingStatus();
     refreshTelegramStatus();
     window.__cs_loaded = true;

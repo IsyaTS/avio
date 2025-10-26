@@ -268,7 +268,7 @@ def client_settings(tenant: int, request: Request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
     primary_key = (C.get_tenant_pubkey(int(tenant)) or "").strip()
-    key = primary_key or provided_key or ""
+    key = (provided_key or primary_key or "").strip()
 
     C.ensure_tenant_files(tenant)
     cfg = C.read_tenant_config(tenant)
@@ -308,7 +308,7 @@ def client_settings(tenant: int, request: Request):
     state = {
         "tenant": tenant,
         "key": key,
-        "public_key": key,
+        "public_key": primary_key,
         "primary_key": primary_key,
         "urls": urls,
         "max_days": EXPORT_MAX_DAYS,
@@ -329,7 +329,7 @@ def client_settings(tenant: int, request: Request):
         "request": request,
         "tenant": tenant,
         "key": key,
-        "public_key": key,
+        "public_key": primary_key,
         "persona": persona,
         "form": form_payload,
         "title": f"Настройки клиента · Tenant {tenant}",
