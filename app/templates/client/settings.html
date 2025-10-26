@@ -1,12 +1,24 @@
 {% extends "layouts/base.html" %}
 {% set title = title or 'Настройки клиента' %}
+{% set tenant_id = tenant_id if tenant_id is defined else tenant %}
 {% set client_state_source = state_payload if state_payload is defined else state %}
-{% set client_state_json = (client_state_source if client_state_source is defined else {'tenant': tenant, 'key': key, 'urls': {
-    'settings_get': '/pub/settings/get',
-    'upload_catalog': '/pub/catalog/upload',
-    'csv_get': '/pub/catalog/csv',
-    'csv_save': '/pub/catalog/csv'
-}}) | tojson %}
+{% set client_state_fallback = {
+    'tenant': tenant,
+    'key': key,
+    'urls': {
+        'settings_get': '/pub/settings/get',
+        'settings_save': '/pub/settings/save',
+        'save_settings': '/client/' ~ tenant_id ~ '/settings/save',
+        'save_persona': '/client/' ~ tenant_id ~ '/persona',
+        'upload_catalog': '/pub/catalog/upload',
+        'csv_get': '/pub/catalog/csv',
+        'csv_save': '/pub/catalog/csv',
+        'training_upload': '/client/' ~ tenant_id ~ '/training/upload',
+        'training_status': '/client/' ~ tenant_id ~ '/training/status',
+        'whatsapp_export': '/pub/wa/export'
+    }
+} %}
+{% set client_state_json = (client_state_source if client_state_source is defined else client_state_fallback) | tojson %}
 {% set extra_head %}
 <script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
 <script src="/static/js/boot.js?v={{ asset_version }}" defer></script>
@@ -126,8 +138,8 @@
               style="gap:12px;"
               method="post"
               enctype="multipart/form-data"
-              action="/client/{{ tenant.id }}/training/upload{% if key %}?k={{ key }}{% endif %}"
-              data-upload-url="/client/{{ tenant.id }}/training/upload{% if key %}?k={{ key }}{% endif %}">
+              action="/client/{{ tenant_id }}/training/upload{% if key %}?k={{ key }}{% endif %}"
+              data-upload-url="/client/{{ tenant_id }}/training/upload{% if key %}?k={{ key }}{% endif %}">
             <label class="grid" style="grid-template-columns: 1fr;">
                 <span class="label">Файл (JSONL/JSON/CSV)</span>
                 <input id="training-upload-file" type="file" name="file" accept=".jsonl,.json,.csv" required>

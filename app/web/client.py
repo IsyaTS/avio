@@ -480,14 +480,16 @@ def client_settings(tenant: int, request: Request):
 
     urls = {
         "settings": f"/client/{tenant}/settings",
+        "settings_get": "/pub/settings/get",
+        "settings_save": "/pub/settings/save",
         "save_settings": f"/client/{tenant}/settings/save",
         "save_persona": f"/client/{tenant}/persona",
-        "upload_catalog": f"/client/{tenant}/catalog/upload",
-        "csv_get": f"/client/{tenant}/catalog/csv",
-        "csv_save": f"/client/{tenant}/catalog/csv",
+        "upload_catalog": "/pub/catalog/upload",
+        "csv_get": "/pub/catalog/csv",
+        "csv_save": "/pub/catalog/csv",
         "training_upload": f"/client/{tenant}/training/upload",
         "training_status": f"/client/{tenant}/training/status",
-        "whatsapp_export": "/export/whatsapp",
+        "whatsapp_export": "/pub/wa/export",
     }
 
     webhook_secret = getattr(C.settings, "WEBHOOK_SECRET", "") if hasattr(C, "settings") else ""
@@ -518,6 +520,7 @@ def client_settings(tenant: int, request: Request):
     context = {
         "request": request,
         "tenant": tenant,
+        "tenant_id": tenant,
         "key": key,
         "public_key": tenant_key,
         "persona": persona,
