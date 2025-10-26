@@ -45,3 +45,25 @@ def test_settings_get_accepts_query_key(monkeypatch):
     assert response.json() == {"ok": True, "cfg": {"tenant": 5}, "persona": "persona"}
 
     client.close()
+
+
+def test_settings_get_accepts_global_and_tenant_keys(monkeypatch):
+    monkeypatch.setattr(public_module.settings, "PUBLIC_KEY", "GLOBAL")
+    monkeypatch.setattr(public_module.common, "ensure_tenant_files", lambda tenant: None)
+    config = {"passport": {"public_key": "TENANT_KEY"}, "tenant": 1}
+    monkeypatch.setattr(public_module.common, "read_tenant_config", lambda tenant: dict(config))
+    monkeypatch.setattr(public_module.common, "read_persona", lambda tenant: "persona")
+    monkeypatch.setattr(public_module.common, "get_tenant_pubkey", lambda tenant: "")
+
+    client = _build_app()
+
+    global_resp = client.get("/pub/settings/get", params={"tenant": 1, "k": "GLOBAL"})
+    assert global_resp.status_code == 200
+
+    tenant_resp = client.get("/pub/settings/get", params={"tenant": 1, "k": "TENANT_KEY"})
+    assert tenant_resp.status_code == 200
+
+    denied_resp = client.get("/pub/settings/get", params={"tenant": 1, "k": "BAD"})
+    assert denied_resp.status_code == 401
+
+    client.close()

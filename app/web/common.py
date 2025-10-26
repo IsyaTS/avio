@@ -489,31 +489,30 @@ def _migrate_legacy_keys(tenant: int, current_meta: dict[str, Any]) -> dict[str,
 
 
 def valid_key(tenant: int, kk: str) -> bool:
-    candidate = str(kk).strip()
+    candidate = _normalize_key(kk)
     if not candidate:
         return False
 
-    raw_public_key = getattr(settings, "PUBLIC_KEY", "")
-    public_key = str(raw_public_key).strip() if raw_public_key is not None else ""
+    public_key = _normalize_key(getattr(settings, "PUBLIC_KEY", ""))
     if public_key and candidate == public_key:
         return True
 
     tenant_id = int(tenant)
 
-    tenant_cfg_key = ""
+    tenant_key = ""
     try:
         cfg = read_tenant_config(tenant_id)
     except Exception:
         cfg = {}
-    passport = cfg.get("passport") if isinstance(cfg, dict) else None
-    if isinstance(passport, dict):
-        raw_key = passport.get("public_key")
-        if raw_key is not None:
-            tenant_cfg_key = str(raw_key).strip()
-    if tenant_cfg_key and candidate == tenant_cfg_key:
+    if isinstance(cfg, dict):
+        passport = cfg.get("passport")
+        if isinstance(passport, dict):
+            tenant_key = _normalize_key(passport.get("public_key"))
+
+    if tenant_key and candidate == tenant_key:
         return True
 
-    stored_key = str(get_tenant_pubkey(tenant_id) or "").strip()
+    stored_key = _normalize_key(get_tenant_pubkey(tenant_id) or "")
     if stored_key and candidate == stored_key:
         return True
 
