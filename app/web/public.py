@@ -80,6 +80,7 @@ from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.db import insert_message_in, upsert_lead
 from app.integrations import avito
 from . import common as common
+from .client import read_csv_table, write_csv_table
 try:  # pragma: no cover - optional webhooks import
     from . import webhooks as webhook_module  # type: ignore
 except ImportError:  # pragma: no cover - fallback when module alias missing
@@ -3092,126 +3093,13 @@ def public_catalog_csv_get(
 
     tenant_id, _ = auth
 
-    from . import client as client_module
-
     cfg = C.read_tenant_config(tenant_id)
-    csv_path, encoding_hint, relative = client_module._catalog_csv_path(tenant_id, cfg)
-    if not csv_path or not csv_path.exists():
+    try:
+        table = read_csv_table(tenant_id, cfg)
+    except FileNotFoundError:
         return JSONResponse({"detail": "csv_not_ready"}, status_code=404)
 
-    raw = csv_path.read_bytes()
-    encoding = encoding_hint or client_module._detect_encoding(raw)
-    text = raw.decode(encoding or "utf-8", errors="ignore")
-
-    sample = text[:2048]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        delimiter = dialect.delimiter
-    except Exception:
-        delimiter = ","
-
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-
-    header_raw: list[str] | None = None
-    for raw_header in reader:
-        if not raw_header or not any((cell or "").strip() for cell in raw_header):
-            continue
-        header_raw = raw_header
-        break
-
-    if not header_raw:
-        return {
-            "ok": True,
-            "columns": [],
-            "rows": [],
-            "encoding": encoding or "utf-8",
-            "path": relative or "",
-        }
-
-    normalized: list[str] = []
-    seen: dict[str, int] = {}
-    for idx, cell in enumerate(header_raw):
-        name = (cell or "").strip().lstrip("\ufeff")
-        if not name:
-            name = f"column_{idx + 1}"
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 0
-        normalized.append(name)
-
-    columns = normalized[:]
-    data_rows: list[list[str]] = []
-    for row in reader:
-        if not row or not any((value.strip() if isinstance(value, str) else str(value or "").strip()) for value in row):
-            continue
-        while len(columns) < len(row):
-            columns.append(f"column_{len(columns) + 1}")
-        ordered: list[str] = []
-        for idx_col in range(len(columns)):
-            if idx_col < len(row):
-                val = row[idx_col]
-                ordered.append(val.strip() if isinstance(val, str) else str(val or "").strip())
-            else:
-                ordered.append("")
-        data_rows.append(ordered)
-
-    base_to_indices: dict[str, list[int]] = {}
-    for idx_col, col in enumerate(columns):
-        base = re.sub(r"_(\d+)$", "", col)
-        base_to_indices.setdefault(base, []).append(idx_col)
-
-    merged_columns: list[str] = []
-    seen_bases: set[str] = set()
-    for col in columns:
-        base = re.sub(r"_(\d+)$", "", col)
-        if base in seen_bases:
-            continue
-        seen_bases.add(base)
-        merged_columns.append(base)
-
-    if any(len(indices) > 1 for indices in base_to_indices.values()):
-        merged_rows: list[list[str]] = []
-        for row in data_rows:
-            merged_row: list[str] = []
-            for base in merged_columns:
-                indices = base_to_indices.get(base, [])
-                if not indices:
-                    merged_row.append("")
-                    continue
-                values: list[str] = []
-                for index in indices:
-                    if index < len(row):
-                        cell = row[index].strip() if isinstance(row[index], str) else str(row[index] or "").strip()
-                        if cell and cell not in values:
-                            values.append(cell)
-                merged_row.append(" ".join(values))
-            merged_rows.append(merged_row)
-        columns = merged_columns
-        data_rows = merged_rows
-
-    if data_rows:
-        keep_idx: list[int] = []
-        for idx_col in range(len(columns)):
-            any_non_empty = any(
-                (row[idx_col].strip() if isinstance(row[idx_col], str) else str(row[idx_col] or "").strip())
-                for row in data_rows
-                if idx_col < len(row)
-            )
-            if any_non_empty:
-                keep_idx.append(idx_col)
-        if keep_idx and len(keep_idx) < len(columns):
-            columns = [columns[i] for i in keep_idx]
-            data_rows = [[(row[i] if i < len(row) else "") for i in keep_idx] for row in data_rows]
-
-    return {
-        "ok": True,
-        "columns": columns,
-        "rows": data_rows,
-        "encoding": encoding or "utf-8",
-        "path": relative or "",
-    }
+    return {"ok": True, **table}
 
 
 @router.post("/pub/catalog/csv")
@@ -3232,53 +3120,16 @@ async def public_catalog_csv_save(
     columns = payload.get("columns") if isinstance(payload, dict) else None
     rows = payload.get("rows") if isinstance(payload, dict) else None
 
-    if not isinstance(columns, list) or not all(isinstance(col, str) for col in columns):
-        return JSONResponse({"detail": "invalid_columns"}, status_code=400)
-    if not isinstance(rows, list):
-        return JSONResponse({"detail": "invalid_rows"}, status_code=400)
-
-    from . import client as client_module
-
-    csv_path, _, _ = client_module._catalog_csv_path(tenant_id)
-    if not csv_path:
+    cfg = C.read_tenant_config(tenant_id)
+    try:
+        written = write_csv_table(tenant_id, columns, rows, cfg)
+    except FileNotFoundError:
         return JSONResponse({"detail": "csv_not_ready"}, status_code=404)
+    except ValueError as exc:
+        detail = str(exc) or "invalid_rows"
+        return JSONResponse({"detail": detail}, status_code=400)
 
-    serializable_rows: list[list[str]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            ordered = [str(row.get(col, "") or "") for col in columns]
-            serializable_rows.append(ordered)
-        elif isinstance(row, list):
-            ordered = [str(row[idx]) if idx < len(row) else "" for idx in range(len(columns))]
-            serializable_rows.append(ordered)
-        else:
-            return JSONResponse({"detail": "invalid_row"}, status_code=400)
-
-    encoding = "utf-8-sig"
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", encoding=encoding, newline="") as handle:
-        writer = csv.writer(handle, delimiter=";", quoting=csv.QUOTE_MINIMAL)
-        clean_columns: list[str] = []
-        for col in columns:
-            name = (col or "").strip().lstrip("\ufeff")
-            clean_columns.append(name)
-        writer.writerow(clean_columns)
-        for row in serializable_rows:
-            out_row: list[str] = []
-            for cell in row:
-                text = str(cell or "")
-                if text:
-                    text = (
-                        text.replace("\r\n", " ")
-                        .replace("\r", " ")
-                        .replace("\n", " ")
-                        .replace("\t", " ")
-                    )
-                    text = re.sub(r"\s+", " ", text).strip()
-                out_row.append(text)
-            writer.writerow(out_row)
-
-    return {"ok": True, "rows": len(serializable_rows)}
+    return {"ok": True, "rows": written}
 
 
 # Move public catalog upload off the client namespace to avoid route collisions
