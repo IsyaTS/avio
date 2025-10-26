@@ -75,7 +75,7 @@ from redis import exceptions as redis_ex
 
 from config import tg_worker_url
 
-from app.core import client as C
+from app.web import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.db import insert_message_in, upsert_lead
 from app.integrations import avito
@@ -3093,7 +3093,7 @@ def public_catalog_csv_get(
 
     tenant_id, _ = auth
 
-    cfg = C.read_tenant_config(tenant_id)
+    cfg = common.read_tenant_config(tenant_id)
     try:
         table = read_csv_table(tenant_id, cfg)
     except FileNotFoundError:
@@ -3120,7 +3120,7 @@ async def public_catalog_csv_save(
     columns = payload.get("columns") if isinstance(payload, dict) else None
     rows = payload.get("rows") if isinstance(payload, dict) else None
 
-    cfg = C.read_tenant_config(tenant_id)
+    cfg = common.read_tenant_config(tenant_id)
     try:
         written = write_csv_table(tenant_id, columns, rows, cfg)
     except FileNotFoundError:
