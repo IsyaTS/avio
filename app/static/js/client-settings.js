@@ -447,15 +447,19 @@ try {
     const tenant = determineTenant(state, { fallbackDefault: true, globalConfig: clientConfig });
     const stateAccessKey = typeof state.key === 'string' ? state.key.trim() : '';
     const statePublicKey = typeof state.public_key === 'string' ? state.public_key.trim() : '';
-    const configPublicKey = (() => {
-      if (clientConfig && typeof clientConfig.public_key === 'string') {
-        const trimmed = clientConfig.public_key.trim();
+    const configKey = (() => {
+      if (clientConfig && typeof clientConfig.key === 'string') {
+        const trimmed = clientConfig.key.trim();
         if (trimmed) {
           return trimmed;
         }
       }
-      if (clientConfig && typeof clientConfig.key === 'string') {
-        const trimmed = clientConfig.key.trim();
+      return '';
+    })();
+
+    const configPublicKey = (() => {
+      if (clientConfig && typeof clientConfig.public_key === 'string') {
+        const trimmed = clientConfig.public_key.trim();
         if (trimmed) {
           return trimmed;
         }
@@ -466,6 +470,9 @@ try {
     const resolveEffectiveAccessKey = () => {
       if (stateAccessKey) {
         return stateAccessKey;
+      }
+      if (configKey) {
+        return configKey;
       }
       if (statePublicKey) {
         return statePublicKey;
@@ -1913,8 +1920,9 @@ try {
     const clientConfig = getClientSettings();
     const candidates = [
       typeof fromState.key === 'string' ? fromState.key.trim() : '',
+      configKey || (clientConfig && typeof clientConfig.key === 'string' ? clientConfig.key.trim() : ''),
       typeof fromState.public_key === 'string' ? fromState.public_key.trim() : '',
-      clientConfig && typeof clientConfig.key === 'string' ? clientConfig.key.trim() : '',
+      configPublicKey || (clientConfig && typeof clientConfig.public_key === 'string' ? clientConfig.public_key.trim() : ''),
     ];
     for (let idx = 0; idx < candidates.length; idx += 1) {
       const value = candidates[idx];
@@ -1925,55 +1933,11 @@ try {
     return '';
   }
 
-  function resolveCsvUrl(state) {
-    const locationInfo = getLocation();
-    let origin = locationInfo.origin || '';
-    if (!origin) {
-      try {
-        origin = new URL(locationInfo.href || '/', 'https://localhost').origin;
-      } catch (error) {
-        origin = 'https://localhost';
-      }
-    }
-
-    const urls = state && typeof state === 'object' ? state.urls || {} : {};
-    const rawPath = typeof urls.csv_get === 'string' ? urls.csv_get : '';
-    let targetUrl = null;
-    if (rawPath) {
-      try {
-        targetUrl = new URL(rawPath, origin);
-      } catch (error) {
-        console.error('[client-settings] csv invalid url', rawPath, error);
-        targetUrl = null;
-      }
-    }
-
-    if (!targetUrl) {
-      const clientConfig = getClientSettings();
-      const tenant = determineTenant(state, { fallbackDefault: true, globalConfig: clientConfig });
-      const tenantId = Number.isFinite(tenant) && tenant > 0 ? tenant : 1;
-      const fallbackPath = `/client/${tenantId}/catalog/csv`;
-      try {
-        targetUrl = new URL(fallbackPath, origin);
-      } catch (error) {
-        console.error('[client-settings] csv failed to build fallback url', fallbackPath, error);
-        return '';
-      }
-    }
-
-    const key = resolveCsvKey(state);
-    targetUrl.searchParams.set('k', key || '');
-    return targetUrl.toString();
-  }
-
   async function fetchCsvAndRender({ quiet = false } = {}) {
-    console.log('[client-settings] csv fetch start');
+    console.info('[client-settings] csv fetch start', { quiet });
 
     if (!dom.csvTable || !dom.csvEmpty) {
-      console.error('[client-settings] csv fetch fail: required elements missing', {
-        table: Boolean(dom.csvTable),
-        empty: Boolean(dom.csvEmpty),
-      });
+      console.info('[client-settings] csv fetch fail', { quiet, reason: 'missing-elements' });
       setCsvMessage('Не удалось загрузить CSV: отсутствуют элементы таблицы', 'alert');
       return;
     }
@@ -1981,26 +1945,51 @@ try {
     const thead = dom.csvTable.querySelector('thead');
     const tbody = dom.csvTable.querySelector('tbody');
     if (!thead || !tbody) {
-      console.error('[client-settings] csv fetch fail: table missing thead/tbody');
+      console.info('[client-settings] csv fetch fail', { quiet, reason: 'table-missing-thead-tbody' });
       setCsvMessage('Не удалось загрузить CSV: таблица повреждена', 'alert');
       return;
     }
 
-    const state = readStateFromDom();
-    const url = resolveCsvUrl(state);
-    if (!url) {
-      console.error('[client-settings] csv fetch fail', new Error('CSV URL не задан'));
-      setCsvMessage('Не удалось загрузить CSV: CSV URL не задан', 'alert');
-      ensureTableVisible(false);
-      thead.innerHTML = '';
-      tbody.innerHTML = '';
-      csvState.columns = [];
-      csvState.rows = [];
-      return;
+    const state = readStateFromDom() || {};
+    const urls = state && typeof state === 'object' ? state.urls || {} : {};
+    const tenantCandidate = (() => {
+      const rawTenant = Number.parseInt(state.tenant, 10);
+      if (Number.isFinite(rawTenant) && rawTenant > 0) {
+        return rawTenant;
+      }
+      const resolved = determineTenant(state, { fallbackDefault: true, globalConfig: getClientSettings() });
+      return Number.isFinite(resolved) && resolved > 0 ? resolved : 1;
+    })();
+    const basePath = (typeof urls.csv_get === 'string' && urls.csv_get) || `/client/${tenantCandidate}/catalog/csv`;
+
+    const locationInfo = getLocation();
+    const baseOrigin = locationInfo.origin || locationInfo.href || 'https://localhost';
+    let requestUrl;
+    try {
+      requestUrl = new URL(basePath, baseOrigin);
+    } catch (error) {
+      try {
+        requestUrl = new URL(basePath, 'https://localhost');
+      } catch (fallbackError) {
+        console.error('[client-settings] csv fetch fail: invalid url', basePath, fallbackError);
+        console.info('[client-settings] csv fetch fail', { quiet, reason: 'invalid-url', url: basePath });
+        ensureTableVisible(false);
+        thead.innerHTML = '';
+        tbody.innerHTML = '';
+        csvState.columns = [];
+        csvState.rows = [];
+        setCsvMessage('Не удалось загрузить CSV: некорректный адрес', 'alert');
+        return;
+      }
+    }
+
+    const key = resolveCsvKey(state);
+    if (key) {
+      requestUrl.searchParams.set('k', key);
     }
 
     try {
-      const response = await fetch(url, {
+      const response = await fetch(requestUrl.toString(), {
         headers: {
           Accept: 'application/json',
         },
@@ -2016,22 +2005,34 @@ try {
         const message = (errorText && errorText.trim()) || `status ${response.status}`;
         throw new Error(message);
       }
+
       const payload = await response.json();
       const columns = normalizeColumns(payload && payload.columns);
       const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
       csvState.columns = columns;
       csvState.rows = rows;
+      thead.innerHTML = '';
+      tbody.innerHTML = '';
+      dom.csvEmpty.style.display = 'none';
+      dom.csvTable.style.display = '';
       renderCsvTable();
-      console.log('[client-settings] csv fetch ok');
+      console.info('[client-settings] csv fetch ok', {
+        quiet,
+        rows: rows.length,
+        columns: columns.length,
+        url: requestUrl.toString(),
+      });
       setCsvMessage(`CSV загружен (${rows.length} строк)`, 'muted');
     } catch (error) {
-      console.error('[client-settings] csv fetch fail', error);
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error('[client-settings] csv fetch fail', err);
+      console.info('[client-settings] csv fetch fail', { quiet, message: err.message, url: requestUrl && requestUrl.toString() });
       csvState.columns = [];
       csvState.rows = [];
       thead.innerHTML = '';
       tbody.innerHTML = '';
       ensureTableVisible(false);
-      setCsvMessage(`Не удалось загрузить CSV: ${error.message}`, 'alert');
+      setCsvMessage(`Не удалось загрузить CSV: ${err.message}`, 'alert');
     }
   }
 
@@ -2071,7 +2072,26 @@ try {
       }
       const rows = collectCsvRows();
       try {
-        const targetUrl = resolveEndpointUrl(endpoints.csvSave, withTenant());
+        let targetUrl = resolveEndpointUrl(endpoints.csvSave, withTenant());
+        const stateForSave = readStateFromDom() || {};
+        const keyForSave = resolveCsvKey(stateForSave);
+        if (targetUrl && keyForSave) {
+          try {
+            const locationInfo = getLocation();
+            const origin = locationInfo.origin || locationInfo.href || 'https://localhost';
+            const urlObj = new URL(targetUrl, origin);
+            urlObj.searchParams.set('k', keyForSave);
+            const isAbsolute = ABSOLUTE_URL_RE.test(targetUrl);
+            const isRootRelative = !isAbsolute && targetUrl.startsWith('/');
+            if (isRootRelative) {
+              targetUrl = `${urlObj.pathname}${urlObj.search}${urlObj.hash}`;
+            } else {
+              targetUrl = urlObj.toString();
+            }
+          } catch (appendError) {
+            console.error('[client-settings] csv save url append key failed', appendError);
+          }
+        }
         const result = await postJSON(targetUrl, {
           columns: csvState.columns,
           rows,

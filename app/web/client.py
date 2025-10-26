@@ -268,7 +268,7 @@ def client_settings(tenant: int, request: Request):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
     primary_key = (C.get_tenant_pubkey(int(tenant)) or "").strip()
-    key = (provided_key or primary_key or "").strip()
+    key = (primary_key or provided_key or "").strip()
 
     C.ensure_tenant_files(tenant)
     cfg = C.read_tenant_config(tenant)
