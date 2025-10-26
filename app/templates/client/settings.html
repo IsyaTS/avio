@@ -157,8 +157,11 @@
 </section>
 
 {% set state_json = state | tojson %}
-<script id="client-settings-state" type="application/json">{{ state_json }}</script>
+{% set client_state = {'tenant': tenant, 'key': key} %}
+{% set client_state_json = client_state | tojson %}
+<script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
 <script>
+  window.__client_settings_state = Object.assign({}, window.__client_settings_state || {}, {{ client_state_json }});
   window.state = {{ state_json }};
   window.CLIENT_SETTINGS = Object.assign({}, window.CLIENT_SETTINGS || {}, {
     public_key: {{ (upload_public_key | default('', true)) | tojson }},
@@ -166,7 +169,7 @@
     webhook_secret: {{ (webhook_secret | default('', true)) | tojson }}
   });
 </script>
-<script src="{{ static_url(request, 'js/boot.js') }}?v={{ ASSET_VERSION }}" defer></script>
-<script src="{{ static_url(request, 'js/catalog-upload.js') }}?v={{ ASSET_VERSION }}" defer></script>
-<script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ ASSET_VERSION }}" defer></script>
+<script src="{{ static_url(request, 'js/boot.js') }}?v={{ asset_version }}" defer></script>
+<script src="{{ static_url(request, 'js/catalog-upload.js') }}?v={{ asset_version }}" defer></script>
+<script src="{{ static_url(request, 'js/client-settings.js') }}?v={{ asset_version }}" defer></script>
 {% endblock %}

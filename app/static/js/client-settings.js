@@ -28,6 +28,95 @@ try {
   const STATE_NODE_ID = 'client-settings-state';
   const TENANT_PATH_REGEX = /\/client\/(\d+)(?:\/|$)/;
 
+  const mergeClientState = (payload) => {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const base = (typeof window !== 'undefined'
+      && window.__client_settings_state
+      && typeof window.__client_settings_state === 'object')
+      ? window.__client_settings_state
+      : {};
+    const merged = { ...base, ...safePayload };
+    if (typeof window !== 'undefined') {
+      window.__client_settings_state = merged;
+    }
+    return merged;
+  };
+
+  const readCookie = (name) => {
+    if (typeof document === 'undefined' || !name) {
+      return '';
+    }
+    const source = document.cookie || '';
+    if (!source) {
+      return '';
+    }
+    const parts = source.split(';');
+    for (let idx = 0; idx < parts.length; idx += 1) {
+      const part = parts[idx].trim();
+      if (!part) {
+        continue;
+      }
+      if (part.startsWith(`${name}=`)) {
+        const value = part.slice(name.length + 1);
+        try {
+          return decodeURIComponent(value);
+        } catch (error) {
+          return value;
+        }
+      }
+    }
+    return '';
+  };
+
+  const deriveFallbackState = () => {
+    if (typeof window === 'undefined') {
+      return {};
+    }
+    const fallback = {};
+    const locationInfo = getLocation();
+    const path = locationInfo && typeof locationInfo.pathname === 'string' ? locationInfo.pathname : '';
+    const match = path.match(TENANT_PATH_REGEX);
+    if (match && match[1]) {
+      const parsed = Number.parseInt(match[1], 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        fallback.tenant = parsed;
+      }
+    }
+
+    let keyCandidate = '';
+    try {
+      const origin = locationInfo.origin
+        || (locationInfo.protocol && locationInfo.host ? `${locationInfo.protocol}//${locationInfo.host}` : 'https://localhost');
+      const hrefBase = locationInfo.href || `${origin}${path || '/'}`;
+      const url = new URL(hrefBase, origin || undefined);
+      keyCandidate = url.searchParams.get('k') || '';
+    } catch (error) {
+      keyCandidate = '';
+    }
+
+    if (!keyCandidate) {
+      const search = typeof locationInfo.search === 'string' ? locationInfo.search : '';
+      if (search) {
+        try {
+          const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+          keyCandidate = params.get('k') || '';
+        } catch (error) {
+          keyCandidate = '';
+        }
+      }
+    }
+
+    if (!keyCandidate) {
+      keyCandidate = readCookie('client_key');
+    }
+
+    if (keyCandidate) {
+      fallback.key = keyCandidate;
+    }
+
+    return fallback;
+  };
+
   const getClientSettings = () => {
     if (typeof window === 'undefined') {
       return {};
@@ -37,22 +126,36 @@ try {
   };
 
   const readStateFromDom = () => {
+    if (typeof window !== 'undefined') {
+      const cached = window.__client_settings_state;
+      if (cached && typeof cached === 'object' && Object.keys(cached).length > 0) {
+        return cached;
+      }
+    }
+
+    if (typeof document === 'undefined') {
+      return mergeClientState(deriveFallbackState());
+    }
+
     const node = document.getElementById(STATE_NODE_ID);
     if (!node) {
-      return {};
+      return mergeClientState(deriveFallbackState());
     }
     const raw = (node.textContent || '').trim();
     if (!raw) {
-      return {};
+      return mergeClientState(deriveFallbackState());
     }
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return mergeClientState(parsed);
+      }
     } catch (error) {
       try {
         console.error('[client-settings] failed to parse state JSON', error);
       } catch (_) {}
-      return {};
     }
+    return mergeClientState(deriveFallbackState());
   };
 
   const resolveMaxDays = (state) => {
@@ -1153,6 +1256,10 @@ try {
           throw new Error('Ссылка недоступна');
         }
         const data = await fetchSettingsJsonWithRetry(settingsUrl);
+        const uploadedMeta = extractUploadedCatalogMeta(data);
+        if (uploadedMeta && typeof uploadedMeta.csv_path === 'string' && uploadedMeta.csv_path.trim()) {
+          fetchCsvAndRender({ quiet: true });
+        }
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
@@ -2069,6 +2176,14 @@ try {
       thead.innerHTML = '';
       tbody.innerHTML = '';
       renderCsvTable();
+      ensureTableVisible(csvState.columns.length > 0);
+      if (dom.csvSection) {
+        showElement(dom.csvSection);
+      }
+      if (dom.csvContainer) {
+        showElement(dom.csvContainer);
+      }
+      updateCsvControls();
 
       console.info('[client-settings] csv fetch ok', {
         quiet,
