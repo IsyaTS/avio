@@ -192,6 +192,13 @@
   const bootStartedAt = Date.now();
   window.__EXPORT_BOOT_TS__ = bootStartedAt;
 
+  function setExportLoadedFlag(value) {
+    if (value === false && window.__EXPORT_LOADED__ === true) {
+      return;
+    }
+    window.__EXPORT_LOADED__ = value;
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     let button = document.getElementById('export-download');
     if (button && button.dataset && button.dataset.bound) {
@@ -203,7 +210,7 @@
 
     if (!button) {
       window.__EXPORT_BIND_OK__ = false;
-      window.__EXPORT_LOADED__ = false;
+      setExportLoadedFlag(false);
       console.info('boot ok');
       return;
     }
@@ -213,7 +220,7 @@
     }
 
     window.__EXPORT_BIND_OK__ = false;
-    window.__EXPORT_LOADED__ = false;
+    setExportLoadedFlag(false);
 
     console.info('boot ok');
   });

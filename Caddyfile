@@ -15,5 +15,8 @@ static.avio.website {
   @js_assets {
     path *.js
   }
-  header @js_assets Content-Type "application/javascript"
+  header @js_assets {
+    Content-Type "application/javascript"
+    X-Content-Type-Options "nosniff"
+  }
 }

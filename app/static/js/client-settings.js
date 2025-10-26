@@ -1863,21 +1863,28 @@ try {
     const container = dom.csvContainer || table.parentElement;
     const section = dom.csvSection;
 
-    const toggle = (element, visible) => {
-      if (!element) return;
-      if (visible) {
-        showElement(element);
-        element.style.display = '';
-      } else {
-        hideElement(element);
-        element.style.display = 'none';
-      }
-    };
+    table.style.display = show ? 'table' : 'none';
+    emptyState.style.display = show ? 'none' : 'block';
 
-    toggle(table, show);
-    toggle(container, show);
-    toggle(section, show);
-    toggle(emptyState, !show);
+    if (show) {
+      showElement(table);
+      if (container) {
+        showElement(container);
+      }
+      if (section) {
+        showElement(section);
+      }
+      hideElement(emptyState);
+    } else {
+      hideElement(table);
+      if (container) {
+        hideElement(container);
+      }
+      if (section) {
+        hideElement(section);
+      }
+      showElement(emptyState);
+    }
   }
 
   function normalizeColumns(cols) {
