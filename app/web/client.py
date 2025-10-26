@@ -290,21 +290,16 @@ def client_settings(tenant: int, request: Request):
     else:
         uploaded_display = ""
 
-    try:
-        whatsapp_export_url = str(request.url_for("whatsapp_export"))
-    except Exception:
-        whatsapp_export_url = _resolve_whatsapp_export_url(request, tenant)
-
     urls = {
-        "settings": str(request.url_for("client_settings", tenant=tenant)),
-        "save_settings": str(request.url_for("save_form", tenant=tenant)),
-        "save_persona": str(request.url_for("save_persona", tenant=tenant)),
-        "upload_catalog": str(request.url_for("catalog_upload", tenant=tenant)),
-        "csv_get": str(request.url_for("catalog_csv_get", tenant=tenant)),
-        "csv_save": str(request.url_for("catalog_csv_save", tenant=tenant)),
-        "training_upload": str(request.url_for("training_upload", tenant=tenant)),
-        "training_status": str(request.url_for("training_status", tenant=tenant)),
-        "whatsapp_export": whatsapp_export_url,
+        "settings": f"/client/{tenant}/settings",
+        "save_settings": f"/client/{tenant}/settings/save",
+        "save_persona": f"/client/{tenant}/persona",
+        "upload_catalog": f"/client/{tenant}/catalog/upload",
+        "csv_get": f"/client/{tenant}/catalog/csv",
+        "csv_save": f"/client/{tenant}/catalog/csv",
+        "training_upload": f"/client/{tenant}/training/upload",
+        "training_status": f"/client/{tenant}/training/status",
+        "whatsapp_export": "/export/whatsapp",
     }
 
     webhook_secret = getattr(C.settings, "WEBHOOK_SECRET", "") if hasattr(C, "settings") else ""
