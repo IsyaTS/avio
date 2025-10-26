@@ -1,4 +1,4 @@
-window.__client_settings_build = '20240518';
+window.__client_settings_build = '20240527';
 window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {
@@ -957,12 +957,18 @@ function getLocation() {
   function showElement(element) {
     if (!element) return;
     element.classList.remove(HIDDEN_CLASS);
+    if (typeof element.removeAttribute === 'function' && element.hasAttribute('hidden')) {
+      element.removeAttribute('hidden');
+    }
   }
 
   function hideElement(element) {
     if (!element) return;
     if (!element.classList.contains(HIDDEN_CLASS)) {
       element.classList.add(HIDDEN_CLASS);
+    }
+    if (typeof element.setAttribute === 'function') {
+      element.setAttribute('hidden', '');
     }
   }
 
@@ -2789,7 +2795,13 @@ function getLocation() {
     }
     window.__EXPORT_ERROR__ = undefined;
     try {
-      ensureBootstrapGlobals();
+      const bootstrap = ensureBootstrapGlobals() || {};
+      if (bootstrap.state && state && typeof state === 'object') {
+        Object.assign(state, bootstrap.state);
+      }
+      if (bootstrap.endpoints && endpoints && typeof endpoints === 'object') {
+        Object.assign(endpoints, bootstrap.endpoints);
+      }
       bootstrapClientSettings();
     } catch (error) {
       window.__cs_loaded = false;

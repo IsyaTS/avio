@@ -13,8 +13,8 @@
         'upload_catalog': '/pub/catalog/upload',
         'csv_get': '/pub/catalog/csv',
         'csv_save': '/pub/catalog/csv',
-        'training_upload': '/client/' ~ tenant_id ~ '/training/upload',
-        'training_status': '/client/' ~ tenant_id ~ '/training/status',
+        'training_upload': '/pub/training/upload',
+        'training_status': '/pub/training/status',
         'whatsapp_export': '/pub/wa/export'
     }
 } %}
@@ -108,7 +108,7 @@
 
     {# CSV editor placeholder is separate to keep message visible when таблица скрыта #}
     <div id="csv-empty" class="surface status-text" style="padding: 16px;">CSV ещё не готов — загрузите PDF или CSV файл</div>
-    <div id="csv-section" class="surface stack" style="gap: 12px;">
+    <div id="csv-section" class="surface stack hidden" style="gap: 12px;" hidden>
         <h3 class="section-title" style="font-size:1.1rem;">CSV редактор</h3>
         <div style="display:flex; flex-wrap:wrap; gap:12px;">
             <button class="btn btn--secondary" id="csv-refresh" type="button">Обновить данные</button>
@@ -116,7 +116,7 @@
             <button class="btn" id="csv-save" type="button">Сохранить CSV</button>
             <span id="csv-message" class="status-text"></span>
         </div>
-        <div id="csv-container" class="surface" style="padding:0; overflow:auto;">
+        <div id="csv-container" class="surface hidden" style="padding:0; overflow:auto;" hidden>
             <table id="csv-table" class="table">
                 <thead></thead>
                 <tbody></tbody>

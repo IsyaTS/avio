@@ -203,12 +203,21 @@
       return Object.assign({}, DEFAULT_CLIENT_ENDPOINTS, computed);
     }
 
-    const existing = (window.__client_endpoints && typeof window.__client_endpoints === 'object')
-      ? window.__client_endpoints
-      : {};
-    const merged = Object.assign({}, DEFAULT_CLIENT_ENDPOINTS, existing, computed);
-    window.__client_endpoints = merged;
-    return merged;
+    const hasExisting = window.__client_endpoints && typeof window.__client_endpoints === 'object';
+    if (!hasExisting) {
+      window.__client_endpoints = Object.assign({}, DEFAULT_CLIENT_ENDPOINTS, computed);
+      return window.__client_endpoints;
+    }
+
+    const target = window.__client_endpoints;
+    Object.keys(DEFAULT_CLIENT_ENDPOINTS).forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(computed, key) && computed[key]) {
+        target[key] = computed[key];
+      } else if (!target[key]) {
+        target[key] = DEFAULT_CLIENT_ENDPOINTS[key];
+      }
+    });
+    return target;
   }
 
   function ensureAbsoluteUrl(raw) {
@@ -331,8 +340,8 @@
     }
     clientSettingsBootCalled = true;
     try {
-      if (typeof window !== 'undefined' && typeof window.__client_settings_boot === 'function') {
-        window.__client_settings_boot();
+      if (typeof window !== 'undefined') {
+        window.__client_settings_boot?.();
       }
     } catch (error) {
       try {
@@ -341,7 +350,7 @@
     }
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
+  function handleDomReady() {
     try {
       let button = document.getElementById('export-download');
       if (button && button.dataset && button.dataset.bound) {
@@ -369,9 +378,13 @@
     } finally {
       callClientSettingsBoot();
     }
-  });
+  }
 
-  if (typeof document !== 'undefined' && document.readyState !== 'loading') {
-    setTimeout(callClientSettingsBoot, 0);
+  if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', handleDomReady, { once: true });
+    } else {
+      setTimeout(handleDomReady, 0);
+    }
   }
 })();
