@@ -1,4 +1,4 @@
-window.__client_settings_build = '20240527';
+window.__client_settings_build = '20240601';
 window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {
@@ -1024,6 +1024,68 @@ function getLocation() {
       return url.toString();
     }
 
+    function buildPublicUrl(path, options = {}) {
+      const {
+        params = {},
+        fallback = '',
+        cacheBust = false,
+      } = options || {};
+      const normalizedPath = normalizeEndpointPath(path, fallback);
+      if (!normalizedPath) {
+        return '';
+      }
+
+      const effectiveParams = Object.assign({}, params && typeof params === 'object' ? params : {});
+
+      const state = readStateFromDom() || {};
+      const tenantFromState = Object.prototype.hasOwnProperty.call(state, 'tenant')
+        ? state.tenant
+        : undefined;
+      const tenantValue = tenantFromState != null ? String(tenantFromState).trim() : '';
+      if (tenantValue && effectiveParams.tenant == null) {
+        effectiveParams.tenant = tenantValue;
+      }
+
+      let keyValue = '';
+      if (typeof state.key === 'string' && state.key.trim()) {
+        keyValue = state.key.trim();
+      }
+      if (!keyValue && typeof state.public_key === 'string' && state.public_key.trim()) {
+        keyValue = state.public_key.trim();
+      }
+      if (!keyValue && typeof resolveEffectiveAccessKey === 'function') {
+        keyValue = resolveEffectiveAccessKey() || '';
+      }
+      if (keyValue && effectiveParams.k == null) {
+        effectiveParams.k = keyValue;
+      }
+
+      const shouldBustCache = (() => {
+        try {
+          const locationInfo = getLocation();
+          const origin = locationInfo.origin || locationInfo.href || 'https://localhost';
+          const url = new URL(normalizedPath, origin);
+          const pathname = url.pathname || normalizedPath;
+          if (pathname === '/pub/settings/get') {
+            return true;
+          }
+        } catch (error) {
+          const questionIdx = normalizedPath.indexOf('?');
+          const pathname = questionIdx >= 0 ? normalizedPath.slice(0, questionIdx) : normalizedPath;
+          if (pathname === '/pub/settings/get') {
+            return true;
+          }
+        }
+        return Boolean(cacheBust);
+      })();
+
+      if (shouldBustCache && effectiveParams._ == null) {
+        effectiveParams._ = Date.now();
+      }
+
+      return resolveEndpointUrl(normalizedPath, effectiveParams, fallback);
+    }
+
     const endpoints = {
       saveSettings: normalizeEndpointPath(urls.save_settings, '/pub/settings/save'),
       savePersona: normalizeEndpointPath(urls.save_persona, `/client/${tenant}/persona`),
@@ -1531,7 +1593,8 @@ function getLocation() {
   if (dom.downloadConfig) {
     dom.downloadConfig.addEventListener('click', async () => {
       try {
-        const settingsUrl = resolveEndpointUrl('/pub/settings/get', withTenant());
+        const settingsPath = endpoints.settingsGet || '/pub/settings/get';
+        const settingsUrl = buildPublicUrl(settingsPath, { fallback: '/pub/settings/get', cacheBust: true });
         if (!settingsUrl) {
           throw new Error('Ссылка недоступна');
         }
@@ -1661,33 +1724,27 @@ function getLocation() {
 
   function buildCatalogUploadUrl(publicKey, tenantValue) {
     if (!publicKey || !tenantValue) return '';
-    const locationInfo = getLocation();
-    let url;
-    try {
-      url = new URL('/pub/catalog/upload', locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL('/pub/catalog/upload', locationInfo.href || 'https://localhost');
-    }
-    url.searchParams.set('k', publicKey);
-    url.searchParams.set('tenant', String(tenantValue));
-    return url.toString();
+    return buildPublicUrl('/pub/catalog/upload', {
+      params: {
+        k: publicKey,
+        tenant: String(tenantValue),
+      },
+      fallback: '/pub/catalog/upload',
+    });
   }
 
   function buildCatalogStatusUrl(jobId, context) {
     if (!jobId || !context || !context.publicKey || !context.tenant) {
       return '';
     }
-    const locationInfo = getLocation();
-    let url;
-    try {
-      url = new URL('/pub/catalog/status', locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL('/pub/catalog/status', locationInfo.href || 'https://localhost');
-    }
-    url.searchParams.set('k', context.publicKey);
-    url.searchParams.set('tenant', String(context.tenant));
-    url.searchParams.set('job', String(jobId));
-    return url.toString();
+    return buildPublicUrl('/pub/catalog/status', {
+      params: {
+        k: context.publicKey,
+        tenant: String(context.tenant),
+        job: String(jobId),
+      },
+      fallback: '/pub/catalog/status',
+    });
   }
 
   function buildInternalFileUrl(pathValue, context) {
@@ -1712,19 +1769,19 @@ function getLocation() {
       throw new Error('invalid_context');
     }
     const { bypassCache = false } = typeof options === 'object' && options ? options : {};
-    const locationInfo = getLocation();
-    let url;
-    try {
-      url = new URL('/pub/settings/get', locationInfo.origin || 'https://localhost');
-    } catch (error) {
-      url = new URL('/pub/settings/get', locationInfo.href || 'https://localhost');
+    const params = {
+      k: context.publicKey,
+      tenant: String(context.tenant),
+    };
+    const settingsUrl = buildPublicUrl('/pub/settings/get', {
+      params,
+      fallback: '/pub/settings/get',
+      cacheBust: bypassCache,
+    });
+    if (!settingsUrl) {
+      throw new Error('settings_url_unavailable');
     }
-    url.searchParams.set('k', context.publicKey);
-    url.searchParams.set('tenant', String(context.tenant));
-    if (bypassCache) {
-      url.searchParams.set('_', String(Date.now()));
-    }
-    const data = await fetchSettingsJsonWithRetry(url.toString());
+    const data = await fetchSettingsJsonWithRetry(settingsUrl);
     rememberSettingsSnapshot(data);
     return data;
   }
@@ -1878,9 +1935,87 @@ function getLocation() {
     return message;
   }
 
-  async function handleCatalogCompleted(context, payload) {
+  async function refreshCatalogSettingsAndCsv(options = {}) {
+    const { context = null, quietCsv = true, bypassCache = true } = options || {};
+    const params = {};
+    if (context && context.publicKey) {
+      params.k = context.publicKey;
+    }
+    if (context && context.tenant) {
+      params.tenant = String(context.tenant);
+    }
+    const settingsPath = endpoints.settingsGet || '/pub/settings/get';
+    const settingsUrl = buildPublicUrl(settingsPath, {
+      params,
+      fallback: '/pub/settings/get',
+      cacheBust: bypassCache,
+    });
+    if (!settingsUrl) {
+      throw new Error('settings_url_unavailable');
+    }
+    const data = await fetchSettingsJsonWithRetry(settingsUrl);
+    rememberSettingsSnapshot(data);
+
+    refreshCsvDomElements();
+
+    if (dom.csvSection) {
+      showElement(dom.csvSection);
+    }
+    if (dom.csvContainer) {
+      showElement(dom.csvContainer);
+    }
+
+    const meta = extractUploadedCatalogMeta(data);
+    const csvPath = meta && typeof meta.csv_path === 'string' ? meta.csv_path.trim() : '';
+
+    if (csvPath) {
+      if (dom.csvEmpty) {
+        dom.csvEmpty.textContent = '';
+        hideElement(dom.csvEmpty);
+      }
+      await fetchCsvAndRender({ quiet: quietCsv });
+      return { data, csvReady: true };
+    }
+
+    csvState.columns = [];
+    csvState.rows = [];
+    csvState.delimiter = '';
+    if (dom.csvTable) {
+      const tableHead = dom.csvTable.querySelector('thead');
+      const tableBody = dom.csvTable.querySelector('tbody');
+      if (tableHead) {
+        tableHead.innerHTML = '';
+      }
+      if (tableBody) {
+        tableBody.innerHTML = '';
+      }
+      hideElement(dom.csvTable);
+    }
+    if (dom.csvEmpty) {
+      dom.csvEmpty.textContent = 'CSV ещё не готов';
+      showElement(dom.csvEmpty);
+    }
+    setCsvMessage('CSV ещё не готов', 'muted');
+    updateCsvControls();
+    return { data, csvReady: false };
+  }
+
+  async function handleCatalogCompleted(context, payload, options = {}) {
     try {
-      const settings = await refreshSettingsSnapshot(context, { bypassCache: true });
+      const opts = options && typeof options === 'object' ? options : {};
+      const preloadedSettings = opts.settings || null;
+      let skipCsvReload = opts.skipCsvReload === true;
+      let settings = preloadedSettings;
+      if (!settings) {
+        const refreshResult = await refreshCatalogSettingsAndCsv({ context, quietCsv: true, bypassCache: true });
+        settings = refreshResult.data;
+        if (refreshResult.csvReady) {
+          skipCsvReload = true;
+        }
+      }
+      if (!settings) {
+        settings = await refreshSettingsSnapshot(context, { bypassCache: true });
+      }
       const linkHref = resolveCatalogDownloadLink(settings, context, payload);
       const message = resolveCatalogSuccessLabel(settings, payload);
       if (dom.uploadInput) {
@@ -1891,7 +2026,9 @@ function getLocation() {
       } else {
         setCatalogStatus(message, 'success');
       }
-      await fetchCsvAndRender({ quiet: true });
+      if (!skipCsvReload) {
+        await fetchCsvAndRender({ quiet: true });
+      }
       const itemsCount = Number.isFinite(Number(payload.items)) ? Number(payload.items) : null;
       if (itemsCount === 0 && csvState.columns.length && csvState.rows.length === 0) {
         setCsvMessage('позиций нет', 'muted');
@@ -1971,9 +2108,12 @@ function getLocation() {
     scheduleCatalogStatusPoll(250);
   }
 
-  function performCatalogUpload(event) {
+  async function performCatalogUpload(event) {
     if (event && typeof event.preventDefault === 'function') {
       event.preventDefault();
+    }
+    if (event && typeof event.stopPropagation === 'function') {
+      event.stopPropagation();
     }
     if (catalogUploadInFlight) return;
 
@@ -1996,8 +2136,8 @@ function getLocation() {
       return;
     }
 
-    const webhookSecret = resolveWebhookSecret(clientConfig);
-    const uploadUrl = buildCatalogUploadUrl(publicKey, tenantValue);
+    const uploadPath = endpoints.uploadCatalog || '/pub/catalog/upload';
+    const uploadUrl = buildPublicUrl(uploadPath, { fallback: '/pub/catalog/upload' });
     if (!uploadUrl) {
       setCatalogStatus('Не найден адрес загрузки каталога', 'alert');
       return;
@@ -2006,83 +2146,78 @@ function getLocation() {
     const formData = new FormData();
     formData.append('file', file);
 
+    const webhookSecret = resolveWebhookSecret(clientConfig);
+    const context = { tenant: tenantValue, publicKey, webhookSecret };
+
     catalogUploadInFlight = true;
     stopCatalogStatusPolling({ reset: true });
     disableCatalogUploadButton(true);
     updateCatalogProgress(0);
-    setCatalogStatus('Загрузка 0%', 'muted');
+    setCatalogStatus('Загрузка…', 'muted');
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', uploadUrl, true);
-    xhr.responseType = 'json';
+    try {
+      const response = await fetch(uploadUrl, {
+        method: 'POST',
+        body: formData,
+      });
 
-    xhr.upload.onprogress = (progressEvent) => {
-      if (!progressEvent) {
-        return;
-      }
-      if (!progressEvent.lengthComputable) {
-        updateCatalogProgress(10);
-        setCatalogStatus('Загрузка 0%', 'muted');
-        return;
-      }
-      const percent = progressEvent.total > 0
-        ? Math.round((progressEvent.loaded / progressEvent.total) * 100)
-        : 0;
-      updateCatalogProgress(percent);
-      setCatalogStatus(`Загрузка ${percent}%`, 'muted');
-    };
-
-    const fail = (message) => {
-      catalogUploadInFlight = false;
-      disableCatalogUploadButton(false);
-      setCatalogStatus(message, 'alert');
-      resetCatalogUploadUi();
-    };
-
-    xhr.onerror = () => {
-      fail('Не удалось загрузить файл. Проверьте соединение.');
-    };
-
-    xhr.onabort = () => {
-      fail('Загрузка прервана.');
-    };
-
-    xhr.onload = () => {
-      const { status } = xhr;
-      let responseData = null;
-      if (xhr.response && typeof xhr.response === 'object') {
-        responseData = xhr.response;
-      } else if (xhr.responseText) {
+      if (!response.ok) {
+        let errorMessage = `Ошибка загрузки (HTTP ${response.status})`;
         try {
-          responseData = JSON.parse(xhr.responseText);
-        } catch (error) {
+          const errorPayload = await response.clone().json();
+          if (errorPayload && typeof errorPayload === 'object') {
+            const detail = errorPayload.error || errorPayload.message;
+            if (detail) {
+              errorMessage = String(detail);
+            }
+          }
+        } catch (_) {
+          try {
+            const text = await response.text();
+            if (text && text.trim()) {
+              errorMessage = text.trim();
+            }
+          } catch (__) {
+            // ignore
+          }
+        }
+        throw new Error(errorMessage);
+      }
+
+      let responseData = null;
+      try {
+        responseData = await response.clone().json();
+      } catch (_) {
+        responseData = null;
+      }
+      if (!responseData) {
+        try {
+          const text = await response.text();
+          if (text && text.trim()) {
+            responseData = { message: text.trim() };
+          }
+        } catch (__) {
           responseData = null;
         }
       }
 
-      if (status >= 400) {
-        const errorMessage = (responseData && (responseData.message || responseData.error))
-          || `Ошибка загрузки (HTTP ${status})`;
-        fail(errorMessage);
-        return;
-      }
-
-      if (!responseData || responseData.ok === false) {
-        const errorMessage = (responseData && (responseData.error || responseData.message))
-          || 'Не удалось загрузить файл';
-        fail(errorMessage);
-        return;
+      if (responseData && typeof responseData === 'object' && responseData.ok === false) {
+        const detail = responseData.error || responseData.message || 'Не удалось загрузить файл';
+        throw new Error(String(detail));
       }
 
       updateCatalogProgress(100);
-      const context = { tenant: tenantValue, publicKey, webhookSecret };
-      const finishUploadPhase = () => {
-        catalogUploadInFlight = false;
-        disableCatalogUploadButton(false);
-      };
+      setCatalogStatus('загружено', 'muted');
 
-      if (responseData.job_id) {
-        finishUploadPhase();
+      let settingsResult = null;
+      try {
+        settingsResult = await refreshCatalogSettingsAndCsv({ context, quietCsv: true, bypassCache: true });
+      } catch (refreshError) {
+        const err = refreshError instanceof Error ? refreshError : new Error(String(refreshError));
+        setCatalogStatus(`Каталог загружен, но не удалось обновить настройки: ${err.message}`, 'alert');
+      }
+
+      if (responseData && typeof responseData === 'object' && responseData.job_id) {
         setCatalogStatus('Файл принят. Обработка…', 'muted');
         startCatalogStatusPolling(String(responseData.job_id), context);
         if (dom.uploadInput) {
@@ -2091,16 +2226,19 @@ function getLocation() {
         return;
       }
 
-      finishUploadPhase();
-      stopCatalogStatusPolling();
-      handleCatalogCompleted(context, responseData);
-      return;
-    };
-
-    try {
-      xhr.send(formData);
+      if (responseData) {
+        await handleCatalogCompleted(context, responseData, {
+          settings: settingsResult ? settingsResult.data : null,
+          skipCsvReload: Boolean(settingsResult),
+        });
+      }
     } catch (error) {
-      fail(error && error.message ? error.message : 'Не удалось отправить файл');
+      const message = error instanceof Error ? error.message : String(error);
+      setCatalogStatus(message || 'Не удалось загрузить файл', 'alert');
+      resetCatalogUploadUi();
+    } finally {
+      catalogUploadInFlight = false;
+      disableCatalogUploadButton(false);
     }
   }
 
@@ -2405,23 +2543,6 @@ function getLocation() {
     dom.csvRefresh = document.getElementById('csv-refresh');
   }
 
-  function resolveCsvKey(state) {
-    const fromState = state && typeof state === 'object' ? state : {};
-    const clientConfig = getClientSettings();
-    const candidates = [
-      typeof fromState.key === 'string' ? fromState.key.trim() : '',
-      clientConfig && typeof clientConfig.key === 'string' ? clientConfig.key.trim() : '',
-      typeof fromState.public_key === 'string' ? fromState.public_key.trim() : '',
-    ];
-    for (let idx = 0; idx < candidates.length; idx += 1) {
-      const value = candidates[idx];
-      if (value) {
-        return value;
-      }
-    }
-    return '';
-  }
-
   function parseCsvPayload(payload) {
     const meta = resolveUploadedCatalogMeta();
     const delimiterHint = meta && typeof meta.delimiter === 'string' && meta.delimiter
@@ -2521,21 +2642,14 @@ function getLocation() {
 
     const state = readStateFromDom() || {};
     const urls = state && typeof state === 'object' ? state.urls || {} : {};
-    const fallbackTenant = state && Object.prototype.hasOwnProperty.call(state, 'tenant') ? state.tenant : '';
-    const tenantSegment = fallbackTenant == null ? '' : String(fallbackTenant).trim();
-    const basePath = (typeof urls.csv_get === 'string' && urls.csv_get)
-      || (tenantSegment ? `/client/${tenantSegment}/catalog/csv` : '/client/catalog/csv');
+    const basePath = (typeof urls.csv_get === 'string' && urls.csv_get) || endpoints.csvGet;
 
-    const locationInfo = getLocation();
-    const origin = locationInfo.origin || locationInfo.href || 'https://localhost';
-
-    let requestUrl;
-    try {
-      requestUrl = new URL(basePath, origin);
-    } catch (error) {
+    const requestUrl = buildPublicUrl(basePath, { fallback: endpoints.csvGet });
+    if (!requestUrl) {
       console.info('[client-settings] csv fetch fail', { quiet, reason: 'invalid-url', url: basePath });
       csvState.columns = [];
       csvState.rows = [];
+      csvState.delimiter = '';
       thead.innerHTML = '';
       tbody.innerHTML = '';
       ensureTableVisible(false);
@@ -2544,17 +2658,13 @@ function getLocation() {
       return;
     }
 
-    const key = resolveCsvKey(state);
-    if (key) {
-      requestUrl.searchParams.set('k', key);
-    }
-
     csvState.loading = true;
     try {
-      const response = await fetch(requestUrl.toString(), {
+      const response = await fetch(requestUrl, {
         headers: {
           Accept: 'application/json',
         },
+        cache: 'no-store',
       });
       if (!response.ok) {
         let message = `status ${response.status}`;
@@ -2587,12 +2697,7 @@ function getLocation() {
       }
       updateCsvControls();
 
-      console.info('[client-settings] csv fetch ok', {
-        quiet,
-        rows: rows.length,
-        columns: columns.length,
-        url: requestUrl.toString(),
-      });
+      console.info('[client-settings] csv fetch ok', { quiet, rows: rows.length, columns: columns.length, url: requestUrl });
       if (csvState.columns.length && csvState.rows.length === 0) {
         setCsvMessage('позиций нет', 'muted');
       } else if (!quiet) {
@@ -2603,7 +2708,7 @@ function getLocation() {
       console.info('[client-settings] csv fetch fail', {
         quiet,
         message: err.message,
-        url: requestUrl && requestUrl.toString(),
+        url: requestUrl,
       });
       csvState.columns = [];
       csvState.rows = [];
@@ -2664,26 +2769,10 @@ function getLocation() {
           const stateForSave = readStateFromDom() || {};
           const urls = stateForSave && typeof stateForSave === 'object' ? stateForSave.urls || {} : {};
           const rawSavePath = typeof urls.csv_save === 'string' && urls.csv_save ? urls.csv_save : endpoints.csvSave;
-          let targetUrl = resolveEndpointUrl(rawSavePath, withTenant());
-          const keyForSave = resolveCsvKey(stateForSave);
-          if (targetUrl && keyForSave) {
-            try {
-              const locationInfo = getLocation();
-              const origin = locationInfo.origin || locationInfo.href || 'https://localhost';
-              const urlObj = new URL(targetUrl, origin);
-              urlObj.searchParams.set('k', keyForSave);
-              const isAbsolute = ABSOLUTE_URL_RE.test(targetUrl);
-              const isRootRelative = !isAbsolute && targetUrl.startsWith('/');
-              if (isRootRelative) {
-                targetUrl = `${urlObj.pathname}${urlObj.search}${urlObj.hash}`;
-              } else {
-                targetUrl = urlObj.toString();
-              }
-            } catch (appendError) {
-              try {
-                console.error('[client-settings] csv save url append key failed', appendError);
-              } catch (_) {}
-            }
+          const targetUrl = buildPublicUrl(rawSavePath || endpoints.csvSave, { fallback: endpoints.csvSave });
+          if (!targetUrl) {
+            setCsvMessage('Не найден адрес сохранения CSV', 'alert');
+            return;
           }
           const result = await postJSON(targetUrl, {
             columns: csvState.columns,

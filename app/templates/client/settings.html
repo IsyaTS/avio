@@ -22,6 +22,7 @@
 {% set extra_head %}
 <script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
 <script src="/static/js/boot.js?v={{ asset_version }}" defer></script>
+<script src="/static/js/catalog-upload.js?v={{ asset_version }}" defer></script>
 <script src="/static/js/client-settings.js?v={{ asset_version }}" defer></script>
 {% endset %}
 {% block content %}

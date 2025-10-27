@@ -72,6 +72,7 @@ TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") o
 
 
 _ASSET_VERSION: str | None = None
+ASSET_VERSION_SEED = "20240601a"
 
 
 def _static_base_prefix() -> str:
@@ -158,6 +159,10 @@ def asset_version() -> str:
 
     if not version:
         version = str(int(time.time()))
+
+    seed = (ASSET_VERSION_SEED or "").strip()
+    if seed:
+        version = f"{version}-{seed}" if version else seed
 
     _ASSET_VERSION = version
     return version
