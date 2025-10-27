@@ -1185,7 +1185,9 @@ function getLocation() {
     if (!element) return;
     if (element.classList && typeof element.classList.remove === 'function') {
       element.classList.remove('hidden');
-      element.classList.remove(HIDDEN_CLASS);
+      if (HIDDEN_CLASS) {
+        element.classList.remove(HIDDEN_CLASS);
+      }
     }
     if (typeof element.removeAttribute === 'function') {
       element.removeAttribute('hidden');
@@ -1196,7 +1198,7 @@ function getLocation() {
     if (!element) return;
     if (element.classList && typeof element.classList.add === 'function') {
       element.classList.add('hidden');
-      if (HIDDEN_CLASS && HIDDEN_CLASS !== 'hidden') {
+      if (HIDDEN_CLASS) {
         element.classList.add(HIDDEN_CLASS);
       }
     }
@@ -2664,18 +2666,12 @@ function getLocation() {
       tbody.innerHTML = '';
       renderCsvTable();
       ensureTableVisible(csvState.columns.length > 0);
-      if (dom.csvSection) {
-        showElement(dom.csvSection);
+      showElement(dom.csvSection);
+      showElement(dom.csvContainer);
+      if (dom.csvEmpty && csvState.columns.length > 0) {
+        dom.csvEmpty.textContent = '';
       }
-      if (dom.csvContainer) {
-        showElement(dom.csvContainer);
-      }
-      if (dom.csvEmpty) {
-        if (csvState.columns.length > 0) {
-          dom.csvEmpty.textContent = '';
-        }
-        hideElement(dom.csvEmpty);
-      }
+      hideElement(dom.csvEmpty);
       updateCsvControls();
 
       console.info('[client-settings] csv fetch ok', { quiet, rows: rows.length, columns: columns.length, url: requestUrl });
