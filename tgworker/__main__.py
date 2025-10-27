@@ -11,6 +11,7 @@ def main() -> None:
         host="0.0.0.0",
         port=8085,
         factory=True,
+        workers=1,
     )
 
 
