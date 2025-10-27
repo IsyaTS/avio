@@ -118,6 +118,7 @@ AVITO_STATE_PREFIX = "oauth:avito:state:"
 AVITO_STATE_TTL = 600  # seconds
 
 router = APIRouter()
+oauth_router = APIRouter(prefix="/v1/oauth/avito", tags=["avito_oauth"])
 
 
 def _qr_cache_ttl() -> int:
@@ -3089,6 +3090,252 @@ def _authorize_public_settings_request(
     return tenant_id, resolved_key
 
 
+@oauth_router.get("/status")
+async def avito_oauth_status(request: Request, tenant: int, k: str):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+
+    tenant_id, _ = auth
+    integration = avito.get_integration(int(tenant_id)) or {}
+    authorized = False
+    if integration:
+        try:
+            _, integration = await avito.ensure_access_token(int(tenant_id))
+            authorized = True
+        except avito.AvitoOAuthError:
+            authorized = False
+        except Exception:
+            logger.exception("avito_oauth_status_failed tenant=%s", tenant_id)
+            integration = avito.get_integration(int(tenant_id)) or {}
+    account_id = _coerce_int(integration.get("account_id")) if integration else None
+    account_login_raw = integration.get("account_login") if integration else None
+    account_login: str | None = None
+    if isinstance(account_login_raw, str):
+        candidate = account_login_raw.strip()
+        if candidate:
+            account_login = candidate
+
+    body = {
+        "authorized": bool(authorized),
+        "account_id": account_id,
+        "account_login": account_login,
+    }
+    return JSONResponse(body)
+
+
+@oauth_router.get("/authorize")
+async def avito_oauth_authorize(request: Request, tenant: int, k: str):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+
+    tenant_id, _ = auth
+    state = uuid.uuid4().hex
+    state_payload = json.dumps({"tenant": tenant_id})
+    state_key = _avito_state_key(state)
+    try:
+        client = common.redis_client()
+        client.setex(state_key, AVITO_STATE_TTL, state_payload)
+    except redis_ex.RedisError:
+        logger.exception("avito_oauth_state_store_failed tenant=%s", tenant_id)
+        return JSONResponse({"detail": "state_store_failed"}, status_code=503)
+
+    authorize_url = avito.build_authorize_url(state=state)
+    return JSONResponse({"authorize_url": authorize_url})
+
+
+@oauth_router.get("/callback")
+async def avito_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    if error:
+        return HTMLResponse(_avito_callback_html(False, error, {}))
+
+    if not state:
+        return HTMLResponse(_avito_callback_html(False, "missing_state", {}))
+
+    try:
+        client = common.redis_client()
+    except redis_ex.RedisError:
+        logger.exception("avito_oauth_state_fetch_failed state=%s", state)
+        return HTMLResponse(_avito_callback_html(False, "state_unavailable", {}))
+
+    state_key = _avito_state_key(state)
+    try:
+        raw_value = client.get(state_key)
+    except redis_ex.RedisError:
+        logger.exception("avito_oauth_state_fetch_failed state=%s", state)
+        return HTMLResponse(_avito_callback_html(False, "state_unavailable", {}))
+    finally:
+        try:
+            client.delete(state_key)
+        except Exception:
+            pass
+
+    tenant_id = None
+    if isinstance(raw_value, bytes):
+        try:
+            raw_value = raw_value.decode("utf-8")
+        except Exception:
+            raw_value = None
+    if isinstance(raw_value, str):
+        try:
+            payload = json.loads(raw_value)
+        except Exception:
+            payload = None
+        if isinstance(payload, Mapping):
+            tenant_id = _coerce_int(payload.get("tenant"))
+
+    if tenant_id is None:
+        return HTMLResponse(_avito_callback_html(False, "invalid_state", {}))
+
+    if not code:
+        return HTMLResponse(
+            _avito_callback_html(False, "missing_code", {"tenant": tenant_id})
+        )
+
+    try:
+        token_payload = await avito.exchange_code_for_token(int(tenant_id), code)
+    except avito.AvitoOAuthError as exc:
+        message = str(exc) or "token_exchange_failed"
+        return HTMLResponse(
+            _avito_callback_html(False, message, {"tenant": tenant_id})
+        )
+    except Exception:
+        logger.exception("avito_oauth_exchange_failed tenant=%s", tenant_id)
+        return HTMLResponse(
+            _avito_callback_html(False, "token_exchange_failed", {"tenant": tenant_id})
+        )
+
+    access_token = str(token_payload.get("access_token") or "").strip()
+    refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    if not access_token:
+        return HTMLResponse(
+            _avito_callback_html(False, "access_token_missing", {"tenant": tenant_id})
+        )
+
+    now = int(time.time())
+    update_payload: dict[str, Any] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token or None,
+        "obtained_at": now,
+    }
+    expires_at = token_payload.get("expires_at")
+    if expires_at is not None:
+        try:
+            update_payload["expires_at"] = int(expires_at)
+        except Exception:
+            update_payload["expires_at"] = None
+    else:
+        expires_in = token_payload.get("expires_in")
+        try:
+            exp_value = int(expires_in)
+        except Exception:
+            exp_value = None
+        if exp_value and exp_value > 0:
+            update_payload["expires_at"] = now + exp_value
+        else:
+            update_payload["expires_at"] = None
+    scope_value = token_payload.get("scope")
+    if isinstance(scope_value, str) and scope_value.strip():
+        update_payload["scope"] = scope_value.strip()
+
+    try:
+        common.ensure_tenant_files(int(tenant_id))
+    except Exception:
+        logger.exception("avito_oauth_store_failed tenant=%s", tenant_id)
+        return HTMLResponse(
+            _avito_callback_html(False, "token_store_failed", {"tenant": tenant_id})
+        )
+
+    try:
+        avito.update_integration(int(tenant_id), update_payload)
+    except Exception:
+        logger.exception("avito_oauth_store_failed tenant=%s", tenant_id)
+        return HTMLResponse(
+            _avito_callback_html(False, "token_store_failed", {"tenant": tenant_id})
+        )
+
+    try:
+        await avito.sync_account_info(int(tenant_id))
+    except avito.AvitoOAuthError as exc:
+        logger.warning(
+            "avito_account_sync_failed tenant=%s error=%s", tenant_id, exc
+        )
+    except Exception:
+        logger.exception("avito_account_sync_failed tenant=%s", tenant_id)
+
+    return HTMLResponse(_avito_callback_html(True, "ok", {"tenant": tenant_id}))
+
+
+@oauth_router.post("/disconnect")
+async def avito_oauth_disconnect(request: Request, tenant: int, k: str):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+
+    tenant_id, _ = auth
+    reset_payload = {
+        "access_token": None,
+        "refresh_token": None,
+        "expires_at": None,
+        "obtained_at": None,
+        "account_id": None,
+        "account_login": None,
+    }
+    try:
+        common.ensure_tenant_files(int(tenant_id))
+    except Exception:
+        logger.exception("avito_oauth_disconnect_failed tenant=%s", tenant_id)
+        return JSONResponse({"detail": "disconnect_failed"}, status_code=500)
+    try:
+        avito.update_integration(int(tenant_id), reset_payload)
+    except Exception:
+        logger.exception("avito_oauth_disconnect_failed tenant=%s", tenant_id)
+        return JSONResponse({"detail": "disconnect_failed"}, status_code=500)
+
+    return JSONResponse({"ok": True})
+
+
+@oauth_router.post("/webhook")
+async def avito_oauth_webhook(request: Request, tenant: int, k: str):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+
+    tenant_id, _ = auth
+    try:
+        await avito.ensure_access_token(int(tenant_id))
+    except avito.AvitoOAuthError as exc:
+        return JSONResponse(
+            {"detail": "oauth_not_authorized", "reason": str(exc) or "oauth_error"},
+            status_code=400,
+        )
+    except Exception:
+        logger.exception("avito_oauth_token_check_failed tenant=%s", tenant_id)
+        return JSONResponse({"detail": "oauth_error"}, status_code=500)
+
+    target_url = common.public_url(request, "/webhook/avito")
+    try:
+        success = await avito.ensure_webhook(int(tenant_id), target_url)
+    except avito.AvitoOAuthError as exc:
+        logger.warning(
+            "avito_webhook_register_failed tenant=%s error=%s", tenant_id, exc
+        )
+        return JSONResponse({"detail": "webhook_register_failed"}, status_code=400)
+    except Exception:
+        logger.exception("avito_webhook_register_failed tenant=%s", tenant_id)
+        return JSONResponse({"detail": "webhook_register_failed"}, status_code=500)
+
+    if not success:
+        return JSONResponse({"detail": "webhook_register_failed"}, status_code=502)
+
+    return JSONResponse({"ok": True})
+
+
 @router.get("/pub/settings/get")
 def settings_get(request: Request, tenant: int | str | None = None, k: str | None = None):
     auth = _authorize_public_settings_request(request, tenant, k)
@@ -3711,3 +3958,6 @@ def catalog_status_public(
     if "updated_at" not in sanitized:
         sanitized["updated_at"] = data.get("updated_at")
     return JSONResponse(sanitized)
+
+
+router.include_router(oauth_router)
