@@ -1,86 +1,131 @@
 #!/usr/bin/env python3
-import os, json, subprocess, shlex, inspect, sys
+import os, json, subprocess, shlex, sys
 
 INLINE = r"""
-import os, json, asyncio, inspect, sys
+import os, json, asyncio, inspect
 
-ten = int(os.environ.get("TEN","1"))
-chan = os.environ.get("CHAN","telegram")
-text = os.environ.get("TEXT","")
+TEN = int(os.environ.get("TEN","1"))
+CHAN = os.environ.get("CHAN","telegram")
+TEXT = os.environ.get("TEXT","")
 
-mods = ["app.core", "app.brain", "app.brain.planner"]
-names = ["generate_sales_reply","generate_reply","reply","respond","plan"]
-cand = []
+CANDIDATE_MODULES = ["app.core", "app.brain", "app.brain.planner"]
+NAME_HINTS = ["generate_sales_reply","generate_reply","reply","respond","plan"]
 
-def collect():
-    for m in mods:
+def extract_text(res):
+    if res is None:
+        return ""
+    if isinstance(res, str):
+        return res.strip()
+    if isinstance(res, (list, tuple)):
+        s = " ".join(map(str, res)).strip()
+        if s: return s
+    if isinstance(res, dict):
+        for k in ("text","reply","answer","content","message","final","output"):
+            v = res.get(k)
+            if v:
+                return str(v).strip()
+        # nested common spots
+        for path in (("data","text"),("message","text")):
+            d = res
+            ok = True
+            for p in path:
+                if isinstance(d, dict) and p in d:
+                    d = d[p]
+                else:
+                    ok = False; break
+            if ok and d:
+                return str(d).strip()
+        # nothing found -> shortest json
+        return json.dumps(res, ensure_ascii=False)
+    # object with common attributes
+    for a in ("text","reply","answer","content","message","final","output","response","body"):
+        if hasattr(res, a):
+            v = getattr(res, a)
+            if v:
+                return str(v).strip()
+    # pydantic/dataclass helpers
+    for m in ("to_dict","dict","model_dump"):
+        if hasattr(res, m) and callable(getattr(res, m)):
+            try:
+                d = getattr(res, m)()
+                txt = extract_text(d)
+                if txt: return txt
+            except Exception:
+                pass
+    # plan-like fields fallback
+    parts = []
+    for a in ("analysis","stage","cta"):
+        if hasattr(res, a):
+            v = getattr(res, a)
+            if isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+    if hasattr(res, "next_questions"):
         try:
-            mod = __import__(m, fromlist=["*"])
+            nq = getattr(res, "next_questions")
+            if isinstance(nq, (list, tuple)) and nq:
+                parts.append(str(nq[0]))
+        except Exception:
+            pass
+    if parts:
+        return " ".join(parts).strip()
+    return str(res)
+
+def collect_candidates():
+    out = []
+    seen = set()
+    for modname in CANDIDATE_MODULES:
+        try:
+            mod = __import__(modname, fromlist=["*"])
         except Exception:
             continue
         for nm in dir(mod):
             low = nm.lower()
-            if any(k in low for k in names):
+            if any(h in low for h in NAME_HINTS):
                 fn = getattr(mod, nm)
-                if callable(fn):
+                if callable(fn) and id(fn) not in seen:
+                    seen.add(id(fn))
                     try:
                         sig = inspect.signature(fn)
                         params = set(sig.parameters.keys())
                     except Exception:
                         params = set()
-                    cand.append((m, nm, fn, params))
-    # уникализируем по объекту
-    uniq = []
-    seen = set()
-    for m,n,f,p in cand:
-        if id(f) in seen: continue
-        seen.add(id(f)); uniq.append((m,n,f,p))
-    return uniq
+                    out.append((modname, nm, fn, params))
+    return out
 
 def call_fn(fn, params):
-    # собираем kwargs из доступных параметров
     kw = {}
-    if "tenant" in params: kw["tenant"] = ten
-    if "channel" in params: kw["channel"] = chan
-    if "text" in params: kw["text"] = text
+    if "tenant" in params: kw["tenant"] = TEN
+    if "channel" in params: kw["channel"] = CHAN
+    if "text" in params: kw["text"] = TEXT
     if "history" in params: kw["history"] = []
     if "ctx" in params: kw["ctx"] = {}
     if inspect.iscoroutinefunction(fn):
         return asyncio.run(fn(**kw))
-    res = fn(**kw) if kw else fn(text)
-    return res
+    try:
+        return fn(**kw) if kw else fn(TEXT)
+    except TypeError:
+        # last resort
+        return fn(TEXT)
 
-out = {"ok": False}
-errs = []
-
-for m,n,fn,params in collect():
+tried = []
+for m,n,fn,params in collect_candidates():
     try:
         res = call_fn(fn, params)
-        ans = None
-        if isinstance(res, dict):
-            ans = res.get("text") or res.get("reply") or res.get("message") or json.dumps(res, ensure_ascii=False)
-        elif isinstance(res, (list, tuple)):
-            ans = " ".join(map(str,res))
-        elif res is not None:
-            ans = str(res)
+        ans = extract_text(res)
         if ans:
-            out = {"ok": True, "module": m, "func": n, "reply": ans}
+            print(json.dumps({"ok": True, "module": m, "func": n, "reply": ans}, ensure_ascii=False))
             break
     except Exception as e:
-        errs.append(f"{m}.{n}: {type(e).__name__}: {e}")
-
-if not out["ok"]:
-    out = {"ok": False, "error": "no callable reply found", "tried": errs[:10]}
-
-print(json.dumps(out, ensure_ascii=False))
+        tried.append(f"{m}.{n}: {type(e).__name__}: {e}")
+else:
+    print(json.dumps({"ok": False, "error": "no callable reply found", "tried": tried[:10]}, ensure_ascii=False))
 """
 
 def get_app():
     p = subprocess.run(["bash","-lc","docker compose ps -q app"], capture_output=True, text=True)
     cid = p.stdout.strip()
     if not cid:
-        print("ERR: app container not found", file=sys.stderr)
-        sys.exit(1)
+        print("ERR: app container not found", file=sys.stderr); sys.exit(1)
     return cid
 
 def call_brain(app_cid, ten, chan, text):
@@ -92,9 +137,9 @@ def call_brain(app_cid, ten, chan, text):
     p = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if p.returncode != 0:
         return {"ok": False, "error": p.stderr.strip() or "exec failed"}
+    line = (p.stdout or "").strip().splitlines()[-1:] or [""]
     try:
-        line = p.stdout.strip().splitlines()[-1]
-        return json.loads(line)
+        return json.loads(line[0])
     except Exception as e:
         return {"ok": False, "error": f"bad json: {e}", "raw": p.stdout}
 
@@ -117,11 +162,8 @@ def main():
             print(f"Бот: {res.get('reply')}")
         else:
             print("ERR:", res.get("error"))
-            tried = res.get("tried")
-            if tried:
-                print("Tried:")
-                for t in tried:
-                    print(" -", t)
+            if res.get("tried"):
+                print("Tried:"); [print(" -", t) for t in res["tried"]]
             break
 
 if __name__ == "__main__":
