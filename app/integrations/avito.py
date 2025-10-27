@@ -94,6 +94,15 @@ async def exchange_code(
     return payload
 
 
+async def exchange_code_for_token(tenant: int, code: str) -> dict[str, Any]:
+    """Exchange an authorization code for access and refresh tokens."""
+
+    payload = await exchange_code(code)
+    if not isinstance(payload, Mapping):
+        raise AvitoOAuthError("Invalid Avito token response")
+    return dict(payload)
+
+
 def _coerce_int(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -305,6 +314,17 @@ async def ensure_account_info(
     merged = dict(integration)
     merged.update(info)
     return update_integration(int(tenant), merged)
+
+
+async def sync_account_info(tenant: int) -> dict[str, Any]:
+    """Synchronize Avito account metadata for the tenant."""
+
+    integration = get_integration(int(tenant)) or {}
+    token = str(integration.get("access_token") or "").strip()
+    if not token:
+        raise AvitoOAuthError("Avito access token is not configured for tenant")
+    updated = await ensure_account_info(int(tenant), integration, token=token)
+    return dict(updated)
 
 
 async def _fetch_account_info(token: str) -> Optional[dict[str, Any]]:
