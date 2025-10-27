@@ -265,6 +265,22 @@ def test_public_catalog_upload_csv_and_pdf_with_query_tenant(api_client, tmp_pat
     tenant_root = Path(os.getenv("TENANTS_DIR", "")) / "1"
     assert (tenant_root / pdf_rel).exists()
 
+    csv_path = tenant_root / pdf_rel
+    csv_text = csv_path.read_text(encoding="utf-8-sig")
+    assert "\r" not in csv_text
+    lines = [line for line in csv_text.split("\n") if line]
+    assert lines, csv_text
+    assert ";" in lines[0]
+    assert lines[0].strip() and lines[0].strip() != "."
+    assert all(line.strip() != "." for line in lines[1:] if line.strip())
+
+    import core
+
+    cfg = core.read_tenant_config(1)
+    uploaded_meta = cfg.get("integrations", {}).get("uploaded_catalog", {})
+    assert uploaded_meta.get("delimiter") == ";"
+    assert uploaded_meta.get("encoding") == "utf-8-sig"
+
 
 def test_public_catalog_upload_accepts_form_tenant(api_client):
     response = api_client.post(
@@ -306,3 +322,25 @@ def test_public_catalog_upload_missing_tenant_returns_422(api_client, monkeypatc
     assert items
     titles = " ".join(item.get("title", "") for item in items)
     assert "ALPHA-100" in titles or any("ALPHA-100" in (item.get("description") or "") for item in items)
+
+
+def test_public_catalog_upload_csv_metadata_preserves_delimiter(api_client):
+    import core
+
+    csv_bytes = "sku,price\nA1,1000\n".encode("utf-8")
+
+    response = api_client.post(
+        "/pub/catalog/upload?k=secret&tenant=1",
+        files={"file": ("catalog.csv", csv_bytes, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["ok"] is True
+
+    _, status = _wait_for_job_status(1, payload["job_id"])
+    assert str(status.get("state")).lower() == "done"
+
+    cfg = core.read_tenant_config(1)
+    uploaded_meta = cfg.get("integrations", {}).get("uploaded_catalog", {})
+    assert uploaded_meta.get("delimiter") == ","
+    assert uploaded_meta.get("encoding") == "utf-8"

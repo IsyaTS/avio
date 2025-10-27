@@ -44,6 +44,185 @@ function getLocation() {
   const STATE_NODE_ID = 'client-settings-state';
   const TENANT_PATH_REGEX = /\/client\/(\d+)(?:\/|$)/;
 
+  let lastSettingsSnapshot = null;
+  const CSV_DELIMITER_CANDIDATES = [';', ',', '\t'];
+
+  function stripBom(value) {
+    if (typeof value !== 'string') {
+      if (value == null) return '';
+      const text = String(value);
+      return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+    }
+    return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+  }
+
+  function detectDelimiterFromText(text, hint) {
+    const fallback = typeof hint === 'string' && hint ? hint : '';
+    const source = typeof text === 'string' ? text : '';
+    if (fallback && source.includes(fallback)) {
+      return fallback;
+    }
+    const lines = source.split(/\r?\n/);
+    let sample = '';
+    for (let idx = 0; idx < lines.length; idx += 1) {
+      const candidate = stripBom(lines[idx] || '').trim();
+      if (candidate) {
+        sample = candidate;
+        break;
+      }
+    }
+    if (!sample) {
+      return fallback || ',';
+    }
+    let best = fallback || ',';
+    let bestCount = -1;
+    let bestIdx = CSV_DELIMITER_CANDIDATES.length;
+    CSV_DELIMITER_CANDIDATES.forEach((delimiter, idx) => {
+      if (!delimiter) return;
+      let count = 0;
+      for (let pos = 0; pos < sample.length; pos += 1) {
+        if (sample[pos] === delimiter) {
+          count += 1;
+        }
+      }
+      if (count > bestCount || (count === bestCount && count > 0 && idx < bestIdx)) {
+        best = delimiter;
+        bestCount = count;
+        bestIdx = idx;
+      }
+    });
+    if (bestCount <= 0) {
+      return fallback || ',';
+    }
+    return best;
+  }
+
+  function splitCsvLine(line, delimiter) {
+    const actualDelimiter = typeof delimiter === 'string' && delimiter ? delimiter : ',';
+    const text = typeof line === 'string' ? line : '';
+    const cells = [];
+    let current = '';
+    let inQuotes = false;
+    for (let idx = 0; idx < text.length; idx += 1) {
+      const char = text[idx];
+      if (char === '"') {
+        if (inQuotes && text[idx + 1] === '"') {
+          current += '"';
+          idx += 1;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+      if (!inQuotes && char === actualDelimiter) {
+        cells.push(current);
+        current = '';
+        continue;
+      }
+      current += char;
+    }
+    cells.push(current);
+    return cells;
+  }
+
+  function parseCsvTextPayload(text, delimiterHint) {
+    const source = typeof text === 'string' ? text : '';
+    const lines = source.split(/\r?\n/);
+    let headerLine = '';
+    let headerIndex = -1;
+    for (let idx = 0; idx < lines.length; idx += 1) {
+      let candidate = lines[idx];
+      if (typeof candidate !== 'string') continue;
+      if (candidate.endsWith('\r')) {
+        candidate = candidate.slice(0, -1);
+      }
+      if (!candidate.trim()) {
+        continue;
+      }
+      headerLine = candidate;
+      headerIndex = idx;
+      break;
+    }
+
+    if (!headerLine) {
+      return { columns: [], rows: [], delimiter: delimiterHint || ',' };
+    }
+
+    let delimiter = detectDelimiterFromText(headerLine, delimiterHint);
+    if (!delimiter) {
+      delimiter = ',';
+    }
+
+    const headerCells = splitCsvLine(headerLine, delimiter).map((cell, idx) => {
+      const value = idx === 0 ? stripBom(cell) : cell;
+      return typeof value === 'string' ? value.trim() : '';
+    });
+    let columns = normalizeColumns(headerCells);
+
+    const rows = [];
+    for (let lineIdx = headerIndex + 1; lineIdx < lines.length; lineIdx += 1) {
+      let line = lines[lineIdx];
+      if (typeof line !== 'string' || !line) {
+        continue;
+      }
+      if (line.endsWith('\r')) {
+        line = line.slice(0, -1);
+      }
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      if (trimmed === '.') {
+        continue;
+      }
+      const cells = splitCsvLine(line, delimiter).map((cell, idx) => {
+        const value = idx === 0 ? stripBom(cell) : cell;
+        return typeof value === 'string' ? value.trim() : '';
+      });
+      if (!cells.some((value) => value)) {
+        continue;
+      }
+      while (columns.length < cells.length) {
+        columns.push(`column_${columns.length + 1}`);
+      }
+      const normalizedRow = columns.map((_, idx) => (idx < cells.length ? cells[idx] : ''));
+      const nonEmpty = normalizedRow.filter((value) => value);
+      if (!nonEmpty.length || (nonEmpty.length === 1 && nonEmpty[0] === '.')) {
+        continue;
+      }
+      rows.push(normalizedRow);
+    }
+
+    return { columns, rows, delimiter };
+  }
+
+  function rememberSettingsSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') {
+      return;
+    }
+    lastSettingsSnapshot = snapshot;
+    if (typeof window !== 'undefined') {
+      window.__last_public_settings__ = snapshot;
+    }
+  }
+
+  function resolveLatestSettingsSnapshot() {
+    if (lastSettingsSnapshot && typeof lastSettingsSnapshot === 'object') {
+      return lastSettingsSnapshot;
+    }
+    if (typeof window !== 'undefined') {
+      const cached = window.__last_public_settings__;
+      if (cached && typeof cached === 'object') {
+        return cached;
+      }
+    }
+    const cfg = getClientSettings();
+    if (cfg && typeof cfg === 'object' && Object.keys(cfg).length > 0) {
+      return { cfg };
+    }
+    return null;
+  }
+
   const mergeClientState = (payload) => {
     const safePayload = payload && typeof payload === 'object' ? payload : {};
     const base = (typeof window !== 'undefined'
@@ -1357,6 +1536,7 @@ function getLocation() {
           throw new Error('Ссылка недоступна');
         }
         const data = await fetchSettingsJsonWithRetry(settingsUrl);
+        rememberSettingsSnapshot(data);
         const uploadedMeta = extractUploadedCatalogMeta(data);
         if (uploadedMeta && typeof uploadedMeta.csv_path === 'string' && uploadedMeta.csv_path.trim()) {
           fetchCsvAndRender({ quiet: true });
@@ -1527,10 +1707,11 @@ function getLocation() {
     return url.toString();
   }
 
-  async function refreshSettingsSnapshot(context) {
+  async function refreshSettingsSnapshot(context, options = {}) {
     if (!context || !context.publicKey || !context.tenant) {
       throw new Error('invalid_context');
     }
+    const { bypassCache = false } = typeof options === 'object' && options ? options : {};
     const locationInfo = getLocation();
     let url;
     try {
@@ -1540,7 +1721,12 @@ function getLocation() {
     }
     url.searchParams.set('k', context.publicKey);
     url.searchParams.set('tenant', String(context.tenant));
-    return fetchSettingsJsonWithRetry(url.toString());
+    if (bypassCache) {
+      url.searchParams.set('_', String(Date.now()));
+    }
+    const data = await fetchSettingsJsonWithRetry(url.toString());
+    rememberSettingsSnapshot(data);
+    return data;
   }
 
   function handleCatalogStatusPayload(payload, context) {
@@ -1615,7 +1801,15 @@ function getLocation() {
     if (!settings || typeof settings !== 'object') {
       return null;
     }
-    const cfg = settings.cfg && typeof settings.cfg === 'object' ? settings.cfg : {};
+    let cfg = null;
+    if (settings && typeof settings.cfg === 'object') {
+      cfg = settings.cfg;
+    } else if (!Object.prototype.hasOwnProperty.call(settings, 'cfg')) {
+      cfg = settings;
+    }
+    if (!cfg || typeof cfg !== 'object') {
+      return null;
+    }
     const integrations = cfg.integrations && typeof cfg.integrations === 'object' ? cfg.integrations : {};
     if (integrations.uploaded_catalog && typeof integrations.uploaded_catalog === 'object') {
       return integrations.uploaded_catalog;
@@ -1626,6 +1820,21 @@ function getLocation() {
       if (entry && typeof entry === 'object') {
         return entry;
       }
+    }
+    return null;
+  }
+
+  function resolveUploadedCatalogMeta() {
+    const snapshot = resolveLatestSettingsSnapshot();
+    if (snapshot) {
+      const meta = extractUploadedCatalogMeta(snapshot);
+      if (meta) {
+        return meta;
+      }
+    }
+    const cfg = getClientSettings();
+    if (cfg && typeof cfg === 'object') {
+      return extractUploadedCatalogMeta(cfg);
     }
     return null;
   }
@@ -1671,7 +1880,7 @@ function getLocation() {
 
   async function handleCatalogCompleted(context, payload) {
     try {
-      const settings = await refreshSettingsSnapshot(context);
+      const settings = await refreshSettingsSnapshot(context, { bypassCache: true });
       const linkHref = resolveCatalogDownloadLink(settings, context, payload);
       const message = resolveCatalogSuccessLabel(settings, payload);
       if (dom.uploadInput) {
@@ -1683,6 +1892,10 @@ function getLocation() {
         setCatalogStatus(message, 'success');
       }
       await fetchCsvAndRender({ quiet: true });
+      const itemsCount = Number.isFinite(Number(payload.items)) ? Number(payload.items) : null;
+      if (itemsCount === 0 && csvState.columns.length && csvState.rows.length === 0) {
+        setCsvMessage('позиций нет', 'muted');
+      }
     } catch (error) {
       setCatalogStatus(`Каталог обновлён, но не удалось получить данные: ${error.message}`, 'alert');
     } finally {
@@ -2058,6 +2271,7 @@ function getLocation() {
   const csvState = {
     columns: [],
     rows: [],
+    delimiter: '',
     loading: false,
   };
 
@@ -2110,7 +2324,8 @@ function getLocation() {
     const seen = Object.create(null);
     const out = [];
     (Array.isArray(cols) ? cols : []).forEach((raw, idx) => {
-      let name = (raw == null ? '' : String(raw)).trim();
+      let name = stripBom(raw == null ? '' : String(raw));
+      name = name.trim();
       if (!name) name = `column_${idx + 1}`;
       if (seen[name] == null) {
         seen[name] = 0;
@@ -2170,7 +2385,12 @@ function getLocation() {
       dom.csvTable.style.display = '';
     }
     if (dom.csvEmpty) {
-      dom.csvEmpty.style.display = 'none';
+      if (csvState.rows.length === 0) {
+        dom.csvEmpty.textContent = 'позиций нет';
+        dom.csvEmpty.style.display = '';
+      } else {
+        dom.csvEmpty.style.display = 'none';
+      }
     }
   }
 
@@ -2200,6 +2420,74 @@ function getLocation() {
       }
     }
     return '';
+  }
+
+  function parseCsvPayload(payload) {
+    const meta = resolveUploadedCatalogMeta();
+    const delimiterHint = meta && typeof meta.delimiter === 'string' && meta.delimiter
+      ? meta.delimiter
+      : '';
+    const csvText = typeof payload === 'object' && typeof payload.csv_text === 'string'
+      ? payload.csv_text
+      : '';
+
+    let columns = [];
+    let rows = [];
+    let delimiter = '';
+
+    if (csvText) {
+      const parsed = parseCsvTextPayload(csvText, delimiterHint);
+      columns = normalizeColumns(parsed.columns);
+      rows = parsed.rows;
+      delimiter = parsed.delimiter;
+    } else {
+      columns = normalizeColumns(payload && payload.columns);
+      const rawRows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+      rows = [];
+      rawRows.forEach((entry) => {
+        let values;
+        if (Array.isArray(entry)) {
+          values = entry;
+        } else if (entry && typeof entry === 'object') {
+          values = columns.map((column) => entry[column]);
+        } else {
+          values = null;
+        }
+        if (!values) {
+          return;
+        }
+        const cleaned = values.map((value, idx) => {
+          let text = value == null ? '' : String(value);
+          if (idx === 0) {
+            text = stripBom(text);
+          }
+          return text.trim();
+        });
+        if (!cleaned.some((cell) => cell)) {
+          return;
+        }
+        const nonEmpty = cleaned.filter((cell) => cell);
+        if (nonEmpty.length === 1 && nonEmpty[0] === '.') {
+          return;
+        }
+        while (cleaned.length < columns.length) {
+          cleaned.push('');
+        }
+        rows.push(cleaned.slice(0, columns.length));
+      });
+      if (typeof payload === 'object' && typeof payload.delimiter === 'string' && payload.delimiter) {
+        delimiter = payload.delimiter;
+      } else {
+        delimiter = delimiterHint;
+      }
+    }
+
+    if (!delimiter) {
+      const sample = columns.join(';');
+      delimiter = detectDelimiterFromText(sample, delimiterHint);
+    }
+
+    return { columns, rows, delimiter };
   }
 
   async function fetchCsvAndRender({ quiet = false } = {}) {
@@ -2280,11 +2568,13 @@ function getLocation() {
       }
 
       const payload = await response.json();
-      const columns = normalizeColumns(payload && payload.columns);
-      const rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+      const parsed = parseCsvPayload(payload);
+      const columns = parsed.columns;
+      const rows = parsed.rows;
 
       csvState.columns = columns;
       csvState.rows = rows;
+      csvState.delimiter = parsed.delimiter;
       thead.innerHTML = '';
       tbody.innerHTML = '';
       renderCsvTable();
@@ -2303,7 +2593,9 @@ function getLocation() {
         columns: columns.length,
         url: requestUrl.toString(),
       });
-      if (!quiet) {
+      if (csvState.columns.length && csvState.rows.length === 0) {
+        setCsvMessage('позиций нет', 'muted');
+      } else if (!quiet) {
         setCsvMessage(`CSV загружен (${rows.length} строк)`, 'muted');
       }
     } catch (error) {
@@ -2315,6 +2607,7 @@ function getLocation() {
       });
       csvState.columns = [];
       csvState.rows = [];
+      csvState.delimiter = '';
       thead.innerHTML = '';
       tbody.innerHTML = '';
       ensureTableVisible(false);

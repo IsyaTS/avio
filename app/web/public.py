@@ -105,7 +105,7 @@ TG_WORKER_BASE = tg_worker_url()
 if not hasattr(C, "valid_key"):
     setattr(C, "valid_key", common.valid_key)
 
-NO_STORE_CACHE_VALUE = "no-store, no-cache, must-revalidate"
+NO_STORE_CACHE_VALUE = "no-store, must-revalidate"
 
 PASSWORD_ATTEMPT_LIMIT = 2
 PASSWORD_ATTEMPT_WINDOW = 60.0
@@ -854,6 +854,46 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+def _strip_bom(text: str) -> str:
+    if not text:
+        return ""
+    if text[0] == "\ufeff":
+        return text.lstrip("\ufeff")
+    return text
+
+
+_DELIMITER_CANDIDATES = [";", ",", "\t"]
+
+
+def _detect_csv_delimiter(text: str) -> str:
+    if not isinstance(text, str) or not text:
+        return ","
+
+    first_line = ""
+    for raw_line in io.StringIO(text):
+        candidate = raw_line.strip("\r\n")
+        if candidate:
+            first_line = _strip_bom(candidate)
+            break
+
+    if not first_line:
+        return ","
+
+    best = ","
+    best_count = -1
+    best_idx = len(_DELIMITER_CANDIDATES)
+    for idx, delimiter in enumerate(_DELIMITER_CANDIDATES):
+        count = first_line.count(delimiter)
+        if count > best_count or (count == best_count and count > 0 and idx < best_idx):
+            best = delimiter
+            best_count = count
+            best_idx = idx
+
+    if best_count <= 0:
+        return ","
+    return best
+
+
 def _read_csv_bytes(raw: bytes) -> tuple[list[dict[str, str]], dict[str, Any]]:
     encoding_used: str | None = None
     text: str | None = None
@@ -867,26 +907,30 @@ def _read_csv_bytes(raw: bytes) -> tuple[list[dict[str, str]], dict[str, Any]]:
     if text is None or encoding_used is None:
         raise ValueError("encoding_detection_failed")
 
-    stream = io.StringIO(text)
-    sample = stream.read(2048)
-    stream.seek(0)
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        delimiter = dialect.delimiter
-    except Exception:
-        delimiter = ","
+    delimiter = _detect_csv_delimiter(text)
 
+    stream = io.StringIO(text)
     reader = csv.reader(stream, delimiter=delimiter)
     header: list[str] | None = None
     for row in reader:
-        if row and any((cell or "").strip() for cell in row):
-            header = _normalize_headers(row)
-            break
+        if not row:
+            continue
+        meaningful = [(_stringify(cell)) for cell in row if _stringify(cell)]
+        if not meaningful:
+            continue
+        header = _normalize_headers(row)
+        break
     records: list[dict[str, str]] = []
     if header is None:
         header = ["title"]
     for row in reader:
-        if not row or not any((_stringify(cell) for cell in row)):
+        if not row:
+            continue
+        cleaned = [_stringify(value) for value in row]
+        non_empty = [cell for cell in cleaned if cell]
+        if not non_empty:
+            continue
+        if len(non_empty) == 1 and non_empty[0] == ".":
             continue
         while len(header) < len(row):
             header.append(f"column_{len(header) + 1}")
@@ -939,6 +983,8 @@ def _read_excel_bytes(raw: bytes) -> tuple[list[dict[str, str]], dict[str, Any]]
         "type": "excel",
         "columns": header,
         "sheet": sheet.title if sheet is not None else "Sheet1",
+        "encoding": "utf-8-sig",
+        "delimiter": ";",
     }
     normalized = _normalize_catalog_items(records, meta)
     return normalized, meta
@@ -1069,6 +1115,7 @@ def _process_pdf(
         "source_path": str(saved_rel_path),
         "original": original_name,
         "encoding": "utf-8-sig",
+        "delimiter": ";",
     }
     normalized = _normalize_catalog_items(items, meta)
     return normalized, meta, manifest_rel
@@ -3052,7 +3099,8 @@ def settings_get(request: Request, tenant: int | str | None = None, k: str | Non
     common.ensure_tenant_files(tenant_id)
     cfg = common.read_tenant_config(tenant_id)
     persona = common.read_persona(tenant_id)
-    return {"ok": True, "cfg": cfg, "persona": persona}
+    payload = {"ok": True, "cfg": cfg, "persona": persona}
+    return JSONResponse(payload, headers=_no_store_headers())
 
 
 @router.post("/pub/settings/save")
@@ -3402,13 +3450,18 @@ async def catalog_upload(
                 "type": catalog_type,
             }
             detected_encoding = _stringify(meta.get("encoding")) if isinstance(meta, dict) else ""
-            if catalog_type == "csv":
-                if detected_encoding:
-                    catalog_entry["encoding"] = detected_encoding
-                if isinstance(meta, dict) and "delimiter" in meta:
-                    catalog_entry["delimiter"] = meta.get("delimiter")
-            elif detected_encoding:
+            if isinstance(meta, dict):
+                raw_delimiter = meta.get("delimiter")
+                if isinstance(raw_delimiter, str):
+                    detected_delimiter = raw_delimiter
+                else:
+                    detected_delimiter = _stringify(raw_delimiter)
+            else:
+                detected_delimiter = ""
+            if detected_encoding:
                 catalog_entry["encoding"] = detected_encoding
+            if detected_delimiter:
+                catalog_entry["delimiter"] = detected_delimiter
             if catalog_type == "pdf":
                 if isinstance(meta, dict):
                     for key in ("index_path", "indexed_at", "chunk_count", "sha1"):
@@ -3432,11 +3485,10 @@ async def catalog_upload(
             }
             if pipeline_info:
                 uploaded_meta["pipeline"] = pipeline_info
-            if catalog_type == "csv":
-                if detected_encoding:
-                    uploaded_meta["encoding"] = detected_encoding
-                if isinstance(meta, dict) and "delimiter" in meta:
-                    uploaded_meta["delimiter"] = meta.get("delimiter")
+            if detected_encoding:
+                uploaded_meta["encoding"] = detected_encoding
+            if detected_delimiter:
+                uploaded_meta["delimiter"] = detected_delimiter
             if catalog_type == "pdf" and isinstance(meta, dict):
                 index_meta = {
                     "path": meta.get("index_path"),

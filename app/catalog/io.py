@@ -57,11 +57,31 @@ def write_catalog_csv(
     rows = list(normalized_rows or [])
     finalized_rows, header, report = finalize_catalog_rows(rows)
 
+    source_type = ""
+    if isinstance(meta, Mapping):
+        source_type = str(meta.get("type") or "").lower()
+
+    filtered_rows: list[Mapping[str, object]] = []
+    for row in finalized_rows:
+        values = [_stringify(row.get(column, "")) for column in header if column != "id"]
+        if not any(value.strip() for value in values):
+            continue
+        if source_type == "pdf":
+            non_empty = [value.strip() for value in values if value.strip()]
+            if len(non_empty) == 1 and non_empty[0] == ".":
+                continue
+        filtered_rows.append(row)
+
+    finalized_rows = filtered_rows
+    report.items = len(finalized_rows)
+
     if isinstance(meta, dict):
-        # NOTE: expose pipeline stats for status pages and logs
-        meta.setdefault("pipeline", report.to_dict())
-        meta.setdefault("items", report.items)
-        meta.setdefault("columns", header)
+        pipeline_report = report.to_dict()
+        meta["pipeline"] = pipeline_report
+        meta["items"] = report.items
+        meta["columns"] = list(header)
+        meta.setdefault("encoding", "utf-8-sig")
+        meta.setdefault("delimiter", ";")
 
     # Excel-friendly: UTF-8 with BOM and semicolon delimiter
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -71,6 +91,7 @@ def write_catalog_csv(
             extrasaction="ignore",
             delimiter=";",
             quoting=csv.QUOTE_MINIMAL,
+            lineterminator="\n",
         )
         writer.writeheader()
         for row in finalized_rows:

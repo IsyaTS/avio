@@ -158,6 +158,46 @@ def _detect_encoding(payload: bytes) -> str:
     return "utf-8"
 
 
+def _strip_bom(text: str) -> str:
+    if not text:
+        return ""
+    if text[0] == "\ufeff":
+        return text.lstrip("\ufeff")
+    return text
+
+
+_DELIMITER_CANDIDATES = [";", ",", "\t"]
+
+
+def _detect_csv_delimiter(text: str) -> str:
+    if not isinstance(text, str) or not text:
+        return ","
+
+    first_line = ""
+    for raw_line in io.StringIO(text):
+        candidate = raw_line.strip("\r\n")
+        if candidate:
+            first_line = _strip_bom(candidate)
+            break
+
+    if not first_line:
+        return ","
+
+    best = ","
+    best_count = -1
+    best_idx = len(_DELIMITER_CANDIDATES)
+    for idx, delimiter in enumerate(_DELIMITER_CANDIDATES):
+        count = first_line.count(delimiter)
+        if count > best_count or (count == best_count and count > 0 and idx < best_idx):
+            best = delimiter
+            best_count = count
+            best_idx = idx
+
+    if best_count <= 0:
+        return ","
+    return best
+
+
 def _resolve_key(request: Request | None, raw: str | None = None) -> str:
     candidates: list[str] = []
     if raw:
@@ -272,20 +312,23 @@ def read_csv_table(
     encoding = encoding_hint or _detect_encoding(raw)
     text = raw.decode(encoding or "utf-8", errors="ignore")
 
-    sample = text[:2048]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        delimiter = dialect.delimiter
-    except Exception:
-        delimiter = ","
+    delimiter = _detect_csv_delimiter(text)
 
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
 
     header_raw: list[str] | None = None
     for raw_header in reader:
-        if not raw_header or not any((cell or "").strip() for cell in raw_header):
+        if not raw_header:
             continue
-        header_raw = raw_header
+        cleaned_header: list[str] = []
+        for idx, cell in enumerate(raw_header):
+            value = cell if isinstance(cell, str) else ("" if cell is None else str(cell))
+            if idx == 0:
+                value = _strip_bom(value)
+            cleaned_header.append(value)
+        if not any((value or "").strip() for value in cleaned_header):
+            continue
+        header_raw = cleaned_header
         break
 
     if not header_raw:
@@ -294,12 +337,17 @@ def read_csv_table(
             "rows": [],
             "encoding": encoding or "utf-8",
             "path": relative or "",
+            "delimiter": delimiter,
+            "csv_text": text,
         }
 
     normalized: list[str] = []
     seen: dict[str, int] = {}
     for idx, cell in enumerate(header_raw):
-        name = (cell or "").strip().lstrip("\ufeff")
+        raw_value = cell or ""
+        if not isinstance(raw_value, str):
+            raw_value = str(raw_value)
+        name = _strip_bom(raw_value).strip()
         if not name:
             name = f"column_{idx + 1}"
         if name in seen:
@@ -312,19 +360,33 @@ def read_csv_table(
     columns = normalized[:]
     data_rows: list[list[str]] = []
     for row in reader:
-        if not row or not any(
-            (v.strip() if isinstance(v, str) else str(v or "").strip()) for v in row
-        ):
+        if not row:
             continue
-        while len(columns) < len(row):
+        cleaned_cells: list[str] = []
+        for idx, value in enumerate(row):
+            if isinstance(value, str):
+                cell_text = value
+            elif value is None:
+                cell_text = ""
+            else:
+                cell_text = str(value)
+            if idx == 0:
+                cell_text = _strip_bom(cell_text)
+            cleaned_cells.append(cell_text)
+
+        trimmed_cells = [cell.strip() for cell in cleaned_cells]
+        if not any(trimmed_cells):
+            continue
+        non_empty = [cell for cell in trimmed_cells if cell]
+        if len(non_empty) == 1 and non_empty[0] == ".":
+            continue
+
+        while len(columns) < len(cleaned_cells):
             columns.append(f"column_{len(columns) + 1}")
         ordered: list[str] = []
         for idx_col in range(len(columns)):
-            if idx_col < len(row):
-                val = row[idx_col]
-                ordered.append(
-                    (val.strip() if isinstance(val, str) else str(val or "").strip())
-                )
+            if idx_col < len(trimmed_cells):
+                ordered.append(trimmed_cells[idx_col])
             else:
                 ordered.append("")
         data_rows.append(ordered)
@@ -385,6 +447,8 @@ def read_csv_table(
         "rows": data_rows,
         "encoding": encoding or "utf-8",
         "path": relative or "",
+        "delimiter": delimiter,
+        "csv_text": text,
     }
 
 
