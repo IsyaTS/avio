@@ -72,7 +72,7 @@ TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") o
 
 
 _ASSET_VERSION: str | None = None
-ASSET_VERSION_SEED = "20240601a"
+ASSET_VERSION_SEED = "20240615a"
 
 
 def _static_base_prefix() -> str:
