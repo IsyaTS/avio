@@ -1,0 +1,25 @@
+### waweb
+*
+1
+1000
+120
+1.22.22
+1s
+20.19.5
+24182262
+673f513b4b141d46c5ac2edcf00807ba
+9001
+/data/wa_state
+eyJhIjoiMjJmMDJjNmJmYTZmOGFjNTcwZmUzMWFlOWUzNTEwYTMiLCJ0IjoiNGViODUwM2ItOGIxZS00YzNkLTk3Y2MtYzdjYTY4ZDAyMTQ3IiwicyI6Ik16SmxNR0ZrT0RndFltTmpZeTAwT0RCaUxUbGlabVF0WmpRM01EaGxNalZsT1dGaSJ9
+f6d03a045e83ac23afdf084e86ff112b
+gpt-4.1
+http://app:8000
+http://app:8000/webhook
+https://api.avio.website
+http://tgworker:9000
+/opt/avio/data/tenants
+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
+sueta
+true
+/usr/bin/chromium
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

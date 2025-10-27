@@ -1,0 +1,30 @@
+### tgworker
+*
+1
+1.0
+1000
+120
+1s
+24182262
+3.11.14
+673f513b4b141d46c5ac2edcf00807ba
+8d3ed8ec5c88c1c95f5e558612a725450d2452813ddad5e58fdb1a53b1209b78
+A035C8C19219BA821ECEA86B64E628F8D684696D
+/app
+/app/tg-sessions
+Avio tgworker
+C.UTF-8
+/data/tenants
+Europe/Moscow
+eyJhIjoiMjJmMDJjNmJmYTZmOGFjNTcwZmUzMWFlOWUzNTEwYTMiLCJ0IjoiNGViODUwM2ItOGIxZS00YzNkLTk3Y2MtYzdjYTY4ZDAyMTQ3IiwicyI6Ik16SmxNR0ZrT0RndFltTmpZeTAwT0RCaUxUbGlabVF0WmpRM01EaGxNalZsT1dGaSJ9
+f6d03a045e83ac23afdf084e86ff112b
+gpt-4.1
+http://app:8000
+http://app:8000/webhook
+https://api.avio.website
+http://tgworker:9000
+ru
+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
+sueta
+true
+/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
