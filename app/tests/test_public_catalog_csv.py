@@ -5,6 +5,18 @@ from app.web import client as client_module
 from app.web import public as public_module
 
 
+def test_detect_csv_delimiter_semicolon():
+    assert public_module._detect_csv_delimiter("id;name;price") == ";"
+
+
+def test_detect_csv_delimiter_comma():
+    assert public_module._detect_csv_delimiter("id,name,price") == ","
+
+
+def test_detect_csv_delimiter_tab():
+    assert public_module._detect_csv_delimiter("id\tname\tprice") == "\t"
+
+
 def _build_client() -> TestClient:
     app = FastAPI()
     app.include_router(public_module.router)
@@ -28,6 +40,7 @@ def test_public_catalog_csv_get_returns_table(tmp_path, monkeypatch):
     assert payload["columns"] == ["name", "price"]
     assert payload["rows"] == [["Chair", "100"], ["Table", "200"]]
     assert payload["path"] == "catalog.csv"
+    assert payload["delimiter"] == ";"
 
     client.close()
 
