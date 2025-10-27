@@ -39,11 +39,13 @@ async def test_build_llm_messages_includes_summary():
     assert "SPIN:" in system_text
 
 
-def test_rule_based_reply_uses_sales_strategies():
+def test_rule_based_reply_uses_sales_strategies(monkeypatch):
     tenant = 0
     contact_id = 202
+    monkeypatch.setenv("EXPLAIN_MODE", "1")
     core.reset_sales_state(tenant, contact_id)
 
+    core.make_rule_based_reply("Здравствуйте", "whatsapp", contact_id, tenant=tenant)
     reply = core.make_rule_based_reply(
         "Ищу настольную лампу, бюджет до 15000, хочу потише",
         "whatsapp",
@@ -78,6 +80,7 @@ def test_rule_based_reply_reflects_empathy_and_history():
     contact_id = 515
     core.reset_sales_state(tenant, contact_id)
 
+    core.make_rule_based_reply("Здравствуйте", "whatsapp", contact_id, tenant=tenant)
     reply = core.make_rule_based_reply(
         "Я расстроен прошлой покупкой, нужен надёжный диван тёплого оттенка",
         "whatsapp",
@@ -132,10 +135,12 @@ def test_rule_based_reply_respects_persona_hints(tmp_core):
     persona_path.write_text(
         "Greeting: Привет, это Мария из команды.\n"
         "CTA: Напишите номер телефона, перезвоню лично.\n"
+        "Closing: Напишите номер телефона, перезвоню лично.\n"
         "Tone: коротко и дружелюбно\n",
         encoding="utf-8",
     )
 
+    tmp_core.make_rule_based_reply("Здравствуйте", "whatsapp", contact_id, tenant=tenant)
     reply = tmp_core.make_rule_based_reply("нужен каталог", "whatsapp", contact_id, tenant=tenant)
 
     assert "Привет, это Мария" in reply
@@ -143,3 +148,20 @@ def test_rule_based_reply_respects_persona_hints(tmp_core):
 
     parts = [block.strip() for block in reply.split("\n\n") if block.strip()]
     assert len(parts) <= 5
+
+
+def test_rule_based_reply_omits_explain_line_without_flag(monkeypatch):
+    tenant = 0
+    contact_id = 606
+    monkeypatch.delenv("EXPLAIN_MODE", raising=False)
+    core.reset_sales_state(tenant, contact_id)
+
+    core.make_rule_based_reply("Здравствуйте", "whatsapp", contact_id, tenant=tenant)
+    reply = core.make_rule_based_reply(
+        "Нужен офисный стул с поддержкой спины",
+        "whatsapp",
+        contact_id,
+        tenant=tenant,
+    )
+
+    assert "Понял запрос" not in reply

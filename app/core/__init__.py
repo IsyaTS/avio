@@ -96,6 +96,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 # Precompiled regexes reused across hot paths
 _FIELD_CLEAN_RE = re.compile(r"[^0-9a-zA-Zа-яА-ЯёЁ]+")
 _PERSONA_HINTS_KEY_RE = re.compile(
@@ -609,6 +621,7 @@ DEFAULT_TENANT_JSON = {
         "dedupe_catalog_titles": True,
         "allow_filter_commands": True,
         "pdf_one_item_per_page": False,
+        "explain": False,
     },
     "cta": {
         "primary": "Оставьте контакт или удобный канал связи — подготовлю точный расчёт сегодня.",
@@ -901,6 +914,9 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
         auto_flag = behavior.get("auto_reply_enabled")
     behavior["auto_reply"] = bool(auto_flag)
     behavior["auto_reply_enabled"] = behavior["auto_reply"]
+
+    explain_flag = _coerce_bool(behavior.get("explain"), False)
+    behavior["explain"] = explain_flag
 
     text_raw = behavior.get("auto_reply_text")
     if isinstance(text_raw, str):
@@ -2585,6 +2601,15 @@ class SalesConversationEngine:
         if items:
             self.state.last_items = items[:]
 
+    def _explain_mode_enabled(self) -> bool:
+        behavior_cfg: Mapping[str, Any] | dict = {}
+        if isinstance(self.cfg, dict):
+            raw_behavior = self.cfg.get("behavior")
+            if isinstance(raw_behavior, Mapping):
+                behavior_cfg = raw_behavior
+        explain_value = behavior_cfg.get("explain") if behavior_cfg else False
+        return _coerce_bool(explain_value, False) or _env_bool("EXPLAIN_MODE", False)
+
     def _focus_phrase(self) -> str:
         focus = str(self.state.needs.get("focus") or "").strip()
         if focus:
@@ -2607,8 +2632,9 @@ class SalesConversationEngine:
             cleaned = cleaned[:117] + "..."
         focus = self._focus_phrase()
         empathy = self._empathy_prefix()
+        explain_mode = self._explain_mode_enabled()
         if cleaned:
-            base = f"Понял запрос: {cleaned}. Держу в фокусе {focus}."
+            base = f"Понял запрос: {cleaned}. Держу в фокусе {focus}." if explain_mode else ""
         else:
             base = f"Учитываю частые запросы по {focus} и сразу показываю сильные позиции."
         if empathy:
