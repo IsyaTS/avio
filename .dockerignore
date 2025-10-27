@@ -18,3 +18,7 @@ tgworker/sessions/
 waweb/node_modules/
 __pycache__/
 *.py[cod]
+
+# runtime data
+data/
+**/wa_state/
