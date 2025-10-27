@@ -1,4 +1,4 @@
-window.__client_settings_build = '20240601';
+window.__client_settings_build = '20240615';
 window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {
@@ -58,43 +58,29 @@ function getLocation() {
 
   function detectDelimiterFromText(text, hint) {
     const fallback = typeof hint === 'string' && hint ? hint : '';
-    const source = typeof text === 'string' ? text : '';
-    if (fallback && source.includes(fallback)) {
+    if (fallback) {
       return fallback;
     }
+    const source = typeof text === 'string' ? text : '';
     const lines = source.split(/\r?\n/);
     let sample = '';
     for (let idx = 0; idx < lines.length; idx += 1) {
-      const candidate = stripBom(lines[idx] || '').trim();
-      if (candidate) {
+      const candidate = stripBom(typeof lines[idx] === 'string' ? lines[idx] : '');
+      if (candidate && candidate.trim()) {
         sample = candidate;
         break;
       }
     }
     if (!sample) {
-      return fallback || ',';
+      return ',';
     }
-    let best = fallback || ',';
-    let bestCount = -1;
-    let bestIdx = CSV_DELIMITER_CANDIDATES.length;
-    CSV_DELIMITER_CANDIDATES.forEach((delimiter, idx) => {
-      if (!delimiter) return;
-      let count = 0;
-      for (let pos = 0; pos < sample.length; pos += 1) {
-        if (sample[pos] === delimiter) {
-          count += 1;
-        }
+    for (let idx = 0; idx < CSV_DELIMITER_CANDIDATES.length; idx += 1) {
+      const delimiter = CSV_DELIMITER_CANDIDATES[idx];
+      if (delimiter && sample.includes(delimiter)) {
+        return delimiter;
       }
-      if (count > bestCount || (count === bestCount && count > 0 && idx < bestIdx)) {
-        best = delimiter;
-        bestCount = count;
-        bestIdx = idx;
-      }
-    });
-    if (bestCount <= 0) {
-      return fallback || ',';
     }
-    return best;
+    return ',';
   }
 
   function splitCsvLine(line, delimiter) {
@@ -2029,10 +2015,6 @@ function getLocation() {
       if (!skipCsvReload) {
         await fetchCsvAndRender({ quiet: true });
       }
-      const itemsCount = Number.isFinite(Number(payload.items)) ? Number(payload.items) : null;
-      if (itemsCount === 0 && csvState.columns.length && csvState.rows.length === 0) {
-        setCsvMessage('позиций нет', 'muted');
-      }
     } catch (error) {
       setCatalogStatus(`Каталог обновлён, но не удалось получить данные: ${error.message}`, 'alert');
     } finally {
@@ -2434,27 +2416,28 @@ function getLocation() {
     const container = dom.csvContainer || table.parentElement;
     const section = dom.csvSection;
 
-    table.style.display = show ? 'table' : 'none';
-    emptyState.style.display = show ? 'none' : 'block';
-
     if (show) {
+      table.style.display = 'table';
+      emptyState.style.display = 'none';
       showElement(table);
+      hideElement(emptyState);
       if (container) {
         showElement(container);
       }
       if (section) {
         showElement(section);
       }
-      hideElement(emptyState);
     } else {
+      table.style.display = 'none';
+      emptyState.style.display = '';
       hideElement(table);
+      showElement(emptyState);
       if (container) {
-        hideElement(container);
+        showElement(container);
       }
       if (section) {
-        hideElement(section);
+        showElement(section);
       }
-      showElement(emptyState);
     }
   }
 
@@ -2523,12 +2506,8 @@ function getLocation() {
       dom.csvTable.style.display = '';
     }
     if (dom.csvEmpty) {
-      if (csvState.rows.length === 0) {
-        dom.csvEmpty.textContent = 'позиций нет';
-        dom.csvEmpty.style.display = '';
-      } else {
-        dom.csvEmpty.style.display = 'none';
-      }
+      dom.csvEmpty.textContent = '';
+      hideElement(dom.csvEmpty);
     }
   }
 
@@ -2545,8 +2524,11 @@ function getLocation() {
 
   function parseCsvPayload(payload) {
     const meta = resolveUploadedCatalogMeta();
-    const delimiterHint = meta && typeof meta.delimiter === 'string' && meta.delimiter
-      ? meta.delimiter
+    const metaDelimiter = meta && typeof meta.delimiter === 'string' && meta.delimiter
+      ? meta.delimiter.trim()
+      : '';
+    const payloadDelimiter = typeof payload === 'object' && typeof payload.delimiter === 'string'
+      ? payload.delimiter.trim()
       : '';
     const csvText = typeof payload === 'object' && typeof payload.csv_text === 'string'
       ? payload.csv_text
@@ -2557,7 +2539,7 @@ function getLocation() {
     let delimiter = '';
 
     if (csvText) {
-      const parsed = parseCsvTextPayload(csvText, delimiterHint);
+      const parsed = parseCsvTextPayload(csvText, payloadDelimiter || metaDelimiter);
       columns = normalizeColumns(parsed.columns);
       rows = parsed.rows;
       delimiter = parsed.delimiter;
@@ -2596,16 +2578,16 @@ function getLocation() {
         }
         rows.push(cleaned.slice(0, columns.length));
       });
-      if (typeof payload === 'object' && typeof payload.delimiter === 'string' && payload.delimiter) {
-        delimiter = payload.delimiter;
+      if (payloadDelimiter) {
+        delimiter = payloadDelimiter;
       } else {
-        delimiter = delimiterHint;
+        delimiter = metaDelimiter;
       }
     }
 
     if (!delimiter) {
       const sample = columns.join(';');
-      delimiter = detectDelimiterFromText(sample, delimiterHint);
+      delimiter = detectDelimiterFromText(sample, metaDelimiter);
     }
 
     return { columns, rows, delimiter };
@@ -2695,10 +2677,19 @@ function getLocation() {
       if (dom.csvContainer) {
         showElement(dom.csvContainer);
       }
+      if (dom.csvEmpty && csvState.columns.length) {
+        hideElement(dom.csvEmpty);
+      }
       updateCsvControls();
 
       console.info('[client-settings] csv fetch ok', { quiet, rows: rows.length, columns: columns.length, url: requestUrl });
-      if (csvState.columns.length && csvState.rows.length === 0) {
+      if (!csvState.columns.length) {
+        if (dom.csvEmpty) {
+          dom.csvEmpty.textContent = 'CSV не распознан';
+          showElement(dom.csvEmpty);
+        }
+        setCsvMessage('CSV не распознан', 'alert');
+      } else if (csvState.rows.length === 0) {
         setCsvMessage('позиций нет', 'muted');
       } else if (!quiet) {
         setCsvMessage(`CSV загружен (${rows.length} строк)`, 'muted');
@@ -2717,7 +2708,17 @@ function getLocation() {
       tbody.innerHTML = '';
       ensureTableVisible(false);
       updateCsvControls();
-      setCsvMessage(`Не удалось загрузить CSV: ${err.message}`, 'alert');
+      if (dom.csvEmpty) {
+        dom.csvEmpty.textContent = 'CSV не распознан';
+        showElement(dom.csvEmpty);
+      }
+      if (dom.csvSection) {
+        showElement(dom.csvSection);
+      }
+      if (dom.csvContainer) {
+        showElement(dom.csvContainer);
+      }
+      setCsvMessage(`CSV не распознан: ${err.message}`, 'alert');
     } finally {
       csvState.loading = false;
     }
