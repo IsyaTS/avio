@@ -1,4 +1,4 @@
-window.__client_settings_build = '20240615';
+window.__client_settings_build = '20240705';
 window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {
@@ -1183,16 +1183,22 @@ function getLocation() {
 
   function showElement(element) {
     if (!element) return;
-    element.classList.remove(HIDDEN_CLASS);
-    if (typeof element.removeAttribute === 'function' && element.hasAttribute('hidden')) {
+    if (element.classList && typeof element.classList.remove === 'function') {
+      element.classList.remove('hidden');
+      element.classList.remove(HIDDEN_CLASS);
+    }
+    if (typeof element.removeAttribute === 'function') {
       element.removeAttribute('hidden');
     }
   }
 
   function hideElement(element) {
     if (!element) return;
-    if (!element.classList.contains(HIDDEN_CLASS)) {
-      element.classList.add(HIDDEN_CLASS);
+    if (element.classList && typeof element.classList.add === 'function') {
+      element.classList.add('hidden');
+      if (HIDDEN_CLASS && HIDDEN_CLASS !== 'hidden') {
+        element.classList.add(HIDDEN_CLASS);
+      }
     }
     if (typeof element.setAttribute === 'function') {
       element.setAttribute('hidden', '');
@@ -1944,13 +1950,6 @@ function getLocation() {
 
     refreshCsvDomElements();
 
-    if (dom.csvSection) {
-      showElement(dom.csvSection);
-    }
-    if (dom.csvContainer) {
-      showElement(dom.csvContainer);
-    }
-
     const meta = extractUploadedCatalogMeta(data);
     const csvPath = meta && typeof meta.csv_path === 'string' ? meta.csv_path.trim() : '';
 
@@ -1975,14 +1974,12 @@ function getLocation() {
       if (tableBody) {
         tableBody.innerHTML = '';
       }
-      hideElement(dom.csvTable);
     }
     if (dom.csvEmpty) {
-      dom.csvEmpty.textContent = 'CSV ещё не готов';
-      showElement(dom.csvEmpty);
+      dom.csvEmpty.textContent = '';
     }
-    setCsvMessage('CSV ещё не готов', 'muted');
     updateCsvControls();
+    ensureTableVisible(false);
     return { data, csvReady: false };
   }
 
@@ -2409,16 +2406,14 @@ function getLocation() {
     }
   }
 
-  function ensureTableVisible(show) {
+  function ensureTableVisible(visible) {
     if (!dom.csvTable || !dom.csvEmpty) return;
     const table = dom.csvTable;
     const emptyState = dom.csvEmpty;
     const container = dom.csvContainer || table.parentElement;
     const section = dom.csvSection;
 
-    if (show) {
-      table.style.display = 'table';
-      emptyState.style.display = 'none';
+    if (visible === true) {
       showElement(table);
       hideElement(emptyState);
       if (container) {
@@ -2427,16 +2422,17 @@ function getLocation() {
       if (section) {
         showElement(section);
       }
-    } else {
-      table.style.display = 'none';
-      emptyState.style.display = '';
+      return;
+    }
+
+    if (visible === false) {
       hideElement(table);
       showElement(emptyState);
       if (container) {
-        showElement(container);
+        hideElement(container);
       }
       if (section) {
-        showElement(section);
+        hideElement(section);
       }
     }
   }
@@ -2502,9 +2498,6 @@ function getLocation() {
       tbody.appendChild(tr);
     });
 
-    if (dom.csvTable) {
-      dom.csvTable.style.display = '';
-    }
     if (dom.csvEmpty) {
       dom.csvEmpty.textContent = '';
       hideElement(dom.csvEmpty);
@@ -2677,7 +2670,10 @@ function getLocation() {
       if (dom.csvContainer) {
         showElement(dom.csvContainer);
       }
-      if (dom.csvEmpty && csvState.columns.length) {
+      if (dom.csvEmpty) {
+        if (csvState.columns.length > 0) {
+          dom.csvEmpty.textContent = '';
+        }
         hideElement(dom.csvEmpty);
       }
       updateCsvControls();
@@ -2710,13 +2706,6 @@ function getLocation() {
       updateCsvControls();
       if (dom.csvEmpty) {
         dom.csvEmpty.textContent = 'CSV не распознан';
-        showElement(dom.csvEmpty);
-      }
-      if (dom.csvSection) {
-        showElement(dom.csvSection);
-      }
-      if (dom.csvContainer) {
-        showElement(dom.csvContainer);
       }
       setCsvMessage(`CSV не распознан: ${err.message}`, 'alert');
     } finally {
