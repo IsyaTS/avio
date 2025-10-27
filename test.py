@@ -1,81 +1,83 @@
 #!/usr/bin/env python3
-import os, json, subprocess, time
+import os, json, subprocess, shlex
 
-ENV = "/opt/avio/.env"
-WEBHOOK = "http://127.0.0.1:8000/webhook"
+def get_app():
+    p = subprocess.run(["bash","-lc","docker compose ps -q app"], capture_output=True, text=True)
+    cid = p.stdout.strip()
+    if not cid: raise SystemExit("app container not found")
+    return cid
 
-def read_env(key):
+INLINE = r"""
+import os, json, sys
+ten = int(os.environ.get("TEN","1"))
+chan = os.environ.get("CHAN","telegram")
+text = os.environ.get("TEXT","")
+reply = None
+err = None
+
+try:
+    # Вариант 1: функция на верхнем уровне
+    from app.brain import generate_sales_reply as gen
+    reply = gen(tenant=ten, channel=chan, text=text, history=[])
+except Exception as e1:
     try:
-        with open(ENV, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith(key + "="):
-                    return line.strip().split("=",1)[1]
-    except FileNotFoundError:
-        pass
-    return ""
+        # Вариант 2: через Planner
+        from app.brain.planner import Planner
+        pl = Planner()
+        if hasattr(pl, "generate_sales_reply"):
+            reply = pl.generate_sales_reply(tenant=ten, channel=chan, text=text, history=[])
+        elif hasattr(pl, "plan") or hasattr(pl, "respond"):
+            f = getattr(pl, "respond", getattr(pl, "plan", None))
+            reply = f(tenant=ten, channel=chan, text=text, history=[])
+        else:
+            raise RuntimeError("Planner has no known reply method")
+    except Exception as e2:
+        err = f"{type(e2).__name__}: {e2}"
 
-def send_event(tenant, channel, text, token):
-    payload = {
-        "provider": channel,
-        "channel": channel,
-        "event": "messages.incoming",
-        "tenant": tenant,
-        "message_id": f"SIM-{int(time.time()*1000)}",
-        "peer": "sim-user",
-        "from": "sim-user",
-        "text": text,
-        "timestamp": int(time.time())
-    }
-    url = f"{WEBHOOK}?tenant={tenant}&token={token}"
-    headers = [
-        "-H", f"X-Webhook-Token: {token}",
-        "-H", f"Authorization: Bearer {token}",
-        "-H", f"X-Auth-Token: {token}",
-        "-H", "Content-Type: application/json",
-    ]
-    return subprocess.run(
-        ["curl","-sS","-o","/dev/null","-w","%{http_code}", "-X","POST", url, *headers, "-d", json.dumps(payload)],
-        capture_output=True, text=True, check=False
-    ).stdout.strip()
+# Нормализуем вывод
+out = {"ok": bool(reply and not err), "error": err}
+if isinstance(reply, dict):
+    out["reply"] = reply.get("text") or reply.get("reply") or json.dumps(reply, ensure_ascii=False)
+elif isinstance(reply, (list, tuple)):
+    out["reply"] = " ".join(map(str, reply))
+elif reply is not None:
+    out["reply"] = str(reply)
+print(json.dumps(out, ensure_ascii=False))
+"""
 
-def tail_reply():
-    # показываем последние строки логов app и выдёргиваем возможный ответ
-    p = subprocess.run(
-        ["docker","compose","logs","--since=3s","app"],
-        capture_output=True, text=True
-    )
-    lines = p.stdout.splitlines()
-    # эвристика по ключевым словам
-    keys = ("generated", "reply", "send", "outbox", "telegram", "whatsapp")
-    hits = [ln for ln in lines if any(k in ln.lower() for k in keys)]
-    if hits:
-        print("\n".join(hits[-12:]))
-    else:
-        print("(логов с ответом не видно; см. полные логи: docker compose logs --since=5s app)")
+def call_brain(app_cid, ten, chan, text):
+    env = os.environ.copy()
+    env["TEN"] = str(ten)
+    env["CHAN"] = chan
+    env["TEXT"] = text
+    cmd = ["bash","-lc", f"docker exec -i {shlex.quote(app_cid)} python - <<'PY'\n{INLINE}\nPY"]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if p.returncode != 0:
+        return {"ok": False, "error": p.stderr.strip() or "exec failed"}
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception as e:
+        return {"ok": False, "error": f"bad json: {e}", "raw": p.stdout}
 
 def main():
-    token = read_env("WEBHOOK_SECRET")
-    if not token:
-        print("WEBHOOK_SECRET не найден в .env")
-        return
+    app = get_app()
     try:
-        tenant = int(input("Tenant ID [1]: ").strip() or "1")
+        ten = int(input("Tenant ID [1]: ").strip() or "1")
     except:
         print("Некорректный tenant"); return
-    channel = (input("Канал [telegram|whatsapp|avito] (по умолчанию telegram): ").strip() or "telegram")
-    if channel not in ("telegram","whatsapp","avito"):
+    chan = (input("Канал [telegram|whatsapp|avito] (по умолчанию telegram): ").strip() or "telegram")
+    if chan not in ("telegram","whatsapp","avito"):
         print("Некорректный канал"); return
-
     print("\nДиалог. /q для выхода.")
     while True:
         msg = input("Вы: ").strip()
         if not msg: continue
         if msg in ("/q","/quit","/exit"): break
-        code = send_event(tenant, channel, msg, token)
-        print(f"[webhook] HTTP {code}")
-        time.sleep(1.2)
-        print("Бот (по логам):")
-        tail_reply()
-        print()
+        res = call_brain(app, ten, chan, msg)
+        if res.get("ok") and res.get("reply"):
+            print("Бот:", res["reply"])
+        else:
+            print("ERR:", res.get("error") or res)
+
 if __name__ == "__main__":
     main()
