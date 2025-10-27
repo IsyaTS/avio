@@ -196,6 +196,7 @@ def main() -> None:
     args = parse_args()
     root = args.root.resolve()
     output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     temp_path = output_dir / "project_snapshot_full.txt"
 
     total_chars = write_full_snapshot(root, temp_path)
