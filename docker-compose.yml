@@ -149,7 +149,7 @@ services:
       timeout: 5s
       retries: 3
     volumes:
-      - ./data/tenants:/data/tenants:ro
+      - ./data/tenants:/data/tenants
       - ./tg-sessions:/app/tg-sessions:rw
 
   cloudflared:
