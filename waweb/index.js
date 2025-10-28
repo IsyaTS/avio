@@ -1351,7 +1351,13 @@ app.get('/session/qr.svg', (req, res) => {
     try { console.log('[waweb]', 'qr_route_last_svg_404'); } catch(_){}
     return res.status(404).type('image/svg+xml').send('');
   }
-  res.setHeader('Cache-Control','no-store');
+  res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma','no-cache');
+  res.setHeader('Expires','0');
+  if (snapshot.qrId) {
+    res.setHeader('ETag', `\"${snapshot.qrId}\"`);
+    res.setHeader('X-QR-Id', snapshot.qrId);
+  }
   try { console.log('[waweb]', 'qr_route_last_svg_200', 't='+snapshot.tenant, 'ts='+snapshot.ts); } catch(_){}
   return res.type('image/svg+xml').send(snapshot.svg);
 });
@@ -1361,6 +1367,7 @@ app.get('/session/:tenant/qr.svg', (req, res) => {
   const t = String(req.params.tenant||'');
   const s = tenants[t];
   let svg = s && s.qrSvg ? s.qrSvg : '';
+  let qrId = s && s.qrId ? String(s.qrId) : null;
   if (!svg) {
     const snapshot = getLastQrSnapshot();
     if (snapshot && snapshot.svg && snapshot.tenant === t) {
@@ -1368,6 +1375,7 @@ app.get('/session/:tenant/qr.svg', (req, res) => {
       if (s) {
         s.qrSvg = svg;
         s.qrId = snapshot.qrId ? String(snapshot.qrId) : s.qrId;
+        qrId = s.qrId;
       }
     }
   }
@@ -1376,7 +1384,13 @@ app.get('/session/:tenant/qr.svg', (req, res) => {
     return res.status(404).type('image/svg+xml').send('');
   }
   try { console.log('[waweb]', 'qr_route_svg_200', 't='+t, 'len='+(svg?svg.length:0)); } catch(_){}
-  res.setHeader('Cache-Control','no-store');
+  res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma','no-cache');
+  res.setHeader('Expires','0');
+  if (qrId) {
+    res.setHeader('ETag', `\"${qrId}\"`);
+    res.setHeader('X-QR-Id', qrId);
+  }
   return res.type('image/svg+xml').send(svg);
 });
 
@@ -1397,7 +1411,13 @@ app.get('/session/:tenant/qr.png', async (req, res) => {
     if (!buf || !buf.length) {
       buf = await QRCode.toBuffer(s.qrText, { type: 'png' });
     }
-    res.setHeader('Cache-Control','no-store');
+    res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma','no-cache');
+    res.setHeader('Expires','0');
+    if (s && s.qrId) {
+      res.setHeader('ETag', `"${s.qrId}"`);
+      res.setHeader('X-QR-Id', String(s.qrId));
+    }
     try { console.log('[waweb]', 'qr_route_png_200', 't='+t, 'len='+(buf?buf.length:0)); } catch(_){}
     return res.type('image/png').send(buf);
   } catch(_) {
