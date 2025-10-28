@@ -4,13 +4,13 @@
   "type": "commonjs",
   "main": "index.js",
   "dependencies": {
-    "express": "^4",
     "axios": "^1",
-    "qrcode": "^1",
-    "ioredis": "^5",
-    "whatsapp-web.js": "^1.34.1",
+    "body-parser": "^1.20.2",
     "cors": "^2",
-    "puppeteer": "^22.8.0",
-    "body-parser": "^1.20.2"
+    "express": "^4",
+    "ioredis": "^5",
+    "puppeteer": "^22.15.0",
+    "qrcode": "^1",
+    "whatsapp-web.js": "^1.34.1"
   }
 }
