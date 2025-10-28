@@ -106,8 +106,10 @@ services:
       - WAWEB_ADMIN_TOKEN=${ADMIN_TOKEN}
       - PUBLIC_KEY=${PUBLIC_KEY}
       - STATE_DIR=/data/wa_state
+      - PUPPETEER_CACHE_DIR=/data/.cache/puppeteer
     restart: unless-stopped
     shm_size: 512m
+    mem_limit: 1024m
     healthcheck:
       test: ["CMD-SHELL","curl -fsS http://127.0.0.1:9001/health || exit 1"]
       interval: 30s
@@ -115,6 +117,7 @@ services:
       retries: 3
     volumes:
       - ./data/wa_state:/data/wa_state
+      - ./data/puppeteer:/data/.cache/puppeteer
 
   tgworker:
     image: avio/app:local
