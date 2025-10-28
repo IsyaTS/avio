@@ -588,11 +588,23 @@ async function notifyTenantQr(tenant, svg, qrId) {
 function ensureDir(p){ try{ fs.mkdirSync(p,{recursive:true}); } catch(_){} }
 function clearTenantStateDir(tenant){
   const dir = path.join(STATE_DIR, `session-tenant-${tenant}`);
-  try {
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  } catch (err) {
-    const reason = err && err.message ? err.message : String(err);
-    console.warn('[waweb]', `state_dir_cleanup_failed tenant=${tenant} reason=${reason}`);
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (!fs.existsSync(dir)) return;
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      if (!fs.existsSync(dir)) {
+        console.log('[waweb]', `state_dir_cleanup_ok tenant=${tenant} attempt=${attempt}`);
+        return;
+      }
+    } catch (err) {
+      const reason = err && err.message ? err.message : String(err);
+      console.warn('[waweb]', `state_dir_cleanup_failed tenant=${tenant} attempt=${attempt} reason=${reason}`);
+    }
+    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); } catch (_) {}
+  }
+  if (fs.existsSync(dir)) {
+    console.warn('[waweb]', `state_dir_cleanup_incomplete tenant=${tenant}`);
   }
 }
 function now(){ return Math.floor(Date.now()/1000); }
@@ -1073,10 +1085,7 @@ function resetSession(tenant, webhookUrl) {
   const s = tenants[tenant];
   (async () => { try { await safeDestroy(s?.client); } catch(_) {} })();
   // снести локальные данные авторизации
-  try {
-    const authDir = path.join(STATE_DIR, `session-tenant-${tenant}`);
-    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
-  } catch(_) {}
+  clearTenantStateDir(tenant);
   delete tenants[tenant];
   return ensureSession(tenant, webhookUrl);
 }
