@@ -1007,6 +1007,7 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
     tenants[tenant].qrId = String(qrId);
     tenants[tenant]._resetScheduled = false;
+    tenants[tenant]._stateProbeTs = now();
     if (svg || png) persistLastQr(tenant, svg, png, qrId, qrId);
     try {
       await notifyTenantQr(tenant, svg, qrId);
@@ -1020,6 +1021,7 @@ function buildClient(tenant) {
     tenants[tenant].qrPng = null;
     tenants[tenant].qrId = null;
     tenants[tenant]._resetScheduled = false;
+    tenants[tenant]._stateProbeTs = now();
     log(tenant, 'authenticated');
     triggerTenantSync(tenant);
   });
@@ -1031,6 +1033,7 @@ function buildClient(tenant) {
     tenants[tenant].lastEvent = 'auth_failure';
     tenants[tenant].lastTs = now();
     tenants[tenant]._resetScheduled = false;
+    tenants[tenant]._stateProbeTs = now();
     log(tenant, 'auth_failure ' + (m||''));
   });
   c.on('ready', () => {
@@ -1041,6 +1044,7 @@ function buildClient(tenant) {
     tenants[tenant].lastEvent = 'ready';
     tenants[tenant].lastTs = now();
      tenants[tenant]._resetScheduled = false;
+    tenants[tenant]._stateProbeTs = now();
     log(tenant, 'ready');
     triggerTenantSync(tenant);
     (async () => {
@@ -1066,6 +1070,7 @@ function buildClient(tenant) {
     tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
+    tenants[tenant]._stateProbeTs = now();
     log(tenant, 'disconnected ' + reasonKey);
     if (LOGOUT_REASONS.has(reasonKey)) {
       scheduleSessionReset(tenant, `disconnected:${reasonKey || 'unknown'}`);
@@ -1078,6 +1083,7 @@ function buildClient(tenant) {
     const lowered = rawState.toLowerCase();
     tenants[tenant].lastTs = now();
     tenants[tenant].lastEvent = `state:${lowered}`;
+    tenants[tenant]._stateProbeTs = now();
     log(tenant, `state ${lowered}`);
     if (isUnpairedState(rawState)) {
       tenants[tenant].ready = false;
@@ -1092,6 +1098,7 @@ function buildClient(tenant) {
       return;
     }
     tenants[tenant].lastTs = now();
+    tenants[tenant]._stateProbeTs = now();
     const normalized = normalizeIncomingMessage(tenant, msg, c);
     if (
       normalized &&
@@ -1184,6 +1191,26 @@ setInterval(() => {
       } catch (err) {
         const reason = err && err.message ? err.message : err;
         console.warn('[waweb]', `watchdog_probe_failed tenant=${t} reason=${reason}`);
+      }
+      if (s.ready && client && typeof client.getState === 'function') {
+        const lastProbe = s._stateProbeTs || 0;
+        if (ts - lastProbe > 20) {
+          s._stateProbeTs = ts;
+          (async () => {
+            try {
+              const state = await client.getState();
+              const normalized = typeof state === 'string' ? state.toLowerCase() : '';
+              if (normalized && normalized !== 'connected' && normalized !== 'open' && normalized !== 'opening') {
+                log(t, `watchdog_state ${state}`);
+                scheduleSessionReset(t, `state_probe:${state || 'unknown'}`);
+              }
+            } catch (err) {
+              const reason = err && err.message ? err.message : err;
+              console.warn('[waweb]', `watchdog_state_failed tenant=${t} reason=${reason}`);
+              scheduleSessionReset(t, 'state_probe_error');
+            }
+          })();
+        }
       }
       // If not ready and no QR for >25s and last event wasn't QR -> soft reinit
       if (!s.ready && !s.qrSvg && s.lastEvent !== 'qr' && (ts - (s.lastTs || 0) > 25)) {
