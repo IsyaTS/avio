@@ -46,6 +46,7 @@ services:
     depends_on: [redis, postgres]
     working_dir: /app
     command: gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:8000 app.main:app --timeout 60 --keep-alive 20
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     restart: unless-stopped
     volumes:
       - ./data:/data
@@ -94,6 +95,7 @@ services:
       - ./data:/data
       - ./data/tenants:/data/tenants
       - ./tg-sessions:/app/tg-sessions:rw
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
 
   waweb:
     build: ./waweb
@@ -146,6 +148,7 @@ services:
     depends_on: [app, redis]
     working_dir: /app
     command: ["uvicorn","tgworker.api:create_app","--host","0.0.0.0","--port","9000","--workers","1"]
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     restart: unless-stopped
     expose: ["9000"]
     healthcheck:
