@@ -23,5 +23,6 @@ COPY package.json package-lock.json* .npmrc ./
 RUN npm ci --omit=dev
 
 COPY . .
+USER root
 EXPOSE 8088
 CMD ["node","index.js"]
