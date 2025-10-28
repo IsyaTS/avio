@@ -1111,6 +1111,23 @@ setInterval(() => {
     for (const t of Object.keys(tenants)) {
       const s = tenants[t];
       if (!s) continue;
+      const client = s.client;
+      try {
+        const browser = client && client.pupBrowser;
+        const page = client && client.pupPage;
+        const browserDisconnected =
+          !!(browser && typeof browser.isConnected === 'function' && !browser.isConnected());
+        const pageClosed = !!(page && typeof page.isClosed === 'function' && page.isClosed());
+        if (client && (browserDisconnected || pageClosed)) {
+          const reason = browserDisconnected ? 'browser_disconnected' : 'page_closed';
+          log(t, `watchdog_reset ${reason}`);
+          scheduleSessionReset(t, `watchdog:${reason}`);
+          continue;
+        }
+      } catch (err) {
+        const reason = err && err.message ? err.message : err;
+        console.warn('[waweb]', `watchdog_probe_failed tenant=${t} reason=${reason}`);
+      }
       // If not ready and no QR for >25s and last event wasn't QR -> soft reinit
       if (!s.ready && !s.qrSvg && s.lastEvent !== 'qr' && (ts - (s.lastTs || 0) > 25)) {
         (async () => {
