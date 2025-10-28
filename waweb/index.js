@@ -586,6 +586,15 @@ async function notifyTenantQr(tenant, svg, qrId) {
   }
 }
 function ensureDir(p){ try{ fs.mkdirSync(p,{recursive:true}); } catch(_){} }
+function clearTenantStateDir(tenant){
+  const dir = path.join(STATE_DIR, `session-tenant-${tenant}`);
+  try {
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  } catch (err) {
+    const reason = err && err.message ? err.message : String(err);
+    console.warn('[waweb]', `state_dir_cleanup_failed tenant=${tenant} reason=${reason}`);
+  }
+}
 function now(){ return Math.floor(Date.now()/1000); }
 function syncTenantFiles(tenant){
   return new Promise((resolve) => {
@@ -939,8 +948,12 @@ function buildClient(tenant) {
     log(tenant, 'disconnected ' + reasonKey);
     if (reasonKey === 'LOGOUT') {
       await safeDestroy(c);
+      clearTenantStateDir(tenant);
       const session = tenants[tenant];
       if (session) {
+        session.qrSvg = null;
+        session.qrPng = null;
+        session.qrId = null;
         session.client = buildClient(tenant);
         session.lastEvent = 'reinit_logout';
         session.lastTs = now();
