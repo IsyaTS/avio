@@ -618,6 +618,46 @@ function clearTenantStateDir(tenant){
   }
 }
 function now(){ return Math.floor(Date.now()/1000); }
+
+const UNPAIRED_STATES = new Set(['UNPAIRED', 'UNPAIRED_IDLE', 'LOGGED_OUT', 'LOGOUT']);
+const LOGOUT_REASONS = new Set(['LOGOUT', 'LOGGED_OUT']);
+
+function isUnpairedState(state) {
+  if (!state) return false;
+  const normalized = String(state).trim().toUpperCase();
+  if (!normalized) return false;
+  if (UNPAIRED_STATES.has(normalized)) return true;
+  return normalized.includes('UNPAIRED') || normalized.includes('LOGGED_OUT');
+}
+
+function scheduleSessionReset(tenant, source) {
+  tenant = String(tenant);
+  const session = tenants[tenant];
+  if (!session) {
+    console.log('[waweb]', `session_reset_skip tenant=${tenant} source=${source} reason=no_session`);
+    return;
+  }
+  if (session._resetScheduled) {
+    console.log('[waweb]', `session_reset_skip tenant=${tenant} source=${source} reason=already_scheduled`);
+    return;
+  }
+  session._resetScheduled = true;
+  const webhookUrl = session.webhook || '';
+  console.log('[waweb]', `session_reset_schedule tenant=${tenant} source=${source}`);
+  setImmediate(() => {
+    try {
+      resetSession(tenant, webhookUrl);
+    } catch (err) {
+      const reason = err && err.message ? err.message : err;
+      console.warn('[waweb]', `session_reset_failed tenant=${tenant} source=${source} reason=${reason}`);
+      try {
+        const current = tenants[tenant];
+        if (current) current._resetScheduled = false;
+      } catch (_) {}
+    }
+  });
+}
+
 function syncTenantFiles(tenant){
   return new Promise((resolve) => {
     const bases = TENANT_SYNC_BASES.length ? TENANT_SYNC_BASES : ['http://app:8000'];
@@ -911,6 +951,7 @@ function buildClient(tenant) {
     tenants[tenant].lastEvent = 'qr';
     tenants[tenant].lastTs = now();
     tenants[tenant].qrId = String(qrId);
+    tenants[tenant]._resetScheduled = false;
     if (svg || png) persistLastQr(tenant, svg, png, qrId, qrId);
     try {
       await notifyTenantQr(tenant, svg, qrId);
@@ -923,6 +964,7 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
     tenants[tenant].qrPng = null;
     tenants[tenant].qrId = null;
+    tenants[tenant]._resetScheduled = false;
     log(tenant, 'authenticated');
     triggerTenantSync(tenant);
   });
@@ -933,6 +975,7 @@ function buildClient(tenant) {
     tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'auth_failure';
     tenants[tenant].lastTs = now();
+    tenants[tenant]._resetScheduled = false;
     log(tenant, 'auth_failure ' + (m||''));
   });
   c.on('ready', () => {
@@ -942,6 +985,7 @@ function buildClient(tenant) {
     tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'ready';
     tenants[tenant].lastTs = now();
+     tenants[tenant]._resetScheduled = false;
     log(tenant, 'ready');
     triggerTenantSync(tenant);
     (async () => {
@@ -968,27 +1012,25 @@ function buildClient(tenant) {
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
     log(tenant, 'disconnected ' + reasonKey);
-    if (reasonKey === 'LOGOUT') {
-      await safeDestroy(c);
-      const session = tenants[tenant];
-      const webhookUrl = session ? session.webhook : '';
-      console.log('[waweb]', `state_dir_cleanup_start tenant=${tenant}`);
-      clearTenantStateDir(tenant);
-      delete tenants[tenant];
-      setImmediate(() => {
-        try {
-          ensureSession(tenant, webhookUrl);
-        } catch (err) {
-          const reason = err && err.message ? err.message : String(err);
-          console.warn('[waweb]', `session_reinit_failed tenant=${tenant} reason=${reason}`);
-        }
-      });
+    if (LOGOUT_REASONS.has(reasonKey)) {
+      scheduleSessionReset(tenant, `disconnected:${reasonKey || 'unknown'}`);
       return;
     }
     setTimeout(() => { try { c.initialize(); } catch(_){} }, 1500);
   });
   c.on('change_state', (state) => {
-    log(tenant, `state ${String(state || '').toLowerCase()}`);
+    const rawState = String(state || '');
+    const lowered = rawState.toLowerCase();
+    tenants[tenant].lastTs = now();
+    tenants[tenant].lastEvent = `state:${lowered}`;
+    log(tenant, `state ${lowered}`);
+    if (isUnpairedState(rawState)) {
+      tenants[tenant].ready = false;
+      tenants[tenant].qrSvg = null;
+      tenants[tenant].qrPng = null;
+      tenants[tenant].qrId = null;
+      scheduleSessionReset(tenant, `state:${rawState}`);
+    }
   });
   c.on('message', (msg) => {
     if (msg && typeof msg.from === 'string' && msg.from.toLowerCase() === 'status@broadcast') {
@@ -1036,7 +1078,7 @@ function ensureSession(tenant, webhookUrl) {
   if (!tenants[tenant]) {
     ensureDir(STATE_DIR);
     ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
-    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init' };
+    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init', _resetScheduled: false };
     tenants[tenant].client = buildClient(tenant);
     tenants[tenant].client.initialize();
     log(tenant, 'init');
