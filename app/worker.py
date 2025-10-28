@@ -136,6 +136,29 @@ OUTBOX_WHITELIST = get_outbox_whitelist()
 RECENT_INCOMING_TTL_SECONDS = 24 * 60 * 60
 
 
+def _is_status_echo(item: Mapping[str, Any]) -> bool:
+    """Return True if the queue payload looks like a status echo we produced."""
+
+    if not isinstance(item, Mapping):
+        return False
+
+    status = item.get("status")
+    if not status:
+        return False
+
+    # Real outgoing jobs always carry either text or attachments to deliver.
+    if item.get("text") or item.get("attachment") or item.get("attachments"):
+        return False
+
+    # Status echoes from write_result contain a reply preview and version tag.
+    reply = item.get("reply")
+    version = item.get("version")
+    if isinstance(reply, str) and version:
+        return True
+
+    return False
+
+
 async def _whitelist_allows(
     *,
     telegram_user_id: Optional[int],
@@ -1731,6 +1754,19 @@ async def process_queue():
                 item = json.loads(raw_item)
             except json.JSONDecodeError:
                 log(f"[worker] json decode err: {raw_item[:200]}")
+                continue
+
+            if _is_status_echo(item):
+                channel_hint = _resolve_channel(item)
+                tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
+                try:
+                    tenant_id = int(tenant_raw)
+                except Exception:
+                    tenant_id = int(os.getenv("TENANT_ID", "1"))
+                status = str(item.get("status") or "").strip() or "-"
+                log(
+                    f"event=outbox_status_echo_skip channel={channel_hint or '-'} tenant={tenant_id} status={status}"
+                )
                 continue
 
             raw_channel = item.get("provider") or item.get("ch") or item.get("channel")
