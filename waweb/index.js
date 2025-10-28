@@ -596,6 +596,23 @@ async function notifyTenantQr(tenant, svg, qrId) {
   }
 }
 function ensureDir(p){ try{ fs.mkdirSync(p,{recursive:true}); } catch(_){} }
+function clearChromeProfileLocks(tenant) {
+  try {
+    const base = path.join(STATE_DIR, `session-tenant-${tenant}`);
+    const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+    for (const name of lockFiles) {
+      const target = path.join(base, name);
+      if (!fs.existsSync(target)) continue;
+      try {
+        fs.rmSync(target, { force: true });
+        console.log('[waweb]', `chrome_lock_removed tenant=${tenant} file=${name}`);
+      } catch (err) {
+        const reason = err && err.message ? err.message : err;
+        console.warn('[waweb]', `chrome_lock_remove_failed tenant=${tenant} file=${name} reason=${reason}`);
+      }
+    }
+  } catch (_) {}
+}
 function clearTenantStateDir(tenant){
   const dir = path.join(STATE_DIR, `session-tenant-${tenant}`);
   const maxAttempts = 5;
@@ -1097,6 +1114,7 @@ function ensureSession(tenant, webhookUrl) {
     (async () => {
       log(tenant, 'reinit');
       await safeDestroy(s.client);
+      clearChromeProfileLocks(tenant);
       s.client = buildClient(tenant);
       s.lastTs = now(); s.lastEvent = 'reinit';
       try { s.client.initialize(); } catch(_) {}
@@ -1134,6 +1152,7 @@ setInterval(() => {
         (async () => {
           log(t, 'reinit_timer');
           await safeDestroy(s.client);
+          clearChromeProfileLocks(t);
           s.client = buildClient(t);
           s.lastTs = now();
           s.lastEvent = 'reinit';
