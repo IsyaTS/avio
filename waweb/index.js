@@ -920,13 +920,14 @@ function buildClient(tenant) {
     })();
   });
   c.on('disconnected', async (reason) => {
+    const reasonKey = String(reason || '').toUpperCase();
     tenants[tenant].ready = false;
     tenants[tenant].qrPng = null;
     tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
-    log(tenant, 'disconnected ' + reason);
-    if (reason === 'LOGOUT') {
+    log(tenant, 'disconnected ' + reasonKey);
+    if (reasonKey === 'LOGOUT') {
       await safeDestroy(c);
       const session = tenants[tenant];
       if (session) {
