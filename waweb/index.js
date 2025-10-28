@@ -627,6 +627,7 @@ function clearChromeProfileLocks(tenant) {
 function updateSessionState(session, state) {
   if (!session) return;
   const normalized = typeof state === 'string' ? state.toLowerCase() : null;
+  if (normalized && session._lastState === normalized) return;
   session._lastState = normalized;
   session._stateSince = now();
 }
@@ -1227,12 +1228,26 @@ setInterval(() => {
         if (ts - lastProbe > 20) {
           s._stateProbeTs = ts;
           (async () => {
+            const prevState = s._lastState;
+            const prevSince = s._stateSince || ts;
             try {
               const state = await client.getState();
               const normalized = typeof state === 'string' ? state.toLowerCase() : '';
-              if (normalized && normalized !== 'connected' && normalized !== 'open' && normalized !== 'opening') {
-                log(t, `watchdog_state ${state}`);
-                scheduleSessionReset(t, `state_probe:${state || 'unknown'}`);
+              if (normalized) {
+                const duration = prevState === normalized ? ts - prevSince : 0;
+                updateSessionState(s, normalized);
+                if (normalized === 'opening' && duration > 45) {
+                  log(t, `watchdog_state_stuck ${state} duration=${duration}s`);
+                  scheduleSessionReset(t, 'state_probe:opening_timeout');
+                  return;
+                }
+                if (normalized !== 'connected' && normalized !== 'open' && normalized !== 'opening') {
+                  log(t, `watchdog_state ${state}`);
+                  scheduleSessionReset(t, `state_probe:${state || 'unknown'}`);
+                  return;
+                }
+              } else {
+                updateSessionState(s, state);
               }
             } catch (err) {
               const reason = err && err.message ? err.message : err;
