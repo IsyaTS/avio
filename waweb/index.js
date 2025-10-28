@@ -1078,6 +1078,7 @@ function ensureSession(tenant, webhookUrl) {
   if (!tenants[tenant]) {
     ensureDir(STATE_DIR);
     ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
+    clearChromeProfileLocks(tenant);
     tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init', _resetScheduled: false };
     tenants[tenant].client = buildClient(tenant);
     tenants[tenant].client.initialize();
