@@ -13,6 +13,16 @@ process.on('uncaughtException', (err) => {
     console.warn('[waweb]', `uncaught_protocol_error message=${message}`);
     return;
   }
+  if (message && (message.includes('SingletonLock') || message.includes('ProcessSingleton'))) {
+    const match = message.match(/session-tenant-([a-zA-Z0-9_-]+)/);
+    const tenant = match && match[1] ? match[1] : null;
+    if (tenant) {
+      console.warn('[waweb]', `uncaught_singleton_conflict tenant=${tenant}`);
+      clearChromeProfileLocks(tenant);
+      scheduleSessionReset(tenant, 'uncaught_singleton');
+      return;
+    }
+  }
   console.error('[waweb]', 'uncaught_exception', message);
   process.exit(1);
 });
@@ -912,6 +922,34 @@ async function safeDestroy(client) {
   try { if (client.pupBrowser) await client.pupBrowser.close(); } catch(_) {}
 }
 
+function handleClientInitError(tenant, err) {
+  const message = err && err.message ? err.message : String(err);
+  if (message && message.includes('Singleton')) {
+    clearChromeProfileLocks(tenant);
+    console.warn('[waweb]', `client_init_singleton_conflict tenant=${tenant}`);
+    scheduleSessionReset(tenant, 'init_singleton_lock');
+    return;
+  }
+  if (message && message.includes('Failed to launch the browser process')) {
+    console.warn('[waweb]', `client_init_browser_launch_failed tenant=${tenant} reason=${message}`);
+    scheduleSessionReset(tenant, 'init_browser_failed');
+    return;
+  }
+  console.warn('[waweb]', `client_init_error tenant=${tenant} reason=${message}`);
+}
+
+function initializeClient(tenant, session) {
+  if (!session || !session.client) return;
+  try {
+    const initResult = session.client.initialize();
+    if (initResult && typeof initResult.catch === 'function') {
+      initResult.catch((err) => handleClientInitError(tenant, err));
+    }
+  } catch (err) {
+    handleClientInitError(tenant, err);
+  }
+}
+
 function buildClient(tenant) {
   const chromePath = pickChromePath();
   const opts = {
@@ -1098,7 +1136,7 @@ function ensureSession(tenant, webhookUrl) {
     clearChromeProfileLocks(tenant);
     tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init', _resetScheduled: false };
     tenants[tenant].client = buildClient(tenant);
-    tenants[tenant].client.initialize();
+    initializeClient(tenant, tenants[tenant]);
     log(tenant, 'init');
     triggerTenantSync(tenant);
     ensureProviderToken(tenant).catch((err) => {
@@ -1117,7 +1155,7 @@ function ensureSession(tenant, webhookUrl) {
       clearChromeProfileLocks(tenant);
       s.client = buildClient(tenant);
       s.lastTs = now(); s.lastEvent = 'reinit';
-      try { s.client.initialize(); } catch(_) {}
+      initializeClient(tenant, s);
     })();
   }
   return s;
@@ -1156,7 +1194,7 @@ setInterval(() => {
           s.client = buildClient(t);
           s.lastTs = now();
           s.lastEvent = 'reinit';
-          try { s.client.initialize(); } catch (_) {}
+          initializeClient(t, s);
         })();
       }
     }
