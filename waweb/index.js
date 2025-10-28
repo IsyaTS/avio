@@ -1134,7 +1134,7 @@ function ensureSession(tenant, webhookUrl) {
     ensureDir(STATE_DIR);
     ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
     clearChromeProfileLocks(tenant);
-    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init', _resetScheduled: false };
+    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init', _resetScheduled: false, _stateProbeTs: 0 };
     tenants[tenant].client = buildClient(tenant);
     initializeClient(tenant, tenants[tenant]);
     log(tenant, 'init');
@@ -1154,7 +1154,7 @@ function ensureSession(tenant, webhookUrl) {
       await safeDestroy(s.client);
       clearChromeProfileLocks(tenant);
       s.client = buildClient(tenant);
-      s.lastTs = now(); s.lastEvent = 'reinit';
+      s.lastTs = now(); s.lastEvent = 'reinit'; s._stateProbeTs = 0;
       initializeClient(tenant, s);
     })();
   }
@@ -1194,6 +1194,7 @@ setInterval(() => {
           s.client = buildClient(t);
           s.lastTs = now();
           s.lastEvent = 'reinit';
+          s._stateProbeTs = 0;
           initializeClient(t, s);
         })();
       }
