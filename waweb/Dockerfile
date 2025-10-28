@@ -13,7 +13,6 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y \
         google-chrome-stable \
         fonts-liberation fonts-noto-color-emoji \
-    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /data/.cache/puppeteer
