@@ -42,6 +42,11 @@ const PROVIDER_TOKEN_REFRESH_INTERVAL_MS = Math.max(
   60,
   Number(process.env.PROVIDER_TOKEN_REFRESH_INTERVAL || '300') || 300,
 ) * 1000;
+const WEB_VERSION_REMOTE_PATH = (() => {
+  const raw = (process.env.WEB_VERSION_REMOTE_PATH || '').trim();
+  if (raw) return raw;
+  return 'https://raw.githubusercontent.com/WhiskeySockets/WhatsAppWebVersions/main/latest.json';
+})();
 
 const providerTokenCache = Object.create(null);
 
@@ -821,6 +826,10 @@ function buildClient(tenant) {
   const chromePath = pickChromePath();
   const opts = {
     authStrategy: new LocalAuth({ clientId: 'tenant-'+tenant, dataPath: STATE_DIR }),
+    webVersionCache: {
+      type: 'remote',
+      remotePath: WEB_VERSION_REMOTE_PATH,
+    },
     puppeteer: {
       headless: true,
       executablePath: chromePath,
@@ -910,16 +919,30 @@ function buildClient(tenant) {
       }
     })();
   });
-  c.on('disconnected', (reason) => {
+  c.on('disconnected', async (reason) => {
     tenants[tenant].ready = false;
     tenants[tenant].qrPng = null;
     tenants[tenant].qrId = null;
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
     log(tenant, 'disconnected ' + reason);
+    if (reason === 'LOGOUT') {
+      await safeDestroy(c);
+      const session = tenants[tenant];
+      if (session) {
+        session.client = buildClient(tenant);
+        session.lastEvent = 'reinit_logout';
+        session.lastTs = now();
+        try { session.client.initialize(); } catch (_) {}
+      }
+      return;
+    }
     setTimeout(() => { try { c.initialize(); } catch(_){} }, 1500);
   });
   c.on('message', (msg) => {
+    if (msg && typeof msg.from === 'string' && msg.from.toLowerCase() === 'status@broadcast') {
+      return;
+    }
     tenants[tenant].lastTs = now();
     const normalized = normalizeIncomingMessage(tenant, msg, c);
     messageInTotal += 1;
