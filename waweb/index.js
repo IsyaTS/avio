@@ -669,6 +669,7 @@ function scheduleSessionReset(tenant, source) {
     return;
   }
   session._resetScheduled = true;
+  session._stateProbeTs = now();
   const webhookUrl = session.webhook || '';
   console.log('[waweb]', `session_reset_schedule tenant=${tenant} source=${source}`);
   setImmediate(() => {
