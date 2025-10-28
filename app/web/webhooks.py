@@ -898,7 +898,12 @@ async def provider_webhook(request: Request) -> JSONResponse:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_payload", channel_label).inc()
         raise HTTPException(status_code=422, detail="invalid_payload")
 
-    tenant_candidate = _coerce_int(payload.get("tenant"))
+    raw_tenant = (
+        payload.get("tenant")
+        or request.query_params.get("tenant")
+        or request.query_params.get("t")
+    )
+    tenant_candidate = _coerce_int(raw_tenant)
     if tenant_candidate is None:
         WEBHOOK_PROVIDER_COUNTER.labels("invalid_tenant", channel_label).inc()
         raise HTTPException(status_code=422, detail="invalid_tenant")
