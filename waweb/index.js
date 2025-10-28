@@ -948,17 +948,18 @@ function buildClient(tenant) {
     log(tenant, 'disconnected ' + reasonKey);
     if (reasonKey === 'LOGOUT') {
       await safeDestroy(c);
-      clearTenantStateDir(tenant);
       const session = tenants[tenant];
-      if (session) {
-        session.qrSvg = null;
-        session.qrPng = null;
-        session.qrId = null;
-        session.client = buildClient(tenant);
-        session.lastEvent = 'reinit_logout';
-        session.lastTs = now();
-        try { session.client.initialize(); } catch (_) {}
-      }
+      const webhookUrl = session ? session.webhook : '';
+      clearTenantStateDir(tenant);
+      delete tenants[tenant];
+      setImmediate(() => {
+        try {
+          ensureSession(tenant, webhookUrl);
+        } catch (err) {
+          const reason = err && err.message ? err.message : String(err);
+          console.warn('[waweb]', `session_reinit_failed tenant=${tenant} reason=${reason}`);
+        }
+      });
       return;
     }
     setTimeout(() => { try { c.initialize(); } catch(_){} }, 1500);
