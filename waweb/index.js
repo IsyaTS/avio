@@ -623,6 +623,13 @@ function clearChromeProfileLocks(tenant) {
     }
   } catch (_) {}
 }
+
+function updateSessionState(session, state) {
+  if (!session) return;
+  const normalized = typeof state === 'string' ? state.toLowerCase() : null;
+  session._lastState = normalized;
+  session._stateSince = now();
+}
 function clearTenantStateDir(tenant){
   const dir = path.join(STATE_DIR, `session-tenant-${tenant}`);
   const maxAttempts = 5;
@@ -1009,6 +1016,7 @@ function buildClient(tenant) {
     tenants[tenant].qrId = String(qrId);
     tenants[tenant]._resetScheduled = false;
     tenants[tenant]._stateProbeTs = now();
+    updateSessionState(tenants[tenant], 'qr');
     if (svg || png) persistLastQr(tenant, svg, png, qrId, qrId);
     try {
       await notifyTenantQr(tenant, svg, qrId);
@@ -1023,6 +1031,7 @@ function buildClient(tenant) {
     tenants[tenant].qrId = null;
     tenants[tenant]._resetScheduled = false;
     tenants[tenant]._stateProbeTs = now();
+    updateSessionState(tenants[tenant], 'authenticated');
     log(tenant, 'authenticated');
     triggerTenantSync(tenant);
   });
@@ -1035,6 +1044,7 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
     tenants[tenant]._resetScheduled = false;
     tenants[tenant]._stateProbeTs = now();
+    updateSessionState(tenants[tenant], 'auth_failure');
     log(tenant, 'auth_failure ' + (m||''));
   });
   c.on('ready', () => {
@@ -1046,6 +1056,7 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
      tenants[tenant]._resetScheduled = false;
     tenants[tenant]._stateProbeTs = now();
+    updateSessionState(tenants[tenant], 'ready');
     log(tenant, 'ready');
     triggerTenantSync(tenant);
     (async () => {
@@ -1072,6 +1083,7 @@ function buildClient(tenant) {
     tenants[tenant].lastEvent = 'disconnected';
     tenants[tenant].lastTs = now();
     tenants[tenant]._stateProbeTs = now();
+    updateSessionState(tenants[tenant], 'disconnected');
     log(tenant, 'disconnected ' + reasonKey);
     if (LOGOUT_REASONS.has(reasonKey)) {
       scheduleSessionReset(tenant, `disconnected:${reasonKey || 'unknown'}`);
@@ -1085,6 +1097,7 @@ function buildClient(tenant) {
     tenants[tenant].lastTs = now();
     tenants[tenant].lastEvent = `state:${lowered}`;
     tenants[tenant]._stateProbeTs = now();
+    updateSessionState(tenants[tenant], lowered);
     log(tenant, `state ${lowered}`);
     if (isUnpairedState(rawState)) {
       tenants[tenant].ready = false;
@@ -1142,9 +1155,24 @@ function ensureSession(tenant, webhookUrl) {
     ensureDir(STATE_DIR);
     ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
     clearChromeProfileLocks(tenant);
-    tenants[tenant] = { client: null, webhook: webhookUrl || '', qrSvg: null, qrText: null, qrPng: null, qrId: null, ready: false, lastTs: now(), lastEvent: 'init', _resetScheduled: false, _stateProbeTs: 0 };
+    tenants[tenant] = {
+      client: null,
+      webhook: webhookUrl || '',
+      qrSvg: null,
+      qrText: null,
+      qrPng: null,
+      qrId: null,
+      ready: false,
+      lastTs: now(),
+      lastEvent: 'init',
+      _resetScheduled: false,
+      _stateProbeTs: 0,
+      _lastState: null,
+      _stateSince: now(),
+    };
     tenants[tenant].client = buildClient(tenant);
     initializeClient(tenant, tenants[tenant]);
+    updateSessionState(tenants[tenant], 'init');
     log(tenant, 'init');
     triggerTenantSync(tenant);
     ensureProviderToken(tenant).catch((err) => {
@@ -1163,6 +1191,7 @@ function ensureSession(tenant, webhookUrl) {
       clearChromeProfileLocks(tenant);
       s.client = buildClient(tenant);
       s.lastTs = now(); s.lastEvent = 'reinit'; s._stateProbeTs = 0;
+      updateSessionState(s, 'reinit');
       initializeClient(tenant, s);
     })();
   }
@@ -1223,6 +1252,7 @@ setInterval(() => {
           s.lastTs = now();
           s.lastEvent = 'reinit';
           s._stateProbeTs = 0;
+          updateSessionState(s, 'reinit');
           initializeClient(t, s);
         })();
       }
