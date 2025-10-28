@@ -47,6 +47,8 @@ const WEB_VERSION_REMOTE_PATH = (() => {
   if (raw) return raw;
   return 'https://raw.githubusercontent.com/WhiskeySockets/WhatsAppWebVersions/main/latest.json';
 })();
+const WINDOWS_CHROME_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
 
 const providerTokenCache = Object.create(null);
 
@@ -830,13 +832,21 @@ function buildClient(tenant) {
       type: 'remote',
       remotePath: WEB_VERSION_REMOTE_PATH,
     },
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0,
+    userAgent: WINDOWS_CHROME_USER_AGENT,
     puppeteer: {
       headless: true,
       executablePath: chromePath,
+      defaultViewport: {
+        width: 1280,
+        height: 800,
+      },
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--window-size=1280,800',
         '--no-zygote',
         '--disable-gpu',
         '--disable-background-timer-throttling',
@@ -940,12 +950,22 @@ function buildClient(tenant) {
     }
     setTimeout(() => { try { c.initialize(); } catch(_){} }, 1500);
   });
+  c.on('change_state', (state) => {
+    log(tenant, `state ${String(state || '').toLowerCase()}`);
+  });
   c.on('message', (msg) => {
     if (msg && typeof msg.from === 'string' && msg.from.toLowerCase() === 'status@broadcast') {
       return;
     }
     tenants[tenant].lastTs = now();
     const normalized = normalizeIncomingMessage(tenant, msg, c);
+    if (
+      normalized &&
+      typeof normalized.from_jid === 'string' &&
+      normalized.from_jid.toLowerCase() === 'status@broadcast'
+    ) {
+      return;
+    }
     messageInTotal += 1;
     try { console.log('[waweb]', `event=message_in channel=whatsapp tenant=${tenant} from=${normalized.from_jid || normalized.from || '-'}`); } catch(_){}
     (async () => {

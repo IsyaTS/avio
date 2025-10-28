@@ -107,6 +107,7 @@ services:
       - PUBLIC_KEY=${PUBLIC_KEY}
       - STATE_DIR=/data/wa_state
       - PUPPETEER_CACHE_DIR=/data/.cache/puppeteer
+      - DEBUG=whatsapp-web.js:*,puppeteer:*
     restart: unless-stopped
     shm_size: 512m
     mem_limit: 1024m
@@ -116,8 +117,8 @@ services:
       timeout: 5s
       retries: 3
     volumes:
-      - ./data/wa_state:/data/wa_state
-      - ./data/puppeteer:/data/.cache/puppeteer
+      - ./data/wa_state:/data/wa_state:rw
+      - ./data/puppeteer:/data/.cache/puppeteer:rw
 
   tgworker:
     image: avio/app:local
