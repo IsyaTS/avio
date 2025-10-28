@@ -7,6 +7,16 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
+process.on('uncaughtException', (err) => {
+  const message = err && err.message ? err.message : String(err);
+  if (message.includes('Protocol error') && message.includes('Target closed')) {
+    console.warn('[waweb]', `uncaught_protocol_error message=${message}`);
+    return;
+  }
+  console.error('[waweb]', 'uncaught_exception', message);
+  process.exit(1);
+});
+
 const PORT = process.env.PORT || 8088;
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(__dirname, '.wwebjs_auth'));
 const APP_WEBHOOK = (process.env.APP_WEBHOOK || '').trim();
@@ -962,6 +972,7 @@ function buildClient(tenant) {
       await safeDestroy(c);
       const session = tenants[tenant];
       const webhookUrl = session ? session.webhook : '';
+      console.log('[waweb]', `state_dir_cleanup_start tenant=${tenant}`);
       clearTenantStateDir(tenant);
       delete tenants[tenant];
       setImmediate(() => {
