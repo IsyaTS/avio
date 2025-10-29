@@ -1478,7 +1478,8 @@ app.post('/session/:tenant/send', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
   recordDeprecated('/session/:tenant/send');
   const t = String(req.params.tenant||'');
-  const tenantNum = Number(t || TENANT_DEFAULT);
+  const tenantNum = Number(t);
+  if (!tenantNum) return res.status(400).json({ ok:false, error:'no_tenant' });
   const payload = req.body || {};
   const attachmentsRaw = [];
   if (payload.attachment) attachmentsRaw.push(payload.attachment);
@@ -1528,7 +1529,12 @@ app.post('/send', async (req, res) => {
   if (channel && channel !== 'whatsapp') {
     return res.status(400).json({ ok:false, error:'channel_mismatch' });
   }
-  const tenantNum = Number(payload.tenant || payload.tenant_id || TENANT_DEFAULT);
+  const tenantRaw =
+    payload.tenant ??
+    payload.tenant_id ??
+    req.query?.tenant ??
+    req.query?.tenant_id;
+  const tenantNum = Number(tenantRaw);
   if (!tenantNum) return res.status(400).json({ ok:false, error:'no_tenant' });
   const attachments = Array.isArray(payload.attachments)
     ? payload.attachments.map(normalizeAttachment).filter(Boolean)
