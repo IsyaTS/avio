@@ -1,11 +1,15 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const axios = require('axios');
 const QRCode = require('qrcode');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const mime = require('mime-types');
+
+const fsPromises = fs.promises;
 
 process.on('uncaughtException', (err) => {
   const message = err && err.message ? err.message : String(err);
@@ -57,6 +61,12 @@ const PROVIDER_WEBHOOK_URL = (() => {
     }
   }
 })();
+const MAX_MEDIA_MB = (() => {
+  const raw = Number(process.env.MAX_MEDIA_MB);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 25;
+})();
+const MAX_MEDIA_BYTES = Math.max(1, Math.floor(MAX_MEDIA_MB * 1024 * 1024));
 const PROVIDER_TOKEN_REFRESH_INTERVAL_MS = Math.max(
   60,
   Number(process.env.PROVIDER_TOKEN_REFRESH_INTERVAL || '300') || 300,
@@ -856,6 +866,267 @@ function normalizeAttachment(raw){
   };
 }
 
+class DocumentPayloadError extends Error {
+  constructor(code, message) {
+    super(message || code);
+    this.name = 'DocumentPayloadError';
+    this.code = code || 'invalid_document';
+  }
+}
+
+async function normalizeDocumentEntry(entry, context){
+  const descriptor = extractDocumentDescriptor(entry, context);
+  if (!descriptor) return null;
+  return buildDocumentAttachmentFromDescriptor(descriptor);
+}
+
+function extractDocumentDescriptor(entry, context){
+  if (entry === null || entry === undefined) return null;
+  const ctx = context || 'payload';
+
+  if (typeof entry === 'string') {
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      if (ctx === 'direct') throw new DocumentPayloadError('invalid_document');
+      return null;
+    }
+    if (ctx === 'direct') {
+      return {
+        source: 'path',
+        value: trimmed,
+        filename: null,
+        mimetype: null,
+        caption: null,
+      };
+    }
+    return null;
+  }
+
+  if (typeof entry !== 'object') return null;
+
+  const typeField = entry.type ? String(entry.type).toLowerCase() : '';
+  const hasDocType = typeField === 'document' || typeField === 'file';
+  const docPathRaw = entry.path ?? entry.document ?? entry.file;
+  const urlRaw = entry.url ?? entry.href;
+  const b64Raw = entry.b64 ?? entry.base64 ?? entry.data ?? null;
+  const captionRaw = entry.caption ?? entry.text ?? null;
+  const filenameRaw = entry.filename ?? entry.name ?? null;
+  const mimetypeRaw = entry.mimetype ?? entry.mime_type ?? entry.mime ?? null;
+  const hasData = Boolean(docPathRaw || urlRaw || b64Raw);
+
+  if (ctx === 'payload' && !hasDocType) return null;
+  if (ctx === 'attachments' && !hasDocType && !docPathRaw && !b64Raw) return null;
+  if (ctx === 'nested' && !hasDocType && !hasData) return null;
+
+  if (!hasData) {
+    if (hasDocType || ctx === 'direct') {
+      throw new DocumentPayloadError('invalid_document');
+    }
+    return null;
+  }
+
+  const rawValue = docPathRaw || urlRaw || b64Raw;
+  if (typeof rawValue !== 'string') {
+    throw new DocumentPayloadError('invalid_document');
+  }
+  const trimmedValue = rawValue.trim();
+  if (!trimmedValue) {
+    throw new DocumentPayloadError('invalid_document');
+  }
+
+  const source = docPathRaw ? 'path' : urlRaw ? 'url' : 'b64';
+
+  return {
+    source,
+    value: trimmedValue,
+    filename: filenameRaw !== undefined && filenameRaw !== null ? String(filenameRaw) : null,
+    mimetype: mimetypeRaw !== undefined && mimetypeRaw !== null ? String(mimetypeRaw) : null,
+    caption: captionRaw !== undefined && captionRaw !== null ? String(captionRaw) : null,
+  };
+}
+
+async function buildDocumentAttachmentFromDescriptor(descriptor){
+  if (!descriptor) return null;
+  const { source } = descriptor;
+  if (source === 'path') return buildDocumentFromPath(descriptor);
+  if (source === 'url') return buildDocumentFromUrl(descriptor);
+  if (source === 'b64') return buildDocumentFromBase64(descriptor);
+  throw new DocumentPayloadError('invalid_document');
+}
+
+async function buildDocumentFromPath(descriptor){
+  const rawPath = descriptor.value;
+  const resolvedPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(rawPath);
+  let stat;
+  try {
+    stat = await fsPromises.stat(resolvedPath);
+  } catch (_) {
+    throw new DocumentPayloadError('document_not_found');
+  }
+  if (!stat.isFile()) throw new DocumentPayloadError('document_not_found');
+  if (stat.size > MAX_MEDIA_BYTES) throw new DocumentPayloadError('document_too_large');
+  let buffer;
+  try {
+    buffer = await fsPromises.readFile(resolvedPath);
+  } catch (_) {
+    throw new DocumentPayloadError('document_unreadable');
+  }
+  const base64 = buffer.toString('base64');
+  const filename = ensureDocumentFilename(descriptor.filename || path.basename(resolvedPath), descriptor.mimetype);
+  const mimetype = descriptor.mimetype || mime.lookup(filename) || 'application/octet-stream';
+  return {
+    type: 'document',
+    source: 'path',
+    b64: base64,
+    filename,
+    mimetype,
+    caption: descriptor.caption || null,
+    size: buffer.length,
+    sendMediaAsDocument: true,
+  };
+}
+
+async function buildDocumentFromUrl(descriptor){
+  const url = descriptor.value;
+  let response;
+  try {
+    response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      maxContentLength: MAX_MEDIA_BYTES,
+      maxBodyLength: MAX_MEDIA_BYTES,
+      timeout: 20000,
+      validateStatus: (status) => status >= 200 && status < 300,
+    });
+  } catch (err) {
+    if (err && err.message && (err.message.includes('maxContentLength size') || err.message.includes('maxBodyLength size'))) {
+      throw new DocumentPayloadError('document_too_large');
+    }
+    if (err && err.response && err.response.status === 404) {
+      throw new DocumentPayloadError('document_not_found');
+    }
+    throw new DocumentPayloadError('document_download_failed');
+  }
+  const buffer = Buffer.from(response.data);
+  if (buffer.length > MAX_MEDIA_BYTES) throw new DocumentPayloadError('document_too_large');
+  const headerMime = response.headers && (response.headers['content-type'] || response.headers['Content-Type']);
+  const disposition = response.headers && (response.headers['content-disposition'] || response.headers['Content-Disposition']);
+  const filename = ensureDocumentFilename(
+    descriptor.filename || extractFilenameFromDisposition(disposition) || guessFilenameFromUrl(url),
+    descriptor.mimetype || headerMime || null
+  );
+  const mimetype = descriptor.mimetype || headerMime || mime.lookup(filename) || 'application/octet-stream';
+  return {
+    type: 'document',
+    source: 'url',
+    b64: buffer.toString('base64'),
+    filename,
+    mimetype,
+    caption: descriptor.caption || null,
+    size: buffer.length,
+    sendMediaAsDocument: true,
+  };
+}
+
+function buildDocumentFromBase64(descriptor){
+  let value = descriptor.value.replace(/\s+/g, '');
+  let detectedMime = null;
+  const match = value.match(/^data:([^;]+);base64,(.+)$/i);
+  if (match) {
+    detectedMime = match[1];
+    value = match[2];
+  }
+  let buffer;
+  try {
+    buffer = Buffer.from(value, 'base64');
+  } catch (_) {
+    throw new DocumentPayloadError('invalid_document');
+  }
+  if (!buffer || !buffer.length) throw new DocumentPayloadError('invalid_document');
+  if (buffer.toString('base64').replace(/=+$/, '') !== value.replace(/=+$/, '')) {
+    throw new DocumentPayloadError('invalid_document');
+  }
+  if (buffer.length > MAX_MEDIA_BYTES) throw new DocumentPayloadError('document_too_large');
+  const mimetype = descriptor.mimetype || detectedMime || 'application/octet-stream';
+  const filename = ensureDocumentFilename(descriptor.filename, mimetype);
+  return {
+    type: 'document',
+    source: 'b64',
+    b64: buffer.toString('base64'),
+    filename,
+    mimetype,
+    caption: descriptor.caption || null,
+    size: buffer.length,
+    sendMediaAsDocument: true,
+  };
+}
+
+function ensureDocumentFilename(filename, mimetype){
+  const trimmed = filename ? String(filename).trim() : '';
+  if (trimmed) return trimmed;
+  const ext = mimetype ? mime.extension(mimetype) : null;
+  if (ext) return `document.${ext}`;
+  return 'document';
+}
+
+function extractFilenameFromDisposition(value){
+  if (!value || typeof value !== 'string') return null;
+  const utfMatch = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch && utfMatch[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1]);
+    } catch (_) {}
+  }
+  const simpleMatch = value.match(/filename="?([^";]+)"?/i);
+  if (simpleMatch && simpleMatch[1]) return simpleMatch[1];
+  return null;
+}
+
+function guessFilenameFromUrl(raw){
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const pathname = parsed.pathname || '';
+    const base = pathname.split('/').filter(Boolean).pop();
+    if (!base) return null;
+    return decodeURIComponent(base);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function normalizeOutgoingAttachments(payload){
+  const attachments = [];
+  let hasDocument = false;
+  const seen = new Set();
+
+  const addDocument = async (entry, context) => {
+    if (entry === undefined || entry === null) return false;
+    const key = typeof entry === 'object' ? entry : `str:${entry}`;
+    if (seen.has(key)) return false;
+    const doc = await normalizeDocumentEntry(entry, context);
+    if (!doc) return false;
+    seen.add(key);
+    attachments.push(doc);
+    hasDocument = true;
+    return true;
+  };
+
+  await addDocument(payload, 'payload');
+  if (payload.document !== undefined) await addDocument(payload.document, 'direct');
+  if (payload.file !== undefined) await addDocument(payload.file, 'direct');
+  if (payload.media !== undefined) await addDocument(payload.media, 'nested');
+  if (payload.message !== undefined) await addDocument(payload.message, 'nested');
+
+  const rawAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  for (const item of rawAttachments) {
+    if (await addDocument(item, 'attachments')) continue;
+    const normalized = normalizeAttachment(item);
+    if (normalized) attachments.push(normalized);
+  }
+
+  return { attachments, hasDocument };
+}
+
 function normalizeWhatsAppRecipient(value) {
   if (value === null || value === undefined) return null;
   let raw = value;
@@ -905,6 +1176,30 @@ async function sendTransportMessage(tenant, transport){
   let textSent = false;
   for (const attachment of attachments) {
     if (!attachment || typeof attachment !== 'object') continue;
+    if (attachment.type === 'document' && attachment.b64) {
+      try {
+        const media = new MessageMedia(
+          attachment.mimetype || 'application/octet-stream',
+          attachment.b64,
+          attachment.filename || 'document'
+        );
+        const opts = {};
+        if (attachment.sendMediaAsDocument) opts.sendMediaAsDocument = true;
+        const caption = typeof attachment.caption === 'string' ? attachment.caption : null;
+        if (caption) {
+          opts.caption = caption;
+        } else if (text && !textSent) {
+          opts.caption = text;
+          textSent = true;
+        }
+        await s.client.sendMessage(jid, media, opts);
+      } catch (err) {
+        const error = new Error('media_send');
+        error.normalizedJid = jid;
+        throw error;
+      }
+      continue;
+    }
     if (!attachment.url) continue;
     try {
       const media = await MessageMedia.fromUrl(String(attachment.url), { unsafeMime: true });
@@ -1539,12 +1834,36 @@ app.post('/send', async (req, res) => {
     req.query?.tenant_id;
   const tenantNum = Number(tenantRaw);
   if (!tenantNum) return res.status(400).json({ ok:false, error:'no_tenant' });
-  const attachments = Array.isArray(payload.attachments)
-    ? payload.attachments.map(normalizeAttachment).filter(Boolean)
-    : [];
+  let attachments = [];
+  let hasDocument = false;
+  try {
+    const normalized = await normalizeOutgoingAttachments(payload);
+    attachments = normalized.attachments;
+    hasDocument = normalized.hasDocument;
+  } catch (err) {
+    if (err instanceof DocumentPayloadError) {
+      return res.status(400).json({ ok:false, error: err.code || 'invalid_document' });
+    }
+    const message = err && err.code ? err.code : 'invalid_document';
+    return res.status(400).json({ ok:false, error: message });
+  }
   const text = typeof payload.text === 'string' ? payload.text : '';
-  if (!text.trim() && !attachments.length) {
+  if (!text.trim() && !hasDocument) {
     return res.status(400).json({ ok:false, error:'empty_message' });
+  }
+  if (hasDocument) {
+    for (const attachment of attachments) {
+      if (!attachment || attachment.type !== 'document') continue;
+      const size = typeof attachment.size === 'number' ? attachment.size : '-';
+      const source = attachment.source || 'unknown';
+      const toValue = payload.to === undefined || payload.to === null ? '-' : String(payload.to);
+      try {
+        console.log(
+          '[waweb]',
+          `send_document type=document source=${source} tenant=${tenantNum} to=${toValue} size=${size}`
+        );
+      } catch (_) {}
+    }
   }
   try {
     const jid = await sendTransportMessage(tenantNum, { to: payload.to, text, attachments });

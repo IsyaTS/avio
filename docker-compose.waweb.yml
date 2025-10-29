@@ -14,6 +14,7 @@ x-waweb-base: &waweb-base
     PUPPETEER_CACHE_DIR: "/data/.cache/puppeteer"
     DEBUG: "${WAWEB_DEBUG:-whatsapp-web.js:*,puppeteer:*}"
     PORT: "9001"
+    MAX_MEDIA_MB: "25"
   restart: unless-stopped
   shm_size: 512m
   mem_limit: 1024m
@@ -27,6 +28,7 @@ x-waweb-base: &waweb-base
     - "${WAWEB_STATE_DIR}:/data/wa_state:rw"
     - "./data/puppeteer:/data/.cache/puppeteer:rw"
     - "./data/tenants:/data/tenants:rw"
+    - "./data:/data:rw"
   networks:
     avio:
       aliases:
