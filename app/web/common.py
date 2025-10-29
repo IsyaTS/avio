@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - fallback when alias not yet registered
         write_tenant_config,
         read_persona,
         write_persona,
+        tenant_waweb_url,
     )
     # NOTE: providing fallback alias keeps imports working during isolated tests
 
@@ -57,11 +58,6 @@ T = TypeVar("T")
 
 # --- redis & integrations ---
 _redis_client: redis.Redis | None = None
-WA_WEB_URL = (
-    os.getenv("WAWEB_BASE_URL")
-    or os.getenv("WA_WEB_URL")
-    or "http://waweb:9001"
-).rstrip("/")
 # Internal auth token that waweb expects in X-Auth-Token. It may be provided
 # via WA_WEB_TOKEN or WEBHOOK_SECRET depending on deployment. Use either.
 WA_INTERNAL_TOKEN = (
@@ -73,6 +69,24 @@ TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") o
 
 _ASSET_VERSION: str | None = None
 ASSET_VERSION_SEED = "20240705a"
+
+
+def wa_base_url(tenant: int | None = None) -> str:
+    """
+    Resolve waweb base URL for the given tenant. Falls back to default settings.
+    """
+
+    base = ""
+    if tenant is not None:
+        try:
+            base = tenant_waweb_url(int(tenant))
+        except Exception:
+            base = ""
+    if not base:
+        base = getattr(settings, "WA_WEB_URL", "") or (
+            os.getenv("WA_WEB_URL") or "http://waweb:9001"
+        )
+    return str(base).rstrip("/")
 
 
 def _static_base_prefix() -> str:

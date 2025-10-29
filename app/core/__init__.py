@@ -192,6 +192,56 @@ _openai_client_key: str | None = None
 _sync_redis_client: redis_sync.Redis | None = None
 
 
+def tenant_config(tenant: int) -> Dict[str, Any]:
+    try:
+        tenant_key = int(tenant)
+    except Exception:
+        return {}
+    raw = _TENANTS_CONFIG_CACHE.get(tenant_key) or {}
+    return dict(raw)
+
+
+def tenant_waweb_url(tenant: int | None) -> str:
+    """
+    Return waweb base URL for a tenant. Falls back to a generated host name or default settings.
+    """
+
+    if tenant is None:
+        return settings.WA_WEB_URL
+
+    try:
+        tenant_key = int(tenant)
+    except Exception:
+        return settings.WA_WEB_URL
+
+    cfg = tenant_config(tenant_key)
+    waweb_cfg = cfg.get("waweb") if isinstance(cfg.get("waweb"), dict) else {}
+
+    url_value = ""
+    if waweb_cfg:
+        url_value = str(waweb_cfg.get("url") or "").strip()
+        if not url_value:
+            host_value = str(waweb_cfg.get("host") or "").strip()
+            port_value = waweb_cfg.get("port")
+            if host_value:
+                if port_value:
+                    try:
+                        port_int = int(str(port_value).strip())
+                    except Exception:
+                        port_int = None
+                    if port_int:
+                        url_value = f"http://{host_value}:{port_int}"
+                if not url_value:
+                    url_value = f"http://{host_value}"
+
+    if url_value:
+        return url_value.rstrip("/")
+
+    # Default naming convention for managed waweb containers
+    default_host = f"waweb-{tenant_key}"
+    return f"http://{default_host}:9001"
+
+
 def _resolve_chat_completion_callable(obj: Any):
     chat = getattr(obj, "chat", None)
     if chat is None:
@@ -3299,6 +3349,7 @@ async def ask_llm(
 
 __all__ = [
     "Settings", "settings",
+    "tenant_config", "tenant_waweb_url",
     "ADMIN_COOKIE",
     "get_tenant_pubkey", "set_tenant_pubkey",
     "http_json",
