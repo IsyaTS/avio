@@ -30,7 +30,6 @@ process.on('uncaughtException', (err) => {
 const PORT = process.env.PORT || 8088;
 const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(__dirname, '.wwebjs_auth'));
 const APP_WEBHOOK = (process.env.APP_WEBHOOK || '').trim();
-const TENANT_DEFAULT = Number(process.env.TENANT_DEFAULT || '0') || 0;
 const RAW_ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
 const WAWEB_ADMIN_TOKEN = (process.env.WAWEB_ADMIN_TOKEN || '').trim();
 if (WAWEB_ADMIN_TOKEN && RAW_ADMIN_TOKEN && WAWEB_ADMIN_TOKEN !== RAW_ADMIN_TOKEN) {
@@ -79,7 +78,7 @@ const sendFailTotal = Object.create(null);
 const waSendTotal = Object.create(null);
 const waToAppTotals = Object.create(null);
 const deprecatedNoticeTs = Object.create(null);
-/** sessions[tenant] = { client, browser, page, webhook, stateDir, providerToken, providerTokenTs, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
+/** sessions[tenant] = { client, browser, page, webhook, state_dir, provider_token, provider_token_ts, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
 const sessions = Object.create(null);
 // Temporary alias to avoid touching legacy helpers that still reference `tenants`
 const tenants = sessions;
@@ -422,8 +421,8 @@ async function ensureProviderTokenViaInternalEnsure(tenant, nowTs) {
       if (nextToken) {
         const session = sessionEntry(key);
         if (session) {
-          session.providerToken = String(nextToken);
-          session.providerTokenTs = typeof nowTs === 'number' && nowTs > 0 ? nowTs : Date.now();
+          session.provider_token = String(nextToken);
+          session.provider_token_ts = typeof nowTs === 'number' && nowTs > 0 ? nowTs : Date.now();
         }
         console.log('[waweb]', `provider_token_ensure_ok tenant=${key}`);
         return String(nextToken);
@@ -472,8 +471,8 @@ async function fetchProviderTokenFromAdmin(tenant, nowTs) {
       if (nextToken) {
         const session = sessionEntry(key);
         if (session) {
-          session.providerToken = nextToken;
-          session.providerTokenTs = typeof nowTs === 'number' && nowTs > 0 ? nowTs : Date.now();
+          session.provider_token = nextToken;
+          session.provider_token_ts = typeof nowTs === 'number' && nowTs > 0 ? nowTs : Date.now();
         }
         return nextToken;
       }
@@ -498,13 +497,14 @@ async function ensureSessionProviderToken(tenant, force = false) {
   const session = sessionEntry(tenant);
   if (!session) return '';
   const now = Date.now();
-  const ts = Number(session.providerTokenTs || 0);
-  if (!force && session.providerToken && now - ts < PROVIDER_TOKEN_REFRESH_INTERVAL_MS) {
-    return session.providerToken;
+  const ts = Number(session.provider_token_ts || 0);
+  if (!force && session.provider_token && now - ts < PROVIDER_TOKEN_REFRESH_INTERVAL_MS) {
+    return session.provider_token;
   }
   const token = await fetchProviderTokenFromAdmin(tenant, now);
   if (token) return token;
-  return session.providerToken || '';
+  session.provider_token_ts = now;
+  return session.provider_token || '';
 }
 
 async function ensureProviderToken(tenant, force = false) {
@@ -1215,9 +1215,9 @@ function ensureSession(tenant, webhookUrl) {
       _stateProbeTs: 0,
       _lastState: null,
       _stateSince: now(),
-      stateDir,
-      providerToken: null,
-      providerTokenTs: 0,
+      state_dir: stateDir,
+      provider_token: null,
+      provider_token_ts: 0,
     };
     tenants[tenant].client = buildClient(tenant);
     ensureSessionHandles(tenant);
