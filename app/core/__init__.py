@@ -537,6 +537,24 @@ def _apply_plan_alignment_to_state(
     if context.applied_cta:
         _remember_cta_state(state, context.applied_cta)
 
+
+def _make_enforcement_context(
+    state: SalesState,
+    persona_hints: Optional[PersonaHints],
+    channel_name: str,
+) -> "quality.EnforcementContext":
+    asked = set(state.asked_question_fingerprints or [])
+    ctx = quality.EnforcementContext(
+        channel=channel_name,
+        max_questions=_max_questions_limit(persona_hints),
+        asked_fingerprints=set(asked),
+        persona_cta=persona_hints.cta if persona_hints else "",
+        allow_cta=_cta_allowed(state, channel_name),
+        recent_cta=state.cta_last_text,
+        recent_cta_ts=state.cta_last_sent_ts,
+    )
+    return ctx
+
     def append_history(self, role: str, content: str) -> None:
         if not content:
             return
@@ -3393,13 +3411,12 @@ async def ask_llm(
         return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
 
     try:
-
-
         openai.api_key = settings.OPENAI_API_KEY  # type: ignore
 
         persona_hints = load_persona_hints(tenant)
-        behavior_cfg: Mapping[str, Any] | dict = {}
         state = load_sales_state(tenant, contact_ref)
+
+        # 1. План + ответ через двухшаговый пайплайн
         try:
             plan, answer = await planner.generate_sales_reply(
                 messages,
@@ -3408,19 +3425,28 @@ async def ask_llm(
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
                 persona_language=persona_hints.language if persona_hints and persona_hints.language else None,
             )
-            refined = quality.enforce_plan_alignment(answer, plan, persona_hints)
+            enforcement_ctx = _make_enforcement_context(state, persona_hints, channel_name)
+            existing_fp = set(enforcement_ctx.asked_fingerprints)
+            refined = quality.enforce_plan_alignment(
+                answer,
+                plan,
+                persona_hints,
+                context=enforcement_ctx,
+            )
+            _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
             state.last_plan = plan.to_dict()
             save_sales_state(state)
             record_bot_reply(contact_ref, tenant, channel_name, refined)
             return refined
         except planner.PlannerError as exc:  # type: ignore[attr-defined]
             logger.warning("planner failed: %s", exc)
+        except APITimeoutError as exc:
+            logger.warning("planner timeout: %s", exc)
         except Exception as exc:
             logger.exception("llm planner error", exc_info=exc)
 
-        # Попробуем прямой ответ модели, затем фоллбек на правила
+        # 2. Прямой вызов chat.completions
         try:
-
             create_fn = _resolve_chat_completion_callable(client)
             if not create_fn:
                 raise RuntimeError("openai client missing chat.completions.create")
@@ -3438,13 +3464,24 @@ async def ask_llm(
             )
             answer = resp.choices[0].message.content.strip()  # type: ignore
             dummy_plan = planner.GeneratedPlan()
-            refined_answer = quality.enforce_plan_alignment(answer, dummy_plan, persona_hints)
+            enforcement_ctx = _make_enforcement_context(state, persona_hints, channel_name)
+            existing_fp = set(enforcement_ctx.asked_fingerprints)
+            refined_answer = quality.enforce_plan_alignment(
+                answer,
+                dummy_plan,
+                persona_hints,
+                context=enforcement_ctx,
+            )
+            _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
             save_sales_state(state)
             record_bot_reply(contact_ref, tenant, channel_name, refined_answer)
             return refined_answer
+        except APITimeoutError as exc:
+            logger.warning("direct llm timeout: %s", exc)
         except Exception as exc:
             logger.exception("direct llm call failed", exc_info=exc)
-            return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+
+        return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
 
     except Exception as exc:
         logger.exception("ask_llm unexpected error", exc_info=exc)
