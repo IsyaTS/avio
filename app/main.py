@@ -539,7 +539,7 @@ async def _handle(request: Request):
 
 @webhook.api_route("/internal/tenant/{tenant}/catalog-file", methods=["GET", "HEAD"])
 async def internal_catalog_file(
-    tenant: int, path: str, token: str = "", request: Request | None = None
+    tenant: int, path: str, token: str = "", request: Request
 ):
     if settings.WEBHOOK_SECRET and token != settings.WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
@@ -578,7 +578,7 @@ async def internal_catalog_file(
         filename=display_name,
     )
 
-    if request is not None and request.method.upper() == "HEAD":
+    if request.method.upper() == "HEAD":
         response.body_iterator = iter(())
 
     return response
