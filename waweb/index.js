@@ -527,6 +527,9 @@ async function sendProviderEvent(tenant, payload, attempt = 1) {
     tenant: Number(tenantKey),
     channel: 'whatsapp',
   });
+  if (!enrichedPayload.provider) {
+    enrichedPayload.provider = 'whatsapp';
+  }
 
   let tries = Math.max(1, Number(attempt) || 1);
   let forceRefresh = tries > 1;

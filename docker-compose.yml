@@ -122,6 +122,7 @@ services:
     volumes:
       - ./data/wa_state:/data/wa_state:rw
       - ./data/puppeteer:/data/.cache/puppeteer:rw
+      - ./data/tenants:/data/tenants:rw
 
   tgworker:
     image: avio/app:local
