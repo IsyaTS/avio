@@ -1701,6 +1701,13 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                     has_custom_catalogs = True
         except Exception:
             pass
+        persona_csv_path = persona_catalog_csv(int(tenant))
+        if persona_csv_path:
+            meta = {"type": "csv", "delimiter": ";", "encoding": "utf-8"}
+            candidate_tuple = (persona_csv_path, meta)
+            if candidate_tuple not in candidates:
+                candidates.insert(0, candidate_tuple)
+            has_custom_catalogs = True
 
     if not candidates:
         candidates.append((CATALOG_CSV, {"delimiter": ",", "encoding": "utf-8"}))
@@ -3171,7 +3178,8 @@ class SalesConversationEngine:
         scarcity = self._choose_scarcity(items)
         reciprocity = self._choose_reciprocity()
         upsell = self._choose_upsell()
-        cta_line = self._choose_cta(cta_primary, cta_fallback)
+        if _cta_allowed(self.state, self.channel_name):
+            cta_line = self._choose_cta(cta_primary, cta_fallback)
         message_parts = {
             "greeting": greeting,
             "teach": teach,
@@ -3555,6 +3563,7 @@ __all__ = [
     "read_tenant_config", "write_tenant_config",
     "read_persona", "write_persona",
     "load_tenant", "load_persona", "PersonaHints", "extract_persona_hints", "load_persona_hints",
+    "load_persona_structured", "persona_meta_config", "persona_catalog_pdf", "persona_catalog_csv",
     "build_llm_messages", "ask_llm",
     # helpers ниже могут понадобиться в других частях
     "infer_user_needs", "search_catalog", "format_needs_for_prompt",
