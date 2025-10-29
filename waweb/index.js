@@ -81,8 +81,10 @@ const sendFailTotal = Object.create(null);
 const waSendTotal = Object.create(null);
 const waToAppTotals = Object.create(null);
 const deprecatedNoticeTs = Object.create(null);
-/** tenants[tenant] = { client, webhook, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
-const tenants = Object.create(null);
+/** sessions[tenant] = { client, browser, page, webhook, stateDir, providerToken, providerTokenTs, qrSvg, qrText, qrPng, ready, lastTs, lastEvent } */
+const sessions = Object.create(null);
+// Temporary alias to avoid touching legacy helpers that still reference `tenants`
+const tenants = sessions;
 function logProviderWebhook(eventName, tenantKey, statusCode, tokenPresent) {
   const flag = tokenPresent ? 'true' : 'false';
   try {
