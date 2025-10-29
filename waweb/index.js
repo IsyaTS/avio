@@ -70,8 +70,6 @@ const WEB_VERSION_REMOTE_PATH = (() => {
 const WINDOWS_CHROME_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
 
-const providerTokenCache = Object.create(null);
-
 /** @type {{ tenant: string, ts: number, svg: string, png: string, qrId: string | null } | null } */
 let lastQrCache = null;
 
@@ -376,7 +374,12 @@ function sessionEntry(tenant) {
 
 function ensureSessionHandles(tenant) {
   const session = sessionEntry(tenant);
-  if (!session || !session.client) return;
+  if (!session) return;
+  if (!session.client) {
+    session.browser = null;
+    session.page = null;
+    return;
+  }
   try {
     session.browser = session.client.pupBrowser || null;
   } catch (_) {
@@ -395,7 +398,7 @@ async function ensureProviderTokenViaInternalEnsure(tenant, nowTs) {
   try {
     url = new URL(`/internal/tenant/${encodeURIComponent(key)}/ensure`, APP_BASE_URL).toString();
   } catch (_) {
-    url = `${APP_BASE_URL.replace(/\/$/, '')}/internal/tenant/${key}/ensure`;
+    url = `${APP_BASE_URL.replace(/\/$/, '')}/internal/tenant/${encodeURIComponent(key)}/ensure`;
   }
 
   const headers = {};
@@ -405,7 +408,14 @@ async function ensureProviderTokenViaInternalEnsure(tenant, nowTs) {
   try {
     const { statusCode, body } = await requestJson('POST', url, null, headers);
     if (statusCode >= 200 && statusCode < 300 && body) {
-      const parsed = JSON.parse(body);
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch (err) {
+        const reason = err && err.message ? err.message : err;
+        console.warn('[waweb]', `provider_token_ensure_parse_error tenant=${key} reason=${reason}`);
+        parsed = null;
+      }
       const nextToken = parsed && typeof parsed === 'object'
         ? (parsed.provider_token || parsed.token || '')
         : '';
@@ -436,7 +446,7 @@ async function fetchProviderTokenFromAdmin(tenant, nowTs) {
   try {
     url = new URL(`/admin/provider-token/${encodeURIComponent(key)}`, APP_BASE_URL).toString();
   } catch (_) {
-    url = `${APP_BASE_URL.replace(/\/$/, '')}/admin/provider-token/${key}`;
+    url = `${APP_BASE_URL.replace(/\/$/, '')}/admin/provider-token/${encodeURIComponent(key)}`;
   }
 
   const headers = {};
@@ -445,7 +455,14 @@ async function fetchProviderTokenFromAdmin(tenant, nowTs) {
   try {
     const { statusCode, body } = await requestJson('GET', url, null, headers);
     if (statusCode >= 200 && statusCode < 300 && body) {
-      const parsed = JSON.parse(body);
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch (err) {
+        const reason = err && err.message ? err.message : err;
+        console.warn('[waweb]', `provider_token_parse_error tenant=${key} reason=${reason}`);
+        parsed = null;
+      }
       const nextToken = (() => {
         if (!parsed || typeof parsed !== 'object') return '';
         if (parsed.provider_token) return String(parsed.provider_token);
@@ -546,7 +563,7 @@ async function sendProviderEvent(tenant, payload, attempt = 1) {
       else if (statusCode === 401) statusLabel = 'unauthorized';
       else if (statusCode === 422) statusLabel = 'invalid';
       incWaToApp(eventName, statusLabel);
-      logProviderWebhook(eventName, tenantKey, statusCode, true);
+      logProviderWebhook(eventName, tenantKey, statusCode, !!token);
       if (statusCode === 401) {
         forceRefresh = true;
         tries += 1;
@@ -563,7 +580,7 @@ async function sendProviderEvent(tenant, payload, attempt = 1) {
       const reason = err && err.code ? err.code : err && err.message ? err.message : String(err);
       incWaToApp(eventName, 'exception');
       console.warn('[waweb]', `wa_to_app_exception event=${eventName} tenant=${tenantKey} reason=${reason}`);
-      logProviderWebhook(eventName, tenantKey, 0, true);
+      logProviderWebhook(eventName, tenantKey, 0, !!token);
       if (tries < 3) {
         tries += 1;
         forceRefresh = true;
@@ -930,12 +947,11 @@ refreshProviderTokens(true).catch((err) => {
 });
 
 async function refreshProviderTokens(force = false) {
-  const list = new Set(Object.keys(tenants));
-  if (TENANT_DEFAULT) list.add(String(TENANT_DEFAULT));
+  const list = Object.keys(tenants);
   for (const tenant of list) {
     if (!tenant) continue;
     try {
-      await ensureProviderToken(tenant, force);
+      await ensureSessionProviderToken(tenant, force);
     } catch (err) {
       const reason = err && err.message ? err.message : err;
       console.warn('[waweb]', `provider_token_refresh_failed tenant=${tenant} reason=${reason}`);
@@ -1009,9 +1025,11 @@ function buildClient(tenant) {
     }
   };
   const c = new Client(opts);
+  const updateHandles = () => ensureSessionHandles(tenant);
 
   c.on('loading_screen', (p, t) => log(tenant, `loading ${p}% ${t||''}`));
   c.on('qr', async (qr) => {
+    updateHandles();
     const qrId = Date.now();
     let svg = '';
     let png = '';
@@ -1044,6 +1062,7 @@ function buildClient(tenant) {
     triggerTenantSync(tenant);
   });
   c.on('authenticated', () => {
+    updateHandles();
     tenants[tenant].lastEvent = 'authenticated';
     tenants[tenant].lastTs = now();
     tenants[tenant].qrPng = null;
@@ -1055,6 +1074,7 @@ function buildClient(tenant) {
     triggerTenantSync(tenant);
   });
   c.on('auth_failure', (m) => {
+    updateHandles();
     tenants[tenant].ready = false;
     tenants[tenant].qrSvg = null;
     tenants[tenant].qrPng = null;
@@ -1067,6 +1087,7 @@ function buildClient(tenant) {
     log(tenant, 'auth_failure ' + (m||''));
   });
   c.on('ready', () => {
+    updateHandles();
     tenants[tenant].ready = true;
     tenants[tenant].qrSvg = null;
     tenants[tenant].qrPng = null;
@@ -1095,6 +1116,7 @@ function buildClient(tenant) {
     })();
   });
   c.on('disconnected', async (reason) => {
+    updateHandles();
     const reasonKey = String(reason || '').toUpperCase();
     tenants[tenant].ready = false;
     tenants[tenant].qrPng = null;
@@ -1111,6 +1133,7 @@ function buildClient(tenant) {
     setTimeout(() => { try { c.initialize(); } catch(_){} }, 1500);
   });
   c.on('change_state', (state) => {
+    updateHandles();
     const rawState = String(state || '');
     const lowered = rawState.toLowerCase();
     tenants[tenant].lastTs = now();
@@ -1127,6 +1150,7 @@ function buildClient(tenant) {
     }
   });
   c.on('message', (msg) => {
+    updateHandles();
     if (msg && typeof msg.from === 'string' && msg.from.toLowerCase() === 'status@broadcast') {
       return;
     }
@@ -1172,10 +1196,13 @@ function ensureSession(tenant, webhookUrl) {
   tenant = String(tenant);
   if (!tenants[tenant]) {
     ensureDir(STATE_DIR);
-    ensureDir(path.join(STATE_DIR, `session-tenant-${tenant}`));
+    const stateDir = path.join(STATE_DIR, `session-tenant-${tenant}`);
+    ensureDir(stateDir);
     clearChromeProfileLocks(tenant);
     tenants[tenant] = {
       client: null,
+      browser: null,
+      page: null,
       webhook: webhookUrl || '',
       qrSvg: null,
       qrText: null,
@@ -1188,13 +1215,17 @@ function ensureSession(tenant, webhookUrl) {
       _stateProbeTs: 0,
       _lastState: null,
       _stateSince: now(),
+      stateDir,
+      providerToken: null,
+      providerTokenTs: 0,
     };
     tenants[tenant].client = buildClient(tenant);
+    ensureSessionHandles(tenant);
     initializeClient(tenant, tenants[tenant]);
     updateSessionState(tenants[tenant], 'init');
     log(tenant, 'init');
     triggerTenantSync(tenant);
-    ensureProviderToken(tenant).catch((err) => {
+    ensureSessionProviderToken(tenant).catch((err) => {
       const reason = err && err.message ? err.message : err;
       console.warn('[waweb]', `provider_token_ensure_failed tenant=${tenant} reason=${reason}`);
     });
@@ -1565,8 +1596,9 @@ if (require.main === module) {
 module.exports = {
   app,
   ensureProviderToken,
+  ensureSessionProviderToken,
   ensureProviderTokenViaInternalEnsure,
   requestJson,
   setRequestJsonOverride,
-  providerTokenCache,
+  sessions,
 };
