@@ -470,6 +470,26 @@ class SalesState:
             obj.cta_last_sent_ts = 0.0
         return obj
 
+    def append_history(self, role: str, content: str) -> None:
+        if not content:
+            return
+        content = content.strip()
+        if not content:
+            return
+        if self.history and self.history[-1].get("role") == role and self.history[-1].get("content") == content:
+            return
+        self.history.append({"role": role, "content": content})
+        if len(self.history) > 24:
+            self.history = self.history[-24:]
+
+    def mark_spin_stage(self, stage: str, status: str) -> None:
+        if stage not in self.spin:
+            self.spin[stage] = status
+        else:
+            order = {"pending": 0, "asked": 1, "covered": 2}
+            if order.get(status, 0) >= order.get(self.spin.get(stage, "pending"), 0):
+                self.spin[stage] = status
+
 
 def _remember_question_state(state: SalesState, question: str) -> None:
     clean = (question or "").strip()
@@ -554,26 +574,6 @@ def _make_enforcement_context(
         recent_cta_ts=state.cta_last_sent_ts,
     )
     return ctx
-
-    def append_history(self, role: str, content: str) -> None:
-        if not content:
-            return
-        content = content.strip()
-        if not content:
-            return
-        if self.history and self.history[-1].get("role") == role and self.history[-1].get("content") == content:
-            return
-        self.history.append({"role": role, "content": content})
-        if len(self.history) > 24:
-            self.history = self.history[-24:]
-
-    def mark_spin_stage(self, stage: str, status: str) -> None:
-        if stage not in self.spin:
-            self.spin[stage] = status
-        else:
-            order = {"pending": 0, "asked": 1, "covered": 2}
-            if order.get(status, 0) >= order.get(self.spin.get(stage, "pending"), 0):
-                self.spin[stage] = status
 
 
 @dataclass
