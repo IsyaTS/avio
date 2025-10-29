@@ -70,6 +70,22 @@ _catalog_sent_cache: dict[Tuple[int, str], float] = {}
 WA_QR_CACHE_TTL_MIN = 180  # seconds
 WA_QR_CACHE_TTL_MAX = 300  # seconds
 
+_CATALOG_KEYWORDS = (
+    "каталог",
+    "прайс",
+    "прайс-лист",
+    "catalog",
+    "price",
+    "pdf",
+)
+
+
+def _user_requested_catalog(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(token in lowered for token in _CATALOG_KEYWORDS)
+
 
 def _digits(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isdigit())
@@ -523,7 +539,12 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         behavior = {}
         attachment, caption = None, ""
 
-    if attachment and not catalog_already_sent and provider != "telegram":
+    forced_catalog = bool(text and _user_requested_catalog(text))
+    should_send_catalog = bool(attachment) and (forced_catalog or not catalog_already_sent)
+
+    if should_send_catalog:
+        if forced_catalog and cache_key:
+            _catalog_sent_cache.pop(cache_key, None)
         catalog_text = (caption or "Каталог во вложении (PDF).").strip()
         resolved_provider = provider or "whatsapp"
         catalog_out: Dict[str, Any] = {
@@ -536,16 +557,28 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "message_id": message_id or str(lead_id),
             "attachments": [attachment] if attachment else [],
         }
-        catalog_out["to"] = whatsapp_phone
         catalog_out["attachment"] = attachment
-        await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(catalog_out, ensure_ascii=False))
-        if cache_key:
-            _catalog_sent_cache[cache_key] = time.time()
-        try:
-            core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
-        except Exception:
-            pass
-        return _ok({"queued": True, "leadId": lead_id})
+        if resolved_provider == "telegram":
+            if telegram_user_id:
+                catalog_out["telegram_user_id"] = int(telegram_user_id)
+            if peer_value:
+                catalog_out["peer"] = peer_value
+            if peer_id is not None:
+                catalog_out["peer_id"] = int(peer_id)
+            if not catalog_out.get("telegram_user_id") and not catalog_out.get("peer"):
+                should_send_catalog = False
+        else:
+            catalog_out["to"] = whatsapp_phone
+
+        if should_send_catalog:
+            await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(catalog_out, ensure_ascii=False))
+            if cache_key:
+                _catalog_sent_cache[cache_key] = time.time()
+            try:
+                core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
+            except Exception:
+                pass
+            return _ok({"queued": True, "leadId": lead_id})
 
     fallback_reply = (
         "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
