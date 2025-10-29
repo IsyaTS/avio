@@ -44,6 +44,9 @@ except Exception:  # опциональная зависимость для Exce
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 ROOT_DIR = BASE_DIR.parent
 DATA_DIR = pathlib.Path(os.getenv("APP_DATA_DIR") or (BASE_DIR / "data"))
+TENANTS_CONFIG_PATH = pathlib.Path(
+    os.getenv("TENANTS_CONFIG_PATH") or (BASE_DIR.parent / "config" / "tenants.yml")
+)
 
 
 def _resolve_public_key(admin_token: str) -> str:
@@ -87,6 +90,7 @@ _TENANT_CONFIG_CACHE: Dict[int, Tuple[float, float, dict]] = {}
 _TENANT_PERSONA_CACHE: Dict[int, Tuple[float, str]] = {}
 # Key: (tenant or None, tuple of (path, mtime, size)) -> parsed, normalized items
 _CATALOG_CACHE: Dict[Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]], List[Dict[str, Any]]] = {}
+_TENANTS_CONFIG_CACHE: Dict[int, Dict[str, Any]] = {}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
