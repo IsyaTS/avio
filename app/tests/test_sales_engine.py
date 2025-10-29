@@ -1,8 +1,9 @@
 import importlib
-import pytest
-
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 INNER = ROOT / "app"
@@ -117,7 +118,6 @@ def test_rule_based_reply_reflects_empathy_and_history():
 def tmp_core(monkeypatch, tmp_path):
     tenants_dir = tmp_path / "tenants"
     monkeypatch.setenv("TENANTS_DIR", str(tenants_dir))
-    import sys
     sys.modules.pop("core", None)
     core_module = importlib.import_module("core")
     globals()["core"] = core_module
@@ -165,3 +165,60 @@ def test_rule_based_reply_omits_explain_line_without_flag(monkeypatch):
     )
 
     assert "Понял запрос" not in reply
+
+
+def test_rule_based_reply_respects_cta_cooldown():
+    tenant = 0
+    contact_id = 808
+    core.reset_sales_state(tenant, contact_id)
+
+    core.make_rule_based_reply("Здравствуйте", "whatsapp", contact_id, tenant=tenant)
+    core.make_rule_based_reply("Нужна металлическая дверь", "whatsapp", contact_id, tenant=tenant)
+
+    state = core.load_sales_state(tenant, contact_id)
+    first_cta = state.cta_last_text
+    assert first_cta, "CTA must be recorded after второй ответ"
+    first_ts = state.cta_last_sent_ts
+    assert first_ts > 0
+
+    manual_ts = time.time()
+    state.cta_last_sent_ts = manual_ts
+    core.save_sales_state(state)
+
+    reply = core.make_rule_based_reply("Хочу уточнить сроки установки", "whatsapp", contact_id, tenant=tenant)
+    assert first_cta not in reply, "CTA не должен повторяться сразу после предыдущего"
+
+    updated = core.load_sales_state(tenant, contact_id)
+    assert updated.cta_last_sent_ts == pytest.approx(manual_ts)
+
+
+def test_persona_catalog_assets(tmp_core):
+    tenant = 5
+    tmp_core.ensure_tenant_files(tenant)
+    tenant_root = tmp_core.tenant_dir(tenant)
+    uploads_dir = tenant_root / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = uploads_dir / "catalog.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
+
+    catalogs_dir = tenant_root / "catalogs"
+    catalogs_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = catalogs_dir / "custom.csv"
+    csv_path.write_text("name;price\nМодель;10000\n", encoding="utf-8-sig")
+
+    persona_path = tenant_root / "persona.md"
+    persona_path.write_text(
+        "meta:\n"
+        "  catalog_pdf_path: \"uploads/catalog.pdf\"\n"
+        "  catalog_csv_path: \"catalogs/custom.csv\"\n",
+        encoding="utf-8",
+    )
+
+    meta = tmp_core.persona_catalog_pdf(tenant)
+    assert meta and meta["path"] == "uploads/catalog.pdf"
+
+    csv_resolved = tmp_core.persona_catalog_csv(tenant)
+    assert csv_resolved and csv_resolved.exists()
+
+    items = tmp_core.read_all_catalog(tenant=tenant)
+    assert items and any(item.get("title") == "Модель" for item in items)
