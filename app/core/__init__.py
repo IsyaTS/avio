@@ -470,6 +470,73 @@ class SalesState:
             obj.cta_last_sent_ts = 0.0
         return obj
 
+
+def _remember_question_state(state: SalesState, question: str) -> None:
+    clean = (question or "").strip()
+    if not clean:
+        return
+    if clean not in state.asked_questions:
+        state.asked_questions.append(clean)
+        if len(state.asked_questions) > 24:
+            state.asked_questions = state.asked_questions[-24:]
+    fingerprint = quality.question_fingerprint(clean)
+    if fingerprint:
+        if fingerprint not in (state.asked_question_fingerprints or []):
+            state.asked_question_fingerprints.append(fingerprint)
+            if len(state.asked_question_fingerprints) > 32:
+                state.asked_question_fingerprints = state.asked_question_fingerprints[-32:]
+    state.last_question_text = clean
+
+
+def _remember_cta_state(state: SalesState, cta_text: str) -> None:
+    clean = (cta_text or "").strip()
+    if not clean:
+        return
+    state.cta_last_text = clean
+    state.cta_last_sent_ts = time.time()
+
+
+def _cta_allowed(state: SalesState, channel_name: str | None) -> bool:
+    if not isinstance(state, SalesState):
+        return True
+    if (state.user_message_count or 0) <= 1:
+        return False
+    if state.sentiment_score <= -1.2:
+        return False
+    now_ts = time.time()
+    if state.cta_last_sent_ts and (now_ts - state.cta_last_sent_ts) < CTA_COOLDOWN_SECONDS:
+        return False
+    if channel_name and channel_name.lower() == "avito":
+        return True
+    return True
+
+
+def _max_questions_limit(persona_hints: Optional[PersonaHints], default: int = 1) -> int:
+    if persona_hints and persona_hints.max_questions is not None:
+        try:
+            return max(0, int(persona_hints.max_questions))
+        except Exception:
+            return max(0, default)
+    return max(0, default)
+
+
+def _apply_plan_alignment_to_state(
+    state: SalesState,
+    context: "quality.EnforcementContext",
+    previous_fingerprints: set[str],
+) -> None:
+    if not isinstance(state, SalesState):
+        return
+    new_fingerprints = set(context.asked_fingerprints or []) - set(previous_fingerprints or set())
+    for fingerprint in new_fingerprints:
+        question = context.fingerprint_map.get(fingerprint)
+        if question:
+            _remember_question_state(state, question)
+    for question in context.applied_questions or []:
+        _remember_question_state(state, question)
+    if context.applied_cta:
+        _remember_cta_state(state, context.applied_cta)
+
     def append_history(self, role: str, content: str) -> None:
         if not content:
             return
@@ -2853,6 +2920,12 @@ class SalesConversationEngine:
         self._remember_question(question)
         return question
 
+    def _remember_question(self, question: str) -> None:
+        _remember_question_state(self.state, question)
+
+    def _remember_cta(self, cta_text: str) -> None:
+        _remember_cta_state(self.state, cta_text)
+
     def pending_question(self) -> Optional[str]:
         focus = self._focus_phrase()
         for stage in ("s", "p", "i", "n"):
@@ -2999,6 +3072,7 @@ class SalesConversationEngine:
         question_line = self._choose_question(currency, max_questions_cfg)
         greeting = self._personalized_greeting()
         loyalty_line = self._loyalty_line()
+        cta_line = ""
 
         if current_turn <= 1:
             intro_parts = [greeting]
@@ -3022,6 +3096,7 @@ class SalesConversationEngine:
         scarcity = self._choose_scarcity(items)
         reciprocity = self._choose_reciprocity()
         upsell = self._choose_upsell()
+        cta_line = self._choose_cta(cta_primary, cta_fallback)
         message_parts = {
             "greeting": greeting,
             "teach": teach,
@@ -3034,6 +3109,7 @@ class SalesConversationEngine:
             "scarcity": scarcity,
             "upsell": upsell,
             "reciprocity": reciprocity,
+            "cta": cta_line or "",
             "closing": self.persona_hints.closing or "",
         }
 
@@ -3049,6 +3125,7 @@ class SalesConversationEngine:
             "scarcity",
             "upsell",
             "reciprocity",
+            "cta",
             "closing",
         ]
 
@@ -3060,6 +3137,7 @@ class SalesConversationEngine:
                 message_parts.get("question", ""),
                 message_parts.get("loyalty", ""),
                 message_parts.get("fab", ""),
+                message_parts.get("cta", ""),
                 message_parts.get("closing", ""),
             ]
             cleaned = [part.strip() for part in prioritized if part and part.strip()]
@@ -3068,6 +3146,8 @@ class SalesConversationEngine:
         self.state.last_bot_reply = reply
         self.state.append_history("assistant", reply)
         self.state.last_updated_ts = time.time()
+        if cta_line:
+            self._remember_cta(cta_line)
         return reply
 
     def summary_for_llm(self) -> str:
