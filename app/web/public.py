@@ -91,6 +91,16 @@ except ImportError:  # pragma: no cover - fallback when module alias missing
 from .ui import render_template, templates as _templates
 from .webhooks import router as webhook_router, process_incoming
 
+
+class TgWorkerCallError(RuntimeError):
+    """Raised when a call to the tgworker proxy fails."""
+
+    def __init__(self, url: str, detail: str) -> None:
+        self.url = url
+        self.detail = detail
+        message = f"{url}: {detail}" if detail else url
+        super().__init__(message)
+
 templates = _templates
 
 logger = logging.getLogger(__name__)
