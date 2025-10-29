@@ -118,12 +118,23 @@ def test_internal_catalog_file_uses_original_name_and_normalizes_path(sandbox):
     core.write_tenant_config(tenant, cfg)
 
     client = TestClient(main.app)
-    response = client.get(f"/internal/tenant/{tenant}/catalog-file", params={"path": "uploads\\catalog.pdf"})
+    response = client.get(
+        f"/internal/tenant/{tenant}/catalog-file",
+        params={"path": "uploads\\catalog.pdf"},
+    )
 
     assert response.status_code == 200
     assert response.content == payload
     disposition = response.headers.get("content-disposition", "")
     assert "catalog-original.pdf" in disposition
+
+    head_response = client.head(
+        f"/internal/tenant/{tenant}/catalog-file",
+        params={"path": "uploads/catalog.pdf"},
+    )
+
+    assert head_response.status_code == 200
+    assert head_response.headers.get("content-length") == str(len(payload))
 
 
 def test_read_catalog_missing_custom_returns_empty(sandbox):

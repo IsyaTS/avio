@@ -537,8 +537,10 @@ async def _handle(request: Request):
 
     return await process_incoming(body, request)
 
-@webhook.get("/internal/tenant/{tenant}/catalog-file")
-async def internal_catalog_file(tenant: int, path: str, token: str = ""):
+@webhook.api_route("/internal/tenant/{tenant}/catalog-file", methods=["GET", "HEAD"])
+async def internal_catalog_file(
+    tenant: int, path: str, token: str = "", request: Request | None = None
+):
     if settings.WEBHOOK_SECRET and token != settings.WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
     if not path:
@@ -570,11 +572,16 @@ async def internal_catalog_file(tenant: int, path: str, token: str = ""):
     except Exception:
         pass
 
-    return FileResponse(
+    response = FileResponse(
         target,
         media_type=mime or "application/octet-stream",
         filename=display_name,
     )
+
+    if request is not None and request.method.upper() == "HEAD":
+        response.body_iterator = iter(())
+
+    return response
 
 # монтирование роутеров
 app.include_router(admin_router)
