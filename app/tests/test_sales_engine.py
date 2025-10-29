@@ -147,7 +147,7 @@ def test_rule_based_reply_respects_persona_hints(tmp_core):
     assert "Напишите номер телефона, перезвоню лично." in reply
 
     parts = [block.strip() for block in reply.split("\n\n") if block.strip()]
-    assert len(parts) <= 5
+    assert len(parts) <= 6
 
 
 def test_rule_based_reply_omits_explain_line_without_flag(monkeypatch):

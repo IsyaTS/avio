@@ -66,6 +66,7 @@ def _looks_like_channel_switch(question: str) -> bool:
     return any(
         token in lowered
         for token in (
+            "канал",
             "какой канал",
             "где удобнее",
             "перейд",
