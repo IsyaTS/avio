@@ -157,7 +157,101 @@ GET /pub/settings/get?k=<PUBLIC_KEY>&tenant=<TENANT>
 - `OUTBOX_WHITELIST` фильтрует получателей по ID, username и телефону; пустое значение означает, что все отправки будут пропущены.
 - Перед отправкой воркер проверяет наличие лида в БД и, при отсутствии, помечает результат как `err:no_lead` без попытки доставки.
 
-### Database migrations
+## Мультиарендный WhatsApp (waweb)
+
+Чтобы каждый арендатор имел собственную сессию WhatsApp и не конфликтовал с остальными, используются отдельные контейнеры `waweb`. Управление вынесено в отдельный compose‑файл (`docker-compose.waweb.yml`) и утилиту `scripts/waweb_manage.py`.
+
+### Конфигурация
+
+- Реестр арендаторов хранится в `config/tenants.yml`:
+
+  ```yaml
+  tenants:
+    - id: 1
+      waweb:
+        host: waweb-1
+        port: 9001
+    - id: 2
+      waweb:
+        host: waweb-2
+        port: 9001
+  ```
+
+  `host` попадает в alias Docker‑сети `avio_default`, а `port` — внутрь контейнера (по умолчанию `9001`). При необходимости можно задать собственный `container_name` и `state_dir`.
+
+- Каталоги сессий лежат в `data/wa_state/<TENANT>`. Для защиты создаётся файл `DO_NOT_DELETE.txt`; никакие скрипты не очищают эти каталоги.
+
+- Основной `app` получает URL waweb через `app.core.tenant_waweb_url()`, поэтому после изменения конфига требуется `docker compose restart app`.
+
+### Скрипт управления
+
+```
+scripts/waweb_manage.py <command> [--tenant <id>] [--all]
+
+  up        – запустить (или пересобрать) контейнер
+  down      – остановить контейнер
+  restart   – перезапустить контейнер
+  status    – показать `docker compose ps`
+  logs      – вывести логи (с --follow для tail -f)
+  purge     – попытка очистить state (всегда возвращает «нельзя удалять»)
+```
+
+Команды выполняются через `docker compose -f docker-compose.waweb.yml`, поэтому требуется сеть `avio_default` (создаётся основной `docker-compose.yml`).
+
+### Добавление нового арендатора (пример для tenant=2)
+
+1. **Конфиг** – добавить запись в `config/tenants.yml` (см. выше).
+2. **Перезапустить `app`**, чтобы он перечитал конфигурацию:
+   ```bash
+   docker compose restart app
+   ```
+3. **Поднять контейнер waweb**:
+   ```bash
+   export ADMIN_TOKEN=sueta    # или ваш реальный токен
+   ./scripts/waweb_manage.py up --tenant 2
+   ./scripts/waweb_manage.py logs --tenant 2   # убедиться, что сервис поднялся
+   ```
+4. **Запросить старт сессии через app** (генерация QR):
+   ```bash
+   docker exec avio-app-1 curl -fsS \
+     -H "X-Auth-Token: ${ADMIN_TOKEN}" \
+     -H "Content-Type: application/json" \
+     -d '{"tenant_id": 2, "webhook_url": "http://app:8000/webhook?token='${ADMIN_TOKEN}'"}' \
+     -X POST http://waweb-2:9001/session/2/start
+   ```
+5. **Проверить статус**:
+   ```bash
+   docker exec avio-app-1 curl -fsS \
+     -H "X-Auth-Token: ${ADMIN_TOKEN}" \
+     http://waweb-2:9001/session/2/status
+   ```
+   Ответ `{"ready":false,"qr":true,...}` означает, что QR готов.
+6. **Авторизоваться** – открыть `/pub/wa/start?tenant=2&k=<TENANT_KEY>` и сканировать QR. После подключения статус перейдёт в `ready=true`.
+
+### Использование
+
+- Один контейнер обслуживает одного арендатора. Для нескольких арендаторов запускаются `waweb-1`, `waweb-2` и т.д.
+- Приложение `app` автоматически обращается к нужному контейнеру (никаких публичных переменных `WA_WEB_URL` не осталось).
+- Очистка `data/wa_state/<TENANT>` недопустима: это приведёт к потере авторизации. При необходимости «сбросить» сессию используйте `POST /session/<tenant>/logout` или `restart`.
+
+### Диагностика
+
+```bash
+# состояние контейнера
+./scripts/waweb_manage.py status --tenant 1
+
+# tail -f логов
+./scripts/waweb_manage.py logs --tenant 1 -f
+
+# проверка API из app
+docker exec avio-app-1 curl -fsS -H "X-Auth-Token:${ADMIN_TOKEN}" http://waweb-1:9001/session/1/status
+
+# экспорт SVG QR
+docker exec avio-app-1 curl -fsS -H "X-Auth-Token:${ADMIN_TOKEN}" http://waweb-1:9001/session/1/qr.svg -o /tmp/wa-qr.svg
+```
+
+Если `/session/<tenant>/status` долго висит, смотрите лог контейнера (`SingletonLock`, `Failed to launch the browser process` и т.п.). Часто помогает `./scripts/waweb_manage.py restart --tenant <id>` с последующим `curl` через 20–30 секунд.
+
 
 - Выполните `make migrate`, чтобы через контейнер `ops` применить Alembic-миграции и вывести структуру таблиц `leads`, `messages` и список колонок `contacts`. Перед запуском установите переменную окружения `DATABASE_URL`.
 
