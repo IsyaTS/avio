@@ -42,3 +42,4 @@ node_modules/
 # runtime extra
 data/wa_state/
 waweb/.wwebjs_cache/
+.aider*
