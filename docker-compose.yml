@@ -97,33 +97,6 @@ services:
       - ./tg-sessions:/app/tg-sessions:rw
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
 
-  waweb:
-    build: ./waweb
-    env_file: .env
-    environment:
-      - PORT=9001
-      - TENANT_DEFAULT=${TENANT_DEFAULT:-1}
-      - APP_BASE_URL=http://app:8000
-      - ADMIN_TOKEN=${ADMIN_TOKEN}
-      - WAWEB_ADMIN_TOKEN=${ADMIN_TOKEN}
-      - PUBLIC_KEY=${PUBLIC_KEY}
-      - STATE_DIR=/data/wa_state
-      - PUPPETEER_CACHE_DIR=/data/.cache/puppeteer
-      - DEBUG=whatsapp-web.js:*,puppeteer:*
-    restart: unless-stopped
-    shm_size: 512m
-    mem_limit: 1024m
-    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
-    healthcheck:
-      test: ["CMD-SHELL","curl -fsS http://127.0.0.1:9001/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    volumes:
-      - ./data/wa_state:/data/wa_state:rw
-      - ./data/puppeteer:/data/.cache/puppeteer:rw
-      - ./data/tenants:/data/tenants:rw
-
   tgworker:
     image: avio/app:local
     env_file: .env

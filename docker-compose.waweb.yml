@@ -1,0 +1,44 @@
+x-waweb-base: &waweb-base
+  build:
+    context: .
+    dockerfile: waweb/Dockerfile
+  env_file: .env
+  environment:
+    TENANT: "${WAWEB_TENANT_ID}"
+    TENANT_DEFAULT: "${WAWEB_TENANT_ID}"
+    APP_BASE_URL: "${APP_BASE_URL:-http://app:8000}"
+    ADMIN_TOKEN: "${ADMIN_TOKEN}"
+    WAWEB_ADMIN_TOKEN: "${WAWEB_ADMIN_TOKEN:-${ADMIN_TOKEN}}"
+    PUBLIC_KEY: "${PUBLIC_KEY}"
+    STATE_DIR: "/data/wa_state"
+    PUPPETEER_CACHE_DIR: "/data/.cache/puppeteer"
+    DEBUG: "${WAWEB_DEBUG:-whatsapp-web.js:*,puppeteer:*}"
+    PORT: "9001"
+  restart: unless-stopped
+  shm_size: 512m
+  mem_limit: 1024m
+  user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+  healthcheck:
+    test: ["CMD-SHELL","curl -fsS http://127.0.0.1:9001/health || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+  volumes:
+    - "${WAWEB_STATE_DIR}:/data/wa_state:rw"
+    - "./data/puppeteer:/data/.cache/puppeteer:rw"
+    - "./data/tenants:/data/tenants:rw"
+  networks:
+    avio:
+      aliases:
+        - "${WAWEB_HOSTNAME:-waweb-${WAWEB_TENANT_ID}}"
+
+services:
+  waweb:
+    <<: *waweb-base
+    container_name: "${WAWEB_CONTAINER_NAME:-waweb-${WAWEB_TENANT_ID}}"
+    hostname: "${WAWEB_HOSTNAME:-waweb-${WAWEB_TENANT_ID}}"
+
+networks:
+  avio:
+    external: true
+    name: "${WAWEB_NETWORK_NAME:-avio_default}"

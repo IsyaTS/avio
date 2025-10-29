@@ -15,11 +15,15 @@ import redis.asyncio as redis
 from redis import exceptions as redis_ex
 
 try:
-    from app.core import settings as core_settings  # type: ignore
+    from app.core import settings as core_settings, tenant_waweb_url  # type: ignore
 except Exception:  # pragma: no cover - fallback for bootstrap edge cases
     from types import SimpleNamespace
 
-    core_settings = SimpleNamespace(APP_VERSION="v21.0")  # type: ignore[assignment]
+    core_settings = SimpleNamespace(APP_VERSION="v21.0", WA_WEB_URL="http://waweb:9001")  # type: ignore[assignment]
+    def tenant_waweb_url(tenant: int | None) -> str:  # type: ignore
+        if tenant is None:
+            return "http://waweb:9001"
+        return f"http://waweb-{tenant}:9001"
 
 from app.db import (
     init_db,
@@ -58,7 +62,6 @@ APP_VERSION = os.getenv("APP_VERSION", _default_version)
 
 # ==== ENV ====
 REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
-WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
 # Match waweb INTERNAL_SYNC_TOKEN resolution (WA_WEB_TOKEN or WEBHOOK_SECRET)
 WA_INTERNAL_TOKEN = (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 TGWORKER_BASE_URL = (
@@ -100,6 +103,18 @@ QUEUES = [OUTBOX_QUEUE_KEY]
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
 # ==== Utils ====
+def _waweb_base_url(tenant: Optional[int]) -> str:
+    base = ""
+    if tenant is not None:
+        try:
+            base = tenant_waweb_url(int(tenant))
+        except Exception:
+            base = ""
+    if not base:
+        base = getattr(core_settings, "WA_WEB_URL", "http://waweb:9001")
+    return str(base).rstrip("/")
+
+
 def log(*parts: object):
     if len(parts) == 1:
         print(parts[0], flush=True)
@@ -971,7 +986,7 @@ async def send_whatsapp(
     text: str | None = None,
     attachment: dict | None = None,
 ) -> tuple[int, str]:
-    url = f"{WA_WEB_URL}/session/{tenant_id}/send"
+    url = f"{_waweb_base_url(tenant_id)}/session/{tenant_id}/send"
     payload: Dict[str, Any] = {"to": phone}
     if text:
         payload["text"] = text
