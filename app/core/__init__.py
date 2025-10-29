@@ -16,6 +16,14 @@ try:
 except Exception:  # библиотека может быть не установлена
     openai = None  # type: ignore
 
+try:  # pragma: no cover - зависимость optional
+    from openai import APITimeoutError  # type: ignore
+except Exception:  # pragma: no cover
+    class APITimeoutError(Exception):  # type: ignore
+        """Fallback timeout error when OpenAI SDK недоступен."""
+
+        pass
+
 try:
     from ..brain import planner, quality
 except Exception:  # pragma: no cover
@@ -91,6 +99,8 @@ _TENANT_PERSONA_CACHE: Dict[int, Tuple[float, str]] = {}
 # Key: (tenant or None, tuple of (path, mtime, size)) -> parsed, normalized items
 _CATALOG_CACHE: Dict[Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]], List[Dict[str, Any]]] = {}
 _TENANTS_CONFIG_CACHE: Dict[int, Dict[str, Any]] = {}
+
+CTA_COOLDOWN_SECONDS = float(os.getenv("CTA_COOLDOWN_SECONDS", "180"))
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -366,6 +376,7 @@ class SalesState:
     spin: Dict[str, str] = field(default_factory=lambda: {stage: "pending" for stage in ("s", "p", "i", "n")})
     bant: Dict[str, Any] = field(default_factory=dict)
     asked_questions: List[str] = field(default_factory=list)
+    asked_question_fingerprints: List[str] = field(default_factory=list)
     challenger_cursor: int = 0
     social_proof_cursor: int = 0
     scarcity_cursor: int = 0
@@ -384,6 +395,8 @@ class SalesState:
     sentiment_score: float = 0.0
     user_message_count: int = 0
     last_question_text: str = ""
+    cta_last_text: str = ""
+    cta_last_sent_ts: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -394,6 +407,7 @@ class SalesState:
             "spin": self.spin,
             "bant": self.bant,
             "asked_questions": self.asked_questions,
+            "asked_question_fingerprints": self.asked_question_fingerprints[-32:],
             "challenger_cursor": self.challenger_cursor,
             "social_proof_cursor": self.social_proof_cursor,
             "scarcity_cursor": self.scarcity_cursor,
@@ -412,6 +426,8 @@ class SalesState:
             "sentiment_score": self.sentiment_score,
             "user_message_count": self.user_message_count,
             "last_question_text": self.last_question_text,
+            "cta_last_text": self.cta_last_text,
+            "cta_last_sent_ts": self.cta_last_sent_ts,
         }
 
     @classmethod
@@ -425,6 +441,7 @@ class SalesState:
         obj.spin = payload.get("spin", obj.spin) or {stage: "pending" for stage in ("s", "p", "i", "n")}
         obj.bant = payload.get("bant", {}) or {}
         obj.asked_questions = payload.get("asked_questions", []) or []
+        obj.asked_question_fingerprints = payload.get("asked_question_fingerprints", []) or []
         obj.challenger_cursor = int(payload.get("challenger_cursor", 0))
         obj.social_proof_cursor = int(payload.get("social_proof_cursor", 0))
         obj.scarcity_cursor = int(payload.get("scarcity_cursor", 0))
@@ -446,6 +463,11 @@ class SalesState:
             obj.sentiment_score = 0.0
         obj.user_message_count = int(payload.get("user_message_count", 0))
         obj.last_question_text = payload.get("last_question_text", "") or ""
+        obj.cta_last_text = payload.get("cta_last_text", "") or ""
+        try:
+            obj.cta_last_sent_ts = float(payload.get("cta_last_sent_ts", 0.0) or 0.0)
+        except Exception:
+            obj.cta_last_sent_ts = 0.0
         return obj
 
     def append_history(self, role: str, content: str) -> None:
@@ -2823,10 +2845,12 @@ class SalesConversationEngine:
             return None
         if question in self.state.asked_questions:
             return None
+        fingerprint = quality.question_fingerprint(question)
+        if fingerprint and fingerprint in (self.state.asked_question_fingerprints or []):
+            return None
         if question.strip() == (self.state.last_question_text or "").strip():
             return None
-        self.state.asked_questions.append(question)
-        self.state.last_question_text = question
+        self._remember_question(question)
         return question
 
     def pending_question(self) -> Optional[str]:
