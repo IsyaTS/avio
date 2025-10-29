@@ -1,7 +1,7 @@
 x-waweb-base: &waweb-base
   build:
-    context: .
-    dockerfile: waweb/Dockerfile
+    context: ./waweb
+    dockerfile: Dockerfile
   env_file: .env
   environment:
     TENANT: "${WAWEB_TENANT_ID}"
