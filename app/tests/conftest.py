@@ -6,8 +6,20 @@ import os
 import sys
 from pathlib import Path
 
-import prometheus_client
-from prometheus_client import CollectorRegistry
+try:
+    import prometheus_client
+    from prometheus_client import CollectorRegistry
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    class CollectorRegistry:  # type: ignore[misc]
+        def __init__(self) -> None:
+            self._metrics = {}
+
+    class _DummyModule:
+        REGISTRY = CollectorRegistry()
+
+    prometheus_client = _DummyModule()  # type: ignore
+    prometheus_client.registry = _DummyModule()  # type: ignore
+    prometheus_client.metrics = _DummyModule()  # type: ignore
 
 prometheus_client.REGISTRY = CollectorRegistry()  # reset default registry for tests
 prometheus_client.registry.REGISTRY = prometheus_client.REGISTRY
