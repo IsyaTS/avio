@@ -1395,7 +1395,7 @@ async def _wa_status_impl(tenant: int) -> dict:
     cached_qr_id, redis_failed = _get_last_qr_id(int(tenant))
 
     code, raw = common.http(
-        "GET", f"{common.WA_WEB_URL}/session/{int(tenant)}/status", timeout=3.0
+        "GET", f"{common.wa_base_url(int(tenant))}/session/{int(tenant)}/status", timeout=3.0
     )
     try:
         data = json.loads(raw)
@@ -1602,7 +1602,7 @@ def _fetch_qr_bytes(url: str, timeout: float = 6.0):
 
 
 def _build_qr_candidates(tenant: int, cache_bust: int) -> list[tuple[str, str]]:
-    base = common.WA_WEB_URL.rstrip("/")
+    base = common.wa_base_url(int(tenant) if tenant is not None else None).rstrip("/")
     ts_param = f"ts={cache_bust}"
     return [
         (f"{base}/session/{tenant}/qr?format=svg&{ts_param}", "tenant_query_svg"),
@@ -1621,7 +1621,12 @@ def _proxy_qr_with_fallbacks(tenant: int) -> Response:
         try:
             hook = common.webhook_url()
             payload = json.dumps({"tenant_id": int(tenant), "webhook_url": hook}, ensure_ascii=False).encode("utf-8")
-            code, _ = common.http("POST", f"{common.WA_WEB_URL}/session/{int(tenant)}/start", body=payload, timeout=4.0)
+            code, _ = common.http(
+                "POST",
+                f"{common.wa_base_url(int(tenant))}/session/{int(tenant)}/start",
+                body=payload,
+                timeout=4.0,
+            )
             wa_logger.info("qr_prefetch_start code=%s", code)
         except Exception:
             wa_logger.info("qr_prefetch_start_failed")
@@ -2341,7 +2346,7 @@ async def wa_qr_svg(
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(
-                    f"{common.WA_WEB_URL}/session/{int(tenant_id)}/qr.svg",
+                    f"{common.wa_base_url(int(tenant_id))}/session/{int(tenant_id)}/qr.svg",
                     headers=fallback_headers,
                 )
         except httpx.HTTPError as exc:
@@ -3006,7 +3011,7 @@ async def wa_restart(
 
         code_restart, _ = common.http(
             "POST",
-            f"{common.WA_WEB_URL}/session/{tenant_id}/restart",
+            f"{common.wa_base_url(tenant_id)}/session/{tenant_id}/restart",
             body=start_payload,
         )
         if 200 <= int(code_restart or 0) < 300:
@@ -3015,12 +3020,12 @@ async def wa_restart(
 
         code_logout, _ = common.http(
             "POST",
-            f"{common.WA_WEB_URL}/session/{tenant_id}/logout",
+            f"{common.wa_base_url(tenant_id)}/session/{tenant_id}/logout",
             body=empty_payload,
         )
         code_start, _ = common.http(
             "POST",
-            f"{common.WA_WEB_URL}/session/{tenant_id}/start",
+            f"{common.wa_base_url(tenant_id)}/session/{tenant_id}/start",
             body=start_payload,
         )
         if 200 <= int(code_start or 0) < 300:
@@ -3032,7 +3037,11 @@ async def wa_restart(
             )
             return JSONResponse({"ok": True})
 
-        code_global_restart, _ = common.http("POST", f"{common.WA_WEB_URL}/session/restart", body=start_payload)
+        code_global_restart, _ = common.http(
+            "POST",
+            f"{common.wa_base_url(None)}/session/restart",
+            body=start_payload,
+        )
         if 200 <= int(code_global_restart or 0) < 300:
             wa_logger.info(
                 "wa_restart success tenant=%s stage=global_restart code=%s",
@@ -3041,7 +3050,11 @@ async def wa_restart(
             )
             return JSONResponse({"ok": True})
 
-        code_global_start, _ = common.http("POST", f"{common.WA_WEB_URL}/session/start", body=start_payload)
+        code_global_start, _ = common.http(
+            "POST",
+            f"{common.wa_base_url(None)}/session/start",
+            body=start_payload,
+        )
         if 200 <= int(code_global_start or 0) < 300:
             wa_logger.info(
                 "wa_restart success tenant=%s stage=global_start code=%s",
