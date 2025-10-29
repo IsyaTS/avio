@@ -1344,6 +1344,63 @@ def load_persona(tenant: int | None = None, channel: str | None = None) -> str:
     return persona
 
 
+def load_persona_structured(tenant: int | None = None) -> Dict[str, Any]:
+    """Парсит persona.md как YAML и возвращает структуру."""
+    text = load_persona(tenant)
+    if not text.strip():
+        return {}
+    try:
+        parsed = yaml.safe_load(text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def persona_meta_config(tenant: int | None = None) -> Dict[str, Any]:
+    structured = load_persona_structured(tenant)
+    meta = structured.get("meta") if isinstance(structured, dict) else {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _resolve_persona_relative_path(tenant: int, raw_path: str) -> Optional[pathlib.Path]:
+    candidate = (raw_path or "").strip()
+    if not candidate:
+        return None
+    candidate = candidate.replace("\\", "/")
+    candidate = candidate.lstrip("/")
+    if ".." in candidate.split("/"):
+        return None
+    tenant_root = tenant_dir(tenant)
+    target = tenant_root / candidate
+    if target.exists() and target.is_file():
+        return target
+    return None
+
+
+def persona_catalog_pdf(tenant: int) -> Optional[Dict[str, Any]]:
+    meta = persona_meta_config(tenant)
+    raw_path = meta.get("catalog_pdf_path") if isinstance(meta, dict) else None
+    if not isinstance(raw_path, str):
+        return None
+    target = _resolve_persona_relative_path(tenant, raw_path)
+    if not target:
+        return None
+    return {
+        "type": "pdf",
+        "path": str(target.relative_to(tenant_dir(tenant))),
+        "original": target.name,
+        "mime": "application/pdf",
+    }
+
+
+def persona_catalog_csv(tenant: int) -> Optional[pathlib.Path]:
+    meta = persona_meta_config(tenant)
+    raw_path = meta.get("catalog_csv_path") if isinstance(meta, dict) else None
+    if not isinstance(raw_path, str):
+        return None
+    return _resolve_persona_relative_path(tenant, raw_path)
+
+
 # ---------------------- простая rule-based логика ----------------------------
 CATALOG_CSV = DATA_DIR / "catalog_sample.csv"
 

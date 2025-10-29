@@ -96,10 +96,16 @@ def _resolve_catalog_attachment(
     tenant: int,
     request: Request | None = None,
 ) -> tuple[dict | None, str]:
-    if not isinstance(cfg, dict):
-        return None, ""
-    integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
-    meta = integrations.get("uploaded_catalog")
+    meta: dict | None = None
+    if isinstance(cfg, dict):
+        integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
+        raw_meta = integrations.get("uploaded_catalog")
+        if isinstance(raw_meta, dict) and raw_meta:
+            meta = raw_meta
+    if not meta:
+        persona_meta = core.persona_catalog_pdf(int(tenant))
+        if persona_meta:
+            meta = persona_meta
     if not isinstance(meta, dict):
         return None, ""
     if (meta.get("type") or "").lower() != "pdf":
