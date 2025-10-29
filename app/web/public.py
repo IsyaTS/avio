@@ -1353,6 +1353,7 @@ async def wa_start(
         response = await common.wa_post(
             f"/session/{int(tenant_id)}/start",
             payload,
+            tenant=int(tenant_id),
         )
     except Exception:
         return JSONResponse({"error": "wa_unavailable"}, status_code=502)
