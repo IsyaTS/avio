@@ -303,8 +303,22 @@ def webhook_url() -> str:
 
 
 
-async def wa_post(path: str, data: dict, timeout: float = 8.0) -> httpx.Response:
-    url = f"{WA_WEB_URL}{path}"
+async def wa_post(
+    path: str,
+    data: dict,
+    *,
+    tenant: int | None = None,
+    timeout: float = 8.0,
+) -> httpx.Response:
+    tenant_hint = tenant
+    if tenant_hint is None and isinstance(data, dict):
+        tenant_hint = (
+            _coerce_tenant_id(data.get("tenant"))
+            or _coerce_tenant_id(data.get("tenant_id"))
+            or _coerce_tenant_id(data.get("tenantId"))
+        )
+
+    url = f"{wa_base_url(tenant_hint)}{path}"
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if WA_INTERNAL_TOKEN:
         headers["X-Auth-Token"] = WA_INTERNAL_TOKEN
@@ -631,13 +645,13 @@ def set_primary(tenant: int, key: str):
 
 
 __all__ = [
-    "WA_WEB_URL",
     "WA_INTERNAL_TOKEN",
     "TG_WORKER_URL",
     "TG_WORKER_TOKEN",
     "redis_client",
     "http",
     "wa_post",
+    "wa_base_url",
     "tg_post",
     "tg_http",
     "public_base_url",
