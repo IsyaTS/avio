@@ -130,7 +130,11 @@ _PERSONA_HINTS_KEY_RE = re.compile(
 )
 
 
+_DEFAULT_WORKER_BASE_URL = "http://worker:8000"
+
+
 class Settings:
+    DEFAULT_WORKER_BASE_URL = _DEFAULT_WORKER_BASE_URL
     APP_VERSION   = os.getenv("APP_VERSION", "v21.0")
     SEND          = os.getenv("SEND_ENABLED", "true").lower() == "true"
 
@@ -159,7 +163,15 @@ class Settings:
 
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "").strip()
-    TGWORKER_BASE_URL = (os.getenv("TGWORKER_BASE_URL") or "http://tgworker:9000").strip().rstrip("/")
+    _WORKER_BASE_RAW = (
+        os.getenv("WORKER_BASE_URL")
+        or os.getenv("TGWORKER_BASE_URL")
+        or os.getenv("TG_WORKER_URL")
+        or os.getenv("TGWORKER_URL")
+        or _DEFAULT_WORKER_BASE_URL
+    )
+    WORKER_BASE_URL = str(_WORKER_BASE_RAW).strip().rstrip("/") or _DEFAULT_WORKER_BASE_URL
+    TGWORKER_BASE_URL = WORKER_BASE_URL
     PUBLIC_KEY    = _resolve_public_key(ADMIN_TOKEN)
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
 

@@ -1,7 +1,7 @@
 services:
   app:
     environment:
-      TG_WORKER_URL: http://mocktg:8085
+      WORKER_BASE_URL: http://mocktg:8085
       ASSET_VERSION: ${ASSET_VERSION:-}
     depends_on:
       mocktg:

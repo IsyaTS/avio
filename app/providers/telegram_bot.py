@@ -17,6 +17,11 @@ except Exception:  # pragma: no cover - fallback when settings unavailable
 logger = logging.getLogger("app.providers.telegram_bot")
 
 _DEFAULT_TIMEOUT = float(os.getenv("TGWORKER_TIMEOUT", "10"))
+_DEFAULT_WORKER_BASE = (
+    getattr(core_settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+    if core_settings is not None
+    else "http://worker:8000"
+)
 
 _client_lock = asyncio.Lock()
 _client: httpx.AsyncClient | None = None
@@ -25,7 +30,7 @@ _client: httpx.AsyncClient | None = None
 def _resolve_base_url() -> str:
     """Resolve TG worker base URL without enforcing Bot API tokens."""
 
-    for env_key in ("TGWORKER_BASE_URL", "TG_WORKER_URL", "TGWORKER_URL"):
+    for env_key in ("WORKER_BASE_URL", "TGWORKER_BASE_URL", "TG_WORKER_URL", "TGWORKER_URL"):
         raw = os.getenv(env_key)
         if raw:
             candidate = raw.strip()
@@ -33,7 +38,7 @@ def _resolve_base_url() -> str:
                 return candidate.rstrip("/")
 
     if core_settings is not None:
-        candidate = getattr(core_settings, "TGWORKER_BASE_URL", "") or ""
+        candidate = getattr(core_settings, "WORKER_BASE_URL", "") or ""
         if candidate:
             return str(candidate).strip().rstrip("/")
 
@@ -46,7 +51,8 @@ def _resolve_base_url() -> str:
         base = tg_worker_url()
     except Exception:  # pragma: no cover - defensive around dynamic config
         return ""
-    return str(base).strip().rstrip("/")
+    resolved = str(base).strip().rstrip("/")
+    return resolved or _DEFAULT_WORKER_BASE
 
 
 def _resolve_headers() -> dict[str, str]:

@@ -28,8 +28,7 @@ services:
       TENANTS_DIR: /data/tenants
       TG_SESSIONS_DIR: /app/tg-sessions
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
-      TG_WORKER_URL: http://tgworker:9000
-      TGWORKER_BASE_URL: http://tgworker:9000
+      WORKER_BASE_URL: http://tgworker:8000
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       WAWEB_BASE_URL: http://waweb:9001
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -61,7 +60,7 @@ services:
     environment:
       TENANTS_DIR: /data/tenants
       PYTHONPATH: /app
-      TGWORKER_URL: http://tgworker:9000
+      WORKER_BASE_URL: http://tgworker:8000
       TG_SESSIONS_DIR: /app/tg-sessions
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
@@ -121,12 +120,12 @@ services:
       - TZ=Europe/Moscow
     depends_on: [app, redis]
     working_dir: /app
-    command: ["uvicorn","tgworker.api:create_app","--host","0.0.0.0","--port","9000","--workers","1"]
+    command: ["uvicorn","tgworker.api:create_app","--host","0.0.0.0","--port","8000","--workers","1"]
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     restart: unless-stopped
-    expose: ["9000"]
+    expose: ["8000"]
     healthcheck:
-      test: ["CMD-SHELL","curl -f http://127.0.0.1:9000/health || exit 1"]
+      test: ["CMD-SHELL","curl -f http://127.0.0.1:8000/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

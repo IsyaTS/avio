@@ -5,14 +5,17 @@ from typing import Any, Mapping
 
 import httpx
 
-from config import tg_worker_url
-
 try:  # pragma: no cover - fallback for early imports
     from app.core import settings as core_settings  # type: ignore
 except Exception:  # pragma: no cover
     core_settings = None  # type: ignore[assignment]
 
 _DEFAULT_TIMEOUT_SECONDS = 5.0
+_DEFAULT_WORKER_BASE = (
+    getattr(core_settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+    if core_settings is not None
+    else "http://worker:8000"
+)
 
 
 def _default_timeout() -> httpx.Timeout:
@@ -48,12 +51,20 @@ def _normalize_timeout(value: float | httpx.Timeout | None) -> float | httpx.Tim
 
 
 def _base_url() -> str:
-    raw = os.getenv("TGWORKER_URL") or os.getenv("TG_WORKER_URL")
-    if raw:
-        candidate = raw.strip()
-        if candidate:
-            return candidate.rstrip("/")
-    return tg_worker_url()
+    if core_settings is not None:
+        candidate = getattr(core_settings, "WORKER_BASE_URL", "") or ""
+        cleaned = str(candidate).strip()
+        if cleaned:
+            return cleaned.rstrip("/") or _DEFAULT_WORKER_BASE
+
+    for env_key in ("WORKER_BASE_URL", "TGWORKER_BASE_URL", "TG_WORKER_URL", "TGWORKER_URL"):
+        raw = os.getenv(env_key)
+        if raw:
+            cleaned = str(raw).strip()
+            if cleaned:
+                return cleaned.rstrip("/")
+
+    return _DEFAULT_WORKER_BASE
 
 
 def _resolve_url(path: str) -> str:
