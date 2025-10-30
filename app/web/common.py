@@ -64,8 +64,11 @@ _redis_client: redis.Redis | None = None
 # Internal auth token that waweb expects in X-Auth-Token. It may be provided
 # via WA_WEB_TOKEN or WEBHOOK_SECRET depending on deployment. Use either.
 WA_INTERNAL_TOKEN = (
-    (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
-)
+    os.getenv("WA_INTERNAL_TOKEN")
+    or os.getenv("WA_WEB_TOKEN")
+    or os.getenv("WEBHOOK_SECRET")
+    or ""
+).strip()
 TG_WORKER_URL = tg_worker_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
