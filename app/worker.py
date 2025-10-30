@@ -330,6 +330,17 @@ def _internal_base_url() -> str:
     return "http://app:8000"
 
 
+def _is_internal_path(value: str) -> bool:
+    trimmed = (value or "").strip()
+    if not trimmed:
+        return False
+    if trimmed.startswith("/internal/"):
+        return True
+    parsed = urlsplit(trimmed)
+    path = parsed.path or ""
+    return path.startswith("/internal/")
+
+
 def _inject_internal_token(query: str) -> str:
     token_value = WA_INTERNAL_TOKEN
     if not token_value:
@@ -484,6 +495,32 @@ async def _download_internal_attachment(
     return None, final_headers, absolute_url
 
 
+def _prepare_whatsapp_attachment_url(url: str) -> str:
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return ""
+    if _is_internal_path(cleaned):
+        _, absolute = _normalize_internal_urls(cleaned)
+        return absolute
+    return cleaned
+
+
+def _tokenize_attachment_mapping(attachment: Mapping[str, Any]) -> dict[str, Any]:
+    prepared = dict(attachment)
+    url_value = prepared.get("url")
+    if isinstance(url_value, str):
+        prepared["url"] = _prepare_whatsapp_attachment_url(url_value)
+    for nested_key in ("document", "image", "video", "audio", "voice", "thumbnail"):
+        nested_value = prepared.get(nested_key)
+        if isinstance(nested_value, Mapping):
+            nested_copy = dict(nested_value)
+            nested_url = nested_copy.get("url")
+            if isinstance(nested_url, str):
+                nested_copy["url"] = _prepare_whatsapp_attachment_url(nested_url)
+            prepared[nested_key] = nested_copy
+    return prepared
+
+
 async def _prepare_internal_attachment(
     attachment: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -493,15 +530,15 @@ async def _prepare_internal_attachment(
     if not isinstance(url, str):
         return dict(attachment)
     trimmed = url.strip()
-    if not trimmed.startswith("/internal/tenant/"):
-        return dict(attachment)
+    if not _is_internal_path(trimmed):
+        return _tokenize_attachment_mapping(attachment)
 
     data, headers, absolute_url = await _download_internal_attachment(trimmed)
     prepared = dict(attachment)
     prepared["url"] = absolute_url
 
     if data is None:
-        return prepared
+        return _tokenize_attachment_mapping(prepared)
 
     filename = _resolve_attachment_filename(prepared, headers, absolute_url)
     if filename:
@@ -518,7 +555,7 @@ async def _prepare_internal_attachment(
     prepared["b64"] = base64.b64encode(data).decode("ascii")
     prepared["sendMediaAsDocument"] = True
     prepared.setdefault("size", len(data))
-    return prepared
+    return _tokenize_attachment_mapping(prepared)
 
 
 def _build_wa_document_payload(
@@ -1254,7 +1291,8 @@ async def send_whatsapp(
     tenant_id: int,
     phone: str,
     text: str | None = None,
-    attachment: dict | None = None,
+    attachment: Mapping[str, Any] | None = None,
+    attachments: Iterable[Mapping[str, Any]] | None = None,
 ) -> tuple[int, str]:
     base_url = _waweb_base_url(tenant_id)
     url = f"{base_url}/send?tenant={tenant_id}"
@@ -1280,16 +1318,39 @@ async def send_whatsapp(
 
     attachments_payload: list[dict[str, Any]] = []
     document_block: dict[str, Any] | None = None
+    seen_urls: set[str] = set()
+
+    def _append_attachment(
+        blob: Mapping[str, Any], *, force_include: bool = False
+    ) -> dict[str, Any]:
+        nonlocal document_block
+        prepared_blob = _tokenize_attachment_mapping(blob)
+        url_value = str(prepared_blob.get("url") or "")
+        include_blob = force_include or not url_value or url_value not in seen_urls
+        if url_value:
+            seen_urls.add(url_value)
+        if include_blob:
+            wa_attachment, doc_block = _build_wa_document_payload(prepared_blob)
+            if wa_attachment:
+                attachments_payload.append(wa_attachment)
+                if doc_block and document_block is None:
+                    document_block = doc_block
+            else:
+                attachments_payload.append(prepared_blob)
+        return prepared_blob
+
+    attachment_copy: dict[str, Any] | None = None
     if attachment:
-        attachment_copy: dict[str, Any] = dict(attachment)
-        wa_attachment, doc_block = _build_wa_document_payload(attachment_copy)
-        if wa_attachment:
-            attachments_payload.append(wa_attachment)
-            if doc_block:
-                document_block = doc_block
-        else:
-            attachments_payload.append(attachment_copy)
+        attachment_copy = _append_attachment(attachment, force_include=True)
         payload["attachment"] = attachment_copy
+
+    if attachments:
+        for blob in attachments:
+            if not isinstance(blob, Mapping):
+                continue
+            if attachment is not None and blob is attachment:
+                continue
+            _append_attachment(blob)
 
     if attachments_payload:
         payload["attachments"] = attachments_payload
@@ -1832,8 +1893,26 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             if attachment
             else attachment
         )
+        prepared_attachments: list[dict[str, Any]] = []
+        for blob in attachments:
+            if not isinstance(blob, Mapping):
+                continue
+            if attachment is not None and blob is attachment:
+                if prepared_attachment is not None:
+                    prepared_attachments.append(dict(prepared_attachment))
+                else:
+                    prepared_attachments.append(dict(blob))
+                continue
+            prepared_blob = await _prepare_internal_attachment(blob)
+            prepared_attachments.append(prepared_blob)
         recipient_value = raw_to if isinstance(raw_to, str) and raw_to.strip() else phone
-        st, body = await send_whatsapp(tenant, recipient_value or "", text or None, prepared_attachment)
+        st, body = await send_whatsapp(
+            tenant,
+            recipient_value or "",
+            text or None,
+            prepared_attachment,
+            prepared_attachments or None,
+        )
         if st == 401:
             retry_count = 0
             try:
@@ -1900,7 +1979,13 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         )
     else:
         recipient_value = raw_to if isinstance(raw_to, str) and raw_to.strip() else phone
-        st, body = await send_whatsapp(tenant, recipient_value or "", text or None, attachment)
+        st, body = await send_whatsapp(
+            tenant,
+            recipient_value or "",
+            text or None,
+            attachment,
+            attachments or None,
+        )
 
     if 200 <= st < 300:
         status = "sent"
