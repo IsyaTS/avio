@@ -70,6 +70,7 @@ def test_resolve_catalog_attachment_uses_request_url(sandbox):
 
     assert attachment is not None
     assert attachment["url"].startswith("http://testserver/internal/tenant/2/catalog-file")
+    assert "token=test-wa-token" in attachment["url"]
     assert caption.startswith("Каталог в PDF")
 
 
@@ -177,6 +178,13 @@ def test_internal_catalog_file_requires_authorized_header(sandbox):
     )
     assert (
         client.head(url, params=params, headers={"X-Internal-Token": "test-wa-token"}).status_code
+        == 200
+    )
+    assert (
+        client.head(
+            url,
+            params={"path": "uploads/catalog.pdf", "token": "test-wa-token"},
+        ).status_code
         == 200
     )
 

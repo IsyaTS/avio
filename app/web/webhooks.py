@@ -156,7 +156,7 @@ def _resolve_catalog_attachment(
     from urllib.parse import quote
 
     url = f"{base}?path={quote(str(safe), safe='/')}"
-    token = settings.WEBHOOK_SECRET or ""
+    token = getattr(C, "WA_INTERNAL_TOKEN", "") or ""
     if token:
         url += f"&token={quote(token)}"
 

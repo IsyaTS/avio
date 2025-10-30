@@ -8,7 +8,7 @@ import asyncio
 import urllib.request
 import urllib.error
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, unquote, quote
 
 import httpx
 
@@ -330,6 +330,48 @@ def _internal_base_url() -> str:
     return "http://app:8000"
 
 
+def _inject_internal_token(query: str) -> str:
+    token_value = WA_INTERNAL_TOKEN
+    if not token_value:
+        return query
+
+    filtered: list[str] = []
+    for chunk in query.split("&"):
+        if not chunk:
+            continue
+        key, sep, value = chunk.partition("=")
+        if key.lower() == "token":
+            continue
+        if sep:
+            filtered.append(f"{key}{sep}{value}")
+        else:
+            filtered.append(key)
+
+    filtered.append(f"token={quote(token_value, safe='')}")
+    return "&".join(filtered)
+
+
+def _normalize_internal_urls(relative_url: str) -> tuple[str, str]:
+    parsed = urlsplit(relative_url)
+    query = _inject_internal_token(parsed.query)
+    fragment = parsed.fragment
+
+    if parsed.scheme and parsed.netloc:
+        absolute = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, fragment))
+        path = parsed.path or ""
+        relative = urlunsplit(("", "", path, query, fragment))
+        if not relative.startswith("/"):
+            relative = f"/{relative.lstrip('/')}"
+        return relative, absolute
+
+    path = parsed.path or ""
+    if not path.startswith("/"):
+        path = f"/{path}"
+    relative = urlunsplit(("", "", path, query, fragment))
+    absolute = f"{_internal_base_url()}{relative}"
+    return relative, absolute
+
+
 def _parse_disposition_filename(header: str | None) -> str:
     if not header:
         return ""
@@ -385,7 +427,7 @@ def _resolve_attachment_mime(
 async def _download_internal_attachment(
     relative_url: str,
 ) -> tuple[bytes | None, Mapping[str, str] | None, str]:
-    absolute_url = f"{_internal_base_url()}{relative_url}"
+    normalized_relative, absolute_url = _normalize_internal_urls(relative_url)
     token_value = WA_INTERNAL_TOKEN
     timeout = httpx.Timeout(20.0, connect=5.0)
     final_headers: Mapping[str, str] | None = None
@@ -403,7 +445,7 @@ async def _download_internal_attachment(
         for attempt_index, (header_label, headers) in enumerate(header_attempts, start=1):
             log(
                 "event=internal_download level=info action=request "
-                f"attempt={attempt_index} url={relative_url} header={header_label or 'none'}"
+                f"attempt={attempt_index} url={normalized_relative} header={header_label or 'none'}"
             )
             try:
                 response = await client.get(absolute_url, headers=headers)
@@ -411,7 +453,7 @@ async def _download_internal_attachment(
                 error_label = exc.__class__.__name__
                 log(
                     "event=internal_download level=info action=error "
-                    f"attempt={attempt_index} url={relative_url} error={error_label}"
+                    f"attempt={attempt_index} url={normalized_relative} error={error_label}"
                 )
                 continue
 
@@ -419,7 +461,7 @@ async def _download_internal_attachment(
             final_headers = response.headers
             log(
                 "event=internal_download level=info action=response "
-                f"attempt={attempt_index} url={relative_url} status={final_status}"
+                f"attempt={attempt_index} url={normalized_relative} status={final_status}"
             )
 
             if 200 <= response.status_code < 300:
@@ -436,7 +478,7 @@ async def _download_internal_attachment(
         status_hint = error_label or final_status or "error"
         log(
             "event=internal_download level=info action=fetch "
-            f"url={relative_url} status={status_hint}"
+            f"url={normalized_relative} status={status_hint}"
         )
 
     return None, final_headers, absolute_url
@@ -1180,6 +1222,8 @@ async def _handle_incoming_event(event: Mapping[str, Any]) -> None:
         return
 
     await handler(event)
+
+
 def _http_json(
     method: str,
     url: str,
@@ -1213,7 +1257,7 @@ async def send_whatsapp(
     attachment: dict | None = None,
 ) -> tuple[int, str]:
     base_url = _waweb_base_url(tenant_id)
-    url = f"{base_url}/send"
+    url = f"{base_url}/send?tenant={tenant_id}"
 
     payload: Dict[str, Any] = {
         "channel": "whatsapp",
@@ -1253,8 +1297,14 @@ async def send_whatsapp(
             payload["document"] = document_block
 
     headers: Dict[str, str] = {}
+    admin_token = (
+        str(getattr(core_settings, "ADMIN_TOKEN", "") or "")
+        or ADMIN_TOKEN
+    ).strip()
+    if admin_token:
+        headers["X-Auth-Token"] = admin_token
     if WA_INTERNAL_TOKEN:
-        headers["X-Auth-Token"] = WA_INTERNAL_TOKEN
+        headers.setdefault("X-Internal-Token", WA_INTERNAL_TOKEN)
 
     last_status, last_body = 0, ""
     retry_delays = (0.5, 1.0, 2.0)
