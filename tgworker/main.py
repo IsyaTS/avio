@@ -9,7 +9,7 @@ from .api import create_app
 
 def main() -> None:  # pragma: no cover - CLI entrypoint
     app = create_app()
-    port = int(os.getenv("TGWORKER_PORT", "9000"))
+    port = int(os.getenv("TGWORKER_PORT", os.getenv("WORKER_PORT", "8000")))
     uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
 
 

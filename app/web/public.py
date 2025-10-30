@@ -73,8 +73,6 @@ from urllib.parse import quote, quote_plus, urlencode
 
 from redis import exceptions as redis_ex
 
-from config import tg_worker_url
-
 from app.web import client as C
 from app.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from app.db import insert_message_in, upsert_lead
@@ -111,7 +109,7 @@ _deprecated_hits: dict[str, float] = {}
 # Avoid duplicate logging of WA messages via root logger handlers
 wa_logger.propagate = False
 
-TG_WORKER_BASE = tg_worker_url()
+TG_WORKER_BASE = None  # will be resolved lazily via _tg_base_url()
 if not hasattr(C, "valid_key"):
     setattr(C, "valid_key", common.valid_key)
 
@@ -541,20 +539,30 @@ def connect_avito(tenant: int, request: Request, k: str | None = None, key: str 
 
 
 def _tg_base_url() -> str:
-    raw = getattr(settings, "TGWORKER_BASE_URL", "") or os.getenv("TGWORKER_BASE_URL") or ""
-    base = str(raw).strip() or "http://tgworker:9000"
-    return base.rstrip("/") or "http://tgworker:9000"
+    base = getattr(settings, "WORKER_BASE_URL", "") or ""
+    cleaned = str(base).strip()
+    if cleaned:
+        return cleaned.rstrip("/") or getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+    return getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+
+
+def _resolve_tg_base() -> str:
+    global TG_WORKER_BASE
+    base = _tg_base_url()
+    if TG_WORKER_BASE != base:
+        TG_WORKER_BASE = base
+    return TG_WORKER_BASE
 
 
 def _tg_make_url(path: str) -> str:
     if not path:
-        return _tg_base_url()
+        return _resolve_tg_base()
     lowered = path.lower()
     if lowered.startswith("http://") or lowered.startswith("https://"):
         return path
     if not path.startswith("/"):
         path = f"/{path}"
-    return f"{_tg_base_url()}{path}"
+    return f"{_resolve_tg_base()}{path}"
 
 
 _TG_HTTP_CLIENT: httpx.AsyncClient | None = None
@@ -2850,7 +2858,7 @@ def tg_qr_txt(request: Request, qr_id: str | None = None, k: str | None = None, 
     safe_qr = quote(qr_value, safe="")
     status_code, body, headers = common.tg_http(
         "GET",
-        f"{TG_WORKER_BASE}/session/qr/{safe_qr}.txt",
+        f"{_resolve_tg_base()}/session/qr/{safe_qr}.txt",
         timeout=15.0,
     )
     body_bytes = body if isinstance(body, (bytes, bytearray)) else ("" if body is None else str(body)).encode("utf-8")

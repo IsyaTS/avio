@@ -38,7 +38,10 @@ class _CoreSettingsProxy:
         return repr(self._resolve())
 
 
-DEFAULT_TG_WORKER_URL = "http://tgworker:9000"
+settings = _CoreSettingsProxy()
+
+
+DEFAULT_WORKER_BASE_URL = "http://worker:8000"
 DEFAULT_WA_WEB_URL = "http://waweb:9001"
 DEFAULT_APP_INTERNAL_URL = "http://app:8000"
 
@@ -54,14 +57,11 @@ def _coerce_int(value: str | None, default: int = 0) -> int:
 
 def _normalize_worker_url(raw: str | None) -> str:
     if not raw:
-        return DEFAULT_TG_WORKER_URL
+        return DEFAULT_WORKER_BASE_URL
     cleaned = raw.strip()
     if not cleaned:
-        return DEFAULT_TG_WORKER_URL
-    return cleaned.rstrip("/") or DEFAULT_TG_WORKER_URL
-
-
-TG_WORKER_URL = _normalize_worker_url(os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL"))
+        return DEFAULT_WORKER_BASE_URL
+    return cleaned.rstrip("/") or DEFAULT_WORKER_BASE_URL
 
 
 def _normalize_wa_url(raw: str | None) -> str:
@@ -163,17 +163,16 @@ def telegram_config() -> TelegramConfig:
 def tg_worker_url() -> str:
     """Return base URL for the Telegram worker service."""
 
-    raw = os.getenv("TG_WORKER_URL") or os.getenv("TGWORKER_URL") or TG_WORKER_URL
-    return _normalize_worker_url(raw)
+    base = getattr(settings, "WORKER_BASE_URL", "") or ""
+    if base:
+        return _normalize_worker_url(str(base))
+    return DEFAULT_WORKER_BASE_URL
 
 
 CHANNEL_ENDPOINTS = {
     "telegram": f"{tg_worker_url()}/send",
     "whatsapp": f"{WA_WEB_URL}/send",
 }
-
-
-settings = _CoreSettingsProxy()
 
 __all__ = [
     "TelegramConfig",

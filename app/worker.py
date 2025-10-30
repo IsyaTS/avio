@@ -70,15 +70,15 @@ APP_VERSION = os.getenv("APP_VERSION", _default_version)
 REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
 # Match waweb INTERNAL_SYNC_TOKEN resolution (shared with the web layer)
 WA_INTERNAL_TOKEN = COMMON_WA_INTERNAL_TOKEN
-TGWORKER_BASE_URL = (
-    os.getenv("TGWORKER_URL")
+_DEFAULT_WORKER_BASE = getattr(core_settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+_WORKER_BASE_RAW = (
+    os.getenv("WORKER_BASE_URL")
+    or os.getenv("TGWORKER_URL")
     or os.getenv("TGWORKER_BASE_URL")
     or os.getenv("TG_WORKER_URL")
-    or ""
-).strip()
-if not TGWORKER_BASE_URL:
-    TGWORKER_BASE_URL = "http://tgworker:9000"
-TGWORKER_BASE_URL = TGWORKER_BASE_URL.rstrip("/") or "http://tgworker:9000"
+    or getattr(core_settings, "WORKER_BASE_URL", "")
+)
+TGWORKER_BASE_URL = str(_WORKER_BASE_RAW).strip().rstrip("/") or _DEFAULT_WORKER_BASE
 APP_BASE_URL = (
     os.getenv("APP_BASE_URL")
     or os.getenv("APP_INTERNAL_URL")

@@ -152,7 +152,8 @@ GET /pub/settings/get?k=<PUBLIC_KEY>&tenant=<TENANT>
 | `PUBLIC_KEY` | публичный ключ для доступа к `/pub/tg/*` и `/pub/wa/*` |
 | `ADMIN_TOKEN` | админ-токен для приватных RPC эндпоинтов |
 | `APP_BASE_URL` | внешний URL API (используется для обратных вызовов, по умолчанию `http://app:8000`) |
-| `TGWORKER_BASE_URL` | внутренний URL Telegram worker (по умолчанию `http://tgworker:9000`) |
+| `WORKER_BASE_URL` | базовый URL Telegram worker (по умолчанию `http://worker:8000`) |
+| `TGWORKER_BASE_URL` | алиас для обратной совместимости, использует `WORKER_BASE_URL` |
 | `OUTBOX_ENABLED` | включает обработку очереди исходящих сообщений (по умолчанию `false`, чтобы ничего не отправлять без явного разрешения) |
 | `OUTBOX_WHITELIST` | список разрешённых получателей (через пробелы или запятые), любая отправка вне списка будет пропущена (по умолчанию пустой список блокирует все исходящие) |
 | `TG_SESSIONS_DIR` | каталог для хранения `.session` файлов (общий с `app`) |

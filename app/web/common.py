@@ -25,8 +25,6 @@ import httpx
 import redis  # sync client
 from redis import exceptions as redis_ex
 
-from config import tg_worker_url
-
 try:
     from core import (
         settings,
@@ -38,6 +36,7 @@ try:
         write_tenant_config,
         read_persona,
         write_persona,
+        tenant_waweb_url,
     )
 except ImportError:  # pragma: no cover - fallback when alias not yet registered
     from app import core as _core  # type: ignore
@@ -69,7 +68,18 @@ WA_INTERNAL_TOKEN = (
     or os.getenv("WEBHOOK_SECRET")
     or ""
 ).strip()
-TG_WORKER_URL = tg_worker_url()
+_DEFAULT_WORKER_BASE = getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+
+
+def _worker_base_url() -> str:
+    base = getattr(settings, "WORKER_BASE_URL", "") or ""
+    cleaned = str(base).strip()
+    if cleaned:
+        return cleaned.rstrip("/") or _DEFAULT_WORKER_BASE
+    return _DEFAULT_WORKER_BASE
+
+
+TG_WORKER_URL = _worker_base_url()
 TG_WORKER_TOKEN = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
 
@@ -292,14 +302,15 @@ def is_internal_request_authorized(
 
 
 def _build_tg_url(path: str) -> str:
+    base_url = _worker_base_url()
     if not path:
-        return TG_WORKER_URL
+        return base_url
     lowered = path.lower()
     if lowered.startswith("http://") or lowered.startswith("https://"):
         return path
     if not path.startswith("/"):
         path = f"/{path}"
-    return f"{TG_WORKER_URL}{path}"
+    return f"{base_url}{path}"
 
 
 def redis_client() -> redis.Redis:

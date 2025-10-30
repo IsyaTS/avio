@@ -12,14 +12,36 @@ from app.db import get_lead_peer
 
 logger = logging.getLogger("app.transport.telegram")
 
+try:  # pragma: no cover - optional during bootstrap
+    from app.core import settings as core_settings  # type: ignore
+except Exception:  # pragma: no cover - defensive fallback
+    core_settings = None  # type: ignore[assignment]
+
+_DEFAULT_WORKER_BASE = (
+    getattr(core_settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+    if core_settings is not None
+    else "http://worker:8000"
+)
+
 _client_lock = asyncio.Lock()
 _client: httpx.AsyncClient | None = None
 
 
 def _resolve_base_url() -> str:
-    raw = os.getenv("TGWORKER_URL") or os.getenv("TG_WORKER_URL") or "http://tgworker:9000"
-    base = str(raw).strip() or "http://tgworker:9000"
-    return base.rstrip("/") or "http://tgworker:9000"
+    if core_settings is not None:
+        candidate = getattr(core_settings, "WORKER_BASE_URL", "") or ""
+        cleaned = str(candidate).strip()
+        if cleaned:
+            return cleaned.rstrip("/") or _DEFAULT_WORKER_BASE
+
+    for env_key in ("WORKER_BASE_URL", "TGWORKER_BASE_URL", "TG_WORKER_URL", "TGWORKER_URL"):
+        raw = os.getenv(env_key)
+        if raw:
+            cleaned = str(raw).strip()
+            if cleaned:
+                return cleaned.rstrip("/")
+
+    return _DEFAULT_WORKER_BASE
 
 
 async def _get_client(timeout: float) -> httpx.AsyncClient:
