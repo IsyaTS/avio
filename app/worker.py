@@ -323,9 +323,6 @@ def _normalize_attachments(blobs: Iterable[dict[str, Any]]) -> list[dict[str, An
 
 
 def _internal_base_url() -> str:
-    base = APP_BASE_URL or ""
-    if base:
-        return base.rstrip("/")
     return "http://app:8000"
 
 
@@ -338,7 +335,7 @@ def _parse_disposition_filename(header: str | None) -> str:
             return unquote(match.group(1))
         except Exception:
             return match.group(1)
-    match = re.search(r"filename="?([^";]+)"?", header, flags=re.IGNORECASE)
+    match = re.search(r'filename="?([^";]+)"?', header, flags=re.IGNORECASE)
     if match and match.group(1):
         return match.group(1)
     return ""
@@ -387,48 +384,47 @@ async def _download_internal_attachment(
     absolute_url = f"{_internal_base_url()}{relative_url}"
     token_value = WA_INTERNAL_TOKEN
     timeout = httpx.Timeout(20.0, connect=5.0)
-    headers: Mapping[str, str] | None = None
-    content: bytes | None = None
+    final_headers: Mapping[str, str] | None = None
+    final_status: int | None = None
+    error_label: str | None = None
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        primary_header = "X-Auth-Token"
-        primary_headers = {primary_header: token_value}
+        request_headers: Mapping[str, str] | None = None
+        if token_value:
+            request_headers = {"X-Auth-Token": token_value}
+
         try:
-            response = await client.get(absolute_url, headers=primary_headers)
+            response = await client.get(absolute_url, headers=request_headers)
         except httpx.HTTPError as exc:
-            log(
-                f"event=internal_download url={relative_url} header={primary_header} status=error "
-                f"detail={exc.__class__.__name__}"
-            )
-            return None, None, absolute_url
+            error_label = exc.__class__.__name__
+        else:
+            if 200 <= response.status_code < 300:
+                return response.content, response.headers, absolute_url
 
-        log(
-            f"event=internal_download url={relative_url} header={primary_header} status={response.status_code}"
-        )
+            final_status = response.status_code
+            final_headers = response.headers
 
-        if response.status_code in {401, 403}:
-            retry_header = "X-Internal-Token"
-            retry_headers = {retry_header: token_value}
-            try:
-                retry = await client.get(absolute_url, headers=retry_headers)
-            except httpx.HTTPError as exc:
-                log(
-                    f"event=internal_download url={relative_url} header={retry_header} status=error "
-                    f"detail={exc.__class__.__name__}"
-                )
-                return None, None, absolute_url
+            if (
+                token_value
+                and response.status_code in {401, 403}
+            ):
+                try:
+                    retry = await client.get(
+                        absolute_url, headers={"X-Internal-Token": token_value}
+                    )
+                except httpx.HTTPError as exc:
+                    error_label = exc.__class__.__name__
+                else:
+                    final_status = retry.status_code
+                    final_headers = retry.headers
+                    if 200 <= retry.status_code < 300:
+                        return retry.content, retry.headers, absolute_url
 
-            log(
-                f"event=internal_download url={relative_url} header={retry_header} status={retry.status_code}"
-            )
-            response = retry
+    if final_status is not None or error_label:
+        status_hint = error_label or final_status or "error"
+        log(f"event=internal_download action=fetch url={relative_url} status={status_hint}")
 
-        if 200 <= response.status_code < 300:
-            content = response.content
-            headers = response.headers
-            return content, headers, absolute_url
-
-        return None, response.headers, absolute_url
+    return None, final_headers, absolute_url
 
 
 async def _prepare_internal_attachment(
