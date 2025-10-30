@@ -1361,9 +1361,9 @@ async def send_whatsapp(
     admin_token = (
         str(getattr(core_settings, "ADMIN_TOKEN", "") or "")
         or ADMIN_TOKEN
+        or ""
     ).strip()
-    if admin_token:
-        headers["X-Auth-Token"] = admin_token
+    headers["X-Auth-Token"] = admin_token
     if WA_INTERNAL_TOKEN:
         headers.setdefault("X-Internal-Token", WA_INTERNAL_TOKEN)
 
