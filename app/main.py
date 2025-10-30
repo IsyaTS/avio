@@ -242,9 +242,13 @@ def _normalize_internal_attachment_url(raw_url: str) -> str:
 
     base_url = f"{internal_base}{path}"
     if token:
-        params = dict(parse_qsl(query, keep_blank_values=True))
-        params["token"] = token
-        query = urlencode(params)
+        query_pairs = [
+            (key, value)
+            for key, value in parse_qsl(query, keep_blank_values=True)
+            if key.lower() != "token"
+        ]
+        query_pairs.append(("token", token))
+        query = urlencode(query_pairs)
     return f"{base_url}?{query}" if query else base_url
 
 
@@ -278,6 +282,15 @@ def _prepare_whatsapp_attachment(item: Any) -> dict[str, Any]:
     if caption is not None:
         prepared["caption"] = str(caption)
 
+    for nested_key in ("document", "image", "video", "audio", "voice", "thumbnail"):
+        nested_value = prepared.get(nested_key)
+        if isinstance(nested_value, dict):
+            nested_prepared = {k: v for k, v in nested_value.items() if v is not None}
+            nested_url = nested_prepared.get("url")
+            if isinstance(nested_url, str):
+                nested_prepared["url"] = _normalize_internal_attachment_url(nested_url)
+            prepared[nested_key] = nested_prepared
+
     return prepared
 
 
@@ -306,12 +319,13 @@ def _transport_client(channel: str) -> httpx.AsyncClient:
     key = (channel or "").lower()
     client = _transport_clients.get(key)
     admin_token = _admin_token()
+    wa_header_value = admin_token or ""
     if client is None or client.is_closed:
         headers: dict[str, str] = {}
         if key == "telegram" and admin_token:
             headers["X-Admin-Token"] = admin_token
-        if key == "whatsapp" and admin_token:
-            headers["X-Auth-Token"] = admin_token
+        if key == "whatsapp":
+            headers["X-Auth-Token"] = wa_header_value
         client = httpx.AsyncClient(timeout=httpx.Timeout(12.0), headers=headers)
         _transport_clients[key] = client
     elif key == "telegram":
@@ -320,10 +334,7 @@ def _transport_client(channel: str) -> httpx.AsyncClient:
         else:
             client.headers.pop("X-Admin-Token", None)
     elif key == "whatsapp":
-        if admin_token:
-            client.headers.update({"X-Auth-Token": admin_token})
-        else:
-            client.headers.pop("X-Auth-Token", None)
+        client.headers.update({"X-Auth-Token": wa_header_value})
     return client
 
 app = FastAPI(title="avio-api")
@@ -516,8 +527,7 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
     if channel == "whatsapp":
         payload = _prepare_whatsapp_payload(payload, message.tenant)
         token = _admin_token()
-        if token:
-            request_headers = {"X-Auth-Token": token}
+        request_headers = {"X-Auth-Token": token}
 
     try:
         client = _transport_client(channel)

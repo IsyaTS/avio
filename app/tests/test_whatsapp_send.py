@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -138,6 +139,54 @@ def test_send_whatsapp_success(monkeypatch: pytest.MonkeyPatch, recipient: str) 
     assert call["json"]["to"] == "79991234567@c.us"
     assert "tenant" not in call["json"]
     assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
+
+
+def test_send_whatsapp_accepts_alias_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = DummyResponse(200, {"ok": True})
+    client, stub = _prepare_app(
+        monkeypatch,
+        whitelist="*",
+        response_factory=lambda: response,
+    )
+
+    from app import main as main_module
+
+    monkeypatch.setattr(main_module.C, "WA_INTERNAL_TOKEN", "diag-token", raising=False)
+
+    payload = {
+        "tenant_id": 1,
+        "provider": "wa",
+        "recipient": "+79991234567",
+        "message": "diag payload",
+        "media": {
+            "type": "document",
+            "url": "/internal/tenant/1/catalog-file?foo=1",
+            "name": "doc.pdf",
+            "mime": "application/pdf",
+        },
+    }
+
+    http_response = client.post(
+        "/send",
+        json=payload,
+        headers={"X-Admin-Token": "test-token"},
+    )
+
+    assert http_response.status_code == 200
+    assert stub.calls
+    call = stub.calls[0]
+    assert call["endpoint"].endswith("/send?tenant=1")
+    assert call["json"]["to"].endswith("@c.us")
+    attachments = call["json"].get("attachments")
+    assert isinstance(attachments, list) and attachments, "attachments must be normalized"
+    attachment = attachments[0]
+    url = attachment.get("url")
+    parsed = urlparse(url)
+    assert parsed.scheme == "http" and parsed.netloc == "app:8000"
+    query_params = parse_qs(parsed.query)
+    assert query_params.get("token") == ["diag-token"]
+    assert query_params.get("foo") == ["1"]
+    assert call["headers"].get("X-Auth-Token") == "test-token"
 
 
 def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Mapping, Sequence, Union
 
 from pydantic import BaseModel, Field
 try:  # pragma: no cover - pydantic v1 compatibility
@@ -40,33 +40,134 @@ class Attachment(_AliasModel):
     caption: str | None = Field(default=None)
     size: int | None = Field(default=None, ge=0)
 
+    @classmethod
+    def _normalize_values(cls, values: Any) -> Any:
+        if not isinstance(values, Mapping):
+            return values
+        data = dict(values)
+        caption = data.get("caption") or data.get("description")
+        if caption is not None and not isinstance(caption, str):
+            caption = str(caption)
+        if caption is not None:
+            data["caption"] = caption
+        size_value = data.get("size")
+        if size_value in ("", None):
+            data.pop("size", None)
+        elif not isinstance(size_value, int):
+            try:
+                data["size"] = int(size_value)
+            except (TypeError, ValueError):
+                data.pop("size", None)
+        return data
+
+    if model_validator is not None:  # pragma: no branch - prefer v2 API
+
+        @model_validator(mode="before")
+        def _normalize_v2(cls, values: Any) -> Any:
+            return cls._normalize_values(values)
+
+    elif root_validator is not None:  # pragma: no branch - fallback for v1
+
+        @root_validator(pre=True)
+        def _normalize_v1(cls, values: dict[str, Any]) -> dict[str, Any]:
+            normalized = cls._normalize_values(values)
+            return normalized if isinstance(normalized, dict) else values
+
 
 class _TransportMessageBase(_AliasModel):
     channel: str = Field(..., pattern=r"^(telegram|whatsapp)$")
     to: Union[int, str]
-    text: str | None = None
+    text: str | None = Field(default=None)
     attachments: List[Attachment] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def _ensure_tenant(cls, values: dict[str, Any]) -> dict[str, Any]:
-        if "tenant" not in values and "tenant_id" in values:
-            values = dict(values)
-            values["tenant"] = values.pop("tenant_id")
-        return values
+        data = dict(values)
+        if "tenant" not in data:
+            for alias in ("tenant_id", "tenantId", "tenantID"):
+                if alias in data:
+                    data["tenant"] = data.pop(alias)
+                    break
+        return data
+
+    @classmethod
+    def _apply_aliases(cls, values: Mapping[str, Any]) -> dict[str, Any]:
+        data = cls._ensure_tenant(values if isinstance(values, Mapping) else dict(values))
+
+        def _maybe_coerce_sequence(value: Any) -> list[Any] | None:
+            if value is None:
+                return []
+            if isinstance(value, list):
+                return value
+            if isinstance(value, tuple):
+                return list(value)
+            if isinstance(value, Mapping):
+                return [dict(value)]
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                return list(value)
+            return [value]
+
+        alias_pairs: dict[str, tuple[str, ...]] = {
+            "channel": ("provider", "ch"),
+            "to": ("recipient", "phone", "jid"),
+            "text": ("message", "body"),
+            "attachments": ("attachment", "media"),
+        }
+
+        for field_name, aliases in alias_pairs.items():
+            if field_name in data and data[field_name] not in (None, ""):
+                continue
+            for alias in aliases:
+                if alias in data:
+                    data[field_name] = data.pop(alias)
+                    break
+
+        attachments_value = data.get("attachments")
+        if attachments_value is not None:
+            maybe_list = _maybe_coerce_sequence(attachments_value)
+            if maybe_list is not None:
+                data["attachments"] = maybe_list
+        else:
+            singular = None
+            for alias in ("attachment", "media"):
+                if alias in data:
+                    singular = data.pop(alias)
+                    break
+            if singular is not None:
+                maybe_list = _maybe_coerce_sequence(singular)
+                if maybe_list is not None:
+                    data["attachments"] = maybe_list
+
+        channel = data.get("channel")
+        if isinstance(channel, str):
+            normalized = channel.strip().lower()
+            channel_aliases = {
+                "wa": "whatsapp",
+                "whatsapp": "whatsapp",
+                "telegram": "telegram",
+                "tg": "telegram",
+            }
+            data["channel"] = channel_aliases.get(normalized, normalized)
+
+        text_value = data.get("text")
+        if text_value is not None and not isinstance(text_value, str):
+            data["text"] = str(text_value)
+
+        return data
 
     if model_validator is not None:  # pragma: no branch - prefer v2 API
 
         @model_validator(mode="before")
         def _alias_tenant_v2(cls, values: Any) -> Any:
-            if isinstance(values, dict):
-                return cls._ensure_tenant(values)
+            if isinstance(values, Mapping):
+                return cls._apply_aliases(values)
             return values
     elif root_validator is not None:  # pragma: no branch - fallback
 
         @root_validator(pre=True)
         def _alias_tenant_v1(cls, values: dict[str, Any]) -> dict[str, Any]:
-            return cls._ensure_tenant(values)
+            return cls._apply_aliases(values)
 
     @property
     def has_content(self) -> bool:
