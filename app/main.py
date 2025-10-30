@@ -337,6 +337,24 @@ def _transport_client(channel: str) -> httpx.AsyncClient:
         client.headers.update({"X-Auth-Token": wa_header_value})
     return client
 
+
+_WORKER_HEALTH_URL = "http://worker:8000/health"
+_WORKER_HEALTH_TIMEOUT = httpx.Timeout(0.75)
+
+
+async def _ensure_worker_healthy() -> None:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                _WORKER_HEALTH_URL,
+                timeout=_WORKER_HEALTH_TIMEOUT,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="worker_unreachable") from exc
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="worker_unreachable")
+
+
 app = FastAPI(title="avio-api")
 
 
@@ -528,6 +546,7 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
         payload = _prepare_whatsapp_payload(payload, message.tenant)
         token = _admin_token()
         request_headers = {"X-Auth-Token": token}
+        await _ensure_worker_healthy()
 
     try:
         client = _transport_client(channel)
