@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pathlib
 import os, json, re, time, mimetypes
-from urllib.parse import quote
+from urllib.parse import quote, parse_qsl, urlencode, urlparse
+from typing import Any
 
 import importlib
 import importlib.machinery
@@ -187,18 +188,142 @@ wa_logger = logging.getLogger("wa")
 _transport_clients: dict[str, httpx.AsyncClient] = {}
 
 
+def _admin_token() -> str:
+    return (getattr(settings, "ADMIN_TOKEN", "") or "").strip()
+
+
+def _waweb_base_url(tenant: int) -> str:
+    try:
+        base = str(C.wa_base_url(int(tenant)))
+    except Exception:
+        base = ""
+    if base:
+        return base.rstrip("/")
+    endpoint = CHANNEL_ENDPOINTS.get("whatsapp") or ""
+    if endpoint.endswith("/send"):
+        endpoint = endpoint[: -len("/send")]
+    return (endpoint or "http://waweb:9001").rstrip("/")
+
+
+def _waweb_send_url(tenant: int) -> str:
+    base = _waweb_base_url(int(tenant)).rstrip("/")
+    query = urlencode({"tenant": int(tenant)})
+    return f"{base}/send?{query}"
+
+
+def _normalize_internal_attachment_url(raw_url: str) -> str:
+    url_value = str(raw_url or "").strip()
+    if not url_value:
+        return url_value
+
+    internal_base = (
+        settings.APP_INTERNAL_URL
+        or os.getenv("APP_INTERNAL_URL")
+        or "http://app:8000"
+    ).rstrip("/")
+    base_netloc = urlparse(internal_base).netloc
+    token = (getattr(C, "WA_INTERNAL_TOKEN", "") or "").strip()
+
+    path = ""
+    query = ""
+
+    if url_value.startswith("/internal/"):
+        parsed = urlparse(url_value)
+        path = parsed.path
+        query = parsed.query
+    else:
+        parsed = urlparse(url_value)
+        if not (parsed.scheme and parsed.netloc and parsed.path.startswith("/internal/")):
+            return url_value
+        if parsed.netloc not in {base_netloc, "app:8000"}:
+            return url_value
+        path = parsed.path
+        query = parsed.query
+
+    base_url = f"{internal_base}{path}"
+    if token:
+        params = dict(parse_qsl(query, keep_blank_values=True))
+        params["token"] = token
+        query = urlencode(params)
+    return f"{base_url}?{query}" if query else base_url
+
+
+def _prepare_whatsapp_attachment(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    prepared = {key: value for key, value in item.items() if value is not None}
+
+    url_value = prepared.get("url")
+    if isinstance(url_value, str):
+        prepared["url"] = _normalize_internal_attachment_url(url_value)
+
+    name = prepared.get("name") or prepared.get("filename") or prepared.get("title")
+    if name is not None:
+        prepared["name"] = str(name)
+    prepared.pop("filename", None)
+
+    mime = (
+        prepared.get("mime")
+        or prepared.get("mime_type")
+        or prepared.get("mimetype")
+        or prepared.get("content_type")
+    )
+    if mime is not None:
+        prepared["mime"] = str(mime)
+    prepared.pop("mime_type", None)
+    prepared.pop("mimetype", None)
+    prepared.pop("content_type", None)
+
+    caption = prepared.get("caption") or prepared.get("description")
+    if caption is not None:
+        prepared["caption"] = str(caption)
+
+    return prepared
+
+
+def _prepare_whatsapp_payload(payload: dict[str, Any], tenant: int) -> dict[str, Any]:
+    cleaned = dict(payload)
+    for key in ("tenant", "tenant_id", "tenantId"):
+        cleaned.pop(key, None)
+
+    attachments = cleaned.get("attachments")
+    if isinstance(attachments, list):
+        normalized: list[dict[str, Any]] = []
+        for item in attachments:
+            prepared = _prepare_whatsapp_attachment(item)
+            if prepared:
+                normalized.append(prepared)
+        cleaned["attachments"] = normalized
+
+    attachment_single = cleaned.get("attachment")
+    if isinstance(attachment_single, dict):
+        cleaned["attachment"] = _prepare_whatsapp_attachment(attachment_single)
+
+    return cleaned
+
+
 def _transport_client(channel: str) -> httpx.AsyncClient:
     key = (channel or "").lower()
     client = _transport_clients.get(key)
-    admin_token = getattr(settings, "ADMIN_TOKEN", "") or ""
+    admin_token = _admin_token()
     if client is None or client.is_closed:
         headers: dict[str, str] = {}
-        if key == "telegram":
+        if key == "telegram" and admin_token:
             headers["X-Admin-Token"] = admin_token
+        if key == "whatsapp" and admin_token:
+            headers["X-Auth-Token"] = admin_token
         client = httpx.AsyncClient(timeout=httpx.Timeout(12.0), headers=headers)
         _transport_clients[key] = client
     elif key == "telegram":
-        client.headers.update({"X-Admin-Token": admin_token})
+        if admin_token:
+            client.headers.update({"X-Admin-Token": admin_token})
+        else:
+            client.headers.pop("X-Admin-Token", None)
+    elif key == "whatsapp":
+        if admin_token:
+            client.headers.update({"X-Auth-Token": admin_token})
+        else:
+            client.headers.pop("X-Auth-Token", None)
     return client
 
 app = FastAPI(title="avio-api")
@@ -303,7 +428,7 @@ async def metrics_endpoint() -> Response:
 
 @app.post("/send")
 async def send_transport_message(request: Request, message: TransportMessage) -> Response:
-    admin_token = getattr(settings, "ADMIN_TOKEN", "") or ""
+    admin_token = _admin_token()
     header_token = (request.headers.get("X-Admin-Token") or "").strip()
     if admin_token and header_token != admin_token:
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -311,12 +436,15 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
     if not message.has_content:
         raise HTTPException(status_code=400, detail="empty_message")
 
-    endpoint = CHANNEL_ENDPOINTS.get(message.channel)
+    payload = transport_message_asdict(message)
+    channel = message.channel
+    endpoint = CHANNEL_ENDPOINTS.get(channel)
+    if channel == "whatsapp":
+        endpoint = _waweb_send_url(message.tenant)
     if not endpoint:
         raise HTTPException(status_code=400, detail="channel_unknown")
 
-    payload = transport_message_asdict(message)
-    channel = message.channel
+    request_headers: dict[str, str] | None = None
     raw_to_value = payload.get("to")
     normalized_to = raw_to_value
     whitelist_number: str | None = None
@@ -385,13 +513,21 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
             )
             return JSONResponse({"error": "not_whitelisted"}, status_code=403)
 
+    if channel == "whatsapp":
+        payload = _prepare_whatsapp_payload(payload, message.tenant)
+        token = _admin_token()
+        if token:
+            request_headers = {"X-Auth-Token": token}
+
     try:
         client = _transport_client(channel)
-        response = await client.post(
-            endpoint,
-            json=payload,
-            timeout=httpx.Timeout(12.0),
-        )
+        request_kwargs: dict[str, Any] = {
+            "json": payload,
+            "timeout": httpx.Timeout(12.0),
+        }
+        if request_headers:
+            request_kwargs["headers"] = request_headers
+        response = await client.post(endpoint, **request_kwargs)
     except httpx.HTTPError as exc:
         status_label = "http_error"
         SEND_FAIL_COUNTER.labels(channel, status_label).inc()
@@ -542,7 +678,14 @@ async def internal_catalog_file(
     tenant: int, path: str, request: Request, token: str = ""
 ):
     if not C.is_internal_request_authorized(request, token=token):
-        raise HTTPException(status_code=403, detail="forbidden")
+        internal_token = (getattr(C, "WA_INTERNAL_TOKEN", "") or "").strip()
+        query_token = ""
+        try:
+            query_token = (request.query_params.get("token") or "").strip()
+        except Exception:
+            query_token = ""
+        if not (internal_token and query_token == internal_token):
+            raise HTTPException(status_code=403, detail="forbidden")
     if not path:
         raise HTTPException(status_code=400, detail="invalid_path")
     try:
