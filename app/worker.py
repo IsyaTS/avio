@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import base64
 import re
 import json
 import time
@@ -7,7 +8,7 @@ import asyncio
 import urllib.request
 import urllib.error
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 
 import httpx
 
@@ -54,6 +55,7 @@ from app.core import build_llm_messages, ask_llm
 from app.integrations import avito as avito_integration
 from app.transport import WhatsAppAddressError, normalize_e164_digits
 from app.transport import telegram as telegram_transport
+from app.web.common import WA_INTERNAL_TOKEN as COMMON_WA_INTERNAL_TOKEN
 
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
@@ -62,8 +64,8 @@ APP_VERSION = os.getenv("APP_VERSION", _default_version)
 
 # ==== ENV ====
 REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
-# Match waweb INTERNAL_SYNC_TOKEN resolution (WA_WEB_TOKEN or WEBHOOK_SECRET)
-WA_INTERNAL_TOKEN = (os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
+# Match waweb INTERNAL_SYNC_TOKEN resolution (shared with the web layer)
+WA_INTERNAL_TOKEN = COMMON_WA_INTERNAL_TOKEN
 TGWORKER_BASE_URL = (
     os.getenv("TGWORKER_URL")
     or os.getenv("TGWORKER_BASE_URL")
@@ -318,6 +320,152 @@ def _normalize_attachments(blobs: Iterable[dict[str, Any]]) -> list[dict[str, An
         if item:
             normalized.append(item)
     return normalized
+
+
+def _internal_base_url() -> str:
+    base = APP_BASE_URL or ""
+    if base:
+        return base.rstrip("/")
+    return "http://app:8000"
+
+
+def _parse_disposition_filename(header: str | None) -> str:
+    if not header:
+        return ""
+    match = re.search(r"filename\*=UTF-8''([^;]+)", header, flags=re.IGNORECASE)
+    if match and match.group(1):
+        try:
+            return unquote(match.group(1))
+        except Exception:
+            return match.group(1)
+    match = re.search(r"filename="?([^";]+)"?", header, flags=re.IGNORECASE)
+    if match and match.group(1):
+        return match.group(1)
+    return ""
+
+
+def _resolve_attachment_filename(
+    attachment: Mapping[str, Any],
+    headers: Mapping[str, str] | None,
+    absolute_url: str,
+) -> str:
+    for key in ("filename", "name"):
+        candidate = attachment.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    disposition = ""
+    if headers:
+        disposition = headers.get("Content-Disposition") or headers.get("content-disposition") or ""
+    candidate = _parse_disposition_filename(disposition)
+    if candidate:
+        return candidate
+    path = urlparse(absolute_url).path
+    if path:
+        tail = path.rstrip("/").split("/")[-1]
+        if tail:
+            return unquote(tail)
+    return ""
+
+
+def _resolve_attachment_mime(
+    attachment: Mapping[str, Any], headers: Mapping[str, str] | None
+) -> str:
+    for key in ("mime", "mime_type", "mimetype"):
+        candidate = attachment.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    if headers:
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        if content_type:
+            return content_type.split(";", 1)[0].strip()
+    return ""
+
+
+async def _download_internal_attachment(
+    relative_url: str,
+) -> tuple[bytes | None, Mapping[str, str] | None, str]:
+    absolute_url = f"{_internal_base_url()}{relative_url}"
+    token_value = WA_INTERNAL_TOKEN
+    timeout = httpx.Timeout(20.0, connect=5.0)
+    headers: Mapping[str, str] | None = None
+    content: bytes | None = None
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        primary_header = "X-Auth-Token"
+        primary_headers = {primary_header: token_value}
+        try:
+            response = await client.get(absolute_url, headers=primary_headers)
+        except httpx.HTTPError as exc:
+            log(
+                f"event=internal_download url={relative_url} header={primary_header} status=error "
+                f"detail={exc.__class__.__name__}"
+            )
+            return None, None, absolute_url
+
+        log(
+            f"event=internal_download url={relative_url} header={primary_header} status={response.status_code}"
+        )
+
+        if response.status_code in {401, 403}:
+            retry_header = "X-Internal-Token"
+            retry_headers = {retry_header: token_value}
+            try:
+                retry = await client.get(absolute_url, headers=retry_headers)
+            except httpx.HTTPError as exc:
+                log(
+                    f"event=internal_download url={relative_url} header={retry_header} status=error "
+                    f"detail={exc.__class__.__name__}"
+                )
+                return None, None, absolute_url
+
+            log(
+                f"event=internal_download url={relative_url} header={retry_header} status={retry.status_code}"
+            )
+            response = retry
+
+        if 200 <= response.status_code < 300:
+            content = response.content
+            headers = response.headers
+            return content, headers, absolute_url
+
+        return None, response.headers, absolute_url
+
+
+async def _prepare_internal_attachment(
+    attachment: Mapping[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(attachment, Mapping):
+        return dict(attachment)
+    url = attachment.get("url")
+    if not isinstance(url, str):
+        return dict(attachment)
+    trimmed = url.strip()
+    if not trimmed.startswith("/internal/tenant/"):
+        return dict(attachment)
+
+    data, headers, absolute_url = await _download_internal_attachment(trimmed)
+    prepared = dict(attachment)
+    prepared["url"] = absolute_url
+
+    if data is None:
+        return prepared
+
+    filename = _resolve_attachment_filename(prepared, headers, absolute_url)
+    if filename:
+        prepared["filename"] = filename
+        prepared.setdefault("name", filename)
+
+    mime = _resolve_attachment_mime(prepared, headers)
+    if mime:
+        prepared["mime"] = mime
+        prepared["mime_type"] = mime
+        prepared["mimetype"] = mime
+
+    prepared["type"] = str(prepared.get("type") or "document")
+    prepared["b64"] = base64.b64encode(data).decode("ascii")
+    prepared["sendMediaAsDocument"] = True
+    prepared.setdefault("size", len(data))
+    return prepared
 
 
 async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
@@ -1506,7 +1654,38 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             item["_resolved_lead_id"] = actual_lead_id
 
     if channel == "whatsapp":
-        st, body = await send_whatsapp(tenant, phone, text or None, attachment)
+        prepared_attachment = (
+            await _prepare_internal_attachment(attachment)
+            if attachment
+            else attachment
+        )
+        st, body = await send_whatsapp(tenant, phone, text or None, prepared_attachment)
+        if st == 401:
+            retry_count = 0
+            try:
+                retry_count = int(item.get("_waweb_auth_retry") or 0)
+            except Exception:
+                retry_count = 0
+            attempt = retry_count + 1
+            log(
+                f"event=waweb_auth_error tenant={tenant} lead_id={actual_lead_id} "
+                f"phone={phone or '-'} attempt={attempt}"
+            )
+            retry_payload = dict(item)
+            retry_payload["_waweb_auth_retry"] = attempt
+            if attempt >= 3:
+                try:
+                    await r.lpush(OUTBOX_DLQ_KEY, json.dumps(retry_payload, ensure_ascii=False))
+                except Exception:
+                    pass
+                return ("failed", "waweb_auth", body, st)
+            try:
+                await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(retry_payload, ensure_ascii=False))
+            except Exception:
+                log(
+                    f"event=waweb_auth_error action=requeue_failed tenant={tenant} lead_id={actual_lead_id}"
+                )
+            return ("retry", "waweb_auth", body, st)
     elif channel == "avito":
         chat_hint = avito_chat_id_hint
         if chat_hint is not None:

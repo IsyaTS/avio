@@ -218,6 +218,10 @@ scripts/waweb_manage.py <command> [--tenant <id>] [--all]
 
 - При первом сообщении в WhatsApp/Telegram бот отправляет PDF из `meta.catalog_pdf_path` (если он задан и каталог ещё не высылался). Повторные запросы «каталог», «pdf», «прайс» в любом канале немедленно сбрасывают TTL и пересылают документ заново.
 - Telegram использует те же вложения, что и WhatsApp: в очередь подаётся сообщение с `attachments` и `telegram_user_id`/`peer`, дальнейшую доставку осуществляет воркер.
+- Перед отправкой воркер скачивает `/internal/tenant/<TENANT>/catalog-file` с заголовком `X-Auth-Token: ${WA_INTERNAL_TOKEN}`. Если приложение отвечает `401`/`403`, выполняется повторная попытка с `X-Internal-Token: ${WA_INTERNAL_TOKEN}`. Сам маршрут также принимает `X-Admin-Token: ${ADMIN_TOKEN}`, `Authorization: Bearer ${ADMIN_TOKEN}` и `X-Webhook-Token: ${WEBHOOK_SECRET}`.
+- Для проверки доступа:
+  - `curl -I -H "X-Auth-Token: $WA_INTERNAL_TOKEN" "http://app:8000/internal/tenant/1/catalog-file?path=uploads/catalog.pdf"` → `200 OK`.
+  - `curl -I "http://app:8000/internal/tenant/1/catalog-file?path=uploads/catalog.pdf"` → `403 Forbidden`.
 - Если у арендатора задан `meta.catalog_csv_path`, поисковый движок каталога берёт данные прямо из этого файла — достаточно обновить CSV и перезапустить индекс.
 
 ### Тестирование

@@ -11,6 +11,9 @@ def sandbox(monkeypatch, tmp_path):
     monkeypatch.setenv("TENANTS_DIR", str(tenants_dir))
     monkeypatch.delenv("APP_INTERNAL_URL", raising=False)
     monkeypatch.delenv("APP_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("WEBHOOK_SECRET", "test-webhook-token")
+    monkeypatch.setenv("ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("WA_WEB_TOKEN", "test-wa-token")
 
     from app import core as core_module
     from app import main as main_module
@@ -118,9 +121,11 @@ def test_internal_catalog_file_uses_original_name_and_normalizes_path(sandbox):
     core.write_tenant_config(tenant, cfg)
 
     client = TestClient(main.app)
+    headers = {"X-Webhook-Token": "test-webhook-token"}
     response = client.get(
         f"/internal/tenant/{tenant}/catalog-file",
         params={"path": "uploads\\catalog.pdf"},
+        headers=headers,
     )
 
     assert response.status_code == 200
@@ -131,10 +136,49 @@ def test_internal_catalog_file_uses_original_name_and_normalizes_path(sandbox):
     head_response = client.head(
         f"/internal/tenant/{tenant}/catalog-file",
         params={"path": "uploads/catalog.pdf"},
+        headers=headers,
     )
 
     assert head_response.status_code == 200
     assert head_response.headers.get("content-length") == str(len(payload))
+
+
+def test_internal_catalog_file_requires_authorized_header(sandbox):
+    core, main = sandbox
+    tenant = 7
+    core.ensure_tenant_files(tenant)
+
+    uploads = core.tenant_dir(tenant) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    pdf_path = uploads / "catalog.pdf"
+    pdf_path.write_bytes(b"sample")
+
+    client = TestClient(main.app)
+    url = f"/internal/tenant/{tenant}/catalog-file"
+    params = {"path": "uploads/catalog.pdf"}
+
+    assert client.head(url, params=params).status_code == 403
+
+    assert (
+        client.head(url, params=params, headers={"X-Webhook-Token": "test-webhook-token"}).status_code
+        == 200
+    )
+    assert (
+        client.head(url, params=params, headers={"X-Admin-Token": "test-admin-token"}).status_code
+        == 200
+    )
+    assert (
+        client.head(url, params=params, headers={"Authorization": "Bearer test-admin-token"}).status_code
+        == 200
+    )
+    assert (
+        client.head(url, params=params, headers={"X-Auth-Token": "test-wa-token"}).status_code
+        == 200
+    )
+    assert (
+        client.head(url, params=params, headers={"X-Internal-Token": "test-wa-token"}).status_code
+        == 200
+    )
 
 
 def test_read_catalog_missing_custom_returns_empty(sandbox):
