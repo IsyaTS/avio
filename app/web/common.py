@@ -247,6 +247,24 @@ def is_internal_request_authorized(
         candidate = _coerce_header_value(headers.get("X-Internal-Token"))
         if candidate and candidate == internal_token:
             return True
+        query_token: str | None = None
+        try:
+            query_params = getattr(request, "query_params", None)
+        except Exception:  # pragma: no cover - defensive
+            query_params = None
+        if query_params is not None:
+            if isinstance(query_params, Mapping):
+                query_token = query_params.get("token")
+            else:
+                try:
+                    query_token = query_params.get("token")  # type: ignore[attr-defined]
+                except Exception:
+                    try:
+                        query_token = query_params["token"]  # type: ignore[index]
+                    except Exception:
+                        query_token = None
+        if _coerce_header_value(query_token) == internal_token:
+            return True
 
     provided = _coerce_header_value(token)
     if internal_token and provided and provided == internal_token:
