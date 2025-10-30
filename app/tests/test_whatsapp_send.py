@@ -50,8 +50,14 @@ class StubTransportClient:
         self._factory = factory
         self.calls: list[dict[str, Any]] = []
 
-    async def post(self, endpoint: str, json: dict[str, Any], timeout: Any) -> DummyResponse:
-        self.calls.append({"endpoint": endpoint, "json": json})
+    async def post(
+        self,
+        endpoint: str,
+        json: dict[str, Any],
+        timeout: Any,
+        headers: dict[str, str] | None = None,
+    ) -> DummyResponse:
+        self.calls.append({"endpoint": endpoint, "json": json, "headers": headers})
         return self._factory()
 
 
@@ -127,7 +133,11 @@ def test_send_whatsapp_success(monkeypatch: pytest.MonkeyPatch, recipient: str) 
     assert http_response.status_code == 200
     assert http_response.json()["ok"] is True
     assert stub.calls, "transport client must be invoked"
-    assert stub.calls[0]["json"]["to"] == "79991234567@c.us"
+    call = stub.calls[0]
+    assert call["endpoint"].endswith("/send?tenant=1")
+    assert call["json"]["to"] == "79991234567@c.us"
+    assert "tenant" not in call["json"]
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
 
 
 def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,7 +163,11 @@ def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert http_response.status_code == 200
     assert http_response.json()["ok"] is True
-    assert stub.calls and stub.calls[0]["json"]["to"] == "79991234567@c.us"
+    assert stub.calls
+    call = stub.calls[0]
+    assert call["endpoint"].endswith("/send?tenant=1")
+    assert call["json"]["to"] == "79991234567@c.us"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
 
 
 def test_send_whatsapp_not_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,4 +224,8 @@ def test_send_whatsapp_propagates_waweb_error(monkeypatch: pytest.MonkeyPatch) -
 
     assert http_response.status_code == 500
     assert http_response.json() == {"error": "wa_failure"}
-    assert stub.calls and stub.calls[0]["json"]["to"] == "79991234567@c.us"
+    assert stub.calls
+    call = stub.calls[0]
+    assert call["endpoint"].endswith("/send?tenant=1")
+    assert call["json"]["to"] == "79991234567@c.us"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"

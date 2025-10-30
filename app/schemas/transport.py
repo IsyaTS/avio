@@ -35,8 +35,9 @@ class Attachment(_AliasModel):
 
     type: str = Field(..., min_length=1)
     url: str = Field(..., min_length=1)
-    name: str | None = Field(default=None)
-    mime: str | None = Field(default=None)
+    name: str = Field(..., min_length=1)
+    mime: str = Field(..., min_length=1)
+    caption: str | None = Field(default=None)
     size: int | None = Field(default=None, ge=0)
 
 
