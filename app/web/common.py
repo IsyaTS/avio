@@ -248,6 +248,10 @@ def is_internal_request_authorized(
         if candidate and candidate == internal_token:
             return True
 
+    provided = _coerce_header_value(token)
+    if internal_token and provided and provided == internal_token:
+        return True
+
     admin_token = _admin_token()
     if admin_token:
         candidate = _coerce_header_value(headers.get("X-Admin-Token"))
@@ -263,7 +267,6 @@ def is_internal_request_authorized(
         if candidate and candidate == webhook_secret:
             return True
 
-    provided = _coerce_header_value(token)
     if webhook_secret and provided and provided == webhook_secret:
         return True
 
