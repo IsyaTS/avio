@@ -53,7 +53,11 @@ from app.common import (
 )
 from app.core import build_llm_messages, ask_llm
 from app.integrations import avito as avito_integration
-from app.transport import WhatsAppAddressError, normalize_e164_digits
+from app.transport import (
+    WhatsAppAddressError,
+    normalize_e164_digits,
+    normalize_whatsapp_recipient,
+)
 from app.transport import telegram as telegram_transport
 from app.web.common import WA_INTERNAL_TOKEN as COMMON_WA_INTERNAL_TOKEN
 
@@ -388,41 +392,52 @@ async def _download_internal_attachment(
     final_status: int | None = None
     error_label: str | None = None
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        request_headers: Mapping[str, str] | None = None
-        if token_value:
-            request_headers = {"X-Auth-Token": token_value}
+    header_attempts: list[tuple[str, Mapping[str, str] | None]] = []
+    if token_value:
+        header_attempts.append(("X-Auth-Token", {"X-Auth-Token": token_value}))
+        header_attempts.append(("X-Internal-Token", {"X-Internal-Token": token_value}))
+    else:
+        header_attempts.append(("", None))
 
-        try:
-            response = await client.get(absolute_url, headers=request_headers)
-        except httpx.HTTPError as exc:
-            error_label = exc.__class__.__name__
-        else:
-            if 200 <= response.status_code < 300:
-                return response.content, response.headers, absolute_url
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt_index, (header_label, headers) in enumerate(header_attempts, start=1):
+            log(
+                "event=internal_download level=info action=request "
+                f"attempt={attempt_index} url={relative_url} header={header_label or 'none'}"
+            )
+            try:
+                response = await client.get(absolute_url, headers=headers)
+            except httpx.HTTPError as exc:
+                error_label = exc.__class__.__name__
+                log(
+                    "event=internal_download level=info action=error "
+                    f"attempt={attempt_index} url={relative_url} error={error_label}"
+                )
+                continue
 
             final_status = response.status_code
             final_headers = response.headers
+            log(
+                "event=internal_download level=info action=response "
+                f"attempt={attempt_index} url={relative_url} status={final_status}"
+            )
 
-            if (
+            if 200 <= response.status_code < 300:
+                return response.content, response.headers, absolute_url
+
+            if not (
                 token_value
                 and response.status_code in {401, 403}
+                and header_label == "X-Auth-Token"
             ):
-                try:
-                    retry = await client.get(
-                        absolute_url, headers={"X-Internal-Token": token_value}
-                    )
-                except httpx.HTTPError as exc:
-                    error_label = exc.__class__.__name__
-                else:
-                    final_status = retry.status_code
-                    final_headers = retry.headers
-                    if 200 <= retry.status_code < 300:
-                        return retry.content, retry.headers, absolute_url
+                break
 
     if final_status is not None or error_label:
         status_hint = error_label or final_status or "error"
-        log(f"event=internal_download action=fetch url={relative_url} status={status_hint}")
+        log(
+            "event=internal_download level=info action=fetch "
+            f"url={relative_url} status={status_hint}"
+        )
 
     return None, final_headers, absolute_url
 
@@ -462,6 +477,73 @@ async def _prepare_internal_attachment(
     prepared["sendMediaAsDocument"] = True
     prepared.setdefault("size", len(data))
     return prepared
+
+
+def _build_wa_document_payload(
+    attachment: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not isinstance(attachment, Mapping):
+        return None, None
+
+    attachment_type = str(attachment.get("type") or attachment.get("kind") or "").strip().lower()
+    if attachment_type and attachment_type not in {"document", "file"}:
+        return None, None
+
+    def _first_text(*keys: str) -> str:
+        for key in keys:
+            value = attachment.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    url = _first_text("url", "href", "document", "file", "path")
+    if not url:
+        return None, None
+
+    filename = _first_text("filename", "name", "title")
+    mime = _first_text("mime", "mime_type", "mimetype", "content_type")
+    caption = _first_text("caption", "text", "description")
+
+    document_block: dict[str, Any] = {"url": url}
+    if filename:
+        document_block["filename"] = filename
+    if mime:
+        document_block["mime"] = mime
+    if caption:
+        document_block["caption"] = caption
+
+    wa_attachment: dict[str, Any] = {
+        "type": "document",
+        "document": dict(document_block),
+        "url": url,
+    }
+
+    if filename:
+        wa_attachment["filename"] = filename
+        wa_attachment.setdefault("name", filename)
+    if mime:
+        wa_attachment["mime"] = mime
+        wa_attachment.setdefault("mime_type", mime)
+        wa_attachment.setdefault("mimetype", mime)
+    if caption:
+        wa_attachment["caption"] = caption
+
+    if attachment.get("b64"):
+        wa_attachment["b64"] = attachment.get("b64")
+    if attachment.get("sendMediaAsDocument") is not None:
+        wa_attachment["sendMediaAsDocument"] = attachment.get("sendMediaAsDocument")
+    if attachment.get("source"):
+        wa_attachment["source"] = attachment.get("source")
+
+    size_value = attachment.get("size")
+    try:
+        size_int = int(size_value) if size_value is not None else None
+    except Exception:
+        size_int = None
+    if size_int is not None and size_int >= 0:
+        wa_attachment["size"] = size_int
+
+    return wa_attachment, document_block
 
 
 async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
@@ -1130,23 +1212,68 @@ async def send_whatsapp(
     text: str | None = None,
     attachment: dict | None = None,
 ) -> tuple[int, str]:
-    url = f"{_waweb_base_url(tenant_id)}/session/{tenant_id}/send"
-    payload: Dict[str, Any] = {"to": phone}
+    base_url = _waweb_base_url(tenant_id)
+    url = f"{base_url}/send"
+
+    payload: Dict[str, Any] = {
+        "channel": "whatsapp",
+        "tenant": tenant_id,
+        "tenant_id": tenant_id,
+    }
+
+    raw_phone = phone
+    if raw_phone is None:
+        raw_phone = ""
+    try:
+        _, jid = normalize_whatsapp_recipient(raw_phone)
+    except WhatsAppAddressError:
+        digits_only = _digits(str(raw_phone))
+        jid = f"{digits_only}@c.us" if digits_only else str(raw_phone)
+    payload["to"] = jid
+
     if text:
         payload["text"] = text
+
+    attachments_payload: list[dict[str, Any]] = []
+    document_block: dict[str, Any] | None = None
     if attachment:
-        payload["attachment"] = attachment
+        attachment_copy: dict[str, Any] = dict(attachment)
+        wa_attachment, doc_block = _build_wa_document_payload(attachment_copy)
+        if wa_attachment:
+            attachments_payload.append(wa_attachment)
+            if doc_block:
+                document_block = doc_block
+        else:
+            attachments_payload.append(attachment_copy)
+        payload["attachment"] = attachment_copy
+
+    if attachments_payload:
+        payload["attachments"] = attachments_payload
+        if document_block:
+            payload["document"] = document_block
+
     headers: Dict[str, str] = {}
     if WA_INTERNAL_TOKEN:
         headers["X-Auth-Token"] = WA_INTERNAL_TOKEN
+
     last_status, last_body = 0, ""
-    for attempt in range(3):
+    retry_delays = (0.5, 1.0, 2.0)
+    for attempt in range(len(retry_delays)):
         last_status, last_body = await asyncio.to_thread(
             _http_json, "POST", url, payload, 12.0, headers
         )
-        if 200 <= last_status < 500:
+        if 200 <= last_status < 300:
             break
-        await asyncio.sleep(0.5 * (attempt + 1))
+        if last_status == 0 or last_status >= 500:
+            if attempt < len(retry_delays) - 1:
+                delay = retry_delays[attempt]
+                log(
+                    f"event=waweb_retry attempt={attempt + 1} status={last_status} delay={delay}"  # noqa: G004
+                )
+                await asyncio.sleep(delay)
+                continue
+        break
+
     return last_status, last_body
 
 async def send_avito(
@@ -1655,7 +1782,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             if attachment
             else attachment
         )
-        st, body = await send_whatsapp(tenant, phone, text or None, prepared_attachment)
+        recipient_value = raw_to if isinstance(raw_to, str) and raw_to.strip() else phone
+        st, body = await send_whatsapp(tenant, recipient_value or "", text or None, prepared_attachment)
         if st == 401:
             retry_count = 0
             try:
@@ -1663,9 +1791,12 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             except Exception:
                 retry_count = 0
             attempt = retry_count + 1
+            body_hint = (body or "").strip()
+            if len(body_hint) > 400:
+                body_hint = f"{body_hint[:400]}…"
             log(
                 f"event=waweb_auth_error tenant={tenant} lead_id={actual_lead_id} "
-                f"phone={phone or '-'} attempt={attempt}"
+                f"phone={phone or '-'} attempt={attempt} code={st} body={body_hint or '-'}"
             )
             retry_payload = dict(item)
             retry_payload["_waweb_auth_retry"] = attempt
@@ -1718,7 +1849,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             lead_id=actual_lead_id,
         )
     else:
-        st, body = await send_whatsapp(tenant, phone, text or None, attachment)
+        recipient_value = raw_to if isinstance(raw_to, str) and raw_to.strip() else phone
+        st, body = await send_whatsapp(tenant, recipient_value or "", text or None, attachment)
 
     if 200 <= st < 300:
         status = "sent"
