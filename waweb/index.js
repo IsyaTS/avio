@@ -906,12 +906,60 @@ function extractDocumentDescriptor(entry, context){
 
   const typeField = entry.type ? String(entry.type).toLowerCase() : '';
   const hasDocType = typeField === 'document' || typeField === 'file';
-  const docPathRaw = entry.path ?? entry.document ?? entry.file;
-  const urlRaw = entry.url ?? entry.href;
-  const b64Raw = entry.b64 ?? entry.base64 ?? entry.data ?? null;
-  const captionRaw = entry.caption ?? entry.text ?? null;
-  const filenameRaw = entry.filename ?? entry.name ?? null;
-  const mimetypeRaw = entry.mimetype ?? entry.mime_type ?? entry.mime ?? null;
+  const documentNode = entry.document && typeof entry.document === 'object' ? entry.document : null;
+
+  const pickFirstText = (candidates) => {
+    for (const value of candidates) {
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed) return trimmed;
+      }
+    }
+    return null;
+  };
+
+  const docPathRaw = pickFirstText([
+    entry.path,
+    typeof entry.document === 'string' ? entry.document : null,
+    entry.file,
+    documentNode ? documentNode.path : null,
+    documentNode ? documentNode.document : null,
+    documentNode ? documentNode.file : null,
+  ]);
+  const urlRaw = pickFirstText([
+    entry.url,
+    entry.href,
+    documentNode ? documentNode.url : null,
+    documentNode ? documentNode.href : null,
+  ]);
+  const b64Raw = pickFirstText([
+    entry.b64,
+    entry.base64,
+    entry.data,
+    documentNode ? documentNode.b64 : null,
+    documentNode ? documentNode.base64 : null,
+    documentNode ? documentNode.data : null,
+  ]);
+  const captionRaw = pickFirstText([
+    entry.caption,
+    entry.text,
+    documentNode ? documentNode.caption : null,
+    documentNode ? documentNode.text : null,
+  ]);
+  const filenameRaw = pickFirstText([
+    entry.filename,
+    entry.name,
+    documentNode ? documentNode.filename : null,
+    documentNode ? documentNode.name : null,
+  ]);
+  const mimetypeRaw = pickFirstText([
+    entry.mimetype,
+    entry.mime_type,
+    entry.mime,
+    documentNode ? documentNode.mimetype : null,
+    documentNode ? documentNode.mime_type : null,
+    documentNode ? documentNode.mime : null,
+  ]);
   const hasData = Boolean(docPathRaw || urlRaw || b64Raw);
 
   if (ctx === 'payload' && !hasDocType) return null;
