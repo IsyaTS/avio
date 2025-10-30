@@ -541,7 +541,7 @@ async def _handle(request: Request):
 async def internal_catalog_file(
     tenant: int, path: str, request: Request, token: str = ""
 ):
-    if settings.WEBHOOK_SECRET and token != settings.WEBHOOK_SECRET:
+    if not C.is_internal_request_authorized(request, token=token):
         raise HTTPException(status_code=403, detail="forbidden")
     if not path:
         raise HTTPException(status_code=400, detail="invalid_path")

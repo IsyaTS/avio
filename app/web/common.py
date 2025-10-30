@@ -16,7 +16,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Mapping, TypeVar, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - hints only
+    from fastapi import Request
 
 import httpx
 import redis  # sync client
@@ -188,6 +191,80 @@ def client_settings_version() -> str:
 
 def _admin_token() -> str:
     return (getattr(settings, "ADMIN_TOKEN", "") or os.getenv("ADMIN_TOKEN") or "").strip()
+
+
+def _webhook_secret() -> str:
+    return (
+        getattr(settings, "WEBHOOK_SECRET", "")
+        or os.getenv("WEBHOOK_SECRET")
+        or ""
+    ).strip()
+
+
+def _coerce_header_value(raw: Any) -> str:
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def _extract_bearer_token(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    prefix = value.split(" ", 1)
+    if len(prefix) == 2 and prefix[0].lower() == "bearer":
+        return prefix[1].strip()
+    return ""
+
+
+def _headers_mapping(request: "Request" | Any | None) -> Mapping[str, Any]:
+    if request is None:
+        return {}
+    headers = getattr(request, "headers", None)
+    if isinstance(headers, Mapping):
+        return headers
+    try:
+        return dict(headers or {})
+    except Exception:
+        return {}
+
+
+def is_internal_request_authorized(
+    request: "Request" | Any | None,
+    *,
+    token: str | None = None,
+) -> bool:
+    headers = _headers_mapping(request)
+
+    internal_token = WA_INTERNAL_TOKEN
+    if internal_token:
+        candidate = _coerce_header_value(headers.get("X-Auth-Token"))
+        if candidate and candidate == internal_token:
+            return True
+        candidate = _coerce_header_value(headers.get("X-Internal-Token"))
+        if candidate and candidate == internal_token:
+            return True
+
+    admin_token = _admin_token()
+    if admin_token:
+        candidate = _coerce_header_value(headers.get("X-Admin-Token"))
+        if candidate and candidate == admin_token:
+            return True
+        bearer = _extract_bearer_token(_coerce_header_value(headers.get("Authorization")))
+        if bearer and bearer == admin_token:
+            return True
+
+    webhook_secret = _webhook_secret()
+    if webhook_secret:
+        candidate = _coerce_header_value(headers.get("X-Webhook-Token"))
+        if candidate and candidate == webhook_secret:
+            return True
+
+    provided = _coerce_header_value(token)
+    if webhook_secret and provided and provided == webhook_secret:
+        return True
+
+    return False
 
 
 def _build_tg_url(path: str) -> str:
