@@ -165,10 +165,16 @@ def _resolve_catalog_attachment(
     caption = f"Каталог в PDF: {filename}"
 
     attachment = {
+        "type": "document",
         "url": url,
         "filename": filename,
         "mime_type": mime,
     }
+    attachment["mime"] = mime
+    attachment["mimetype"] = mime
+    attachment["sendMediaAsDocument"] = True
+    if caption:
+        attachment["caption"] = caption
     return attachment, caption
 
 
