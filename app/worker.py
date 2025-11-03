@@ -1360,9 +1360,17 @@ async def send_whatsapp(
             _append_attachment(blob)
 
     if attachments_payload:
+        log(
+            "[worker] wa_payload attachments_len=%s first_keys=%s"
+            % (
+                len(attachments_payload),
+                list(attachments_payload[0].keys()) if attachments_payload else [],
+            )
+        )
         payload["attachments"] = attachments_payload
     elif document_block:
         payload["document"] = document_block
+        log("[worker] wa_payload document_keys=%s" % list(document_block.keys()))
 
     headers: Dict[str, str] = {}
     admin_token = (
