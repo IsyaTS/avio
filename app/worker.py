@@ -1359,7 +1359,14 @@ async def send_whatsapp(
                 continue
             _append_attachment(blob)
 
+    media_bytes = 0
     if attachments_payload:
+        for candidate in attachments_payload:
+            if not isinstance(candidate, Mapping):
+                continue
+            data_block = candidate.get("b64")
+            if isinstance(data_block, str) and data_block:
+                media_bytes += int(len(data_block) * 3 / 4)
         log(
             "[worker] wa_payload attachments_len=%s first_keys=%s"
             % (
@@ -1371,6 +1378,22 @@ async def send_whatsapp(
     elif document_block:
         payload["document"] = document_block
         log("[worker] wa_payload document_keys=%s" % list(document_block.keys()))
+
+    def _wa_post_timeout(bytes_total: int) -> float:
+        base_timeout = 12.0
+        if bytes_total <= 0:
+            return base_timeout
+        # allow ~2.5 seconds per MiB, capped at 180 seconds
+        per_mib = 2.5
+        timeout = base_timeout + per_mib * (bytes_total / (1024 * 1024))
+        return float(min(180.0, max(base_timeout, timeout)))
+
+    request_timeout = _wa_post_timeout(media_bytes)
+    if media_bytes:
+        log(
+            "[worker] wa_payload media_bytes=%s timeout=%.1f"
+            % (media_bytes, request_timeout)
+        )
 
     headers: Dict[str, str] = {}
     admin_token = (
@@ -1390,7 +1413,7 @@ async def send_whatsapp(
     retry_delays = (0.5, 1.0, 2.0)
     for attempt in range(len(retry_delays)):
         last_status, last_body = await asyncio.to_thread(
-            _http_json, "POST", url, payload, 12.0, headers
+            _http_json, "POST", url, payload, request_timeout, headers
         )
         if 200 <= last_status < 300:
             break
