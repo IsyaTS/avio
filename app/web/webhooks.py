@@ -115,12 +115,20 @@ def _resolve_catalog_attachment(
     meta: dict | None = None
     if isinstance(cfg, dict):
         integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
-        raw_meta = integrations.get("uploaded_catalog")
-        if isinstance(raw_meta, dict) and raw_meta:
-            if (raw_meta.get("type") or "").lower() == "pdf":
-                meta = raw_meta
-            else:
-                meta = None
+        if isinstance(integrations, dict):
+            candidates: list[dict[str, Any]] = []
+            raw_meta = integrations.get("uploaded_catalog")
+            if isinstance(raw_meta, dict) and raw_meta:
+                candidates.append(raw_meta)
+            for alt_key in ("uploaded_catalog_pdf", "catalog_pdf", "pdf_catalog"):
+                alt_meta = integrations.get(alt_key)
+                if isinstance(alt_meta, dict) and alt_meta:
+                    candidates.append(alt_meta)
+            for candidate in candidates:
+                meta_type = str(candidate.get("type") or "").lower()
+                if meta_type in {"pdf", "document"}:
+                    meta = candidate
+                    break
     if not meta:
         persona_meta = core.persona_catalog_pdf(int(tenant))
         if persona_meta:
