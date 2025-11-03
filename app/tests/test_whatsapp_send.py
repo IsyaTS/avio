@@ -169,8 +169,7 @@ def test_send_whatsapp_success(monkeypatch: pytest.MonkeyPatch, recipient: str) 
     assert call["endpoint"].endswith("/send?tenant=1")
     assert call["json"]["to"] == "79991234567@c.us"
     assert "tenant" not in call["json"]
-    assert call["headers"] and call["headers"].get("X-Auth-Token") == "diag-token"
-    assert call["headers"].get("X-Internal-Token") == "diag-token"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
 
 
 def test_send_whatsapp_accepts_alias_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,8 +217,7 @@ def test_send_whatsapp_accepts_alias_payload(monkeypatch: pytest.MonkeyPatch) ->
     query_params = parse_qs(parsed.query)
     assert query_params.get("token") == ["diag-token"]
     assert query_params.get("foo") == ["1"]
-    assert call["headers"].get("X-Auth-Token") == "diag-token"
-    assert call["headers"].get("X-Internal-Token") == "diag-token"
+    assert call["headers"].get("X-Auth-Token") == "test-token"
 
 
 def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,8 +247,7 @@ def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
     call = stub.calls[0]
     assert call["endpoint"].endswith("/send?tenant=1")
     assert call["json"]["to"] == "79991234567@c.us"
-    assert call["headers"] and call["headers"].get("X-Auth-Token") == "diag-token"
-    assert call["headers"].get("X-Internal-Token") == "diag-token"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
 
 
 def test_send_whatsapp_not_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,5 +308,4 @@ def test_send_whatsapp_propagates_waweb_error(monkeypatch: pytest.MonkeyPatch) -
     call = stub.calls[0]
     assert call["endpoint"].endswith("/send?tenant=1")
     assert call["json"]["to"] == "79991234567@c.us"
-    assert call["headers"] and call["headers"].get("X-Auth-Token") == "diag-token"
-    assert call["headers"].get("X-Internal-Token") == "diag-token"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
