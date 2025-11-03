@@ -206,6 +206,8 @@ scripts/waweb_manage.py <command> [--tenant <id>] [--all]
   purge     – попытка очистить state (всегда возвращает «нельзя удалять»)
 ```
 
+Утилита сама передаёт в контейнеры секрет `WA_WEB_TOKEN` (и совместимый `WA_INTERNAL_TOKEN`), поэтому достаточно задать его один раз в `.env` — все арендаторы будут использовать согласованный токен без ручной синхронизации.
+
 Команды выполняются через `docker compose -f docker-compose.waweb.yml`, поэтому требуется сеть `avio_default` (создаётся основной `docker-compose.yml`).
 
 ## Умный ответ (Smart Reply)
@@ -219,10 +221,10 @@ scripts/waweb_manage.py <command> [--tenant <id>] [--all]
 
 - При первом сообщении в WhatsApp/Telegram бот отправляет PDF из `meta.catalog_pdf_path` (если он задан и каталог ещё не высылался). Повторные запросы «каталог», «pdf», «прайс» в любом канале немедленно сбрасывают TTL и пересылают документ заново.
 - Telegram использует те же вложения, что и WhatsApp: в очередь подаётся сообщение с `attachments` и `telegram_user_id`/`peer`, дальнейшую доставку осуществляет воркер.
-- Перед отправкой воркер скачивает `/internal/tenant/<TENANT>/catalog-file` с заголовком `X-Auth-Token: ${WA_INTERNAL_TOKEN}`. Если приложение отвечает `401`/`403`, выполняется повторная попытка с `X-Internal-Token: ${WA_INTERNAL_TOKEN}`. Сам маршрут также принимает `X-Admin-Token: ${ADMIN_TOKEN}`, `Authorization: Bearer ${ADMIN_TOKEN}` и `X-Webhook-Token: ${WEBHOOK_SECRET}`.
-- Готовый документ отправляется через `POST http://waweb-<TENANT>:9001/send` c заголовком `X-Auth-Token: ${WA_INTERNAL_TOKEN}`.
+- Перед отправкой воркер скачивает `/internal/tenant/<TENANT>/catalog-file` с заголовком `X-Auth-Token: ${WA_WEB_TOKEN}` (alias `WA_INTERNAL_TOKEN`). Если приложение отвечает `401`/`403`, выполняется повторная попытка с `X-Internal-Token: ${WA_WEB_TOKEN}`. Сам маршрут также принимает `X-Admin-Token: ${ADMIN_TOKEN}`, `Authorization: Bearer ${ADMIN_TOKEN}` и `X-Webhook-Token: ${WEBHOOK_SECRET}`.
+- Готовый документ отправляется через `POST http://waweb-<TENANT>:9001/send` c заголовком `X-Auth-Token: ${WA_WEB_TOKEN}`.
 - Для проверки доступа:
-  - `curl -I -H "X-Auth-Token: $WA_INTERNAL_TOKEN" "http://app:8000/internal/tenant/1/catalog-file?path=uploads/catalog.pdf"` → `200 OK`.
+  - `curl -I -H "X-Auth-Token: $WA_WEB_TOKEN" "http://app:8000/internal/tenant/1/catalog-file?path=uploads/catalog.pdf"` → `200 OK`.
   - `curl -I "http://app:8000/internal/tenant/1/catalog-file?path=uploads/catalog.pdf"` → `403 Forbidden`.
 - Если у арендатора задан `meta.catalog_csv_path`, поисковый движок каталога берёт данные прямо из этого файла — достаточно обновить CSV и перезапустить индекс.
 

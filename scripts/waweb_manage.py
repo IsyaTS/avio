@@ -113,6 +113,14 @@ def _compose_env(cfg: TenantConfig) -> Dict[str, str]:
     if cfg.port:
         env["WAWEB_PORT"] = str(cfg.port)
     env.setdefault("WAWEB_ADMIN_TOKEN", env.get("ADMIN_TOKEN", ""))
+    shared_token = (
+        env.get("WA_WEB_TOKEN")
+        or env.get("WA_INTERNAL_TOKEN")
+        or env.get("WEBHOOK_SECRET")
+    )
+    if shared_token:
+        env["WA_WEB_TOKEN"] = shared_token
+        env.setdefault("WA_INTERNAL_TOKEN", shared_token)
     return env
 
 

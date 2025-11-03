@@ -12,6 +12,8 @@ x-waweb-base: &waweb-base
     PUBLIC_KEY: "${PUBLIC_KEY}"
     STATE_DIR: "/data/wa_state"
     PUPPETEER_CACHE_DIR: "/data/.cache/puppeteer"
+    WA_WEB_TOKEN: "${WA_WEB_TOKEN:-${WEBHOOK_SECRET:-}}"
+    WA_INTERNAL_TOKEN: "${WA_INTERNAL_TOKEN:-${WA_WEB_TOKEN:-${WEBHOOK_SECRET:-}}}"
     DEBUG: "${WAWEB_DEBUG:-whatsapp-web.js:*,puppeteer:*}"
     PORT: "9001"
     MAX_MEDIA_MB: "25"
