@@ -1698,10 +1698,38 @@ app.get('/metrics', (_req, res) => {
   return res.send(renderMetrics());
 });
 
+function headerValue(headers, name){
+  if (!headers) return '';
+  const raw = headers[name];
+  if (raw === undefined || raw === null) return '';
+  if (Array.isArray(raw)) {
+    if (!raw.length) return '';
+    return String(raw[0] ?? '').trim();
+  }
+  return String(raw).trim();
+}
+
 function authorized(req){
-  if (!INTERNAL_SYNC_TOKEN) return true;
-  const h = (req.headers['x-auth-token'] || '').toString().trim();
-  return h && h === INTERNAL_SYNC_TOKEN;
+  const headers = req && req.headers ? req.headers : {};
+  const authToken = headerValue(headers, 'x-auth-token');
+  const internalToken = headerValue(headers, 'x-internal-token');
+  const adminHeader = headerValue(headers, 'x-admin-token');
+
+  const presented = [];
+  if (authToken) presented.push(authToken);
+  if (internalToken) presented.push(internalToken);
+  if (adminHeader) presented.push(adminHeader);
+
+  if (INTERNAL_SYNC_TOKEN && presented.includes(INTERNAL_SYNC_TOKEN)) {
+    return true;
+  }
+  if (ADMIN_TOKEN && presented.includes(ADMIN_TOKEN)) {
+    return true;
+  }
+  if (!INTERNAL_SYNC_TOKEN && !ADMIN_TOKEN) {
+    return true;
+  }
+  return false;
 }
 
 app.post('/session/start', (req, res) => {
