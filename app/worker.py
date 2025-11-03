@@ -1380,13 +1380,13 @@ async def send_whatsapp(
         log("[worker] wa_payload document_keys=%s" % list(document_block.keys()))
 
     def _wa_post_timeout(bytes_total: int) -> float:
-        base_timeout = 20.0
+        base_timeout = 30.0
         if bytes_total <= 0:
             return base_timeout
-        # allow ~6 seconds per MiB, capped at 240 seconds
-        per_mib = 6.0
+        # allow ~12 seconds per MiB to cover large document uploads
+        per_mib = 12.0
         timeout = base_timeout + per_mib * (bytes_total / (1024 * 1024))
-        return float(min(240.0, max(base_timeout, timeout)))
+        return float(min(360.0, max(60.0, timeout)))
 
     request_timeout = _wa_post_timeout(media_bytes)
     if media_bytes:
