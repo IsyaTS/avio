@@ -1342,7 +1342,14 @@ async def send_whatsapp(
     attachment_copy: dict[str, Any] | None = None
     if attachment:
         attachment_copy = _append_attachment(attachment, force_include=True)
-        payload["attachment"] = attachment_copy
+        if attachment_copy is not None:
+            sanitized_attachment = {
+                key: value
+                for key, value in attachment_copy.items()
+                if key not in {"b64", "data"}
+            }
+            if sanitized_attachment:
+                payload["attachment"] = sanitized_attachment
 
     if attachments:
         for blob in attachments:
@@ -1354,8 +1361,8 @@ async def send_whatsapp(
 
     if attachments_payload:
         payload["attachments"] = attachments_payload
-        if document_block:
-            payload["document"] = document_block
+    elif document_block:
+        payload["document"] = document_block
 
     headers: Dict[str, str] = {}
     admin_token = (
