@@ -558,6 +558,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     forced_catalog = bool(text and _user_requested_catalog(text))
     should_send_catalog = bool(attachment) and (forced_catalog or not catalog_already_sent)
+    logger.debug(
+        "catalog_flow tenant=%s forced=%s already_sent=%s attachment=%s",
+        tenant,
+        int(forced_catalog),
+        int(catalog_already_sent),
+        isinstance(attachment, dict),
+    )
 
     if should_send_catalog:
         if forced_catalog and cache_key:
