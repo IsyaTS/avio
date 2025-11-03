@@ -99,12 +99,39 @@ def _prepare_app(
     whitelist: str,
     response_factory: Callable[[], DummyResponse],
 ) -> tuple[TestClient, StubTransportClient]:
+    import sys
+    import types
+
+    if "sklearn" not in sys.modules:
+        sklearn_stub = types.ModuleType("sklearn")
+        feature_stub = types.ModuleType("sklearn.feature_extraction")
+        text_stub = types.ModuleType("sklearn.feature_extraction.text")
+
+        class _DummyVectorizer:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def fit_transform(self, *args: Any, **kwargs: Any) -> list[Any]:
+                return []
+
+            def transform(self, *args: Any, **kwargs: Any) -> list[Any]:
+                return []
+
+        text_stub.TfidfVectorizer = _DummyVectorizer  # type: ignore[attr-defined]
+        feature_stub.text = text_stub  # type: ignore[attr-defined]
+        sklearn_stub.feature_extraction = feature_stub  # type: ignore[attr-defined]
+        sys.modules["sklearn"] = sklearn_stub
+        sys.modules["sklearn.feature_extraction"] = feature_stub
+        sys.modules["sklearn.feature_extraction.text"] = text_stub
+
     from app import main as main_module
 
     monkeypatch.setenv("OUTBOX_ENABLED", "true")
     monkeypatch.setenv("OUTBOX_WHITELIST", whitelist)
     monkeypatch.setenv("ADMIN_TOKEN", "test-token")
+    monkeypatch.setenv("WA_WEB_TOKEN", "diag-token")
     monkeypatch.setattr(main_module.settings, "ADMIN_TOKEN", "test-token", raising=False)
+    monkeypatch.setattr(main_module.C, "WA_INTERNAL_TOKEN", "diag-token", raising=False)
 
     stub = StubTransportClient(response_factory)
     monkeypatch.setattr(main_module, "_transport_client", lambda channel: stub)
@@ -142,7 +169,8 @@ def test_send_whatsapp_success(monkeypatch: pytest.MonkeyPatch, recipient: str) 
     assert call["endpoint"].endswith("/send?tenant=1")
     assert call["json"]["to"] == "79991234567@c.us"
     assert "tenant" not in call["json"]
-    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "diag-token"
+    assert call["headers"].get("X-Internal-Token") == "diag-token"
 
 
 def test_send_whatsapp_accepts_alias_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,7 +218,8 @@ def test_send_whatsapp_accepts_alias_payload(monkeypatch: pytest.MonkeyPatch) ->
     query_params = parse_qs(parsed.query)
     assert query_params.get("token") == ["diag-token"]
     assert query_params.get("foo") == ["1"]
-    assert call["headers"].get("X-Auth-Token") == "test-token"
+    assert call["headers"].get("X-Auth-Token") == "diag-token"
+    assert call["headers"].get("X-Internal-Token") == "diag-token"
 
 
 def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,7 +249,8 @@ def test_send_whatsapp_allows_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
     call = stub.calls[0]
     assert call["endpoint"].endswith("/send?tenant=1")
     assert call["json"]["to"] == "79991234567@c.us"
-    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "diag-token"
+    assert call["headers"].get("X-Internal-Token") == "diag-token"
 
 
 def test_send_whatsapp_not_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,4 +311,5 @@ def test_send_whatsapp_propagates_waweb_error(monkeypatch: pytest.MonkeyPatch) -
     call = stub.calls[0]
     assert call["endpoint"].endswith("/send?tenant=1")
     assert call["json"]["to"] == "79991234567@c.us"
-    assert call["headers"] and call["headers"].get("X-Auth-Token") == "test-token"
+    assert call["headers"] and call["headers"].get("X-Auth-Token") == "diag-token"
+    assert call["headers"].get("X-Internal-Token") == "diag-token"

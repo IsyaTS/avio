@@ -1363,9 +1363,13 @@ async def send_whatsapp(
         or ADMIN_TOKEN
         or ""
     ).strip()
-    headers["X-Auth-Token"] = admin_token
+    shared_token = WA_INTERNAL_TOKEN or admin_token
+    if shared_token:
+        headers["X-Auth-Token"] = shared_token
     if WA_INTERNAL_TOKEN:
         headers.setdefault("X-Internal-Token", WA_INTERNAL_TOKEN)
+    if admin_token and admin_token != headers.get("X-Auth-Token"):
+        headers.setdefault("X-Admin-Token", admin_token)
 
     last_status, last_body = 0, ""
     retry_delays = (0.5, 1.0, 2.0)
