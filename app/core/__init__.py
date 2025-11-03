@@ -1715,7 +1715,14 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
             pass
         persona_csv_path = persona_catalog_csv(int(tenant))
         if persona_csv_path:
-            meta = {"type": "csv", "delimiter": ";", "encoding": "utf-8"}
+            meta_config = persona_meta_config(int(tenant))
+            csv_delimiter = str(meta_config.get("catalog_csv_delimiter") or ";").strip() or ";"
+            csv_encoding = str(meta_config.get("catalog_csv_encoding") or "utf-8").strip() or "utf-8"
+            meta = {
+                "type": "csv",
+                "delimiter": csv_delimiter,
+                "encoding": csv_encoding,
+            }
             candidate_tuple = (persona_csv_path, meta)
             if candidate_tuple not in candidates:
                 candidates.insert(0, candidate_tuple)
