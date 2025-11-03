@@ -117,7 +117,10 @@ def _resolve_catalog_attachment(
         integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
         raw_meta = integrations.get("uploaded_catalog")
         if isinstance(raw_meta, dict) and raw_meta:
-            meta = raw_meta
+            if (raw_meta.get("type") or "").lower() == "pdf":
+                meta = raw_meta
+            else:
+                meta = None
     if not meta:
         persona_meta = core.persona_catalog_pdf(int(tenant))
         if persona_meta:
