@@ -1689,7 +1689,7 @@ function resetSession(tenant, webhookUrl) {
 
 /* ---------- server ---------- */
 const app = express();
-app.use(bodyParser.json({ limit: '1mb' }));
+app.use(bodyParser.json({ limit: '32mb' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'waweb' }));
 
