@@ -330,7 +330,7 @@ def _transport_client(channel: str) -> httpx.AsyncClient:
             # Large WhatsApp documents (e.g. catalog PDFs) may require extra time for waweb
             # to fetch, transcode, and upload to WhatsApp. Use a longer timeout to avoid
             # premature 502 responses while waweb processes the payload.
-            timeout = httpx.Timeout(60.0)
+            timeout = httpx.Timeout(300.0)
         client = httpx.AsyncClient(timeout=timeout, headers=headers)
         _transport_clients[key] = client
     elif key == "telegram":
@@ -560,7 +560,7 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
             "timeout": httpx.Timeout(12.0),
         }
         if channel == "whatsapp":
-            request_kwargs["timeout"] = httpx.Timeout(60.0)
+            request_kwargs["timeout"] = httpx.Timeout(300.0)
         if request_headers:
             request_kwargs["headers"] = request_headers
         response = await client.post(endpoint, **request_kwargs)
