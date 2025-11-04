@@ -568,15 +568,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         bool(cache_key and cache_key in _catalog_sent_cache),
     )
 
-    if should_send_catalog:
+    if should_send_catalog and (provider or "").lower() != "avito":
         if forced_catalog and cache_key:
             _catalog_sent_cache.pop(cache_key, None)
         catalog_text = (caption or "Каталог во вложении (PDF).").strip()
-        download_url = ""
-        if isinstance(attachment, dict):
-            download_url = str(attachment.get("url") or "").strip()
-        if download_url:
-            catalog_text = f"{catalog_text}\nЕсли файл не открылся, скачайте по ссылке: {download_url}"
         resolved_provider = provider or "whatsapp"
         catalog_out: Dict[str, Any] = {
             "lead_id": lead_id,

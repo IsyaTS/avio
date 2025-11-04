@@ -196,7 +196,60 @@ def enforce_plan_alignment(
             if not re.search(r"[\)\]»☺😊😀😄😃😉😎❤️]", text):
                 text = text + " \U0001F60A"
 
+    text = _dedupe_repeated_blocks(text)
     return text
+
+
+def _dedupe_repeated_blocks(text: str) -> str:
+    """
+    Collapse identical question/statement lines that the LLM may have duplicated.
+
+    We fingerprint questions with question_fingerprint and fall back to a casefolded
+    line comparison for neutral statements. Only the first occurrence is kept.
+    """
+
+    if not text:
+        return text
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    deduped: list[str] = []
+    seen_questions: set[str] = set()
+    seen_sentences: set[str] = set()
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if deduped and deduped[-1]:
+                deduped.append("")
+            continue
+
+        if "?" in line:
+            fingerprint = question_fingerprint(line)
+            if fingerprint in seen_questions:
+                continue
+            seen_questions.add(fingerprint)
+            deduped.append(line)
+            continue
+
+        normalized = re.sub(r"\s+", " ", line.casefold())
+        if normalized in seen_sentences:
+            continue
+        seen_sentences.add(normalized)
+        deduped.append(line)
+
+    # keep intentional spacing: collapse multiple blanks while preserving paragraph breaks
+    cleaned: list[str] = []
+    blank_pending = False
+    for line in deduped:
+        if not line:
+            blank_pending = True
+            continue
+        if blank_pending and cleaned:
+            cleaned.append("")
+        cleaned.append(line)
+        blank_pending = False
+
+    return "\n".join(cleaned)
 
 
 __all__ = [
