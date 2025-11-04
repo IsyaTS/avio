@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -124,23 +125,55 @@ def _compose_env(cfg: TenantConfig) -> Dict[str, str]:
     return env
 
 
+def _resolve_compose_command() -> Optional[List[str]]:
+    custom = os.getenv("DOCKER_COMPOSE_BIN")
+    if custom:
+        return custom.strip().split()
+
+    docker_bin = shutil.which("docker")
+    if docker_bin:
+        try:
+            subprocess.check_call(
+                [docker_bin, "compose", "version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return [docker_bin, "compose"]
+        except Exception:
+            pass
+
+    standalone = shutil.which("docker-compose")
+    if standalone:
+        return [standalone]
+
+    return None
+
+
 def _run_compose(cfg: TenantConfig, compose_args: List[str]) -> int:
     env = _compose_env(cfg)
-    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), "--project-name", f"waweb-{cfg.id}"] + compose_args
+    base = _resolve_compose_command()
+    if base is None:
+        print("[waweb] docker compose / docker-compose не найдены в PATH", file=sys.stderr)
+        return 1
+    cmd = base + ["-f", str(COMPOSE_FILE), "--project-name", f"waweb-{cfg.id}"] + compose_args
     try:
         return subprocess.call(cmd, cwd=str(REPO_ROOT), env=env)
     except FileNotFoundError:
-        print("[waweb] docker compose not found in PATH", file=sys.stderr)
+        print("[waweb] не удалось выполнить docker compose", file=sys.stderr)
         return 1
 
 
 def _ensure_network() -> None:
     network_name = os.getenv("WAWEB_NETWORK_NAME", DEFAULT_NETWORK_NAME)
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        print("[waweb] docker CLI не найден — сеть не будет проверена", file=sys.stderr)
+        return
     try:
-        subprocess.check_call(["docker", "network", "inspect", network_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call([docker_bin, "network", "inspect", network_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
         # создаём пустую сеть, если основной стек еще не поднят
-        subprocess.check_call(["docker", "network", "create", network_name], stdout=subprocess.DEVNULL)
+        subprocess.check_call([docker_bin, "network", "create", network_name], stdout=subprocess.DEVNULL)
 
 
 def _iter_target_tenants(args: argparse.Namespace, tenants: Dict[int, TenantConfig]) -> Iterable[TenantConfig]:
