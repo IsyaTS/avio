@@ -557,7 +557,15 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
     if channel == "whatsapp":
         payload = _prepare_whatsapp_payload(payload, message.tenant)
 
-        if SEND_STRATEGY == "redis":
+        strategy_override = ""
+        try:
+            strategy_override = (request.query_params.get("strategy") or "").strip().lower()
+        except Exception:
+            strategy_override = ""
+
+        use_queue = SEND_STRATEGY == "redis" and strategy_override != "direct"
+
+        if use_queue:
             redis_client = _r or getattr(settings, "r", None)
             if redis_client is None:
                 transport_logger.error(
