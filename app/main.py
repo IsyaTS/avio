@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pathlib
-import os, json, re, time, mimetypes
+import os, json, re, time, mimetypes, uuid
 from urllib.parse import quote, parse_qsl, urlencode, urlparse
 from typing import Any
 
@@ -164,7 +164,11 @@ from app.metrics import (
     WA_QR_RECEIVED_COUNTER,
 )
 from app.transport import WhatsAppAddressError, normalize_whatsapp_recipient
-from app.common import get_outbox_whitelist, whitelist_contains_number
+from app.common import (
+    OUTBOX_QUEUE_KEY,
+    get_outbox_whitelist,
+    whitelist_contains_number,
+)
 
 
 _FALSE_OUTBOX_VALUES = {"0", "false", "no", "off", "disabled"}
@@ -173,6 +177,9 @@ _FALSE_OUTBOX_VALUES = {"0", "false", "no", "off", "disabled"}
 def _outbox_enabled() -> bool:
     raw = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
     return raw not in _FALSE_OUTBOX_VALUES
+
+
+SEND_STRATEGY = (os.getenv("SEND_STRATEGY") or "").strip().lower()
 
 
 from app.starlette_ext import register_transport_validation
@@ -549,6 +556,82 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
 
     if channel == "whatsapp":
         payload = _prepare_whatsapp_payload(payload, message.tenant)
+
+        if SEND_STRATEGY == "redis":
+            redis_client = _r or getattr(settings, "r", None)
+            if redis_client is None:
+                transport_logger.error(
+                    "event=message_out channel=%s tenant=%s to=%s status=queue_unavailable",
+                    channel,
+                    message.tenant,
+                    normalized_to or "-",
+                )
+                raise HTTPException(status_code=502, detail="queue_unavailable")
+
+            meta_payload: dict[str, Any] = {}
+            if isinstance(message.meta, dict):
+                try:
+                    meta_payload = json.loads(
+                        json.dumps(message.meta, ensure_ascii=False)
+                    )
+                except Exception:
+                    meta_payload = dict(message.meta)
+
+            lead_hint = None
+            if isinstance(meta_payload, dict):
+                lead_hint = meta_payload.get("lead_id") or meta_payload.get("leadId")
+            try:
+                lead_from_meta = int(lead_hint) if lead_hint is not None else 0
+            except Exception:
+                lead_from_meta = 0
+
+            queue_message_id = (
+                payload.get("message_id")
+                or payload.get("meta", {}).get("message_id")
+                or getattr(message, "message_id", None)
+                or str(uuid.uuid4())
+            )
+
+            queue_item: dict[str, Any] = {
+                "lead_id": lead_from_meta,
+                "tenant_id": int(message.tenant),
+                "tenant": int(message.tenant),
+                "provider": "whatsapp",
+                "ch": "whatsapp",
+                "channel": "whatsapp",
+                "to": payload.get("to"),
+                "text": payload.get("text") or "",
+                "attachments": payload.get("attachments", []),
+                "attachment": payload.get("attachment"),
+                "meta": meta_payload,
+                "message_id": queue_message_id,
+                "queued_at": time.time(),
+                "origin": "app.send",
+            }
+
+            try:
+                await redis_client.lpush(
+                    OUTBOX_QUEUE_KEY, json.dumps(queue_item, ensure_ascii=False)
+                )
+            except Exception as exc:
+                transport_logger.error(
+                    "event=message_out channel=%s tenant=%s to=%s status=queue_push_failed error=%s",
+                    channel,
+                    message.tenant,
+                    normalized_to or "-",
+                    exc,
+                )
+                raise HTTPException(status_code=502, detail="queue_push_failed") from exc
+
+            MESSAGE_OUT_COUNTER.labels(channel, "queued").inc()
+            transport_logger.info(
+                "event=message_out channel=%s tenant=%s to=%s status=queued strategy=redis",
+                channel,
+                message.tenant,
+                normalized_to or "-",
+            )
+            return JSONResponse({"ok": True, "queued": True, "strategy": "redis"})
+
         token = _admin_token()
         request_headers = {"X-Auth-Token": token}
         await _ensure_worker_healthy()
