@@ -585,6 +585,49 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
             except Exception:
                 lead_from_meta = 0
 
+            base_lead_id = (
+                lead_from_meta if lead_from_meta and lead_from_meta > 0 else int(time.time() * 1000)
+            )
+
+            digits_only = ""
+            if isinstance(normalized_to, str):
+                digits_only = normalized_to.split("@", 1)[0]
+
+            contact_id = 0
+            if digits_only:
+                try:
+                    contact_id = await resolve_or_create_contact(whatsapp_phone=digits_only)
+                except Exception:
+                    contact_id = 0
+
+            lead_resolved = base_lead_id
+            try:
+                lead_resolved = await upsert_lead(
+                    base_lead_id,
+                    channel="whatsapp",
+                    tenant_id=int(message.tenant),
+                    peer=normalized_to or digits_only or None,
+                    contact=digits_only or None,
+                    title=(f"WhatsApp {digits_only}" if digits_only else None),
+                )
+            except Exception:
+                lead_resolved = base_lead_id
+
+            if lead_resolved and contact_id:
+                try:
+                    await link_lead_contact(
+                        lead_resolved,
+                        contact_id,
+                        channel="whatsapp",
+                        peer=normalized_to or digits_only,
+                    )
+                except Exception:
+                    pass
+
+            lead_for_queue = lead_resolved if lead_resolved and lead_resolved > 0 else base_lead_id
+            if isinstance(meta_payload, dict):
+                meta_payload.setdefault("lead_id", lead_for_queue)
+
             queue_message_id = (
                 payload.get("message_id")
                 or payload.get("meta", {}).get("message_id")
@@ -593,7 +636,7 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
             )
 
             queue_item: dict[str, Any] = {
-                "lead_id": lead_from_meta,
+                "lead_id": lead_for_queue,
                 "tenant_id": int(message.tenant),
                 "tenant": int(message.tenant),
                 "provider": "whatsapp",
@@ -608,6 +651,8 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
                 "queued_at": time.time(),
                 "origin": "app.send",
             }
+            if contact_id:
+                queue_item["contact_id"] = contact_id
 
             try:
                 await redis_client.lpush(
