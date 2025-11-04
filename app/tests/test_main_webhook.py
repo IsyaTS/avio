@@ -314,6 +314,88 @@ def test_webhook_returns_pdf_attachment(monkeypatch, tmp_path):
     assert queued["text"].startswith("Каталог")
 
 
+def test_webhook_does_not_send_catalog_on_avito(monkeypatch, tmp_path):
+    tenant = 10
+    lead_id = 555
+    core.ensure_tenant_files(tenant)
+    core.reset_sales_state(tenant, lead_id)
+    main._catalog_sent_cache.clear()
+
+    uploads = core.tenant_dir(tenant) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+
+    pdf_rel = "uploads/catalog.pdf"
+    pdf_path = uploads / "catalog.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 test")
+
+    cfg = core.read_tenant_config(tenant)
+    cfg.setdefault("passport", {})["tenant_id"] = tenant
+    cfg["catalogs"] = [
+        {
+            "name": "uploaded",
+            "path": pdf_rel,
+            "type": "pdf",
+            "encoding": "utf-8",
+        }
+    ]
+    cfg.setdefault("integrations", {})["uploaded_catalog"] = {
+        "path": pdf_rel,
+        "original": "catalog.pdf",
+        "uploaded_at": int(time.time()),
+        "type": "pdf",
+        "size": pdf_path.stat().st_size,
+        "mime": "application/pdf",
+    }
+    core.write_tenant_config(tenant, cfg)
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.pushed: list[tuple[str, dict]] = []
+            self.metrics: dict[str, int] = {}
+
+        async def lpush(self, key: str, value: str) -> None:
+            self.pushed.append((key, json.loads(value)))
+
+        async def incrby(self, key: str, value: int) -> None:
+            self.metrics[key] = self.metrics.get(key, 0) + int(value)
+
+    async def stub_build_llm_messages(*_a, **_k):
+        return [{"role": "system", "content": "stub"}]
+
+    async def stub_ask_llm(*_a, **_k):
+        return "Удобно продолжить в WhatsApp?"
+
+    queue = FakeQueue()
+
+    monkeypatch.setattr(main, "_r", queue)
+    monkeypatch.setattr(main, "build_llm_messages", stub_build_llm_messages)
+    monkeypatch.setattr(main, "ask_llm", stub_ask_llm)
+    monkeypatch.setattr(main._webhooks_mod, "smart_reply_enabled", lambda *_a, **_k: True, raising=False)
+    monkeypatch.setattr(main.settings, "WEBHOOK_SECRET", "", raising=False)
+
+    payload = {
+        "source": {"type": "avito", "tenant": tenant, "account_id": 40001},
+        "message": {
+            "chat_id": "c1",
+            "body": "каталог нужен",
+            "author": {"id": 1, "login": "buyer"},
+        },
+        "id": "msg1",
+    }
+
+    request = DummyRequest(payload)
+    response = asyncio.run(main._handle(request))
+
+    assert response.status_code == 200
+    outgoing = [entry for entry in queue.pushed if entry[0] == "outbox:send"]
+    assert len(outgoing) == 1
+    _, outbound = outgoing[0]
+    assert outbound["provider"] == "avito"
+    assert not outbound.get("attachments")
+    assert "attachment" not in outbound
+    assert outbound["text"] == "Удобно продолжить в WhatsApp?"
+
+
 def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
     tenant = 11
     lead_id = 987
