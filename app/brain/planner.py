@@ -70,7 +70,7 @@ async def generate_sales_reply(
     context_block = _extract_system(messages)
 
     plan_prompt = _build_plan_prompt(dialogue_tail, context_block, persona_language)
-    plan_response = await _call_chat_completion(
+    plan_response = await _call_chat_completion_safe(
         openai_module,
         model,
         plan_prompt,
@@ -85,7 +85,7 @@ async def generate_sales_reply(
     plan = _parse_plan_response(_get_message_content(plan_response))
 
     final_prompt = _build_reply_prompt(messages, plan)
-    final_response = await _call_chat_completion(
+    final_response = await _call_chat_completion_safe(
         openai_module,
         model,
         final_prompt,
@@ -129,6 +129,49 @@ async def _call_chat_completion(
         frequency_penalty=frequency_penalty if frequency_penalty is not None else 0.0,
         presence_penalty=presence_penalty if presence_penalty is not None else 0.0,
     )
+
+
+async def _call_chat_completion_safe(
+    openai_module: Any,
+    model: str,
+    messages: Sequence[Dict[str, str]],
+    timeout: float,
+    *,
+    temperature: float,
+    max_tokens: int,
+    top_p: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+) -> Any:
+    """
+    Invoke `_call_chat_completion`, gracefully handling test doubles that do not accept
+    extended OpenAI keyword arguments.
+    """
+
+    try:
+        return await _call_chat_completion(
+            openai_module,
+            model,
+            messages,
+            timeout,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+        )
+    except TypeError as exc:
+        # Test stubs may not accept OpenAI-specific kwargs; retry with the minimal subset.
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return await _call_chat_completion(
+            openai_module,
+            model,
+            messages,
+            timeout,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
 
 def _extract_dialogue(messages: Sequence[Dict[str, str]], limit: int = 6) -> List[Dict[str, str]]:
