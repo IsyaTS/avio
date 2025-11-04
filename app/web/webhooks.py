@@ -556,8 +556,23 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         behavior = {}
         attachment, caption = None, ""
 
+    lowered_text = text.lower() if isinstance(text, str) else ""
     forced_catalog = bool(text and _user_requested_catalog(text))
+    price_question = any(
+        token in lowered_text
+        for token in (
+            "сколько стоит",
+            "цена",
+            "стоимость",
+            "ценник",
+            "почем",
+            "почём",
+            "прайс на",
+        )
+    )
     should_send_catalog = bool(attachment) and (forced_catalog or not catalog_already_sent)
+    if price_question and not forced_catalog:
+        should_send_catalog = False
     logger.warning(
         "catalog_flow tenant=%s text=%r forced=%s already_sent=%s attachment=%s cache_hit=%s",
         tenant,
@@ -568,6 +583,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         bool(cache_key and cache_key in _catalog_sent_cache),
     )
 
+    catalog_sent_now = False
     if should_send_catalog and (provider or "").lower() != "avito":
         if forced_catalog and cache_key:
             _catalog_sent_cache.pop(cache_key, None)
@@ -604,7 +620,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
             except Exception:
                 pass
-            return _ok({"queued": True, "leadId": lead_id})
+            catalog_sent_now = True
+
+    if catalog_sent_now and not text:
+        return _ok({"queued": True, "leadId": lead_id})
 
     fallback_reply = (
         "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
@@ -655,7 +674,11 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     behavior = behavior or {}
     always_full = bool(behavior.get("always_full_catalog")) if behavior else False
     send_pages_pref = bool(behavior.get("send_catalog_as_pages")) if behavior else False
-    should_send_catalog_pages = (always_full or send_pages_pref) and not catalog_already_sent
+    should_send_catalog_pages = (
+        (always_full or send_pages_pref)
+        and not catalog_already_sent
+        and not price_question
+    )
 
     if should_send_catalog_pages:
         try:
