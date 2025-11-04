@@ -109,6 +109,22 @@ QUEUES = [OUTBOX_QUEUE_KEY]
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
 # ==== Utils ====
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except Exception:
+        return default
+    return value if value > 0 else default
+
+
+WA_SEND_BASE_TIMEOUT = _env_float("WA_SEND_TIMEOUT_BASE", 120.0)
+WA_SEND_TIMEOUT_PER_MIB = _env_float("WA_SEND_TIMEOUT_PER_MIB", 75.0)
+WA_SEND_TIMEOUT_MAX = _env_float("WA_SEND_TIMEOUT_MAX", 1800.0)
+
+
 def _waweb_base_url(tenant: Optional[int]) -> str:
     base = ""
     if tenant is not None:
@@ -1380,13 +1396,17 @@ async def send_whatsapp(
         log("[worker] wa_payload document_keys=%s" % list(document_block.keys()))
 
     def _wa_post_timeout(bytes_total: int) -> float:
-        base_timeout = 90.0
-        if bytes_total <= 0:
-            return base_timeout
-        # allow ~40 seconds per MiB to accommodate slow upstream uploads
-        per_mib = 40.0
-        timeout = base_timeout + per_mib * (bytes_total / (1024 * 1024))
-        return float(min(900.0, max(base_timeout, timeout)))
+    base_timeout = WA_SEND_BASE_TIMEOUT or 90.0
+    if bytes_total <= 0:
+        return float(base_timeout)
+    per_mib = WA_SEND_TIMEOUT_PER_MIB or 40.0
+    timeout = base_timeout + per_mib * (bytes_total / (1024 * 1024))
+    if timeout < base_timeout:
+        timeout = base_timeout
+    max_timeout = WA_SEND_TIMEOUT_MAX
+    if max_timeout and max_timeout > 0:
+        timeout = min(timeout, max_timeout)
+    return float(timeout)
 
     request_timeout = _wa_post_timeout(media_bytes)
     if media_bytes:
