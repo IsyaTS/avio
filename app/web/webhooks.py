@@ -625,6 +625,60 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if catalog_sent_now and not text:
         return _ok({"queued": True, "leadId": lead_id})
 
+    if price_question and not catalog_sent_now:
+        try:
+            catalog_matches = core.search_catalog({}, limit=5, tenant=tenant, query=text or "")
+        except Exception:
+            catalog_matches = []
+        if catalog_matches:
+            best = catalog_matches[0]
+            title_hint = str(best.get("title") or best.get("name") or "").strip()
+            raw_price = str(best.get("price") or "").strip()
+            digits_only = re.sub(r"\D", "", raw_price)
+            if digits_only:
+                try:
+                    formatted_price = f"{int(digits_only):,}".replace(",", " ")
+                except Exception:
+                    formatted_price = raw_price
+            else:
+                formatted_price = raw_price or "цена по запросу"
+            reply_price = title_hint or "Эта модель"
+            reply_text = f"{reply_price} стоит {formatted_price} ₽."
+            stock_value = best.get("stock")
+            if stock_value not in (None, "", "0"):
+                try:
+                    stock_int = int(str(stock_value).strip())
+                except Exception:
+                    stock_int = None
+                if stock_int is not None and stock_int > 0:
+                    reply_text += " В наличии."
+            resolved_provider = provider or "whatsapp"
+            price_out: Dict[str, Any] = {
+                "lead_id": lead_id,
+                "text": reply_text,
+                "provider": resolved_provider,
+                "ch": resolved_provider,
+                "tenant_id": int(tenant),
+                "tenant": int(tenant),
+                "message_id": message_id or str(lead_id),
+                "attachments": [],
+            }
+            if resolved_provider == "telegram":
+                if telegram_user_id:
+                    price_out["telegram_user_id"] = int(telegram_user_id)
+                if peer_value:
+                    price_out["peer"] = peer_value
+                if peer_id is not None:
+                    price_out["peer_id"] = int(peer_id)
+            else:
+                price_out["to"] = whatsapp_phone
+            await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(price_out, ensure_ascii=False))
+            try:
+                core.record_bot_reply(refer_id, tenant, provider, reply_text, tenant_cfg=cfg)
+            except Exception:
+                pass
+            return _ok({"queued": True, "leadId": lead_id})
+
     fallback_reply = (
         "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
     )
