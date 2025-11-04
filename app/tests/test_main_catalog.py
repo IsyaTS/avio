@@ -245,3 +245,47 @@ def test_read_catalog_auto_maps_russian_headers(sandbox):
     pages = core.paginate_catalog_text(items, cfg, page_size=1)
     assert "Стальная полка" in pages[0]
     assert "25 000" in pages[0]
+
+
+def test_read_catalog_respects_persona_csv_mapping(sandbox):
+    core, _ = sandbox
+    tenant = 8
+    core.ensure_tenant_files(tenant)
+
+    uploads = core.tenant_dir(tenant) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    path = uploads / "persona_catalog.csv"
+    path.write_text(
+        "Артикул;Название;Стоимость;Внутренний цвет\nSKU-9;«Уфа»;19990;Белый\n",
+        encoding="utf-8",
+    )
+
+    persona_text = """
+meta:
+  csv_mapping:
+    columns:
+      title: ["Название"]
+      price: ["Стоимость"]
+      Цвет внутренней панели: ["Внутренний цвет"]
+"""
+    core.write_persona(tenant, persona_text)
+
+    cfg = core.read_tenant_config(tenant)
+    cfg["catalogs"] = [
+        {
+            "name": "uploaded",
+            "path": "uploads/persona_catalog.csv",
+            "type": "csv",
+            "encoding": "utf-8",
+            "delimiter": ";",
+        }
+    ]
+    core.write_tenant_config(tenant, cfg)
+
+    items = core._read_catalog(tenant)
+    assert items
+    row = items[0]
+    assert row.get("title") == "«Уфа»"
+    assert row.get("price") == "19990"
+    # custom field should be available using persona-defined key (lowercased)
+    assert row.get("цвет внутренней панели") == "Белый"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, json, re, csv, asyncio, pathlib, time, random, hashlib, logging
-from typing import List, Dict, Any, Optional, Tuple, Mapping
+from typing import List, Dict, Any, Optional, Tuple, Mapping, Sequence
 from dataclasses import dataclass, field
 import urllib.request, urllib.error
 import yaml
@@ -1520,6 +1520,54 @@ _FIELD_TOKEN_MAP: Dict[str, List[str]] = {
 }
 
 
+def _merge_csv_mapping_meta(
+    meta: Mapping[str, Any] | None,
+    persona_meta: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = dict(meta or {})
+    persona_csv = persona_meta.get("csv_mapping") if isinstance(persona_meta, Mapping) else None
+    if not isinstance(persona_csv, Mapping):
+        return result
+
+    merged = dict(result.get("csv_mapping") or {})
+    persona_columns = persona_csv.get("columns")
+    existing_columns = dict(merged.get("columns") or {})
+
+    if isinstance(persona_columns, Mapping):
+        for canonical, aliases in persona_columns.items():
+            key = str(canonical).strip()
+            if not key:
+                continue
+            alias_list: list[str] = []
+            if isinstance(aliases, str):
+                alias_list = [aliases]
+            elif isinstance(aliases, Mapping):
+                alias_list = [str(val) for val in aliases.values() if val]
+            elif isinstance(aliases, Sequence):
+                alias_list = [str(val) for val in aliases if val]
+            else:
+                alias_list = [str(aliases)]
+            bucket = list(existing_columns.get(key, []))
+            for alias in alias_list:
+                cleaned = str(alias).strip()
+                if cleaned and cleaned not in bucket:
+                    bucket.append(cleaned)
+            if bucket:
+                existing_columns[key] = bucket
+
+    if existing_columns:
+        merged["columns"] = existing_columns
+
+    for extra_key, extra_value in persona_csv.items():
+        if extra_key == "columns":
+            continue
+        merged.setdefault(extra_key, extra_value)
+
+    if merged:
+        result["csv_mapping"] = merged
+    return result
+
+
 def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     if not items:
@@ -1528,22 +1576,40 @@ def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) ->
     sample_cols = list(items[0].keys())
     sample_canon = {col: _canonicalize_field_name(col) for col in sample_cols}
 
+    csv_mapping_meta = meta.get("csv_mapping") if isinstance(meta, Mapping) else {}
+    csv_mapping_columns = (
+        csv_mapping_meta.get("columns") if isinstance(csv_mapping_meta, Mapping) else {}
+    )
+
     meta_fields = meta.get("fields") if isinstance(meta, dict) else None
     if isinstance(meta_fields, dict):
         for canonical, source in meta_fields.items():
             if not isinstance(canonical, str) or not isinstance(source, str):
                 continue
-            if source in sample_cols:
-                mapping[canonical.strip().lower()] = source
+            cleaned_source = source.strip()
+            if cleaned_source in sample_cols:
+                key_norm = canonical.strip()
+                key_lower = key_norm.lower()
+                mapping[key_lower] = cleaned_source
+                if key_norm != key_lower:
+                    mapping.setdefault(key_norm, cleaned_source)
 
     used_sources = set(mapping.values())
 
-    def _find_column(tokens: List[str], preferred: List[str] | None = None) -> str | None:
+    def _find_column(
+        tokens: List[str],
+        preferred: List[str] | None = None,
+        raw_names: List[str] | None = None,
+    ) -> str | None:
         preferred = preferred or []
+        raw_lower = [name.lower() for name in raw_names] if raw_names else []
         for col in sample_cols:
             if col in used_sources:
                 continue
             canon = sample_canon.get(col) or ""
+            if raw_lower and col.lower() in raw_lower:
+                used_sources.add(col)
+                return col
             for p in preferred:
                 if p and (canon == p or canon.startswith(p) or p in canon):
                     used_sources.add(col)
@@ -1556,12 +1622,50 @@ def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) ->
                     return col
         return None
 
+    custom_aliases: Dict[str, List[str]] = {}
+    if isinstance(csv_mapping_columns, Mapping):
+        for canonical, aliases in csv_mapping_columns.items():
+            key = str(canonical).strip()
+            if not key:
+                continue
+            if isinstance(aliases, str):
+                custom_aliases[key] = [aliases]
+            elif isinstance(aliases, Mapping):
+                custom_aliases[key] = [str(val) for val in aliases.values() if val]
+            elif isinstance(aliases, Sequence):
+                custom_aliases[key] = [str(val) for val in aliases if val]
+            else:
+                custom_aliases[key] = [str(aliases)]
+
     for field, tokens in _FIELD_TOKEN_MAP.items():
         if field in mapping:
             continue
-        column = _find_column(tokens)
+        preferred_aliases = custom_aliases.get(field, [])
+        normalized_tokens = [
+            _canonicalize_field_name(alias) for alias in preferred_aliases if alias
+        ] + list(tokens)
+        column = _find_column(
+            normalized_tokens,
+            preferred=normalized_tokens,
+            raw_names=preferred_aliases,
+        )
         if column:
             mapping[field] = column
+
+    for canonical, aliases in custom_aliases.items():
+        key_norm = canonical.strip()
+        key_lower = key_norm.lower()
+        if key_lower in mapping or key_norm in mapping:
+            continue
+        normalized_tokens = [_canonicalize_field_name(alias) for alias in aliases if alias]
+        column = _find_column(
+            normalized_tokens,
+            preferred=normalized_tokens,
+            raw_names=[alias.strip() for alias in aliases if isinstance(alias, str)],
+        )
+        if column:
+            mapping[key_norm] = column
+            mapping.setdefault(key_lower, column)
 
     # Extra heuristics if price or title still missing
     if "price" not in mapping:
@@ -1694,10 +1798,12 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     candidates: List[tuple[pathlib.Path, Dict[str, Any]]] = []
     has_custom_catalogs = False
+    persona_meta: Dict[str, Any] = {}
 
     if tenant is not None:
         try:
             cfg = load_tenant(tenant)
+            persona_meta = persona_meta_config(int(tenant))
             catalogs = cfg.get("catalogs") or []
             if isinstance(catalogs, list):
                 for entry in catalogs:
@@ -1709,27 +1815,34 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                     path = pathlib.Path(str(raw_path))
                     if not path.is_absolute():
                         path = tenant_dir(tenant) / path
-                    candidates.append((path, entry))
+                    merged_meta = _merge_csv_mapping_meta(entry, persona_meta)
+                    candidates.append((path, merged_meta))
                     has_custom_catalogs = True
         except Exception:
             pass
         persona_csv_path = persona_catalog_csv(int(tenant))
         if persona_csv_path:
-            meta_config = persona_meta_config(int(tenant))
-            csv_delimiter = str(meta_config.get("catalog_csv_delimiter") or ";").strip() or ";"
-            csv_encoding = str(meta_config.get("catalog_csv_encoding") or "utf-8").strip() or "utf-8"
-            meta = {
-                "type": "csv",
-                "delimiter": csv_delimiter,
-                "encoding": csv_encoding,
-            }
-            candidate_tuple = (persona_csv_path, meta)
+            csv_delimiter = str(persona_meta.get("catalog_csv_delimiter") or ";").strip() or ";"
+            csv_encoding = str(persona_meta.get("catalog_csv_encoding") or "utf-8").strip() or "utf-8"
+            meta = _merge_csv_mapping_meta(
+                {
+                    "type": "csv",
+                    "delimiter": csv_delimiter,
+                    "encoding": csv_encoding,
+                },
+                persona_meta,
+            )
+            candidate_tuple = (
+                persona_csv_path,
+                meta,
+            )
             if candidate_tuple not in candidates:
                 candidates.insert(0, candidate_tuple)
             has_custom_catalogs = True
 
     if not candidates:
-        candidates.append((CATALOG_CSV, {"delimiter": ",", "encoding": "utf-8"}))
+        default_meta = _merge_csv_mapping_meta({"delimiter": ",", "encoding": "utf-8"}, persona_meta)
+        candidates.append((CATALOG_CSV, default_meta))
 
     # mtime/size-based cache key to avoid repeated heavy parsing
     key_fps: List[Tuple[str, float, int]] = []
