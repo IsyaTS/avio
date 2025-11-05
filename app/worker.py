@@ -583,8 +583,11 @@ async def _prepare_internal_attachment(
         }
         if filename:
             document_meta["filename"] = filename
-        if mime:
-            document_meta["mime"] = mime
+        # downgrade mime to avoid heavy PDF preview rendering on waweb side
+        prepared["mime"] = "application/octet-stream"
+        prepared["mime_type"] = "application/octet-stream"
+        prepared["mimetype"] = "application/octet-stream"
+        document_meta["mime"] = "application/octet-stream"
         caption_value = prepared.get("caption") or prepared.get("text")
         if isinstance(caption_value, str) and caption_value.strip():
             document_meta["caption"] = caption_value.strip()
