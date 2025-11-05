@@ -1242,6 +1242,11 @@ async function sendTransportMessage(tenant, transport){
         }
         await s.client.sendMessage(jid, media, opts);
       } catch (err) {
+        const reason = err && err.message ? err.message : String(err);
+        try {
+          console.error('[waweb]', `send_message_error tenant=${tenant} to=${jid} reason=${reason}`);
+          if (err && err.stack) console.error(err.stack);
+        } catch (_) {}
         const error = new Error('media_send');
         error.normalizedJid = jid;
         throw error;
