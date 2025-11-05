@@ -176,6 +176,55 @@ def _normalize_whatsapp_peer(raw: Any) -> Optional[str]:
     return peer.lower()
 
 
+def _compress_pdf_bytes(data: bytes, filename: str, target_bytes: int) -> bytes | None:
+    if not PDF_COMPRESS_ENABLED:
+        return None
+    if not data or target_bytes <= 0:
+        return None
+    gs_path = shutil.which(PDF_COMPRESS_BIN)
+    if not gs_path:
+        return None
+    src_path = out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as src_file:
+            src_file.write(data)
+            src_path = src_file.name
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as out_file:
+            out_path = out_file.name
+        cmd = [
+            gs_path,
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.4",
+            f"-dPDFSETTINGS={PDF_COMPRESS_SETTINGS}",
+            "-dNOPAUSE",
+            "-dQUIET",
+            "-dBATCH",
+            f"-sOutputFile={out_path}",
+            src_path,
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=PDF_COMPRESS_TIMEOUT)
+        with open(out_path, "rb") as fh:
+            compressed = fh.read()
+        if not compressed:
+            return None
+        if len(compressed) >= len(data):
+            return None
+        return compressed
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    finally:
+        if src_path:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+        if out_path:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+
+
 def _coerce_int(value: Any) -> Optional[int]:
     try:
         result = int(str(value).strip())
@@ -587,23 +636,35 @@ async def _prepare_internal_attachment(
     prepared["sendMediaAsDocument"] = True
     prepared.setdefault("size", len(data))
 
-    inline_limit_mb = float(os.getenv("WA_INLINE_ATTACHMENT_LIMIT_MB", "5") or "0")
+    inline_limit_mb = float(os.getenv("WA_INLINE_ATTACHMENT_LIMIT_MB", "8") or "0")
     inline_limit_bytes = 0
     if inline_limit_mb > 0:
         inline_limit_bytes = int(inline_limit_mb * 1024 * 1024)
 
-    if inline_limit_bytes and len(data) > inline_limit_bytes:
+    working_data = data
+    if (
+        inline_limit_bytes
+        and len(working_data) > inline_limit_bytes
+        and isinstance(mime, str)
+        and "pdf" in mime.lower()
+    ):
+        compressed = _compress_pdf_bytes(working_data, filename or "catalog.pdf", inline_limit_bytes)
+        if compressed and len(compressed) < len(working_data):
+            working_data = compressed
+            prepared["size"] = len(working_data)
+
+    if inline_limit_bytes and len(working_data) > inline_limit_bytes:
         # too large for inlining; let waweb download via URL
         document_meta = {
             "url": absolute_url,
         }
         if filename:
             document_meta["filename"] = filename
-        # downgrade mime to avoid heavy PDF preview rendering on waweb side
-        prepared["mime"] = "application/octet-stream"
-        prepared["mime_type"] = "application/octet-stream"
-        prepared["mimetype"] = "application/octet-stream"
-        document_meta["mime"] = "application/octet-stream"
+        fallback_mime = "application/octet-stream"
+        prepared["mime"] = fallback_mime
+        prepared["mime_type"] = fallback_mime
+        prepared["mimetype"] = fallback_mime
+        document_meta["mime"] = fallback_mime
         caption_value = prepared.get("caption") or prepared.get("text")
         if isinstance(caption_value, str) and caption_value.strip():
             document_meta["caption"] = caption_value.strip()
@@ -612,7 +673,8 @@ async def _prepare_internal_attachment(
         prepared["source"] = "url"
         return _tokenize_attachment_mapping(prepared)
 
-    prepared["b64"] = base64.b64encode(data).decode("ascii")
+    prepared["size"] = len(working_data)
+    prepared["b64"] = base64.b64encode(working_data).decode("ascii")
     return _tokenize_attachment_mapping(prepared)
 
 
