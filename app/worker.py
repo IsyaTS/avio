@@ -1396,6 +1396,23 @@ async def send_whatsapp(
         log("[worker] wa_payload document_keys=%s" % list(document_block.keys()))
 
     def _wa_post_timeout(bytes_total: int) -> float:
+        import os
+        def _f(name: str, default: float) -> float:
+            try:
+                v = float(os.environ.get(name) or 0)
+                return v if v > 0 else float(default)
+            except Exception:
+                return float(default)
+        base_timeout = _f("WA_SEND_TIMEOUT_BASE", 120.0)
+        per_mib      = _f("WA_SEND_TIMEOUT_PER_MIB", 75.0)
+        max_timeout  = _f("WA_SEND_TIMEOUT_MAX", 1800.0)
+        if bytes_total and bytes_total > 0:
+            timeout = float(base_timeout) + float(per_mib) * (bytes_total / (1024 * 1024))
+        else:
+            timeout = float(base_timeout)
+        if max_timeout and max_timeout > 0:
+            timeout = min(timeout, float(max_timeout))
+        return float(timeout)
     base_timeout = WA_SEND_BASE_TIMEOUT or 90.0
     if bytes_total <= 0:
         return float(base_timeout)
