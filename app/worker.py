@@ -141,6 +141,27 @@ PDF_COMPRESS_TIMEOUT = max(10, int(os.getenv("WA_PDF_COMPRESS_TIMEOUT", "120")))
 PDF_COMPRESS_BIN = os.getenv("WA_PDF_COMPRESS_BIN") or "gs"
 
 
+def _resolve_gs_path() -> str | None:
+    candidates = []
+    raw = os.getenv("WA_PDF_COMPRESS_BIN")
+    if raw:
+        candidates.append(raw)
+    if PDF_COMPRESS_BIN:
+        candidates.append(PDF_COMPRESS_BIN)
+    candidates.extend(["/usr/bin/gs", "/usr/local/bin/gs"])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.isabs(candidate):
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        else:
+            found = shutil.which(candidate)
+            if found:
+                return found
+    return None
+
+
 def _waweb_base_url(tenant: Optional[int]) -> str:
     base = ""
     if tenant is not None:
@@ -181,7 +202,7 @@ def _compress_pdf_bytes(data: bytes, filename: str, target_bytes: int) -> bytes 
         return None
     if not data or target_bytes <= 0:
         return None
-    gs_path = shutil.which(PDF_COMPRESS_BIN)
+    gs_path = _resolve_gs_path()
     if not gs_path:
         return None
     src_path = out_path = None
