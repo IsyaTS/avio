@@ -1,0 +1,7 @@
+services:
+  worker:
+    environment:
+      WA_SEND_TIMEOUT_BASE: "240"
+      WA_SEND_TIMEOUT_PER_MIB: "90"
+      WA_SEND_TIMEOUT_MAX: "1800"
+      OUTBOX_WHITELIST: "*"
