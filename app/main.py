@@ -893,6 +893,11 @@ async def internal_catalog_file(
         filename=display_name,
     )
 
+    inline_flag = request.query_params.get("inline", "")
+    if str(inline_flag).strip().lower() not in {"", "0", "false", "no", "off"}:
+        disposition = f'inline; filename="{display_name}"'
+        response.headers["Content-Disposition"] = disposition
+
     if request.method.upper() == "HEAD":
         response.body_iterator = iter(())
 
