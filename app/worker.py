@@ -568,9 +568,32 @@ async def _prepare_internal_attachment(
         prepared["mimetype"] = mime
 
     prepared["type"] = str(prepared.get("type") or "document")
-    prepared["b64"] = base64.b64encode(data).decode("ascii")
     prepared["sendMediaAsDocument"] = True
     prepared.setdefault("size", len(data))
+
+    inline_limit_mb = float(os.getenv("WA_INLINE_ATTACHMENT_LIMIT_MB", "5") or "0")
+    inline_limit_bytes = 0
+    if inline_limit_mb > 0:
+        inline_limit_bytes = int(inline_limit_mb * 1024 * 1024)
+
+    if inline_limit_bytes and len(data) > inline_limit_bytes:
+        # too large for inlining; let waweb download via URL
+        document_meta = {
+            "url": absolute_url,
+        }
+        if filename:
+            document_meta["filename"] = filename
+        if mime:
+            document_meta["mime"] = mime
+        caption_value = prepared.get("caption") or prepared.get("text")
+        if isinstance(caption_value, str) and caption_value.strip():
+            document_meta["caption"] = caption_value.strip()
+        prepared.pop("b64", None)
+        prepared["document"] = document_meta
+        prepared["source"] = "url"
+        return _tokenize_attachment_mapping(prepared)
+
+    prepared["b64"] = base64.b64encode(data).decode("ascii")
     return _tokenize_attachment_mapping(prepared)
 
 
