@@ -7,6 +7,9 @@ import time
 import asyncio
 import urllib.request
 import urllib.error
+import tempfile
+import subprocess
+import shutil
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, unquote, quote
 
@@ -123,6 +126,19 @@ def _env_float(name: str, default: float) -> float:
 WA_SEND_BASE_TIMEOUT = _env_float("WA_SEND_TIMEOUT_BASE", 120.0)
 WA_SEND_TIMEOUT_PER_MIB = _env_float("WA_SEND_TIMEOUT_PER_MIB", 75.0)
 WA_SEND_TIMEOUT_MAX = _env_float("WA_SEND_TIMEOUT_MAX", 1800.0)
+
+_FALSE_VALUES = {"", "0", "false", "no", "off", "disabled"}
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in _FALSE_VALUES
+
+PDF_COMPRESS_ENABLED = _bool_env("WA_PDF_COMPRESS", True)
+PDF_COMPRESS_SETTINGS = (os.getenv("WA_PDF_COMPRESS_SETTINGS") or "/screen").strip() or "/screen"
+PDF_COMPRESS_TIMEOUT = max(10, int(os.getenv("WA_PDF_COMPRESS_TIMEOUT", "120")))
+PDF_COMPRESS_BIN = os.getenv("WA_PDF_COMPRESS_BIN") or "gs"
 
 
 def _waweb_base_url(tenant: Optional[int]) -> str:
