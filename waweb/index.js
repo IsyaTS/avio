@@ -1310,6 +1310,127 @@ function normalizeWhatsAppRecipient(value) {
   return { digits, jid: `${digits}@c.us` };
 }
 
+function approximateMediaSize(media, declaredSize) {
+  if (typeof declaredSize === 'number' && Number.isFinite(declaredSize)) {
+    return declaredSize;
+  }
+  if (media && typeof media.filesize === 'number' && Number.isFinite(media.filesize)) {
+    return media.filesize;
+  }
+  if (media && typeof media.data === 'string') {
+    return Math.floor((media.data.length * 3) / 4);
+  }
+  return null;
+}
+
+async function prepareMediaAttachment(attachment) {
+  if (!attachment || typeof attachment !== 'object') {
+    throw new Error('media_missing');
+  }
+
+  const type = typeof attachment.type === 'string' ? attachment.type.toLowerCase() : 'file';
+  const declaredMime = attachment.mimetype || attachment.mime || null;
+  const declaredFilename = attachment.filename || attachment.name || null;
+  const declaredCaption =
+    typeof attachment.caption === 'string' ? attachment.caption : null;
+  const declaredSize = typeof attachment.size === 'number' ? attachment.size : null;
+  const source =
+    attachment.source ||
+    (attachment.url ? 'url' : attachment.path ? 'path' : attachment.b64 ? 'b64' : 'unknown');
+
+  let media;
+  if (attachment.url) {
+    try {
+      media = await MessageMedia.fromUrl(
+        String(attachment.url),
+        { unsafeMime: true }
+      );
+    } catch (err) {
+      const error = new Error('media_fetch');
+      error.cause = err;
+      throw error;
+    }
+  } else if (attachment.path) {
+    const resolvedPath = path.isAbsolute(attachment.path)
+      ? attachment.path
+      : path.resolve(attachment.path);
+    try {
+      media = await MessageMedia.fromFilePath(resolvedPath);
+    } catch (err) {
+      const error = new Error('media_path');
+      error.cause = err;
+      throw error;
+    }
+  } else if (attachment.b64) {
+    let base64Payload = String(attachment.b64);
+    let detectedMime = null;
+    const match = base64Payload.match(/^data:([^;]+);base64,(.+)$/i);
+    if (match && match[2]) {
+      detectedMime = match[1];
+      base64Payload = match[2];
+    }
+    const mimetype = declaredMime || detectedMime || 'application/octet-stream';
+    const filename = declaredFilename || (type === 'document' ? 'document' : 'file');
+    try {
+      media = new MessageMedia(mimetype, base64Payload, filename);
+    } catch (err) {
+      const error = new Error('media_base64');
+      error.cause = err;
+      throw error;
+    }
+  } else {
+    throw new Error('media_missing_source');
+  }
+
+  let finalFilename = declaredFilename || media.filename || null;
+  if (!finalFilename) {
+    if (type === 'document') {
+      finalFilename = 'document';
+    } else if (media.mimetype) {
+      const ext = mime.extension(media.mimetype);
+      if (ext) finalFilename = `file.${ext}`;
+    }
+  }
+  if (!finalFilename) finalFilename = 'file';
+
+  let finalMime = declaredMime || media.mimetype || null;
+  if (!finalMime && finalFilename) {
+    finalMime = mime.lookup(finalFilename) || null;
+  }
+
+  if (finalFilename && !media.filename) media.filename = finalFilename;
+  if (finalMime && !media.mimetype) media.mimetype = finalMime;
+
+  const size = approximateMediaSize(media, declaredSize);
+
+  let asDocument = Boolean(
+    attachment.sendMediaAsDocument ||
+    attachment.asDocument ||
+    (typeof attachment.send_as_document === 'boolean' && attachment.send_as_document)
+  );
+  const normalizedMime = (finalMime || '').toLowerCase();
+  if (!asDocument) {
+    if (type === 'document') {
+      asDocument = true;
+    } else if (normalizedMime === 'application/pdf') {
+      asDocument = true;
+    } else if (size !== null && size > TEN_MB) {
+      asDocument = true;
+    }
+  }
+
+  return {
+    media,
+    type,
+    source,
+    asDocument,
+    filename: finalFilename,
+    mimetype: finalMime,
+    size,
+    caption: declaredCaption,
+  };
+}
+
 async function sendTransportMessage(tenant, transport){
   tenant = String(tenant);
   const s = tenants[tenant];
@@ -1333,35 +1454,83 @@ async function sendTransportMessage(tenant, transport){
   const { jid } = normalized;
   transport.to = jid;
 
-  const text = typeof transport.text === 'string' ? transport.text : '';
+  const messageText = typeof transport.text === 'string' ? transport.text : '';
   const attachments = Array.isArray(transport.attachments) ? transport.attachments : [];
-  let textSent = false;
+  const prepared = [];
   for (const attachment of attachments) {
-    if (!attachment || typeof attachment !== 'object') continue;
-    if (attachment.type === 'document' && attachment.b64) {
-      try {
-        const media = new MessageMedia(
-          attachment.mimetype || 'application/octet-stream',
-          attachment.b64,
-          attachment.filename || 'document'
-        );
-        const opts = {};
-        const sizeValue = typeof attachment.size === 'number' ? attachment.size : null;
-        const size =
-          sizeValue !== null ? sizeValue : Math.floor((String(attachment.b64).length * 3) / 4);
-        const mimetype =
-          typeof attachment.mimetype === 'string' ? attachment.mimetype.toLowerCase() : '';
-        const forceDocument =
-          mimetype === 'application/pdf' || (size !== null && size > TEN_MB);
-        if (forceDocument || attachment.sendMediaAsDocument) opts.sendMediaAsDocument = true;
-        const caption = typeof attachment.caption === 'string' ? attachment.caption : null;
-        if (caption) {
-          opts.caption = caption;
-        } else if (text && !textSent) {
-          opts.caption = text;
-          textSent = true;
+    try {
+      const plan = await prepareMediaAttachment(attachment);
+      if (plan) prepared.push(plan);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      error.normalizedJid = jid;
+      throw error;
+    }
+  }
+
+  if (attachments.length && !prepared.length) {
+    const err = new Error('invalid_attachment');
+    err.normalizedJid = jid;
+    throw err;
+  }
+
+  if (prepared.length) {
+    let textUsedAsCaption = false;
+    for (const plan of prepared) {
+      const options = {};
+      const captionCandidate =
+        plan.caption && plan.caption.length
+          ? plan.caption
+          : !textUsedAsCaption && messageText
+            ? messageText
+            : undefined;
+      if (captionCandidate !== undefined) {
+        options.caption = captionCandidate;
+        if (captionCandidate === messageText) {
+          textUsedAsCaption = true;
         }
-        await s.client.sendMessage(jid, media, opts);
+      }
+
+      if (plan.asDocument) {
+        options.sendMediaAsDocument = true;
+        if (plan.filename) {
+          options.filename = plan.filename;
+          if (plan.media && !plan.media.filename) {
+            plan.media.filename = plan.filename;
+          }
+        }
+        if (plan.mimetype) {
+          options.mimetype = plan.mimetype;
+          if (plan.media && !plan.media.mimetype) {
+            plan.media.mimetype = plan.mimetype;
+          }
+        }
+      }
+
+      const sizeValue = (() => {
+        if (typeof plan.size === 'number' && Number.isFinite(plan.size)) {
+          return plan.size;
+        }
+        if (plan.media && typeof plan.media.filesize === 'number') {
+          return plan.media.filesize;
+        }
+        if (plan.media && typeof plan.media.data === 'string') {
+          return Math.floor((plan.media.data.length * 3) / 4);
+        }
+        return '-';
+      })();
+      const captionLen = options.caption ? options.caption.length : 0;
+      const typeLabel = plan.type || (plan.mimetype || 'unknown');
+      const sourceLabel = plan.source || 'unknown';
+      try {
+        console.log(
+          '[waweb]',
+          `send_media type=${typeLabel} source=${sourceLabel} size=${sizeValue} as_document=${plan.asDocument ? 'true' : 'false'} caption_len=${captionLen}`
+        );
+      } catch (_) {}
+
+      try {
+        await s.client.sendMessage(jid, plan.media, options);
       } catch (err) {
         const reason = err && err.message ? err.message : String(err);
         try {
@@ -1372,45 +1541,17 @@ async function sendTransportMessage(tenant, transport){
         error.normalizedJid = jid;
         throw error;
       }
-      continue;
     }
-    if (!attachment.url) continue;
+  } else if (messageText && messageText.trim()) {
     try {
-      const media = await MessageMedia.fromUrl(String(attachment.url), { unsafeMime: true });
-      if (attachment.mime) media.mimetype = attachment.mime;
-      if (attachment.name) media.filename = attachment.name;
-      const opts = {};
-      const rawMime =
-        typeof attachment.mime === 'string'
-          ? attachment.mime
-          : typeof attachment.mimetype === 'string'
-            ? attachment.mimetype
-            : null;
-      const normalizedMime = rawMime ? rawMime.toLowerCase() : '';
-      const size = typeof attachment.size === 'number' ? attachment.size : null;
-      const forceDocument =
-        normalizedMime === 'application/pdf' || (size !== null && size > TEN_MB);
-      if (forceDocument || attachment.sendMediaAsDocument) opts.sendMediaAsDocument = true;
-      if (text && !textSent) {
-        opts.caption = text;
-        textSent = true;
-      }
-      await s.client.sendMessage(jid, media, opts);
-    } catch (err) {
-      const error = new Error('media_fetch');
-      error.normalizedJid = jid;
-      throw error;
-    }
-  }
-  if (text && !textSent) {
-    try {
-      await s.client.sendMessage(jid, text);
+      await s.client.sendMessage(jid, messageText);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       error.normalizedJid = jid;
       throw error;
     }
   }
+
   messageOutTotal += 1;
   return jid;
 }
