@@ -16,7 +16,7 @@ x-waweb-base: &waweb-base
     WA_INTERNAL_TOKEN: "${WA_INTERNAL_TOKEN:-${WA_WEB_TOKEN:-${WEBHOOK_SECRET:-}}}"
     DEBUG: "${WAWEB_DEBUG:-whatsapp-web.js:*,puppeteer:*}"
     PORT: "9001"
-    MAX_MEDIA_MB: "25"
+    MAX_MEDIA_MB: "1024"
   restart: unless-stopped
   shm_size: 512m
   mem_limit: 1024m
