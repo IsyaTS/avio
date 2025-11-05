@@ -64,9 +64,10 @@ const PROVIDER_WEBHOOK_URL = (() => {
 const MAX_MEDIA_MB = (() => {
   const raw = Number(process.env.MAX_MEDIA_MB);
   if (Number.isFinite(raw) && raw > 0) return raw;
-  return 25;
+  return 1024;
 })();
 const MAX_MEDIA_BYTES = Math.max(1, Math.floor(MAX_MEDIA_MB * 1024 * 1024));
+const TEN_MB = 10 * 1024 * 1024;
 const PROVIDER_TOKEN_REFRESH_INTERVAL_MS = Math.max(
   60,
   Number(process.env.PROVIDER_TOKEN_REFRESH_INTERVAL || '300') || 300,
@@ -1052,8 +1053,8 @@ async function buildDocumentFromUrl(descriptor){
     if (!response) {
       response = await axios.get(url, {
         responseType: 'arraybuffer',
-        maxContentLength: MAX_MEDIA_BYTES,
-        maxBodyLength: MAX_MEDIA_BYTES,
+        maxContentLength: 2147483647,
+        maxBodyLength: 2147483647,
         timeout: 20000,
         validateStatus: (status) => status >= 200 && status < 300,
       });
@@ -1267,7 +1268,14 @@ async function sendTransportMessage(tenant, transport){
           attachment.filename || 'document'
         );
         const opts = {};
-        if (attachment.sendMediaAsDocument) opts.sendMediaAsDocument = true;
+        const sizeValue = typeof attachment.size === 'number' ? attachment.size : null;
+        const size =
+          sizeValue !== null ? sizeValue : Math.floor((String(attachment.b64).length * 3) / 4);
+        const mimetype =
+          typeof attachment.mimetype === 'string' ? attachment.mimetype.toLowerCase() : '';
+        const forceDocument =
+          mimetype === 'application/pdf' || (size !== null && size > TEN_MB);
+        if (forceDocument || attachment.sendMediaAsDocument) opts.sendMediaAsDocument = true;
         const caption = typeof attachment.caption === 'string' ? attachment.caption : null;
         if (caption) {
           opts.caption = caption;
@@ -1294,6 +1302,17 @@ async function sendTransportMessage(tenant, transport){
       if (attachment.mime) media.mimetype = attachment.mime;
       if (attachment.name) media.filename = attachment.name;
       const opts = {};
+      const rawMime =
+        typeof attachment.mime === 'string'
+          ? attachment.mime
+          : typeof attachment.mimetype === 'string'
+            ? attachment.mimetype
+            : null;
+      const normalizedMime = rawMime ? rawMime.toLowerCase() : '';
+      const size = typeof attachment.size === 'number' ? attachment.size : null;
+      const forceDocument =
+        normalizedMime === 'application/pdf' || (size !== null && size > TEN_MB);
+      if (forceDocument || attachment.sendMediaAsDocument) opts.sendMediaAsDocument = true;
       if (text && !textSent) {
         opts.caption = text;
         textSent = true;
@@ -1729,7 +1748,7 @@ function resetSession(tenant, webhookUrl) {
 
 /* ---------- server ---------- */
 const app = express();
-app.use(bodyParser.json({ limit: '32mb' }));
+app.use(bodyParser.json({ limit: '256mb' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'waweb' }));
 
@@ -1956,6 +1975,17 @@ app.post('/send', async (req, res) => {
     const normalized = await normalizeOutgoingAttachments(payload);
     attachments = normalized.attachments;
     hasDocument = normalized.hasDocument;
+    const oversizedInline = attachments.find((attachment) => {
+      if (!attachment || typeof attachment !== 'object') return false;
+      if (!attachment.b64) return false;
+      const size = typeof attachment.size === 'number' ? attachment.size : null;
+      if (size !== null) return size > TEN_MB;
+      const approxSize = Math.floor((String(attachment.b64).length * 3) / 4);
+      return approxSize > TEN_MB;
+    });
+    if (oversizedInline) {
+      return res.status(400).json({ ok:false, error:'use_url_for_large_files' });
+    }
   } catch (err) {
     if (err instanceof DocumentPayloadError) {
       return res.status(400).json({ ok:false, error: err.code || 'invalid_document' });
