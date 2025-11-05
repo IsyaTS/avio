@@ -1,0 +1,9 @@
+services:
+  worker:
+    environment:
+      OUTBOX_ENABLED: "1"
+      SEND_STRATEGY: "redis"
+      OUTBOX_DB_WORKER: "0"
+      OUTBOX_REQUIRE_LEAD: "0"
+      OUTBOX_WHITELIST: "*"
+      ALLOW_NO_LEAD: "1"
