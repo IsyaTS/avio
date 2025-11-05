@@ -1091,24 +1091,24 @@ async function buildDocumentFromPath(descriptor){
   }
   if (!stat.isFile()) throw new DocumentPayloadError('document_not_found');
   if (stat.size > MAX_MEDIA_BYTES) throw new DocumentPayloadError('document_too_large');
-  let buffer;
+  let size = stat.size;
   try {
-    buffer = await fsPromises.readFile(resolvedPath);
+    const handle = await fsPromises.open(resolvedPath, 'r');
+    await handle.close();
   } catch (_) {
     throw new DocumentPayloadError('document_unreadable');
   }
-  const base64 = buffer.toString('base64');
   const filename = ensureDocumentFilename(descriptor.filename || path.basename(resolvedPath), descriptor.mimetype);
   const mimetype = descriptor.mimetype || mime.lookup(filename) || 'application/octet-stream';
   return {
     type: 'document',
     source: 'path',
-    b64: base64,
+    b64: null,
     path: resolvedPath,
     filename,
     mimetype,
     caption: descriptor.caption || null,
-    size: buffer.length,
+    size,
     sendMediaAsDocument: true,
   };
 }
@@ -2233,6 +2233,7 @@ app.post('/send', async (req, res) => {
     hasDocument = normalized.hasDocument;
     const oversizedInline = attachments.find((attachment) => {
       if (!attachment || typeof attachment !== 'object') return false;
+      if (attachment.path) return false;
       if (!attachment.b64) return false;
       const size = typeof attachment.size === 'number' ? attachment.size : null;
       if (size !== null) return size > TEN_MB;
