@@ -11,6 +11,9 @@ const mime = require('mime-types');
 
 const fsPromises = fs.promises;
 
+axios.defaults.maxBodyLength = Infinity;
+axios.defaults.maxContentLength = Infinity;
+
 process.on('uncaughtException', (err) => {
   const message = err && err.message ? err.message : String(err);
   if (message.includes('Protocol error') && message.includes('Target closed')) {
@@ -67,6 +70,7 @@ const MAX_MEDIA_MB = (() => {
   return 1024;
 })();
 const MAX_MEDIA_BYTES = Math.max(1, Math.floor(MAX_MEDIA_MB * 1024 * 1024));
+const BODY_PARSER_LIMIT = process.env.WAWEB_BODY_LIMIT || '512mb';
 const TEN_MB = 10 * 1024 * 1024;
 const PROVIDER_TOKEN_REFRESH_INTERVAL_MS = Math.max(
   60,
@@ -856,14 +860,87 @@ function normalizeIncomingMessage(tenant, msg, client){
 
 function normalizeAttachment(raw){
   if (!raw || typeof raw !== 'object') return null;
-  const url = raw.url || raw.href;
-  if (!url) return null;
+  const urlValue = raw.url || raw.href;
+  const pathValue =
+    raw.path ||
+    raw.file_path ||
+    (typeof raw.file === 'string' ? raw.file : null);
+  const base64Value = raw.b64 || raw.base64 || raw.data;
+
+  if (!urlValue && !pathValue && !base64Value) return null;
+
+  const type =
+    typeof raw.type === 'string'
+      ? raw.type.toLowerCase()
+      : 'file';
+  const filename = raw.filename || raw.name || null;
+  const mimetype = raw.mimetype || raw.mime_type || raw.mime || null;
+  const caption =
+    typeof raw.caption === 'string'
+      ? raw.caption
+      : typeof raw.text === 'string'
+        ? raw.text
+        : null;
+  const sizeRaw = raw.size || raw.length || null;
+  const sendAsDocument =
+    Boolean(
+      raw.sendMediaAsDocument ||
+      raw.asDocument ||
+      raw.send_as_document ||
+      type === 'document'
+    );
+
+  const resolvedPath = (() => {
+    if (typeof pathValue !== 'string') return null;
+    const trimmed = pathValue.trim();
+    if (!trimmed) return null;
+    return path.isAbsolute(trimmed) ? trimmed : path.resolve(trimmed);
+  })();
+
+  const cleanedUrl = (() => {
+    if (typeof urlValue !== 'string') return null;
+    const trimmed = urlValue.trim();
+    return trimmed || null;
+  })();
+
+  let cleanedB64 = (() => {
+    if (typeof base64Value !== 'string') return null;
+    const trimmed = base64Value.trim();
+    return trimmed || null;
+  })();
+  if (cleanedB64) {
+    const match = cleanedB64.match(/^data:([^;]+);base64,(.+)$/i);
+    if (match && match[2]) {
+      cleanedB64 = match[2];
+    }
+  }
+
+  const normalizedSize =
+    typeof sizeRaw === 'number'
+      ? sizeRaw
+      : typeof sizeRaw === 'string' && sizeRaw.trim()
+        ? Number(sizeRaw) || null
+        : null;
+
+  const source = cleanedUrl
+    ? 'url'
+    : resolvedPath
+      ? 'path'
+      : cleanedB64
+        ? 'b64'
+        : 'unknown';
+
   return {
-    type: (raw.type || 'file').toString(),
-    url: String(url),
-    name: raw.name || raw.filename || null,
-    mime: raw.mime || raw.mime_type || null,
-    size: raw.size || raw.length || null,
+    type,
+    url: cleanedUrl,
+    path: resolvedPath,
+    b64: cleanedB64,
+    filename: filename ? String(filename) : null,
+    mimetype: mimetype ? String(mimetype) : null,
+    caption,
+    size: normalizedSize,
+    sendMediaAsDocument: sendAsDocument,
+    source,
   };
 }
 
@@ -1027,6 +1104,7 @@ async function buildDocumentFromPath(descriptor){
     type: 'document',
     source: 'path',
     b64: base64,
+    path: resolvedPath,
     filename,
     mimetype,
     caption: descriptor.caption || null,
@@ -1053,8 +1131,8 @@ async function buildDocumentFromUrl(descriptor){
     if (!response) {
       response = await axios.get(url, {
         responseType: 'arraybuffer',
-        maxContentLength: 2147483647,
-        maxBodyLength: 2147483647,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
         timeout: 20000,
         validateStatus: (status) => status >= 200 && status < 300,
       });
@@ -1748,7 +1826,14 @@ function resetSession(tenant, webhookUrl) {
 
 /* ---------- server ---------- */
 const app = express();
-app.use(bodyParser.json({ limit: '256mb' }));
+app.use(bodyParser.json({
+  limit: BODY_PARSER_LIMIT,
+  type: ['application/json', 'application/*+json'],
+}));
+app.use(bodyParser.raw({
+  limit: BODY_PARSER_LIMIT,
+  type: ['application/octet-stream', 'application/pdf', 'image/*', 'text/plain'],
+}));
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'waweb' }));
 
@@ -1768,27 +1853,46 @@ function headerValue(headers, name){
   return String(raw).trim();
 }
 
-function authorized(req){
+function resolveAuthorization(req){
   const headers = req && req.headers ? req.headers : {};
+  const bearerHeader = headerValue(headers, 'authorization');
+  let bearerToken = '';
+  if (bearerHeader) {
+    const match = bearerHeader.match(/^Bearer\s+(.+)$/i);
+    if (match && match[1]) {
+      bearerToken = match[1].trim();
+    }
+  }
   const authToken = headerValue(headers, 'x-auth-token');
   const internalToken = headerValue(headers, 'x-internal-token');
   const adminHeader = headerValue(headers, 'x-admin-token');
 
   const presented = [];
-  if (authToken) presented.push(authToken);
-  if (internalToken) presented.push(internalToken);
-  if (adminHeader) presented.push(adminHeader);
+  if (bearerToken) presented.push({ token: bearerToken, source: 'authorization_bearer' });
+  if (authToken) presented.push({ token: authToken, source: 'x_auth_token' });
+  if (internalToken) presented.push({ token: internalToken, source: 'x_internal_token' });
+  if (adminHeader) presented.push({ token: adminHeader, source: 'x_admin_token' });
 
-  if (INTERNAL_SYNC_TOKEN && presented.includes(INTERNAL_SYNC_TOKEN)) {
-    return true;
+  for (const candidate of presented) {
+    if (INTERNAL_SYNC_TOKEN && candidate.token === INTERNAL_SYNC_TOKEN) {
+      return { ok: true, method: candidate.source };
+    }
+    if (ADMIN_TOKEN && candidate.token === ADMIN_TOKEN) {
+      return { ok: true, method: candidate.source };
+    }
   }
-  if (ADMIN_TOKEN && presented.includes(ADMIN_TOKEN)) {
-    return true;
-  }
+
   if (!INTERNAL_SYNC_TOKEN && !ADMIN_TOKEN) {
-    return true;
+    const method = presented.length ? presented[0].source : 'open';
+    return { ok: true, method };
   }
-  return false;
+
+  return { ok: false, method: presented.length ? presented[0].source : null };
+}
+
+function authorized(req){
+  const result = resolveAuthorization(req);
+  return result.ok;
 }
 
 app.post('/session/start', (req, res) => {
@@ -1956,7 +2060,13 @@ app.post('/session/:tenant/send', async (req, res) => {
 });
 
 app.post('/send', async (req, res) => {
-  if (!authorized(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
+  const auth = resolveAuthorization(req);
+  const authMethod = auth.method || 'unknown';
+  if (!auth.ok) {
+    try { console.warn('[waweb]', `send_auth_denied method=${authMethod}`); } catch (_) {}
+    return res.status(401).json({ ok:false, error:'unauthorized' });
+  }
+  try { console.log('[waweb]', `send_auth method=${authMethod}`); } catch (_) {}
   const payload = req.body || {};
   const channel = (payload.channel || '').toString().toLowerCase();
   if (channel && channel !== 'whatsapp') {
@@ -1994,22 +2104,8 @@ app.post('/send', async (req, res) => {
     return res.status(400).json({ ok:false, error: message });
   }
   const text = typeof payload.text === 'string' ? payload.text : '';
-  if (!text.trim() && !hasDocument) {
+  if (!text.trim() && attachments.length === 0) {
     return res.status(400).json({ ok:false, error:'empty_message' });
-  }
-  if (hasDocument) {
-    for (const attachment of attachments) {
-      if (!attachment || attachment.type !== 'document') continue;
-      const size = typeof attachment.size === 'number' ? attachment.size : '-';
-      const source = attachment.source || 'unknown';
-      const toValue = payload.to === undefined || payload.to === null ? '-' : String(payload.to);
-      try {
-        console.log(
-          '[waweb]',
-          `send_document type=document source=${source} tenant=${tenantNum} to=${toValue} size=${size}`
-        );
-      } catch (_) {}
-    }
   }
   try {
     const jid = await sendTransportMessage(tenantNum, { to: payload.to, text, attachments });
