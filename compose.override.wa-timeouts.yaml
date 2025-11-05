@@ -1,8 +1,8 @@
 services:
   worker:
     environment:
-      - WA_SEND_TIMEOUT_BASE=180
-      - WA_SEND_TIMEOUT_PER_MIB=90
-      - WA_SEND_TIMEOUT_MAX=1800
+      - WA_SEND_TIMEOUT_BASE=30
+      - WA_SEND_TIMEOUT_PER_MIB=30
+      - WA_SEND_TIMEOUT_MAX=180
       - OUTBOX_REQUIRE_LEAD=0
       - ALLOW_NO_LEAD=1
