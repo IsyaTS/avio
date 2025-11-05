@@ -2051,6 +2051,11 @@ app.post('/session/:tenant/send', async (req, res) => {
       logSendResult(tenantNum, toValue, 'no_session');
       return res.status(404).json({ ok:false, error:'no_session' });
     }
+    if (message === 'invalid_attachment') {
+      incWaSend('invalid_attachment');
+      logSendResult(tenantNum, toValue, 'invalid_attachment');
+      return res.status(400).json({ ok:false, error:'invalid_attachment' });
+    }
     const resultTag = sanitizeReason(message || 'error');
     incSendFail(message);
     incWaSend(resultTag);
@@ -2125,6 +2130,11 @@ app.post('/send', async (req, res) => {
       incWaSend('no_session');
       logSendResult(tenantNum, toValue, 'no_session');
       return res.status(404).json({ ok:false, error:'no_session' });
+    }
+    if (message === 'invalid_attachment') {
+      incWaSend('invalid_attachment');
+      logSendResult(tenantNum, toValue, 'invalid_attachment');
+      return res.status(400).json({ ok:false, error:'invalid_attachment' });
     }
     const resultTag = sanitizeReason(message || 'error');
     incSendFail(message);
