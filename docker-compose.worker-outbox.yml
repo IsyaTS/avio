@@ -3,4 +3,4 @@ services:
     environment:
       OUTBOX_ENABLED: "1"
       SEND_STRATEGY: "redis"
-      OUTBOX_WHITELIST: "*"     # разрешить любые номера без проверки лида
+      OUTBOX_WHITELIST: "*"
