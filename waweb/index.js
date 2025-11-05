@@ -1038,13 +1038,32 @@ async function buildDocumentFromUrl(descriptor){
   const url = descriptor.value;
   let response;
   try {
-    response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      maxContentLength: MAX_MEDIA_BYTES,
-      maxBodyLength: MAX_MEDIA_BYTES,
-      timeout: 20000,
-      validateStatus: (status) => status >= 200 && status < 300,
-    });
+    const fetchHookPath = process.env.WAWEB_FETCH_HOOK || path.join(__dirname, 'fetch-hook.js');
+    if (fetchHookPath) {
+      try {
+        const hook = require(fetchHookPath);
+        if (typeof hook === 'function') {
+          response = await hook(url, MAX_MEDIA_BYTES);
+        }
+      } catch (err) {
+        console.warn('[waweb]', `fetch_hook_error url=${url} reason=${err && err.message ? err.message : err}`);
+      }
+    }
+    if (!response) {
+      response = await axios.get(url, {
+        responseType: 'arraybuffer',
+        maxContentLength: MAX_MEDIA_BYTES,
+        maxBodyLength: MAX_MEDIA_BYTES,
+        timeout: 20000,
+        validateStatus: (status) => status >= 200 && status < 300,
+      });
+      response = {
+        buffer: Buffer.from(response.data),
+        size: response.data ? Buffer.byteLength(response.data) : 0,
+        mime: response.headers && (response.headers['content-type'] || response.headers['Content-Type']) || null,
+        disposition: response.headers && (response.headers['content-disposition'] || response.headers['Content-Disposition']) || null,
+      };
+    }
   } catch (err) {
     if (err && err.message && (err.message.includes('maxContentLength size') || err.message.includes('maxBodyLength size'))) {
       throw new DocumentPayloadError('document_too_large');
@@ -1054,10 +1073,26 @@ async function buildDocumentFromUrl(descriptor){
     }
     throw new DocumentPayloadError('document_download_failed');
   }
-  const buffer = Buffer.from(response.data);
+  if (!response.buffer) {
+    return {
+      type: 'document',
+      source: 'url',
+      b64: null,
+      url,
+      filename: ensureDocumentFilename(
+        descriptor.filename || guessFilenameFromUrl(url),
+        descriptor.mimetype || response.mime || 'application/octet-stream'
+      ),
+      mimetype: descriptor.mimetype || response.mime || 'application/octet-stream',
+      caption: descriptor.caption || null,
+      size: response.size,
+      sendMediaAsDocument: true,
+    };
+  }
+  const buffer = response.buffer;
   if (buffer.length > MAX_MEDIA_BYTES) throw new DocumentPayloadError('document_too_large');
-  const headerMime = response.headers && (response.headers['content-type'] || response.headers['Content-Type']);
-  const disposition = response.headers && (response.headers['content-disposition'] || response.headers['Content-Disposition']);
+  const headerMime = response.mime;
+  const disposition = response.disposition;
   const filename = ensureDocumentFilename(
     descriptor.filename || extractFilenameFromDisposition(disposition) || guessFilenameFromUrl(url),
     descriptor.mimetype || headerMime || null
