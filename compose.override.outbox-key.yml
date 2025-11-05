@@ -1,0 +1,4 @@
+services:
+  worker:
+    environment:
+      OUTBOX_QUEUE: "outbox:send"
