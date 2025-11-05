@@ -11,7 +11,16 @@ import tempfile
 import subprocess
 import shutil
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
-from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, unquote, quote
+from urllib.parse import (
+    urljoin,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+    parse_qsl,
+    urlencode,
+    unquote,
+    quote,
+)
 
 import httpx
 
@@ -464,6 +473,24 @@ def _inject_internal_token(query: str) -> str:
     return "&".join(filtered)
 
 
+def _ensure_inline_hint(url: str) -> str:
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return url
+    path = (parsed.path or "").lower()
+    if "/catalog-file" not in path:
+        return url
+    existing = parse_qsl(parsed.query, keep_blank_values=True)
+    if any(key.lower() == "inline" for key, _ in existing):
+        return url
+    existing.append(("inline", "1"))
+    new_query = urlencode(existing, doseq=True)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+
+
 def _normalize_internal_urls(relative_url: str) -> tuple[str, str]:
     parsed = urlsplit(relative_url)
     query = _inject_internal_token(parsed.query)
@@ -475,13 +502,16 @@ def _normalize_internal_urls(relative_url: str) -> tuple[str, str]:
         relative = urlunsplit(("", "", path, query, fragment))
         if not relative.startswith("/"):
             relative = f"/{relative.lstrip('/')}"
+        relative = _ensure_inline_hint(relative)
+        absolute = _ensure_inline_hint(absolute)
         return relative, absolute
 
     path = parsed.path or ""
     if not path.startswith("/"):
         path = f"/{path}"
     relative = urlunsplit(("", "", path, query, fragment))
-    absolute = f"{_internal_base_url()}{relative}"
+    relative = _ensure_inline_hint(relative)
+    absolute = _ensure_inline_hint(f"{_internal_base_url()}{relative}")
     return relative, absolute
 
 
