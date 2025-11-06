@@ -1601,33 +1601,27 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
   } catch (_) {}
   try {
     await page.waitForSelector('[data-testid="chat-list"]', { timeout: 5000 }).catch(() => {});
-    const clipSelectors = [
-      '[data-testid="clip"]',
-      '[data-testid="compose-clip"]',
-      'button[data-testid="chat-input-attach"]',
-      'div[data-testid="chat-input-attach"]',
-      'button[aria-label="Attach"]',
-      'div[aria-label="Attach"]',
-      'button[aria-label="Прикрепить"]',
-      'div[aria-label="Прикрепить"]',
-    ];
-    let clipButton = null;
-    for (const selector of clipSelectors) {
-      clipButton = await page.$(selector);
-      if (clipButton) break;
+    let clipButton = await page.waitForSelector('[data-testid="clip"]', { timeout: 3000 }).catch(() => null);
+    if (!clipButton) {
+      clipButton = await page.waitForSelector('[data-testid="compose-clip"]', { timeout: 3000 }).catch(() => null);
     }
     if (!clipButton) {
-      clipButton = await page.waitForSelector('[role="button"][data-testid*="attach"]', { timeout: 5000 }).catch(() => null);
+      clipButton = await page.waitForSelector('button[data-testid="chat-input-attach"]', { timeout: 3000 }).catch(() => null);
+    }
+    if (!clipButton) {
+      clipButton = await page.waitForSelector('button[aria-label="Attach"],div[aria-label="Attach"]', { timeout: 3000 }).catch(() => null);
+    }
+    if (!clipButton) {
+      clipButton = await page.waitForSelector('button[aria-label="Прикрепить"],div[aria-label="Прикрепить"]', { timeout: 3000 }).catch(() => null);
     }
     if (!clipButton) throw new Error('clip_button_not_found');
     const docSelectors = [
       '[data-testid="attach-document"]',
-      '[data-testid="document"] button',
       '[data-testid="attach-doc"]',
       'button[aria-label="Document"]',
       'button[aria-label="Документ"]',
+      '[data-testid="document"] button',
       '[data-testid="AttachDocument"]',
-      'div[role="button"][data-testid*="attach-document"]',
     ];
     let fileInput = null;
     let fileChooser = null;
