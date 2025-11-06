@@ -1115,6 +1115,9 @@ async function buildDocumentFromPath(descriptor){
 
 async function buildDocumentFromUrl(descriptor){
   const url = descriptor.value;
+  try {
+    console.log('[waweb]', `doc_fetch_begin url=${url}`);
+  } catch (_) {}
   let response;
   try {
     const fetchHookPath = process.env.WAWEB_FETCH_HOOK || path.join(__dirname, 'fetch-hook.js');
@@ -1122,6 +1125,7 @@ async function buildDocumentFromUrl(descriptor){
       try {
         const hook = require(fetchHookPath);
         if (typeof hook === 'function') {
+          console.log('[waweb]', `doc_fetch_hook url=${url}`);
           response = await hook(url, MAX_MEDIA_BYTES);
         }
       } catch (err) {
@@ -1144,6 +1148,7 @@ async function buildDocumentFromUrl(descriptor){
       };
     }
   } catch (err) {
+    console.warn('[waweb]', `doc_fetch_error url=${url} reason=${err && err.message ? err.message : err}`);
     if (err && err.message && (err.message.includes('maxContentLength size') || err.message.includes('maxBodyLength size'))) {
       throw new DocumentPayloadError('document_too_large');
     }
@@ -1153,6 +1158,7 @@ async function buildDocumentFromUrl(descriptor){
     throw new DocumentPayloadError('document_download_failed');
   }
   if (!response.buffer) {
+    console.log('[waweb]', `doc_fetch_stream url=${url} size=${response.size || '-'}`);
     return {
       type: 'document',
       source: 'url',
@@ -1169,6 +1175,7 @@ async function buildDocumentFromUrl(descriptor){
     };
   }
   const buffer = response.buffer;
+  console.log('[waweb]', `doc_fetch_buffer url=${url} size=${buffer.length}`);
   if (buffer.length > MAX_MEDIA_BYTES) throw new DocumentPayloadError('document_too_large');
   const headerMime = response.mime;
   const disposition = response.disposition;
