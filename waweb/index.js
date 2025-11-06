@@ -2319,6 +2319,7 @@ app.post('/session/:tenant/reset', (req,res)=>{
 });
 
 app.get('/debug/file-inputs', async (req, res) => {
+  try { console.log('[waweb]', 'debug_file_inputs_hit'); } catch (_) {}
   if (!authorized(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
   const tenantId = req.query?.tenant || req.query?.tenant_id;
   const tenantKey = String(tenantId || '');
