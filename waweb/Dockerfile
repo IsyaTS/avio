@@ -18,10 +18,11 @@ RUN apt-get update \
 RUN mkdir -p /data/.cache/puppeteer
 
 WORKDIR /app
-COPY package.json package-lock.json* .npmrc ./
-RUN npm ci --omit=dev
+COPY waweb/package.json waweb/package-lock.json* ./
+COPY vendor/whatsapp-web.js /vendor/whatsapp-web.js
+RUN npm install --omit=dev
 
-COPY . .
+COPY waweb/. .
 USER root
 EXPOSE 8088
 CMD ["node","index.js"]
