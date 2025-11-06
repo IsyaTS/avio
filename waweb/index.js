@@ -1278,6 +1278,13 @@ async function normalizeOutgoingAttachments(payload){
   if (payload.file !== undefined) await addDocument(payload.file, 'direct');
   if (payload.media !== undefined) await addDocument(payload.media, 'nested');
   if (payload.message !== undefined) await addDocument(payload.message, 'nested');
+  if (payload.attachment !== undefined) {
+    const handled = await addDocument(payload.attachment, 'direct');
+    if (!handled) {
+      const normalizedSingle = normalizeAttachment(payload.attachment);
+      if (normalizedSingle) attachments.push(normalizedSingle);
+    }
+  }
 
   const rawAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
   for (const item of rawAttachments) {
