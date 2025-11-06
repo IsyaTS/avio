@@ -1743,17 +1743,46 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
         console.warn('[waweb]', `send_media_ui_candidates ${debugSnapshot}`);
       } catch (_) {}
     }
-    for (const selector of clipSelectors) {
-      clipButton = await findClipHandle(selector);
-      if (clipButton) break;
-      const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
-      if (!candidate) continue;
-      const isInside = await insideCompose(candidate);
-      if (isInside) {
-        clipButton = candidate;
-        break;
+    async function findViaCompose() {
+      const handle = await page.evaluateHandle((selectors) => {
+        const compose =
+          document.querySelector('[data-testid="conversation-compose-box"]') ||
+          document.querySelector('[data-testid="conversation-compose-panel"]') ||
+          document.querySelector('[data-testid="composer"]') ||
+          document.body;
+        if (!compose) return null;
+        for (const selector of selectors) {
+          const node = compose.querySelector(selector);
+          if (node) return node;
+        }
+        return null;
+      }, clipSelectors).catch(() => null);
+      if (!handle) return null;
+      const element = handle.asElement();
+      if (!element) {
+        await handle.dispose().catch(() => {});
+        return null;
       }
-      await candidate.dispose().catch(() => {});
+      const ok = await insideCompose(element);
+      if (ok) return element;
+      await element.dispose().catch(() => {});
+      return null;
+    }
+
+    clipButton = await findViaCompose();
+    if (!clipButton) {
+      for (const selector of clipSelectors) {
+        clipButton = await findClipHandle(selector);
+        if (clipButton) break;
+        const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
+        if (!candidate) continue;
+        const isInside = await insideCompose(candidate);
+        if (isInside) {
+          clipButton = candidate;
+          break;
+        }
+        await candidate.dispose().catch(() => {});
+      }
     }
     if (!clipButton) throw new Error('clip_button_not_found');
     const docSelectors = [
@@ -1787,6 +1816,23 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     ];
     let fileInput = null;
     let fileChooser = null;
+    try {
+      const meta = await page.evaluate((el) => {
+        if (!el) return null;
+        const attrs = {
+          tag: el.tagName ? el.tagName.toLowerCase() : '',
+          ariaLabel: el.getAttribute ? (el.getAttribute('aria-label') || '') : '',
+          testId: el.getAttribute ? (el.getAttribute('data-testid') || '') : '',
+          classes: el.className || '',
+          text: el.innerText ? el.innerText.trim().slice(0, 80) : '',
+        };
+        return attrs;
+      }, clipButton);
+      if (meta) {
+        console.warn('[waweb]', `send_media_ui_clip_target ${JSON.stringify(meta)}`);
+      }
+    } catch (_) {}
+
     await clipButton.click();
     try {
       console.log('[waweb]', `send_media_ui_stage=clip_opened path=${plan.path}`);
