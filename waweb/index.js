@@ -1614,7 +1614,12 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       '[data-testid="compose-clip"]',
       'button[data-testid="chat-input-attach"]',
       'button[data-testid="conversation-compose-attach-button"]',
+      'button[data-testid="conversation-compose-attach-menu"]',
+      'button[data-testid="conversation-compose-main-attach-menu-btn"]',
+      'button[data-testid="conversation-compose-main-attach-menu"]',
       'div[data-testid="conversation-compose-attach-button"]',
+      'div[data-testid="conversation-compose-attach-menu"]',
+      'div[data-testid="conversation-compose-box"] button[data-testid]',
       '[data-testid="conversation-header-menu"] button[aria-label]',
       'button[aria-label="Attach"]',
       'div[aria-label="Attach"]',
@@ -1628,38 +1633,57 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       'div[data-icon="clip"]',
       'span[data-icon="clip"]',
       'svg[data-icon="clip"]',
+      'button[aria-haspopup="menu"]',
+      'div[aria-haspopup="menu"]',
+      'button[role="button"][aria-label*="влож"]',
+      'button[role="button"][aria-label*="Attach"]',
     ];
     let clipButton = null;
-    const debugCandidates = await page.evaluate(() => {
-      const items = [];
-      const nodes = Array.from(document.querySelectorAll('button,div,span'));
-      for (const el of nodes) {
-        const label = (el.getAttribute('aria-label') || '').trim();
-        const testId = (el.getAttribute('data-testid') || '').trim();
-        const role = (el.getAttribute('role') || '').trim();
-        if (!label && !testId) continue;
-        const lowered = label.toLowerCase();
-        if (
-          label.includes('📎') ||
-          lowered.includes('attach') ||
-          lowered.includes('clip') ||
-          lowered.includes('прикреп') ||
-          lowered.includes('меню влож') ||
-          lowered.includes('вложения') ||
-          lowered.includes('media') ||
-          lowered.includes('скреп')
-        ) {
-          items.push({ label, testId, role, tag: el.tagName.toLowerCase() });
+    let debugSnapshot = '';
+    try {
+      const rawList = await page.evaluate(() => {
+        const items = [];
+        const nodes = Array.from(document.querySelectorAll('button,div,span'));
+        for (const el of nodes) {
+          const label = (el.getAttribute('aria-label') || '').trim();
+          const testId = (el.getAttribute('data-testid') || '').trim();
+          const role = (el.getAttribute('role') || '').trim();
+          if (!label && !testId) continue;
+          const lowered = label.toLowerCase();
+          const tag = el.tagName.toLowerCase();
+          const entry = `${tag}[aria-label=\"${label}\" data-testid=\"${testId}\" role=\"${role}\"]`;
+          if (
+            label.includes('📎') ||
+            lowered.includes('attach') ||
+            lowered.includes('clip') ||
+            lowered.includes('прикреп') ||
+            lowered.includes('меню влож') ||
+            lowered.includes('вложения') ||
+            lowered.includes('media') ||
+            lowered.includes('скреп')
+          ) {
+            items.push(entry);
+            continue;
+          }
+          if (testId && /attach|clip|menu|conversation|composer/i.test(testId)) {
+            items.push(entry);
+            continue;
+          }
+          if (role && /menu|button/i.test(role) && lowered.includes('send')) {
+            items.push(entry);
+          }
         }
-        if (testId && /attach|clip|menu|conversation/.test(testId)) {
-          items.push({ label, testId, role, tag: el.tagName.toLowerCase() });
-        }
+        return items.slice(0, 25);
+      });
+      if (rawList && rawList.length) {
+        debugSnapshot = rawList.join(',');
       }
-      return items.slice(0, 20);
-    }).catch(() => []);
-    if (debugCandidates && debugCandidates.length) {
+    } catch (snapshotErr) {
+      debugSnapshot = `snapshot_error:${snapshotErr && snapshotErr.message ? snapshotErr.message : snapshotErr}`;
+    }
+    if (debugSnapshot) {
       try {
-        console.warn('[waweb]', `send_media_ui_candidates ${JSON.stringify(debugCandidates)}`);
+        console.warn('[waweb]', `send_media_ui_candidates ${debugSnapshot}`);
       } catch (_) {}
     }
     for (const selector of clipSelectors) {
@@ -1679,6 +1703,10 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       'button[data-testid="attach-menu-document"]',
       'div[data-testid="attach-menu-document"]',
       'button[aria-label="Документ 📄"]',
+      'button[data-testid="attach-document-item"]',
+      'div[data-testid="attach-document-item"]',
+      'button[role="menuitem"][aria-label*="Документ"]',
+      'button[role="menuitem"][aria-label*="document"]',
     ];
     let fileInput = null;
     let fileChooser = null;
