@@ -585,19 +585,19 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 attachment_path = None
                 attachment_size = 0
                 attachment_mtime = 0
-    viewer_url = ""
+    file_url = ""
     if request is not None:
         try:
-            viewer_raw = str(request.url_for("catalog_view_public", tenant=str(tenant)))
+            file_raw = str(request.url_for("public_catalog_file", tenant=str(tenant)))
             if attachment_mtime:
-                separator = "&" if "?" in viewer_raw else "?"
-                viewer_raw = f"{viewer_raw}{separator}v={attachment_mtime}"
-            viewer_url = viewer_raw
+                separator = "&" if "?" in file_raw else "?"
+                file_raw = f"{file_raw}{separator}v={attachment_mtime}"
+            file_url = file_raw
         except Exception:
-            viewer_url = ""
-    use_viewer_link = False
-    if viewer_url and attachment_size and CATALOG_INLINE_LIMIT_BYTES and attachment_size > CATALOG_INLINE_LIMIT_BYTES:
-        use_viewer_link = True
+            file_url = ""
+    use_file_link = False
+    if file_url and attachment_size and CATALOG_INLINE_LIMIT_BYTES and attachment_size > CATALOG_INLINE_LIMIT_BYTES:
+        use_file_link = True
 
     lowered_text = text.lower() if isinstance(text, str) else ""
     forced_catalog = bool(text and _user_requested_catalog(text))
@@ -631,15 +631,15 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         if forced_catalog and cache_key:
             _catalog_sent_cache.pop(cache_key, None)
         catalog_text_override = None
-        if use_viewer_link:
-            catalog_text_override = f"Каталог доступен по ссылке: {viewer_url}"
+        if use_file_link:
+            catalog_text_override = f"Каталог (PDF): {file_url}"
             attachment = None
             caption = ""
             logger.info(
-                "catalog_view_link tenant=%s size_bytes=%s url=%s",
+                "catalog_file_link tenant=%s size_bytes=%s url=%s",
                 tenant,
                 attachment_size,
-                viewer_url,
+                file_url,
             )
         catalog_text = (catalog_text_override or caption or "Каталог во вложении (PDF).").strip()
         resolved_provider = provider or "whatsapp"
