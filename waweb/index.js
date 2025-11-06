@@ -1608,18 +1608,33 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
   } catch (_) {}
   try {
     await page.waitForSelector('[data-testid="chat-list"]', { timeout: 5000 }).catch(() => {});
-    let clipButton = await page.waitForSelector('[data-testid="clip"]', { timeout: 3000 }).catch(() => null);
-    if (!clipButton) {
-      clipButton = await page.waitForSelector('[data-testid="compose-clip"]', { timeout: 3000 }).catch(() => null);
-    }
-    if (!clipButton) {
-      clipButton = await page.waitForSelector('button[data-testid="chat-input-attach"]', { timeout: 3000 }).catch(() => null);
-    }
-    if (!clipButton) {
-      clipButton = await page.waitForSelector('button[aria-label="Attach"],div[aria-label="Attach"]', { timeout: 3000 }).catch(() => null);
-    }
-    if (!clipButton) {
-      clipButton = await page.waitForSelector('button[aria-label="Прикрепить"],div[aria-label="Прикрепить"]', { timeout: 3000 }).catch(() => null);
+    await page.waitForSelector('[data-testid="conversation-compose-box-input"],div[contenteditable="true"][data-testid="conversation-compose-box-input"]', { timeout: 5000 }).catch(() => {});
+    const clipSelectors = [
+      '[data-testid="clip"]',
+      '[data-testid="compose-clip"]',
+      'button[data-testid="chat-input-attach"]',
+      'button[data-testid="conversation-compose-attach-button"]',
+      'div[data-testid="conversation-compose-attach-button"]',
+      '[data-testid="conversation-header-menu"] button[aria-label]',
+      'button[aria-label="Attach"]',
+      'div[aria-label="Attach"]',
+      'button[aria-label="Attach menu"]',
+      'div[aria-label="Attach menu"]',
+      'button[aria-label="Прикрепить"]',
+      'div[aria-label="Прикрепить"]',
+      'button[aria-label="Меню вложений"]',
+      'div[aria-label="Меню вложений"]',
+      'button[data-icon="clip"]',
+      'div[data-icon="clip"]',
+      'span[data-icon="clip"]',
+      'svg[data-icon="clip"]',
+    ];
+    let clipButton = null;
+    for (const selector of clipSelectors) {
+      clipButton = await page.$(selector);
+      if (clipButton) break;
+      clipButton = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
+      if (clipButton) break;
     }
     if (!clipButton) throw new Error('clip_button_not_found');
     const docSelectors = [
@@ -1629,6 +1644,9 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       'button[aria-label="Документ"]',
       '[data-testid="document"] button',
       '[data-testid="AttachDocument"]',
+      'button[data-testid="attach-menu-document"]',
+      'div[data-testid="attach-menu-document"]',
+      'button[aria-label="Документ 📄"]',
     ];
     let fileInput = null;
     let fileChooser = null;
