@@ -1769,23 +1769,7 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
         console.warn('[waweb]', `send_media_ui_candidates ${debugSnapshot}`);
       } catch (_) {}
     }
-    if (!clipButton) {
-      clipButton = await findClipInCompose(composeHandle);
-    }
-    if (!clipButton) {
-      for (const selector of fallbackClipSelectors) {
-        clipButton = await findClipHandle(selector);
-        if (clipButton) break;
-        const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
-        if (!candidate) continue;
-        const isInside = await insideCompose(candidate);
-        if (isInside) {
-          clipButton = candidate;
-          break;
-        }
-        await candidate.dispose().catch(() => {});
-      }
-    }
+
     if (!clipButton) throw new Error('clip_button_not_found');
     const docSelectors = [
       '[data-testid="attach-document"]',
