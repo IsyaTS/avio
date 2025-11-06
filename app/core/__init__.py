@@ -801,44 +801,7 @@ DEFAULT_TENANT_JSON = {
         "fallback": "Поделитесь, что важно в продукте, и соберу подбор за пару минут.",
         "handoff_wa": "Готов перейти в WhatsApp. Напишите мне — отвечаю быстро.",
     },
-    "catalogs": [
-        {
-            "name": "catalog",
-            "path": str(DATA_DIR / "catalog_sample.csv"),
-            "type": "csv",
-            "delimiter": ",",
-            "encoding": "utf-8",
-            "fields": {
-                "id": "id",
-                "title": "name",
-                "price": "price",
-                "brand": "brand",
-                "material": "material",
-                "color": "color",
-                "stock": "stock",
-                "image": "image",
-                "url": "url",
-                "tags": "tags",
-            },
-            "ranking": {
-                "boost_tags": ["хит", "новинка", "склад", "топ"],
-                "boost_stock": 1.0,
-                "boost_margin": 0.2,
-                "min_stock": 0,
-                "min_score": 0,
-                "sort": [
-                    {"by": "score", "order": "desc"},
-                    {"by": "price", "order": "asc"},
-                ],
-                "filters_default": {"stock": [">", 0]},
-            },
-            "presentation": {
-                "price_format": "{price} {CUR}",
-                "line_format": "{title} — {price} {CUR}. Цвет: {color}. Материал: {material}. [{url}]",
-                "group_by": "brand",
-            },
-        }
-    ],
+    "catalogs": [],
     "funnel": {
         "avito_to_wa": {
             "enabled": True,
@@ -875,6 +838,47 @@ DEFAULT_TENANT_JSON = {
         "telegram": {"enabled": True},
     },
 }
+
+_SAMPLE_CATALOG_PATH = DATA_DIR / "catalog_sample.csv"
+if _SAMPLE_CATALOG_PATH.exists():
+    DEFAULT_TENANT_JSON["catalogs"].append(
+        {
+            "name": "catalog",
+            "path": str(_SAMPLE_CATALOG_PATH),
+            "type": "csv",
+            "delimiter": ",",
+            "encoding": "utf-8",
+            "fields": {
+                "id": "id",
+                "title": "name",
+                "price": "price",
+                "brand": "brand",
+                "material": "material",
+                "color": "color",
+                "stock": "stock",
+                "image": "image",
+                "url": "url",
+                "tags": "tags",
+            },
+            "ranking": {
+                "boost_tags": ["хит", "новинка", "склад", "топ"],
+                "boost_stock": 1.0,
+                "boost_margin": 0.2,
+                "min_stock": 0,
+                "min_score": 0,
+                "sort": [
+                    {"by": "score", "order": "desc"},
+                    {"by": "price", "order": "asc"},
+                ],
+                "filters_default": {"stock": [">", 0]},
+            },
+            "presentation": {
+                "price_format": "{price} {CUR}",
+                "line_format": "{title} — {price} {CUR}. Цвет: {color}. Материал: {material}. [{url}]",
+                "group_by": "brand",
+            },
+        }
+    )
 
 PERSONA_DEFAULT_PATH = pathlib.Path(__file__).resolve().parent.parent / "agents" / "persona_default_ru.md"
 try:
