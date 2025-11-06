@@ -1493,19 +1493,7 @@ async function sendTransportMessage(tenant, transport){
     let textUsedAsCaption = false;
     for (const plan of prepared) {
       if (plan.source === 'path' && plan.path) {
-        const captionCandidate =
-          plan.caption && plan.caption.length
-            ? plan.caption
-            : !textUsedAsCaption && messageText
-              ? messageText
-              : '';
-        const sentViaUi = await trySendMediaViaUi(s, jid, plan, captionCandidate);
-        if (sentViaUi) {
-          if (captionCandidate && captionCandidate === messageText) {
-            textUsedAsCaption = true;
-          }
-          continue;
-        }
+        // UI fallback disabled; rely on direct sendMessage flow
       }
       try {
         if (s.client && s.client.interface && typeof s.client.interface.openChatWindow === 'function') {
