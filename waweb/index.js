@@ -1630,6 +1630,38 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       'svg[data-icon="clip"]',
     ];
     let clipButton = null;
+    const debugCandidates = await page.evaluate(() => {
+      const items = [];
+      const nodes = Array.from(document.querySelectorAll('button,div,span'));
+      for (const el of nodes) {
+        const label = (el.getAttribute('aria-label') || '').trim();
+        const testId = (el.getAttribute('data-testid') || '').trim();
+        const role = (el.getAttribute('role') || '').trim();
+        if (!label && !testId) continue;
+        const lowered = label.toLowerCase();
+        if (
+          label.includes('📎') ||
+          lowered.includes('attach') ||
+          lowered.includes('clip') ||
+          lowered.includes('прикреп') ||
+          lowered.includes('меню влож') ||
+          lowered.includes('вложения') ||
+          lowered.includes('media') ||
+          lowered.includes('скреп')
+        ) {
+          items.push({ label, testId, role, tag: el.tagName.toLowerCase() });
+        }
+        if (testId && /attach|clip|menu|conversation/.test(testId)) {
+          items.push({ label, testId, role, tag: el.tagName.toLowerCase() });
+        }
+      }
+      return items.slice(0, 20);
+    }).catch(() => []);
+    if (debugCandidates && debugCandidates.length) {
+      try {
+        console.warn('[waweb]', `send_media_ui_candidates ${JSON.stringify(debugCandidates)}`);
+      } catch (_) {}
+    }
     for (const selector of clipSelectors) {
       clipButton = await page.$(selector);
       if (clipButton) break;
