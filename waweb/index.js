@@ -2043,13 +2043,44 @@ async function sendDocumentViaStore(session, jid, plan, caption) {
       'application/pdf';
     const captionValue = (caption || '').trim();
     const size = typeof plan.size === 'number' && Number.isFinite(plan.size) ? plan.size : data.length;
+    const debugInfo = await page.evaluate(() => {
+      try {
+        if (!window.Store) return { ok: false, reason: 'no_store' };
+        return {
+          ok: true,
+          keys: Object.keys(window.Store),
+          hasChat: Boolean(window.Store.Chat),
+          hasSendMessage: Boolean(window.Store.SendMessage),
+          hasMediaPrep: Boolean(window.Store.MediaPrep),
+          hasMediaUpload: Boolean(window.Store.MediaUpload),
+          hasMediaCollection: Boolean(window.WWebJS && window.WWebJS.mediaCollection),
+          hasProcessMedia: Boolean(window.WWebJS && typeof window.WWebJS.processMediaData === 'function'),
+        };
+      } catch (err) {
+        return { ok: false, reason: err && err.message ? err.message : String(err) };
+      }
+    });
+    try {
+      console.warn('[waweb]', `store_debug ${JSON.stringify(debugInfo)}`);
+    } catch (_) {}
+
     const result = await page.evaluate(
       async ({ jid, base64Data, filename, mimetype, caption }) => {
         try {
-          if (!window.Store || !window.Store.Chat || !window.Store.MediaPrep || !window.Store.SendMessage) {
+          if (!window.Store || !window.Store.Chat || !window.Store.SendMessage) {
             return { status: 'missing_store' };
           }
-          const chat = await window.Store.Chat.find(jid);
+          let chat = null;
+          if (window.Store.Chat.get) {
+            chat = window.Store.Chat.get(jid);
+          }
+          if (!chat && window.Store.Chat.find) {
+            try {
+              chat = await window.Store.Chat.find(jid);
+            } catch (_) {
+              chat = null;
+            }
+          }
           if (!chat) return { status: 'chat_not_found' };
 
           const binary = atob(base64Data);
@@ -2061,23 +2092,35 @@ async function sendDocumentViaStore(session, jid, plan, caption) {
           const blob = new Blob([array.buffer], { type: mimetype });
           const file = new File([blob], filename, { type: mimetype });
 
-          const mediaPrep = await window.Store.MediaPrep.prepUpload(file, { asDocument: true });
-          const messageOptions = {
-            caption,
+          let mediaResult = null;
+          if (window.WWebJS && typeof window.WWebJS.processMediaData === 'function') {
+            mediaResult = await window.WWebJS.processMediaData({ mimetype, filename }, { mediaUploadTimeoutMs: 180000 }, file);
+          } else if (window.WWebJS && window.WWebJS.mediaCollection) {
+            const mc = new window.WWebJS.mediaCollection(chat);
+            await mc.processAttachments([{ attachment: file, mimetype, filename }], chat);
+            mediaResult = mc.mediaPrepCollection && mc.mediaPrepCollection[0];
+          }
+          if (!mediaResult) {
+            return { status: 'no_media_processor' };
+          }
+
+          const options = {
+            caption: caption || filename,
             type: 'document',
             mimetype,
             filename,
-            filehash: mediaPrep.filehash,
-            uploadhash: mediaPrep.uploadhash,
-            mediaKey: mediaPrep.mediaKey,
-            mediaKeyTimestamp: mediaPrep.mediaKeyTimestamp,
-            directPath: mediaPrep.directPath,
-            mediaUploadTimestampMs: mediaPrep.mediaUploadTimestampMs,
-            mediaBlob: mediaPrep.mediaBlob,
+            mediaBlob: mediaResult.mediaBlob,
+            mediaKey: mediaResult.mediaKey,
+            mediaKeyTimestamp: mediaResult.mediaKeyTimestamp,
+            directPath: mediaResult.directPath,
+            mediaUploadTimestampMs: mediaResult.mediaUploadTimestampMs,
+            filehash: mediaResult.filehash,
+            uploadhash: mediaResult.uploadhash,
             body: caption || filename,
             isViewOnce: false,
           };
-          const sentMsg = await window.Store.SendMessage.sendMessage(chat, caption || filename, messageOptions);
+
+          const sentMsg = await window.Store.SendMessage.sendMessage(chat, options.caption, options);
           const messageId =
             sentMsg && sentMsg.id ? sentMsg.id._serialized || sentMsg.id.toString() : null;
           return { status: 'ok', id: messageId };
