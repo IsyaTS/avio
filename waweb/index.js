@@ -1435,6 +1435,7 @@ async function prepareMediaAttachment(attachment) {
     mimetype: finalMime,
     size,
     caption: declaredCaption,
+    path: attachment.path || null,
   };
 }
 
@@ -1484,6 +1485,21 @@ async function sendTransportMessage(tenant, transport){
   if (prepared.length) {
     let textUsedAsCaption = false;
     for (const plan of prepared) {
+      if (plan.source === 'path' && plan.path) {
+        const captionCandidate =
+          plan.caption && plan.caption.length
+            ? plan.caption
+            : !textUsedAsCaption && messageText
+              ? messageText
+              : '';
+        const sentViaUi = await trySendMediaViaUi(s, jid, plan, captionCandidate);
+        if (sentViaUi) {
+          if (captionCandidate && captionCandidate === messageText) {
+            textUsedAsCaption = true;
+          }
+          continue;
+        }
+      }
       try {
         if (s.client && s.client.interface && typeof s.client.interface.openChatWindow === 'function') {
           await s.client.interface.openChatWindow(jid);
@@ -1572,6 +1588,75 @@ async function sendTransportMessage(tenant, transport){
 
   messageOutTotal += 1;
   return jid;
+}
+
+async function trySendMediaViaUi(session, jid, plan, caption) {
+  const page = session?.client?.pupPage;
+  if (!page) return false;
+  if (!plan.path) return false;
+  try {
+    if (session.client.interface && typeof session.client.interface.openChatWindow === 'function') {
+      await session.client.interface.openChatWindow(jid);
+    }
+  } catch (_) {}
+  try {
+    await page.waitForSelector('[data-testid="chat-list"]', { timeout: 5000 }).catch(() => {});
+    const clipButton = await page.waitForSelector('[data-testid="clip"]', { timeout: 5000 });
+    await clipButton.click();
+    const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+    await fileInput.uploadFile(plan.path);
+    await page.waitForTimeout(500);
+    if (caption && caption.trim()) {
+      const composeSelectors = [
+        '[data-testid="conversation-compose-box-input"]',
+        'div[contenteditable="true"][data-testid="conversation-compose-box-input"]',
+        'div[contenteditable="true"][data-tab="10"]',
+      ];
+      let typed = false;
+      for (const selector of composeSelectors) {
+        const el = await page.$(selector);
+        if (el) {
+          await el.focus();
+          await page.keyboard.type(caption);
+          typed = true;
+          break;
+        }
+      }
+      if (!typed) {
+        await page.keyboard.type(caption);
+      }
+    }
+    const sendSelectors = [
+      '[data-testid="send"]',
+      '[data-testid="compose-btn-send"]',
+      'span[data-icon="send"]',
+      'button[aria-label="Send"]',
+    ];
+    let sent = false;
+    for (const selector of sendSelectors) {
+      const button = await page.$(selector);
+      if (button) {
+        await button.click();
+        sent = true;
+        break;
+      }
+    }
+    if (!sent) {
+      const inlineSend = await page.$('button[aria-label*="send"]');
+      if (inlineSend) {
+        await inlineSend.click();
+        sent = true;
+      }
+    }
+    if (!sent) throw new Error('send_button_not_found');
+    await page.waitForTimeout(1500);
+    console.log('[waweb]', `send_media_ui type=${plan.type} path=${plan.path}`);
+    return true;
+  } catch (err) {
+    const reason = err && err.message ? err.message : String(err);
+    console.warn('[waweb]', `send_media_ui_failed type=${plan.type || 'unknown'} reason=${reason}`);
+    return false;
+  }
 }
 function pickChromePath(){
   const cand = [process.env.CHROME_PATH, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome']
