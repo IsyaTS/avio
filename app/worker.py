@@ -735,6 +735,12 @@ def _build_wa_document_payload(
     if not isinstance(attachment, Mapping):
         return None, None
 
+    path_value = attachment.get("path")
+    if isinstance(path_value, str) and path_value.strip():
+        # Если передан локальный путь к файлу, оставляем вложение без изменений,
+        # чтобы waweb использовал доступ к файлу напрямую (без скачивания по URL).
+        return None, None
+
     attachment_type = str(attachment.get("type") or attachment.get("kind") or "").strip().lower()
     if attachment_type and attachment_type not in {"document", "file"}:
         return None, None
