@@ -1609,134 +1609,117 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
   try {
     await page.waitForSelector('[data-testid="chat-list"]', { timeout: 5000 }).catch(() => {});
     await page.waitForSelector('[data-testid="conversation-compose-box-input"],div[contenteditable="true"][data-testid="conversation-compose-box-input"]', { timeout: 5000 }).catch(() => {});
-    const clipSelectors = [
-      '[data-testid="conversation-compose-box"] [data-testid="clip"]',
-      '[data-testid="conversation-compose-box"] [data-testid="compose-clip"]',
-      '[data-testid="conversation-compose-box"] [data-icon="clip"]',
-      '[data-testid="conversation-compose-box"] button[aria-label="Attach"]',
-      '[data-testid="conversation-compose-box"] div[aria-label="Attach"]',
-      '[data-testid="conversation-compose-box"] button[aria-label="Прикрепить"]',
-      '[data-testid="conversation-compose-box"] div[aria-label="Прикрепить"]',
-      '[data-testid="conversation-compose-box"] button[data-testid="chat-input-attach"]',
-      '[data-testid="conversation-compose-box"] button[data-testid="conversation-compose-attach-button"]',
-      '[data-testid="conversation-compose-box"] button[data-testid="conversation-compose-attach-menu"]',
-      '[data-testid="conversation-compose-box"] div[data-testid="conversation-compose-attach-button"]',
-      '[data-testid="conversation-compose-box"] div[data-testid="conversation-compose-attach-menu"]',
-      '[data-testid="conversation-compose-box"] button[data-testid="conversation-compose-main-attach-menu-btn"]',
-      '[data-testid="conversation-compose-box"] button[data-testid="conversation-compose-main-attach-menu"]',
-      '[data-testid="conversation-compose-box"] div[data-testid="conversation-compose-main-attach-menu"]',
-      '[data-testid="conversation-compose-box"] div[data-testid="conversation-compose-main-attach-menu-btn"]',
-      '[data-testid="conversation-compose-box"] button[data-icon="clip"]',
-      '[data-testid="conversation-compose-box"] span[data-icon="clip"]',
-      '[data-testid="conversation-compose-box"] svg[data-icon="clip"]',
-      '[data-testid="conversation-compose-panel"] [data-testid="clip"]',
-      '[data-testid="conversation-compose-panel"] [data-testid="compose-clip"]',
-      '[data-testid="conversation-compose-panel"] button[data-testid="chat-input-attach"]',
-      '[data-testid="conversation-compose-panel"] button[data-icon="clip"]',
-      '[data-testid="conversation-compose-panel"] span[data-icon="clip"]',
-      '[data-testid="conversation-compose-panel"] svg[data-icon="clip"]',
-      '[data-testid="clip"]',
-      '[data-testid="compose-clip"]',
-      'button[data-testid="chat-input-attach"]',
-      'button[data-testid="conversation-compose-attach-button"]',
-      'button[data-testid="conversation-compose-attach-menu"]',
-      'button[data-testid="conversation-compose-main-attach-menu-btn"]',
-      'button[data-testid="conversation-compose-main-attach-menu"]',
-      'div[data-testid="conversation-compose-attach-button"]',
-      'div[data-testid="conversation-compose-attach-menu"]',
-      'div[data-testid="conversation-compose-box"] button[data-testid]',
-      '[data-testid="conversation-header-menu"] button[aria-label]',
-      'button[aria-label="Attach"]',
-      'div[aria-label="Attach"]',
-      'button[aria-label="Attach menu"]',
-      'div[aria-label="Attach menu"]',
-      'button[aria-label="Прикрепить"]',
-      'div[aria-label="Прикрепить"]',
-      'button[aria-label="Меню вложений"]',
-      'div[aria-label="Меню вложений"]',
-      'button[data-icon="clip"]',
-      'div[data-icon="clip"]',
-      'span[data-icon="clip"]',
-      'svg[data-icon="clip"]',
-      'button[aria-haspopup="menu"]',
-      'div[aria-haspopup="menu"]',
-      'button[role="button"][aria-label*="влож"]',
-      'button[role="button"][aria-label*="Attach"]',
-    ];
-    let clipButton = null;
 
-    const composeSelectors = [
+    const composeCandidates = [
       '[data-testid="conversation-compose-box"]',
       '[data-testid="conversation-compose-panel"]',
       'footer [data-testid="conversation-compose-box"]',
+      'footer [data-testid="conversation-compose-panel"]',
+      '[data-testid="composer"]',
     ];
-    let composeHandle = null;
-    for (const selector of composeSelectors) {
-      composeHandle = await page.waitForSelector(selector, { timeout: 5000 }).catch(() => null);
-      if (composeHandle) break;
+
+    async function findComposeHandle() {
+      for (const selector of composeCandidates) {
+        const handle = await page.$(selector);
+        if (handle) return handle;
+      }
+      return null;
     }
+
+    const composeHandle = await findComposeHandle();
 
     async function insideCompose(handle) {
       if (!handle) return false;
       try {
         return await page.evaluate((el) => {
           if (!el) return false;
-          return Boolean(el.closest('[data-testid="conversation-compose-box"]') || el.closest('[data-testid="conversation-compose-panel"]'));
+          return Boolean(
+            el.closest('[data-testid="conversation-compose-box"]') ||
+            el.closest('[data-testid="conversation-compose-panel"]') ||
+            el.closest('[data-testid="composer"]')
+          );
         }, handle);
       } catch (_) {
         return false;
       }
     }
 
-    async function findClipHandle(selector) {
-      const handles = await page.$$(selector);
-      for (const handle of handles) {
-        const isInside = await insideCompose(handle);
-        if (isInside) {
-          return handle;
-        }
-        await handle.dispose().catch(() => {});
-      }
-      return null;
-    }
-
-    async function findClipInCompose(rootHandle) {
+    async function pickClipButtonFromCompose(rootHandle) {
       if (!rootHandle) return null;
-      const clipHandle = await page.evaluateHandle((root) => {
+      const handle = await page.evaluateHandle((root) => {
         const rootNode = root || document;
-        const candidates = [
-          '[data-icon="clip"]',
+        const selectors = [
+          'button span[data-icon="clip"]',
+          'button[data-icon="clip"]',
+          'button[aria-label="Attach"]',
+          'button[aria-label="Attach menu"]',
+          'button[aria-label="Прикрепить"]',
+          'span[data-icon="clip"]',
           '[data-testid="clip"]',
           '[data-testid="compose-clip"]',
-          'button[aria-label="Attach"]',
-          'div[aria-label="Attach"]',
-          'button[aria-label="Attach menu"]',
-          'div[aria-label="Attach menu"]',
-          'button[aria-label="Прикрепить"]',
-          'div[aria-label="Прикрепить"]',
           'button[data-testid="chat-input-attach"]',
           'button[data-testid="conversation-compose-attach-button"]',
-          'div[data-testid="conversation-compose-attach-button"]',
         ];
-        for (const selector of candidates) {
-          const found = rootNode.querySelectorAll(selector);
-          for (const node of found) {
-            const button = node.closest('button,div[role="button"]');
-            if (button) return button;
-          }
+        for (const selector of selectors) {
+          const node = rootNode.querySelector(selector);
+          if (!node) continue;
+          if (node.tagName && node.tagName.toLowerCase() === 'button') return node;
+          const button = node.closest('button,div[role="button"]');
+          if (button) return button;
         }
         return null;
-      }, rootHandle).catch(() => null);
-      if (!clipHandle) return null;
-      const element = clipHandle.asElement();
+      }, composeHandle).catch(() => null);
+      if (!handle) return null;
+      const element = handle.asElement();
       if (!element) {
-        await clipHandle.dispose().catch(() => {});
+        await handle.dispose().catch(() => {});
         return null;
       }
       const within = await insideCompose(element);
       if (within) return element;
       await element.dispose().catch(() => {});
       return null;
+    }
+
+    async function findClipHandle(selector) {
+      const handles = await page.$$(selector);
+      for (const handle of handles) {
+        const ok = await insideCompose(handle);
+        if (ok) return handle;
+        await handle.dispose().catch(() => {});
+      }
+      return null;
+    }
+
+    const fallbackClipSelectors = [
+      '[data-testid="clip"]',
+      '[data-testid="compose-clip"]',
+      'button[data-testid="chat-input-attach"]',
+      'button[data-testid="conversation-compose-attach-button"]',
+      'button[data-icon="clip"]',
+      'span[data-icon="clip"]',
+      'svg[data-icon="clip"]',
+      'button[aria-label="Attach"]',
+      'button[aria-label="Attach menu"]',
+      'button[aria-label="Прикрепить"]',
+      'div[role="button"] span[data-icon="clip"]',
+    ];
+
+    let clipButton = await pickClipButtonFromCompose(composeHandle);
+
+    if (!clipButton) {
+      for (const selector of fallbackClipSelectors) {
+        clipButton = await findClipHandle(selector);
+        if (clipButton) break;
+        const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
+        if (!candidate) continue;
+        const ok = await insideCompose(candidate);
+        if (ok) {
+          clipButton = candidate;
+          break;
+        }
+        await candidate.dispose().catch(() => {});
+      }
     }
 
     let debugSnapshot = '';
@@ -1790,7 +1773,7 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       clipButton = await findClipInCompose(composeHandle);
     }
     if (!clipButton) {
-      for (const selector of clipSelectors) {
+      for (const selector of fallbackClipSelectors) {
         clipButton = await findClipHandle(selector);
         if (clipButton) break;
         const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
@@ -1856,10 +1839,26 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     try {
       console.log('[waweb]', `send_media_ui_stage=clip_opened path=${plan.path}`);
     } catch (_) {}
+    const menuRootCandidates = [
+      '[data-testid="contextual-attachment-menu"]',
+      '[data-testid="conversation-attachment-panel"]',
+      '[data-testid="attach-menu"]',
+      'div[role="menu"]',
+      'div[aria-label*="влож"]',
+    ];
+    let menuRoot = null;
+    for (const selector of menuRootCandidates) {
+      menuRoot = await page.waitForSelector(selector, { timeout: 6000 }).catch(() => null);
+      if (menuRoot) break;
+    }
+    if (!menuRoot) {
+      menuRoot = await page.$('body');
+    }
     try {
-      const menuSnapshot = await page.evaluate(() => {
+      const menuSnapshot = await page.evaluate((root) => {
+        const base = root || document;
         const entries = [];
-        const nodes = Array.from(document.querySelectorAll('button,div[role="menuitem"]'));
+        const nodes = Array.from(base.querySelectorAll('button,div[role="menuitem"]'));
         for (const node of nodes) {
           const label = (node.getAttribute('aria-label') || '').trim();
           const testId = (node.getAttribute('data-testid') || '').trim();
@@ -1871,12 +1870,12 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
             label,
             testId,
             role,
-            text: text.slice(0, 40),
+            text: text.slice(0, 60),
             classes: node.className || '',
           });
         }
         return entries.slice(0, 40);
-      });
+      }, menuRoot);
       if (menuSnapshot && menuSnapshot.length) {
         console.warn('[waweb]', `send_media_ui_menu ${JSON.stringify(menuSnapshot)}`);
       }
