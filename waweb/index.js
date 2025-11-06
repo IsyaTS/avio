@@ -2384,6 +2384,16 @@ app.post('/send', async (req, res) => {
     req.query?.tenant_id;
   const tenantNum = Number(tenantRaw);
   if (!tenantNum) return res.status(400).json({ ok:false, error:'no_tenant' });
+  try {
+    const attachmentsMeta = Array.isArray(payload.attachments) ? payload.attachments.length : 0;
+    const attachmentMeta = payload.attachment && typeof payload.attachment === 'object'
+      ? Object.keys(payload.attachment)
+      : [];
+    console.log(
+      '[waweb]',
+      `incoming_send tenant=${tenantNum} attachments=${attachmentsMeta} attachment_keys=${attachmentMeta}`
+    );
+  } catch (_) {}
   let attachments = [];
   let hasDocument = false;
   try {
