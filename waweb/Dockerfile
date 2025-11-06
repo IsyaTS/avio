@@ -22,6 +22,7 @@ ENV NODE_PATH=/app/node_modules
 COPY waweb/package.json waweb/package-lock.json* ./
 COPY vendor/whatsapp-web.js /vendor/whatsapp-web.js
 RUN npm install --omit=dev
+RUN cd /vendor/whatsapp-web.js && npm install --omit=dev
 
 COPY waweb/. .
 USER root
