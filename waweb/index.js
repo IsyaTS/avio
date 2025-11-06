@@ -2318,6 +2318,51 @@ app.post('/session/:tenant/reset', (req,res)=>{
   return res.json({ ok:true, reset:true, qr: !!s.qrSvg, ready: !!s.ready });
 });
 
+app.get('/debug/file-inputs', async (req, res) => {
+  if (!authorized(req)) return res.status(401).json({ ok:false, error:'unauthorized' });
+  const tenantId = req.query?.tenant || req.query?.tenant_id;
+  const tenantKey = String(tenantId || '');
+  if (!tenantKey) return res.status(400).json({ ok:false, error:'no_tenant' });
+  const session = sessions[tenantKey];
+  if (!session || !session.client || !session.client.pupPage) {
+    return res.status(404).json({ ok:false, error:'session_unavailable' });
+  }
+  const jidRaw = req.query?.jid ? String(req.query.jid) : null;
+  if (jidRaw) {
+    try {
+      if (session.client.interface && typeof session.client.interface.openChatWindow === 'function') {
+        await session.client.interface.openChatWindow(jidRaw);
+      }
+    } catch (_) {}
+  }
+  try {
+    const result = await session.client.pupPage.evaluate(() => {
+      const entries = Array.from(document.querySelectorAll('input[type="file"]')).map((el) => {
+        const style = window.getComputedStyle(el);
+        return {
+          accept: el.getAttribute('accept') || '',
+          name: el.getAttribute('name') || '',
+          dataTestid: el.getAttribute('data-testid') || '',
+          className: el.className || '',
+          hidden: el.hidden,
+          display: style.display,
+          visibility: style.visibility,
+        };
+      });
+      const buttons = Array.from(document.querySelectorAll('[data-testid]')).map((el) => ({
+        testid: el.getAttribute('data-testid') || '',
+        title: el.getAttribute('title') || '',
+        role: el.getAttribute('role') || '',
+      }));
+      return { inputs: entries, buttons };
+    });
+    return res.json({ ok: true, data: result });
+  } catch (err) {
+    const reason = err && err.message ? err.message : String(err || 'error');
+    return res.status(500).json({ ok:false, error:'evaluate_failed', reason });
+  }
+});
+
 if (require.main === module) {
   app.listen(PORT, () => console.log('waweb on :' + PORT));
 }
