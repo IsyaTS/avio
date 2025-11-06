@@ -1665,19 +1665,23 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     ];
     let clipButton = null;
 
+    const composeSelectors = [
+      '[data-testid="conversation-compose-box"]',
+      '[data-testid="conversation-compose-panel"]',
+      'footer [data-testid="conversation-compose-box"]',
+    ];
+    let composeHandle = null;
+    for (const selector of composeSelectors) {
+      composeHandle = await page.waitForSelector(selector, { timeout: 5000 }).catch(() => null);
+      if (composeHandle) break;
+    }
+
     async function insideCompose(handle) {
       if (!handle) return false;
       try {
         return await page.evaluate((el) => {
           if (!el) return false;
-          let node = el;
-          while (node) {
-            if (node.getAttribute && node.getAttribute('data-testid') === 'conversation-compose-box') {
-              return true;
-            }
-            node = node.parentElement;
-          }
-          return false;
+          return Boolean(el.closest('[data-testid="conversation-compose-box"]') || el.closest('[data-testid="conversation-compose-panel"]'));
         }, handle);
       } catch (_) {
         return false;
@@ -1693,6 +1697,45 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
         }
         await handle.dispose().catch(() => {});
       }
+      return null;
+    }
+
+    async function findClipInCompose(rootHandle) {
+      if (!rootHandle) return null;
+      const clipHandle = await page.evaluateHandle((root) => {
+        const rootNode = root || document;
+        const candidates = [
+          '[data-icon="clip"]',
+          '[data-testid="clip"]',
+          '[data-testid="compose-clip"]',
+          'button[aria-label="Attach"]',
+          'div[aria-label="Attach"]',
+          'button[aria-label="Attach menu"]',
+          'div[aria-label="Attach menu"]',
+          'button[aria-label="Прикрепить"]',
+          'div[aria-label="Прикрепить"]',
+          'button[data-testid="chat-input-attach"]',
+          'button[data-testid="conversation-compose-attach-button"]',
+          'div[data-testid="conversation-compose-attach-button"]',
+        ];
+        for (const selector of candidates) {
+          const found = rootNode.querySelectorAll(selector);
+          for (const node of found) {
+            const button = node.closest('button,div[role="button"]');
+            if (button) return button;
+          }
+        }
+        return null;
+      }, rootHandle).catch(() => null);
+      if (!clipHandle) return null;
+      const element = clipHandle.asElement();
+      if (!element) {
+        await clipHandle.dispose().catch(() => {});
+        return null;
+      }
+      const within = await insideCompose(element);
+      if (within) return element;
+      await element.dispose().catch(() => {});
       return null;
     }
 
@@ -1743,17 +1786,22 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
         console.warn('[waweb]', `send_media_ui_candidates ${debugSnapshot}`);
       } catch (_) {}
     }
-    for (const selector of clipSelectors) {
-      clipButton = await findClipHandle(selector);
-      if (clipButton) break;
-      const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
-      if (!candidate) continue;
-      const isInside = await insideCompose(candidate);
-      if (isInside) {
-        clipButton = candidate;
-        break;
+    if (!clipButton) {
+      clipButton = await findClipInCompose(composeHandle);
+    }
+    if (!clipButton) {
+      for (const selector of clipSelectors) {
+        clipButton = await findClipHandle(selector);
+        if (clipButton) break;
+        const candidate = await page.waitForSelector(selector, { timeout: 300 }).catch(() => null);
+        if (!candidate) continue;
+        const isInside = await insideCompose(candidate);
+        if (isInside) {
+          clipButton = candidate;
+          break;
+        }
+        await candidate.dispose().catch(() => {});
       }
-      await candidate.dispose().catch(() => {});
     }
     if (!clipButton) throw new Error('clip_button_not_found');
     const docSelectors = [
