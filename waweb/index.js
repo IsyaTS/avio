@@ -1602,7 +1602,6 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
   try {
     await page.waitForSelector('[data-testid="chat-list"]', { timeout: 5000 }).catch(() => {});
     const clipButton = await page.waitForSelector('[data-testid="clip"]', { timeout: 5000 });
-    await clipButton.click();
     const docSelectors = [
       '[data-testid="attach-document"]',
       'button[aria-label="Document"]',
@@ -1610,20 +1609,52 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       '[data-testid="AttachDocument"]',
     ];
     let fileInput = null;
+    let fileChooser = null;
+    await clipButton.click();
+    try {
+      console.log('[waweb]', `send_media_ui_stage=clip_opened path=${plan.path}`);
+    } catch (_) {}
     for (const selector of docSelectors) {
       const trigger = await page.$(selector);
       if (!trigger) continue;
-      await trigger.click();
       try {
-        fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
-        if (fileInput) break;
+        const result = await Promise.allSettled([
+          page.waitForFileChooser({ timeout: 5000 }),
+          trigger.hover().then(() => trigger.click()),
+        ]);
+        for (const entry of result) {
+          if (entry.status === 'fulfilled' && entry.value && typeof entry.value.accept === 'function') {
+            fileChooser = entry.value;
+            break;
+          }
+        }
+        if (fileChooser) break;
       } catch (_) {}
     }
-    if (!fileInput) {
-      fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+    if (!fileChooser) {
+      try {
+        const result = await Promise.allSettled([
+          page.waitForFileChooser({ timeout: 5000 }),
+          clipButton.click(),
+        ]);
+        for (const entry of result) {
+          if (entry.status === 'fulfilled' && entry.value && typeof entry.value.accept === 'function') {
+            fileChooser = entry.value;
+            break;
+          }
+        }
+      } catch (_) {}
     }
-    if (!fileInput) throw new Error('file_input_not_found');
-    await fileInput.uploadFile(plan.path);
+    if (!fileChooser) {
+      fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+      if (!fileInput) throw new Error('file_input_not_found');
+      await fileInput.uploadFile(plan.path);
+    } else {
+      await fileChooser.accept([plan.path]);
+    }
+    try {
+      console.log('[waweb]', `send_media_ui_stage=file_selected path=${plan.path} via=${fileChooser ? 'chooser' : 'input'}`);
+    } catch (_) {}
     await page.waitForSelector('[data-testid="media-confirmation-dialog"]', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(500);
     if (caption && caption.trim()) {
