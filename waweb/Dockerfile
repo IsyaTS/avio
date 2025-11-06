@@ -18,6 +18,7 @@ RUN apt-get update \
 RUN mkdir -p /data/.cache/puppeteer
 
 WORKDIR /app
+ENV NODE_PATH=/app/node_modules
 COPY waweb/package.json waweb/package-lock.json* ./
 COPY vendor/whatsapp-web.js /vendor/whatsapp-web.js
 RUN npm install --omit=dev
