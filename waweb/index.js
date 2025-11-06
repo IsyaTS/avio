@@ -1538,6 +1538,12 @@ async function sendTransportMessage(tenant, transport){
 
       try {
         await s.client.sendMessage(jid, plan.media, options);
+        try {
+          console.log(
+            '[waweb]',
+            `send_media_done type=${typeLabel} as_document=${plan.asDocument ? 'true' : 'false'}`
+          );
+        } catch (_) {}
       } catch (err) {
         const reason = err && err.message ? err.message : String(err);
         try {
