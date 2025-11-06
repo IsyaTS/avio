@@ -2373,6 +2373,13 @@ app.post('/send', async (req, res) => {
   }
   try { console.log('[waweb]', `send_auth method=${authMethod}`); } catch (_) {}
   const payload = req.body || {};
+  try {
+    const payloadKeys = Object.keys(payload || {});
+    console.log(
+      '[waweb]',
+      `incoming_send_raw tenant=${payload?.tenant ?? payload?.tenant_id ?? '?'} keys=${payloadKeys.join(',')}`
+    );
+  } catch (_) {}
   const channel = (payload.channel || '').toString().toLowerCase();
   if (channel && channel !== 'whatsapp') {
     return res.status(400).json({ ok:false, error:'channel_mismatch' });
