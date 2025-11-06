@@ -639,6 +639,17 @@ def _prepare_whatsapp_attachment_url(url: str) -> str:
 
 def _tokenize_attachment_mapping(attachment: Mapping[str, Any]) -> dict[str, Any]:
     prepared = dict(attachment)
+    path_value = prepared.get("path")
+    if isinstance(path_value, str) and path_value.strip():
+        try:
+            resolved_path = os.path.abspath(path_value)
+            size = os.path.getsize(resolved_path)
+            if size >= 0:
+                prepared.setdefault("path", resolved_path)
+                prepared.setdefault("size", size)
+        except OSError:
+            pass
+
     url_value = prepared.get("url")
     if isinstance(url_value, str):
         prepared["url"] = _prepare_whatsapp_attachment_url(url_value)
@@ -1544,6 +1555,10 @@ async def send_whatsapp(
             data_block = candidate.get("b64")
             if isinstance(data_block, str) and data_block:
                 media_bytes += int(len(data_block) * 3 / 4)
+                continue
+            size_block = candidate.get("size")
+            if isinstance(size_block, (int, float)) and size_block > 0:
+                media_bytes += int(size_block)
         log(
             "[worker] wa_payload attachments_count=%s attachment_keys=%s document_keys=%s"
             % (
