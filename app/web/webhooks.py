@@ -80,6 +80,16 @@ _CATALOG_KEYWORDS = (
     "pdf",
 )
 
+try:
+    _catalog_inline_limit_mb = float(os.getenv("WA_CATALOG_INLINE_LIMIT_MB", "5") or "0")
+except ValueError:
+    _catalog_inline_limit_mb = 5.0
+if _catalog_inline_limit_mb < 0:
+    _catalog_inline_limit_mb = 0.0
+CATALOG_INLINE_LIMIT_BYTES = (
+    int(_catalog_inline_limit_mb * 1024 * 1024) if _catalog_inline_limit_mb > 0 else 0
+)
+
 
 def _user_requested_catalog(text: str) -> bool:
     if not text:

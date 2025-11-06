@@ -3821,6 +3821,105 @@ async def catalog_upload(
     return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "filename": filename})
 
 
+@router.get("/pub/catalog/view/{tenant}", response_class=HTMLResponse)
+def catalog_view_public(tenant: int, request: Request):
+    try:
+        tenant_id = int(tenant)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="not_found") from None
+    if tenant_id <= 0:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
+    pdf_path = tenant_root / "uploads" / "catalog.pdf"
+    has_catalog = pdf_path.exists() and pdf_path.is_file()
+
+    catalog_url: str | None = None
+    catalog_size_mb: float | None = None
+    catalog_updated_at: int | None = None
+
+    if has_catalog:
+        try:
+            stat = pdf_path.stat()
+        except OSError:
+            stat = None
+        if stat:
+            catalog_size_mb = round(stat.st_size / (1024 * 1024), 2)
+            catalog_updated_at = int(stat.st_mtime)
+        try:
+            catalog_url = str(request.url_for("public_catalog_file", tenant=str(tenant_id)))
+            if catalog_updated_at:
+                separator = "&" if "?" in catalog_url else "?"
+                catalog_url = f"{catalog_url}{separator}v={catalog_updated_at}"
+        except Exception:
+            catalog_url = None
+
+    brand = ""
+    agent_name = ""
+    city = ""
+    try:
+        cfg = core_module.load_tenant(tenant_id)
+    except Exception:
+        cfg = {}
+    if isinstance(cfg, dict):
+        passport = cfg.get("passport") if isinstance(cfg.get("passport"), dict) else {}
+        if isinstance(passport, dict):
+            brand = str(passport.get("brand") or "").strip()
+            agent_name = str(passport.get("agent_name") or "").strip()
+            city = str(passport.get("city") or "").strip()
+
+    context = {
+        "request": request,
+        "tenant_id": tenant_id,
+        "brand": brand or "Каталог",
+        "agent_name": agent_name,
+        "city": city,
+        "has_catalog": has_catalog,
+        "catalog_url": catalog_url,
+        "catalog_size_mb": catalog_size_mb,
+        "catalog_updated_at": catalog_updated_at,
+    }
+    return render_template(CATALOG_VIEW_TEMPLATE, context)
+
+
+@router.get("/pub/catalog/file/{tenant}")
+def public_catalog_file(tenant: int):
+    try:
+        tenant_id = int(tenant)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="not_found") from None
+    if tenant_id <= 0:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
+    pdf_path = tenant_root / "uploads" / "catalog.pdf"
+    if not pdf_path.exists() or not pdf_path.is_file():
+        raise HTTPException(status_code=404, detail="not_found")
+
+    filename = pdf_path.name
+    try:
+        cfg = core_module.load_tenant(tenant_id)
+    except Exception:
+        cfg = {}
+    if isinstance(cfg, dict):
+        integrations = cfg.get("integrations") if isinstance(cfg.get("integrations"), dict) else {}
+        if isinstance(integrations, dict):
+            uploaded_meta = integrations.get("uploaded_catalog")
+            if isinstance(uploaded_meta, dict):
+                alt_name = str(uploaded_meta.get("original") or "").strip()
+                if alt_name:
+                    filename = alt_name
+
+    response = FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=filename,
+    )
+    response.headers.setdefault("Cache-Control", "public, max-age=300")
+    response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+    return response
+
+
 
 # Public job status endpoint aligned with the new public upload path
 
