@@ -1627,6 +1627,25 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     }
 
     const composeHandle = await findComposeHandle();
+    try {
+      const foundCompose = await page.evaluate(() => {
+        const compose = document.querySelector('[data-testid="conversation-compose-box"]') ||
+          document.querySelector('[data-testid="conversation-compose-panel"]') ||
+          document.querySelector('[data-testid="composer"]');
+        if (!compose) return null;
+        const info = {
+          tag: compose.tagName ? compose.tagName.toLowerCase() : '',
+          testId: compose.getAttribute ? (compose.getAttribute('data-testid') || '') : '',
+          classes: compose.className || '',
+        };
+        return info;
+      });
+      if (foundCompose) {
+        console.warn('[waweb]', `send_media_ui_compose ${JSON.stringify(foundCompose)}`);
+      } else {
+        console.warn('[waweb]', 'send_media_ui_compose none');
+      }
+    } catch (_) {}
 
     async function insideCompose(handle) {
       if (!handle) return false;
@@ -1718,6 +1737,22 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
           clipButton = candidate;
           break;
         }
+        try {
+          const meta = await page.evaluate((el, sel) => {
+            if (!el) return null;
+            return {
+              selector: sel || '',
+              tag: el.tagName ? el.tagName.toLowerCase() : '',
+              ariaLabel: el.getAttribute ? (el.getAttribute('aria-label') || '') : '',
+              testId: el.getAttribute ? (el.getAttribute('data-testid') || '') : '',
+              classes: el.className || '',
+              text: el.innerText ? el.innerText.trim().slice(0, 40) : '',
+            };
+          }, candidate, selector);
+          if (meta) {
+            console.warn('[waweb]', `send_media_ui_candidate ${JSON.stringify(meta)}`);
+          }
+        } catch (_) {}
         await candidate.dispose().catch(() => {});
       }
     }
