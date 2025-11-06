@@ -12,6 +12,6 @@
     "mime-types": "^2.1.35",
     "puppeteer": "^22.15.0",
     "qrcode": "^1",
-    "whatsapp-web.js": "git+https://github.com/opssemnik/whatsapp-web.js.git#patch-1"
+    "whatsapp-web.js": "file:../vendor/whatsapp-web.js"
   }
 }
