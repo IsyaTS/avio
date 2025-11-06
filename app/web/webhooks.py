@@ -170,7 +170,8 @@ def _resolve_catalog_attachment(
     url = f"{base}?path={quote(str(safe), safe='/')}"
     token = getattr(C, "WA_INTERNAL_TOKEN", "") or ""
     if token:
-        url += f"&token={quote(token)}"
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}token={quote(token)}"
 
     filename = meta.get("original") or safe.name
     mime = meta.get("mime") or "application/pdf"
@@ -179,6 +180,7 @@ def _resolve_catalog_attachment(
     attachment = {
         "type": "document",
         "url": url,
+        "path": str(target),
         "filename": filename,
         "mime_type": mime,
     }
