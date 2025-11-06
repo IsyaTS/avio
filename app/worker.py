@@ -1590,6 +1590,18 @@ async def send_whatsapp(
 
     last_status, last_body = 0, ""
     retry_delays = (0.5, 1.0, 2.0)
+    try:
+        payload_meta = {
+            "has_attachment": bool(payload.get("attachment")),
+            "attachments_len": len(payload.get("attachments") or []) if isinstance(payload.get("attachments"), list) else 0,
+            "keys": sorted(payload.keys()),
+        }
+        log(
+            "[worker] wa_http_request url=%s headers=%s payload_meta=%s"
+            % (url, list(headers.keys()), payload_meta)
+        )
+    except Exception:
+        pass
     for attempt in range(len(retry_delays)):
         last_status, last_body = await asyncio.to_thread(
             _http_json, "POST", url, payload, request_timeout, headers
