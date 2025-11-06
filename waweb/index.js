@@ -1484,6 +1484,11 @@ async function sendTransportMessage(tenant, transport){
   if (prepared.length) {
     let textUsedAsCaption = false;
     for (const plan of prepared) {
+      try {
+        if (s.client && s.client.interface && typeof s.client.interface.openChatWindow === 'function') {
+          await s.client.interface.openChatWindow(jid);
+        }
+      } catch (_) {}
       const options = {};
       const captionCandidate =
         plan.caption && plan.caption.length
