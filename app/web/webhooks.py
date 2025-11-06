@@ -569,6 +569,36 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         behavior = {}
         attachment, caption = None, ""
 
+    attachment_path: pathlib.Path | None = None
+    attachment_size = 0
+    attachment_mtime = 0
+    if isinstance(attachment, Mapping):
+        path_value = attachment.get("path")
+        if isinstance(path_value, str) and path_value.strip():
+            try:
+                candidate = pathlib.Path(path_value)
+                stat = candidate.stat()
+                attachment_path = candidate
+                attachment_size = stat.st_size
+                attachment_mtime = int(stat.st_mtime)
+            except Exception:
+                attachment_path = None
+                attachment_size = 0
+                attachment_mtime = 0
+    viewer_url = ""
+    if request is not None:
+        try:
+            viewer_raw = str(request.url_for("catalog_view_public", tenant=str(tenant)))
+            if attachment_mtime:
+                separator = "&" if "?" in viewer_raw else "?"
+                viewer_raw = f"{viewer_raw}{separator}v={attachment_mtime}"
+            viewer_url = viewer_raw
+        except Exception:
+            viewer_url = ""
+    use_viewer_link = False
+    if viewer_url and attachment_size and CATALOG_INLINE_LIMIT_BYTES and attachment_size > CATALOG_INLINE_LIMIT_BYTES:
+        use_viewer_link = True
+
     lowered_text = text.lower() if isinstance(text, str) else ""
     forced_catalog = bool(text and _user_requested_catalog(text))
     price_question = any(
@@ -600,7 +630,18 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if should_send_catalog and (provider or "").lower() != "avito":
         if forced_catalog and cache_key:
             _catalog_sent_cache.pop(cache_key, None)
-        catalog_text = (caption or "Каталог во вложении (PDF).").strip()
+        catalog_text_override = None
+        if use_viewer_link:
+            catalog_text_override = f"Каталог доступен по ссылке: {viewer_url}"
+            attachment = None
+            caption = ""
+            logger.info(
+                "catalog_view_link tenant=%s size_bytes=%s url=%s",
+                tenant,
+                attachment_size,
+                viewer_url,
+            )
+        catalog_text = (catalog_text_override or caption or "Каталог во вложении (PDF).").strip()
         resolved_provider = provider or "whatsapp"
         catalog_out: Dict[str, Any] = {
             "lead_id": lead_id,
