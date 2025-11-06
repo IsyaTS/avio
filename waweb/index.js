@@ -1696,23 +1696,62 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     const docSelectors = [
       '[data-testid="attach-document"]',
       '[data-testid="attach-doc"]',
-      'button[aria-label="Document"]',
-      'button[aria-label="Документ"]',
       '[data-testid="document"] button',
       '[data-testid="AttachDocument"]',
-      'button[data-testid="attach-menu-document"]',
-      'div[data-testid="attach-menu-document"]',
-      'button[aria-label="Документ 📄"]',
+      '[data-testid="attach-menu-document"]',
+      '[data-testid="attach-document-item"]',
+      '[data-testid="composer-attach-option-document"]',
+      '[data-testid="composer-attach-option-doc"]',
+      '[data-testid="media-picker-document"]',
+      '[data-testid="media-picker-doc"]',
+      '[data-testid="media-picker-documents"]',
+      '[data-testid="media-upload-document"]',
+      '[data-testid="contextual-attachment-menu"] button[data-testid]',
+      'button[data-testid="chat-attach-document"]',
       'button[data-testid="attach-document-item"]',
-      'div[data-testid="attach-document-item"]',
+      'button[aria-label="Document"]',
+      'button[aria-label="Документ"]',
+      'button[aria-label="Документ 📄"]',
+      'button[title="Document"]',
+      'button[title="Документ"]',
       'button[role="menuitem"][aria-label*="Документ"]',
       'button[role="menuitem"][aria-label*="document"]',
+      'div[role="menuitem"][aria-label*="Документ"]',
+      'div[role="menuitem"][aria-label*="document"]',
+      'li[data-testid="document"] button',
+      'li[data-testid="attach-document"] button',
+      'div[data-testid="attach-menu-document"] button',
     ];
     let fileInput = null;
     let fileChooser = null;
     await clipButton.click();
     try {
       console.log('[waweb]', `send_media_ui_stage=clip_opened path=${plan.path}`);
+    } catch (_) {}
+    try {
+      const menuSnapshot = await page.evaluate(() => {
+        const entries = [];
+        const nodes = Array.from(document.querySelectorAll('button,div[role="menuitem"]'));
+        for (const node of nodes) {
+          const label = (node.getAttribute('aria-label') || '').trim();
+          const testId = (node.getAttribute('data-testid') || '').trim();
+          const text = (node.innerText || '').trim();
+          const role = (node.getAttribute('role') || '').trim();
+          if (!label && !testId && !text) continue;
+          entries.push({
+            tag: node.tagName.toLowerCase(),
+            label,
+            testId,
+            role,
+            text: text.slice(0, 40),
+            classes: node.className || '',
+          });
+        }
+        return entries.slice(0, 40);
+      });
+      if (menuSnapshot && menuSnapshot.length) {
+        console.warn('[waweb]', `send_media_ui_menu ${JSON.stringify(menuSnapshot)}`);
+      }
     } catch (_) {}
     for (const selector of docSelectors) {
       const trigger = await page.$(selector);
@@ -1746,7 +1785,18 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       } catch (_) {}
     }
     if (!fileChooser) {
-      fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+      const fileSelectors = [
+        'input[type="file"]',
+        'input[type="file"][data-testid]',
+        'input[data-testid*="attach"][type="file"]',
+        'input[data-testid*="document"][type="file"]',
+        'input[name="file"][type="file"]',
+        'input[accept][type="file"]',
+      ];
+      for (const sel of fileSelectors) {
+        fileInput = await page.waitForSelector(sel, { timeout: 5000 }).catch(() => null);
+        if (fileInput) break;
+      }
       if (!fileInput) throw new Error('file_input_not_found');
       await fileInput.uploadFile(plan.path);
     } else {
