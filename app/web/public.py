@@ -26,7 +26,7 @@ from qrcode.image.svg import SvgImage
 
 from fastapi import APIRouter, Request, UploadFile, BackgroundTasks, HTTPException, Query
 from starlette.datastructures import UploadFile as StarletteUploadFile
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse, FileResponse
 import httpx
 import urllib.request
 import urllib.error
@@ -127,6 +127,8 @@ AVITO_STATE_TTL = 600  # seconds
 
 router = APIRouter()
 oauth_router = APIRouter(prefix="/v1/oauth/avito", tags=["avito_oauth"])
+
+CATALOG_VIEW_TEMPLATE = "catalog/view.html"
 
 
 def _qr_cache_ttl() -> int:
