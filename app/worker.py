@@ -1539,16 +1539,20 @@ async def send_whatsapp(
             if isinstance(data_block, str) and data_block:
                 media_bytes += int(len(data_block) * 3 / 4)
         log(
-            "[worker] wa_payload attachments_len=%s first_keys=%s"
+            "[worker] wa_payload attachments_count=%s attachment_keys=%s document_keys=%s"
             % (
                 len(attachments_payload),
                 list(attachments_payload[0].keys()) if attachments_payload else [],
+                list((document_block or {}).keys()) if document_block else [],
             )
         )
         payload["attachments"] = attachments_payload
     elif document_block:
         payload["document"] = document_block
-        log("[worker] wa_payload document_keys=%s" % list(document_block.keys()))
+        log(
+            "[worker] wa_payload document_only=%s document_keys=%s"
+            % (bool(document_block), list(document_block.keys()))
+        )
 
     def _wa_post_timeout(bytes_total: int) -> float:
         base_timeout = WA_SEND_BASE_TIMEOUT or 90.0
