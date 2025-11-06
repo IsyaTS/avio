@@ -1603,8 +1603,28 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     await page.waitForSelector('[data-testid="chat-list"]', { timeout: 5000 }).catch(() => {});
     const clipButton = await page.waitForSelector('[data-testid="clip"]', { timeout: 5000 });
     await clipButton.click();
-    const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+    const docSelectors = [
+      '[data-testid="attach-document"]',
+      'button[aria-label="Document"]',
+      '[data-testid="document"] button',
+      '[data-testid="AttachDocument"]',
+    ];
+    let fileInput = null;
+    for (const selector of docSelectors) {
+      const trigger = await page.$(selector);
+      if (!trigger) continue;
+      await trigger.click();
+      try {
+        fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+        if (fileInput) break;
+      } catch (_) {}
+    }
+    if (!fileInput) {
+      fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+    }
+    if (!fileInput) throw new Error('file_input_not_found');
     await fileInput.uploadFile(plan.path);
+    await page.waitForSelector('[data-testid="media-confirmation-dialog"]', { timeout: 10000 }).catch(() => {});
     await page.waitForTimeout(500);
     if (caption && caption.trim()) {
       const composeSelectors = [
@@ -1649,8 +1669,13 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       }
     }
     if (!sent) throw new Error('send_button_not_found');
-    await page.waitForTimeout(1500);
-    console.log('[waweb]', `send_media_ui type=${plan.type} path=${plan.path}`);
+    await page.waitForTimeout(2000);
+    const sizeValue = typeof plan.size === 'number' && Number.isFinite(plan.size) ? plan.size : '-';
+    const captionLen = caption ? caption.length : 0;
+    console.log(
+      '[waweb]',
+      `send_media_ui type=${plan.type || 'unknown'} path=${plan.path} size=${sizeValue} caption_len=${captionLen}`,
+    );
     return true;
   } catch (err) {
     const reason = err && err.message ? err.message : String(err);
