@@ -1493,7 +1493,19 @@ async function sendTransportMessage(tenant, transport){
     let textUsedAsCaption = false;
     for (const plan of prepared) {
       if (plan.source === 'path' && plan.path) {
-        // UI fallback disabled; rely on direct sendMessage flow
+        const captionCandidate =
+          plan.caption && plan.caption.length
+            ? plan.caption
+            : !textUsedAsCaption && messageText
+              ? messageText
+              : '';
+        const storeResult = await sendDocumentViaStore(s, jid, plan, captionCandidate);
+        if (storeResult?.success) {
+          if (captionCandidate && captionCandidate === messageText) {
+            textUsedAsCaption = true;
+          }
+          continue;
+        }
       }
       try {
         if (s.client && s.client.interface && typeof s.client.interface.openChatWindow === 'function') {
@@ -2008,6 +2020,86 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
     const reason = err && err.message ? err.message : String(err);
     console.warn('[waweb]', `send_media_ui_failed type=${plan.type || 'unknown'} reason=${reason}`);
     return false;
+  }
+}
+
+async function sendDocumentViaStore(session, jid, plan, caption) {
+  try {
+    if (!session || !session.client || !session.client.pupPage) return { success: false, reason: 'no_page' };
+    if (!plan || !plan.path) return { success: false, reason: 'no_path' };
+    const page = session.client.pupPage;
+    let data;
+    try {
+      data = await fsPromises.readFile(plan.path);
+    } catch (err) {
+      console.warn('[waweb]', `store_send_read_failed path=${plan.path} reason=${err && err.message ? err.message : err}`);
+      return { success: false, reason: 'read_failed' };
+    }
+    const base64Data = data.toString('base64');
+    const filename = plan.filename || path.basename(plan.path) || 'document.pdf';
+    const mimetype =
+      (plan.mimetype && String(plan.mimetype).trim()) ||
+      (plan.mime && String(plan.mime).trim()) ||
+      'application/pdf';
+    const captionValue = (caption || '').trim();
+    const size = typeof plan.size === 'number' && Number.isFinite(plan.size) ? plan.size : data.length;
+    const result = await page.evaluate(
+      async ({ jid, base64Data, filename, mimetype, caption }) => {
+        try {
+          if (!window.Store || !window.Store.Chat || !window.Store.MediaPrep || !window.Store.SendMessage) {
+            return { status: 'missing_store' };
+          }
+          const chat = await window.Store.Chat.find(jid);
+          if (!chat) return { status: 'chat_not_found' };
+
+          const binary = atob(base64Data);
+          const len = binary.length;
+          const array = new Uint8Array(len);
+          for (let i = 0; i < len; i += 1) {
+            array[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([array.buffer], { type: mimetype });
+          const file = new File([blob], filename, { type: mimetype });
+
+          const mediaPrep = await window.Store.MediaPrep.prepUpload(file, { asDocument: true });
+          const messageOptions = {
+            caption,
+            type: 'document',
+            mimetype,
+            filename,
+            filehash: mediaPrep.filehash,
+            uploadhash: mediaPrep.uploadhash,
+            mediaKey: mediaPrep.mediaKey,
+            mediaKeyTimestamp: mediaPrep.mediaKeyTimestamp,
+            directPath: mediaPrep.directPath,
+            mediaUploadTimestampMs: mediaPrep.mediaUploadTimestampMs,
+            mediaBlob: mediaPrep.mediaBlob,
+            body: caption || filename,
+            isViewOnce: false,
+          };
+          const sentMsg = await window.Store.SendMessage.sendMessage(chat, caption || filename, messageOptions);
+          const messageId =
+            sentMsg && sentMsg.id ? sentMsg.id._serialized || sentMsg.id.toString() : null;
+          return { status: 'ok', id: messageId };
+        } catch (err) {
+          return { status: 'exception', error: err && err.message ? err.message : String(err) };
+        }
+      },
+      { jid, base64Data, filename, mimetype, caption: captionValue },
+    );
+    if (result && result.status === 'ok') {
+      try {
+        console.log('[waweb]', `store_send success jid=${jid} filename=${filename} size=${size} caption_len=${captionValue.length}`);
+      } catch (_) {}
+      return { success: true, messageId: result.id };
+    }
+    try {
+      console.warn('[waweb]', `store_send_failed jid=${jid} status=${result ? result.status : 'unknown'} reason=${result && result.error ? result.error : '-'}`);
+    } catch (_) {}
+    return { success: false, reason: result ? result.status || 'failed' : 'failed' };
+  } catch (err) {
+    console.warn('[waweb]', `store_send_exception reason=${err && err.message ? err.message : err}`);
+    return { success: false, reason: 'exception' };
   }
 }
 function pickChromePath(){
