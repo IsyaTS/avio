@@ -1785,6 +1785,12 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
       } catch (_) {}
     }
     if (!fileChooser) {
+      try {
+        await page.waitForTimeout(500);
+        const focusable = await page.$('[data-testid="attach-document"] button, [data-testid="attach-document"]');
+        if (focusable && focusable.focus) await focusable.focus().catch(() => {});
+        await page.waitForTimeout(200);
+      } catch (_) {}
       const fileSelectors = [
         'input[type="file"]',
         'input[type="file"][data-testid]',
@@ -1792,12 +1798,18 @@ async function trySendMediaViaUi(session, jid, plan, caption) {
         'input[data-testid*="document"][type="file"]',
         'input[name="file"][type="file"]',
         'input[accept][type="file"]',
+        'form input[type="file"]',
       ];
       for (const sel of fileSelectors) {
-        fileInput = await page.waitForSelector(sel, { timeout: 5000 }).catch(() => null);
+        fileInput = await page.waitForSelector(sel, { timeout: 8000 }).catch(() => null);
         if (fileInput) break;
       }
-      if (!fileInput) throw new Error('file_input_not_found');
+      if (!fileInput) {
+        try {
+          console.warn('[waweb]', 'send_media_ui_file_input_missing');
+        } catch (_) {}
+        throw new Error('file_input_not_found');
+      }
       await fileInput.uploadFile(plan.path);
     } else {
       await fileChooser.accept([plan.path]);
