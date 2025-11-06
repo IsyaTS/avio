@@ -3723,7 +3723,8 @@ async def catalog_upload(
             cfg = common.read_tenant_config(tenant_id)
             if not isinstance(cfg, dict):
                 cfg = {}
-            catalogs = cfg.get("catalogs") if isinstance(cfg.get("catalogs"), list) else []
+            raw_catalogs = cfg.get("catalogs")
+            catalogs = raw_catalogs if isinstance(raw_catalogs, list) else []
             catalog_type = "pdf" if ext == ".pdf" else ("excel" if ext in {".xlsx", ".xls"} else "csv")
             catalog_entry: dict[str, Any] = {
                 "name": "uploaded",
@@ -3752,7 +3753,14 @@ async def catalog_upload(
             if csv_rel_path:
                 catalog_entry["csv_path"] = csv_rel_path
 
-            cfg["catalogs"] = [catalog_entry] + [entry for entry in catalogs if entry.get("path") != relative_path]
+            cfg["catalogs"] = [
+                catalog_entry,
+                *[
+                    entry
+                    for entry in catalogs
+                    if isinstance(entry, dict) and entry.get("path") != relative_path
+                ],
+            ]
 
             integrations = cfg.setdefault("integrations", {})
             uploaded_meta: dict[str, Any] = {
