@@ -19,7 +19,9 @@ import base64
 import random
 import secrets
 import html
-from typing import Any, Iterable, Mapping, Optional
+import subprocess
+import tempfile
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import qrcode
 from qrcode.image.svg import SvgImage
@@ -45,6 +47,13 @@ def _import_alias(module: str):
 
 catalog_module = _import_alias("catalog")
 catalog_index = _import_alias("catalog_index")
+try:
+    from app.catalog import pdf_universal  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - fallback when package alias differs
+    try:
+        pdf_universal = importlib.import_module("catalog.pdf_universal")  # type: ignore[assignment]
+    except Exception:  # pragma: no cover
+        pdf_universal = None  # type: ignore[assignment]
 
 # NOTE: reference helpers locally to keep call sites compact
 write_catalog_csv = catalog_module.write_catalog_csv
@@ -1096,6 +1105,72 @@ def _collapse_items_one_per_page(index, items: list[dict[str, Any]]) -> list[dic
     return result
 
 
+_TABLE_ENGINES = {"plumber", "camelot"}
+
+
+def _resolve_table_engine(raw: str | None) -> str:
+    candidate = (raw or "plumber").strip().lower()
+    return candidate if candidate in _TABLE_ENGINES else "plumber"
+
+
+def _run_ocrmypdf(source_path: pathlib.Path) -> pathlib.Path | None:
+    """Invoke OCRmyPDF to rebuild the document with a rus+eng OCR layer."""
+
+    tmp_handle = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp_handle.close()
+    target_path = pathlib.Path(tmp_handle.name)
+    cmd = [
+        "ocrmypdf",
+        "--redo-ocr",
+        "--force-ocr",
+        "--skip-text",
+        "--language",
+        "rus+eng",
+        str(source_path),
+        str(target_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        logger.warning("ocrmypdf binary missing; OCR fallback skipped")
+        target_path.unlink(missing_ok=True)
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "ocrmypdf failed",
+            extra={
+                "code": result.returncode,
+                "stdout": (result.stdout or "")[:500],
+                "stderr": (result.stderr or "")[:500],
+            },
+        )
+        target_path.unlink(missing_ok=True)
+        return None
+    return target_path
+
+
+def _stats_to_metrics(stats: Any | None, preliminary_count: int) -> dict[str, Any]:
+    if stats is None:
+        return {}
+    low_conf = set(getattr(stats, "low_confidence_pages", set()) or set())
+    empty_pages = set(getattr(stats, "empty_pages", set()) or set())
+    return {
+        "items_found": preliminary_count,
+        "pages_low_conf": len(low_conf | empty_pages),
+        "table_blocks": int(getattr(stats, "table_blocks", 0) or 0),
+        "kv_blocks": int(getattr(stats, "kv_blocks", 0) or 0),
+        "ocr_pages": int(getattr(stats, "ocr_pages", 0) or 0),
+        "price_coverage": float(getattr(stats, "price_coverage", 0.0) or 0.0),
+    }
+
+
+def _calc_price_coverage(rows: Sequence[Mapping[str, Any]]) -> float:
+    if not rows:
+        return 0.0
+    filled = sum(1 for row in rows if str(row.get("price") or "").strip())
+    return filled / len(rows)
+
+
 def _process_pdf(
     *,
     tenant: int,
@@ -1104,6 +1179,23 @@ def _process_pdf(
     saved_rel_path: pathlib.Path,
     original_name: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
+    behavior: dict[str, Any] = {}
+    try:
+        cfg = common.read_tenant_config(tenant)
+        raw_behavior = cfg.get("behavior")
+        if isinstance(raw_behavior, dict):
+            behavior.update(raw_behavior)
+    except Exception:
+        behavior = {}
+    use_universal = bool(
+        getattr(settings, "PDF_UNIVERSAL_PIPELINE", False)
+        or behavior.get("use_universal_pdf_pipeline")
+    )
+    if use_universal and pdf_universal is None:
+        logger.warning("universal_pdf_pipeline_unavailable", extra={"tenant": tenant})
+        use_universal = False
+    table_engine = _resolve_table_engine(getattr(settings, "PDF_TABLES_ENGINE", "plumber"))
+
     index_dir = tenant_root / "indexes"
     index = build_pdf_index(
         saved_path,
@@ -1111,21 +1203,59 @@ def _process_pdf(
         source_relpath=str(saved_rel_path),
         original_name=original_name,
     )
-    items = index_to_catalog_items(index)
-    # Optional: collapse to exactly one item per page if enabled in tenant behavior
-    try:
-        cfg = common.read_tenant_config(tenant)
-        one_per_page = bool((cfg.get("behavior") or {}).get("pdf_one_item_per_page"))
-    except Exception:
-        one_per_page = False
-    if one_per_page:
-        items = _collapse_items_one_per_page(index, items)
     manifest_path = index.index_path.with_suffix(".manifest.json")
     manifest_rel = _relative_to(manifest_path, tenant_root) if manifest_path.exists() else None
     try:
         rel_index = _relative_to(index.index_path, tenant_root)
     except Exception:
         rel_index = str(index.index_path)
+
+    extraction_metrics: dict[str, Any] = {}
+    universal_items: list[dict[str, Any]] | None = None
+    if use_universal and pdf_universal is not None:
+        try:
+            extraction_result = pdf_universal.extract_items(
+                str(saved_path),
+                table_engine=table_engine,  # type: ignore[arg-type]
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("universal_pdf_pipeline_failed", exc_info=exc)
+            extraction_result = None
+        if extraction_result is not None:
+            universal_items = list(extraction_result)
+            stats = extraction_result.stats
+            if getattr(settings, "PDF_OCR_FALLBACK", False):
+                trigger_pages = set(stats.low_confidence_pages or []) | set(stats.empty_pages or [])
+                if trigger_pages:
+                    ocr_path = _run_ocrmypdf(saved_path)
+                    if ocr_path:
+                        try:
+                            extraction_result = pdf_universal.extract_items(
+                                str(ocr_path),
+                                table_engine=table_engine,  # type: ignore[arg-type]
+                            )
+                        finally:
+                            try:
+                                ocr_path.unlink()
+                            except OSError:
+                                pass
+                        universal_items = list(extraction_result)
+                        stats = extraction_result.stats
+                        stats.ocr_pages = len(trigger_pages)
+                    else:
+                        logger.warning("ocr_fallback_failed", extra={"tenant": tenant})
+            extraction_metrics = _stats_to_metrics(getattr(extraction_result, "stats", None), len(universal_items))
+
+    items = universal_items if universal_items else index_to_catalog_items(index)
+    universal_used = bool(universal_items)
+    if not universal_used:
+        extraction_metrics = {}
+
+    one_per_page = bool(behavior.get("pdf_one_item_per_page"))
+    if one_per_page:
+        items = _collapse_items_one_per_page(index, items)
+
+    manifest_path = index.index_path.with_suffix(".manifest.json")
     meta: dict[str, Any] = {
         "type": "pdf",
         "index_path": rel_index,
@@ -1137,8 +1267,27 @@ def _process_pdf(
         "original": original_name,
         "encoding": "utf-8-sig",
         "delimiter": ";",
+        "encoding": "utf-8-sig",
+        "delimiter": ";",
     }
+    if universal_used:
+        meta["preserve_page_column"] = True
+        meta["pipeline_mode"] = "universal"
     normalized = _normalize_catalog_items(items, meta)
+    price_coverage = _calc_price_coverage(normalized)
+    if extraction_metrics:
+        extraction_metrics["items_found"] = len(normalized)
+        extraction_metrics["price_coverage"] = price_coverage
+    else:
+        extraction_metrics = {
+            "items_found": len(normalized),
+            "pages_low_conf": 0,
+            "table_blocks": 0,
+            "kv_blocks": 0,
+            "ocr_pages": 0,
+            "price_coverage": price_coverage,
+        }
+    meta["extraction"] = extraction_metrics
     return normalized, meta, manifest_rel
 
 
