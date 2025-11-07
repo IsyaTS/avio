@@ -2560,6 +2560,33 @@ def _legacy_rank_catalog(
     return scored[:limit]
 
 
+def _catalog_item_identity(item: Dict[str, Any]) -> str:
+    for key in ("id", "sku", "title", "name"):
+        val = item.get(key)
+        if val:
+            return str(val)
+    return json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+
+def _merge_catalog_results(
+    base: List[Dict[str, Any]],
+    fallback: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return base
+    seen = {_catalog_item_identity(item) for item in base}
+    for item in fallback:
+        identity = _catalog_item_identity(item)
+        if identity in seen:
+            continue
+        base.append(item)
+        seen.add(identity)
+        if len(base) >= limit:
+            break
+    return base
+
+
 def search_catalog(
     needs: Dict[str, Any],
     limit: int = 5,
@@ -2587,6 +2614,10 @@ def search_catalog(
     if advanced:
         if limit <= 0:
             return advanced
+        if len(advanced) < limit:
+            fallback = _legacy_rank_catalog(items, needs, limit, query)
+            if fallback:
+                advanced = _merge_catalog_results(advanced, fallback, limit)
         return advanced[:limit]
 
     return _legacy_rank_catalog(items, needs, limit, query)

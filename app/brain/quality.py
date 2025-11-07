@@ -69,16 +69,22 @@ def question_fingerprint(question: str) -> str:
 
 
 def _question_present(question: str, reply: str) -> bool:
-    q_tokens = set(_tokenize(question))
-    if not q_tokens:
+    q_tokens_list = _tokenize(question)
+    if not q_tokens_list:
         return False
-    min_overlap = max(1, int(len(q_tokens) * 0.6))
+    q_tokens = set(q_tokens_list)
+    min_coverage = 0.5 if len(q_tokens) > 3 else 0.34
     for sentence in re.split(r"[\n\r]+|[.!?]", reply or ""):
         sentence_tokens = set(_tokenize(sentence))
         if not sentence_tokens:
             continue
         overlap = len(q_tokens & sentence_tokens)
-        if overlap >= min_overlap:
+        if not q_tokens:
+            continue
+        coverage = overlap / len(q_tokens)
+        if coverage >= min_coverage:
+            return True
+        if len(q_tokens) >= 4 and overlap >= 2:
             return True
     return False
 
