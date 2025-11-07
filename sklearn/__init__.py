@@ -9,9 +9,6 @@ import importlib
 import sys
 from types import ModuleType
 
-_APP_SKLEARN = importlib.import_module("app.sklearn")
-
-
 def _expose(name: str, target: str) -> ModuleType:
     module = importlib.import_module(target)
     sys.modules.setdefault(name, module)
@@ -20,9 +17,7 @@ def _expose(name: str, target: str) -> ModuleType:
 
 # Ensure the bare package resolves to this module and re-export attrs.
 sys.modules.setdefault("sklearn", sys.modules[__name__])
-__all__ = list(getattr(_APP_SKLEARN, "__all__", []))
-for attr in __all__:
-    globals()[attr] = getattr(_APP_SKLEARN, attr)
+__all__ = ["feature_extraction", "metrics"]
 
 # Mirror subpackages so fully-qualified imports keep working.
 feature_extraction = _expose("sklearn.feature_extraction", "app.sklearn.feature_extraction")
@@ -32,4 +27,3 @@ feature_extraction.text = _expose(
 )
 metrics = _expose("sklearn.metrics", "app.sklearn.metrics")
 metrics.pairwise = _expose("sklearn.metrics.pairwise", "app.sklearn.metrics.pairwise")
-
