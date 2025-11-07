@@ -3538,6 +3538,7 @@ async def build_llm_messages(
 
     cta_cfg = cfg.get("cta", {}) if isinstance(cfg, dict) else {}
     limits_cfg = cfg.get("limits", {}) if isinstance(cfg, dict) else {}
+    cta_allowed = _cta_allowed(state, channel_name)
 
     try:
         catalog_window = int(limits_cfg.get("catalog_page_size", 8))
