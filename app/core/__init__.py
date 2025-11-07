@@ -161,6 +161,11 @@ class Settings:
     if WA_QR_FETCH_RETRY_DELAY < 0:
         WA_QR_FETCH_RETRY_DELAY = 0.0
 
+    PDF_UNIVERSAL_PIPELINE = _env_bool("PDF_UNIVERSAL_PIPELINE", False)
+    PDF_OCR_FALLBACK = _env_bool("PDF_OCR_FALLBACK", False)
+    _PDF_TABLES_ENGINE_RAW = (os.getenv("PDF_TABLES_ENGINE") or "plumber").strip().lower()
+    PDF_TABLES_ENGINE = _PDF_TABLES_ENGINE_RAW if _PDF_TABLES_ENGINE_RAW in {"plumber", "camelot"} else "plumber"
+
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "").strip()
     _WORKER_BASE_RAW = (
@@ -814,6 +819,7 @@ DEFAULT_TENANT_JSON = {
         "allow_filter_commands": True,
         "pdf_one_item_per_page": False,
         "explain": False,
+        "use_universal_pdf_pipeline": False,
     },
     "cta": {
         "primary": "Оставьте контакт или удобный канал связи — подготовлю точный расчёт сегодня.",
