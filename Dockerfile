@@ -42,6 +42,10 @@ RUN apt-get update \
         libjpeg62-turbo \
         libpng16-16 \
         libopenblas-dev \
+        ocrmypdf \
+        tesseract-ocr \
+        tesseract-ocr-rus \
+        ghostscript \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /data && chown -R $(id -u):$(id -g) /data
 COPY app/requirements.txt ./
