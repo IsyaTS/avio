@@ -3580,6 +3580,10 @@ async def build_llm_messages(
     if context_items:
         catalog_block = format_items_for_prompt(context_items, branding["CURRENCY"])
         system_blocks.append(f"Релевантные позиции каталога:\n{catalog_block}")
+        system_blocks.append(
+            "Используй только перечисленные модели и цены из каталога. "
+            "Не придумывай новых позиций и не меняй стоимость."
+        )
 
     # Добавим обучающие примеры диалогов (1–2) из базы арендатора
     if training_retriever and tenant is not None and (last_user_text or "").strip():
