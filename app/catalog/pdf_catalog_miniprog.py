@@ -41,6 +41,10 @@ from .text_normalize import (
 )
 
 logger = logging.getLogger(__name__)
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+logging.getLogger("pypdf.generic").setLevel(logging.ERROR)
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+logging.getLogger("pdfminer.pdfinterp").setLevel(logging.ERROR)
 
 PRICE_REGEX = re.compile(r"(?:\d{1,3}(?:[\s\u00A0\u202F\u2009]\d{3})+|\d{4,})(?:[.,]\d{1,2})?")
 KV_REGEX = re.compile(r"(?P<key>[^:–—•=]{2,})\s*[:=–—•]\s*(?P<value>.+)")
@@ -153,15 +157,21 @@ class CatalogMiniPipeline:
             logger.warning("pdfminer_extract_failed", exc_info=exc)
             return pages
 
-        for idx, layout in enumerate(iterator, start=1):
+        idx = 0
+        for layout in iterator:
+            idx += 1
             lines: List[Line] = []
-            for element in layout:
-                if isinstance(element, LTTextLineHorizontal):
-                    lines.extend(self._lines_from_text_container(element))
-                elif isinstance(element, (LTTextBoxHorizontal, LTTextContainer)):
-                    for child in element:
-                        if isinstance(child, LTTextLineHorizontal):
-                            lines.extend(self._lines_from_text_container(child))
+            try:
+                for element in layout:
+                    if isinstance(element, LTTextLineHorizontal):
+                        lines.extend(self._lines_from_text_container(element))
+                    elif isinstance(element, (LTTextBoxHorizontal, LTTextContainer)):
+                        for child in element:
+                            if isinstance(child, LTTextLineHorizontal):
+                                lines.extend(self._lines_from_text_container(child))
+            except Exception as exc:
+                logger.warning("laparams_page_failed", extra={"page": idx}, exc_info=exc)
+                lines = []
             pages.append({"page": idx, "lines": lines})
         return pages
 
