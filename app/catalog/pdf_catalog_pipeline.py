@@ -194,7 +194,12 @@ class CatalogPipeline:
     def _extract_tables_plumber(self, page) -> List[List[str]]:
         tables = []
         try:
-            for table in page.extract_tables() or []:
+            raw_tables = page.extract_tables() or []
+        except Exception as exc:
+            logger.warning("table_extraction_failed", exc_info=exc)
+            return tables
+        for table in raw_tables:
+            try:
                 normalized = [
                     [
                         _normalize_text(cell)
@@ -204,8 +209,8 @@ class CatalogPipeline:
                     for row in table or []
                 ]
                 tables.extend([row for row in normalized if row])
-        except Exception:
-            pass
+            except Exception:
+                continue
         return tables
 
     def _extract_tables_camelot(self, pdf_path: str, page_num: int) -> List[List[str]]:
@@ -235,13 +240,22 @@ class CatalogPipeline:
     # KV-стратегия
     # ------------------------------------------------------------------
     def _extract_kv(self, page, page_num: int) -> List[Dict[str, Any]]:
-        words = page.extract_words(
-            use_text_flow=True,
-            extra_attrs=["size", "fontname", "upright"],
-        )
+        try:
+            words = page.extract_words(
+                use_text_flow=True,
+                extra_attrs=["size", "fontname", "upright"],
+            )
+        except Exception as exc:
+            logger.warning("word_extraction_failed", exc_info=exc)
+            words = []
         lines = self._build_lines(words)
         if not lines:
-            text = _normalize_text(page.extract_text())
+            try:
+                raw_text = page.extract_text()
+            except Exception as exc:
+                logger.warning("text_extraction_failed", exc_info=exc)
+                raw_text = ""
+            text = _normalize_text(raw_text)
             if not text:
                 return []
             lines = [
