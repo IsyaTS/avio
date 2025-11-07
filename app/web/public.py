@@ -1105,6 +1105,38 @@ def _calc_price_coverage(rows: Sequence[Mapping[str, Any]]) -> float:
 
 
 def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "items_found": len(rows),
+        "pages_total": 0,
+        "pages_skipped_no_price": 0,
+        "table_pages": 0,
+        "median_price": None,
+        "low_price_rate": 0.0,
+        "price_coverage": _calc_price_coverage(rows),
+    }
+    if isinstance(meta, Mapping):
+        extraction = meta.get("extraction")
+        if isinstance(extraction, Mapping):
+            for key in ("pages_total", "pages_skipped_no_price", "table_pages"):
+                value = extraction.get(key)
+                if isinstance(value, (int, float)):
+                    metrics[key] = int(value)
+            if extraction.get("median_price") is not None:
+                metrics["median_price"] = extraction.get("median_price")
+            value = extraction.get("low_price_rate")
+            if isinstance(value, (int, float)):
+                metrics["low_price_rate"] = float(value)
+            value = extraction.get("price_coverage")
+            if isinstance(value, (int, float)):
+                metrics["price_coverage"] = float(value)
+            value = extraction.get("items_found")
+            if isinstance(value, (int, float)):
+                metrics["items_found"] = int(value)
+    metrics["items_found"] = len(rows)
+    return metrics
+
+
+def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     metrics = {
         "items_found": len(rows),
         "pages_low_conf": 0,
@@ -1165,14 +1197,6 @@ def _process_pdf(
             behavior.update(raw_behavior)
     except Exception:
         behavior = {}
-    use_universal = bool(
-        getattr(settings, "PDF_UNIVERSAL_PIPELINE", False)
-        or behavior.get("use_universal_pdf_pipeline")
-    )
-    if use_universal and pdf_universal is None:
-        logger.warning("universal_pdf_pipeline_unavailable", extra={"tenant": tenant})
-        use_universal = False
-    table_engine = _resolve_table_engine(getattr(settings, "PDF_TABLES_ENGINE", "plumber"))
 
     index_dir = tenant_root / "indexes"
     index = build_pdf_index(
@@ -1188,78 +1212,16 @@ def _process_pdf(
     except Exception:
         rel_index = str(index.index_path)
 
-    items: list[dict[str, Any]] = []
-    extraction_metrics: dict[str, Any] = {}
-    ml_used = False
-    if getattr(settings, "PDF_ML_PIPELINE", False) and ml_pipeline is not None:
-        try:
-            extractor = ml_pipeline.MLCatalogExtractor(
-                dpi=int(getattr(settings, "PDF_RENDER_DPI", 220) or 220),
-            )
-            ml_result = extractor.extract(str(saved_path))
-            items = list(ml_result.items)
-            extraction_metrics = dict(ml_result.metrics or {})
-            ml_used = True
-            use_donut = bool(getattr(settings, "PDF_ML_USE_DONUT", False))
-            if use_donut and ml_donut is not None and ml_result.fallback_images:
-                donut = ml_donut.DonutFallback()
-                donut_items, rescued_pages = donut.process(ml_result.fallback_images)
-                if donut_items:
-                    items.extend(donut_items)
-                    extraction_metrics["items_found"] = len(items)
-                    extraction_metrics["pages_skipped_no_price"] = max(
-                        extraction_metrics.get("pages_skipped_no_price", 0) - len(rescued_pages),
-                        0,
-                    )
-        except Exception as exc:
-            logger.warning("ml_pipeline_failed", exc_info=exc)
-            items = []
-            extraction_metrics = {}
-            ml_used = False
-    elif getattr(settings, "PDF_ML_PIPELINE", False) and ml_pipeline is None:
-        logger.warning("ml_pipeline_unavailable", extra={"tenant": tenant})
-
-    universal_used = False
-    if not items:
-        universal_items: list[dict[str, Any]] | None = None
-        if use_universal and pdf_universal is not None:
-            try:
-                extraction_result = pdf_universal.extract_items(
-                    str(saved_path),
-                    table_engine=table_engine,
-                )
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                logger.warning("universal_pdf_pipeline_failed", exc_info=exc)
-                extraction_result = None
-            if extraction_result is not None:
-                universal_items = list(extraction_result)
-                stats = extraction_result.stats
-                if getattr(settings, "PDF_OCR_FALLBACK", False):
-                    trigger_pages = set(stats.low_confidence_pages or []) | set(stats.empty_pages or [])
-                    if trigger_pages:
-                        ocr_path = _run_ocrmypdf(saved_path)
-                        if ocr_path:
-                            try:
-                                extraction_result = pdf_universal.extract_items(
-                                    str(ocr_path),
-                                    table_engine=table_engine,
-                                )
-                            finally:
-                                try:
-                                    ocr_path.unlink()
-                                except OSError:
-                                    pass
-                            universal_items = list(extraction_result)
-                            stats = extraction_result.stats
-                            stats.ocr_pages = len(trigger_pages)
-                        else:
-                            logger.warning("ocr_fallback_failed", extra={"tenant": tenant})
-                extraction_metrics = _stats_to_metrics(getattr(extraction_result, "stats", None), len(universal_items))
-
-        items = universal_items if universal_items else index_to_catalog_items(index)
-        universal_used = bool(universal_items)
-        if not universal_used:
-            extraction_metrics = {}
+    table_engine = getattr(settings, "PDF_TABLES_ENGINE", "plumber")
+    render_dpi = int(getattr(settings, "PDF_RENDER_DPI", 220) or 220)
+    pipeline = CatalogPipeline(table_engine=table_engine, render_dpi=render_dpi)
+    try:
+        items = pipeline.extract_items(str(saved_path))
+        extraction_metrics = dict(getattr(pipeline, "metrics", {}))
+    except Exception as exc:
+        logger.warning("catalog_pipeline_failed", exc_info=exc)
+        items = []
+        extraction_metrics = {}
 
     one_per_page = bool(behavior.get("pdf_one_item_per_page"))
     if one_per_page:
@@ -1276,15 +1238,13 @@ def _process_pdf(
         "original": original_name,
         "encoding": "utf-8-sig",
         "delimiter": ";",
+        "pipeline_mode": "catalog",
+        "preserve_page_column": True,
+        "extraction": extraction_metrics,
     }
-    if ml_used:
-        meta["pipeline_mode"] = "ml"
-        meta["preserve_page_column"] = True
-    elif universal_used:
-        meta["pipeline_mode"] = "universal"
-        meta["preserve_page_column"] = True
+
     normalized = _normalize_catalog_items(items, meta)
-    job_metrics = _resolve_job_metrics({**meta, "extraction": extraction_metrics}, normalized)
+    job_metrics = _resolve_job_metrics(meta, normalized)
     meta["extraction"] = job_metrics
     return normalized, meta, manifest_rel
 
@@ -3861,16 +3821,12 @@ async def catalog_upload(
                 source_path=relative_path,
                 message="completed",
                 items_found=int(job_metrics["items_found"]),
-                pages_low_conf=int(job_metrics["pages_low_conf"]),
-                table_blocks=int(job_metrics["table_blocks"]),
-                kv_blocks=int(job_metrics["kv_blocks"]),
-                ocr_pages=int(job_metrics["ocr_pages"]),
                 pages_total=int(job_metrics.get("pages_total", 0)),
                 pages_skipped_no_price=int(job_metrics.get("pages_skipped_no_price", 0)),
                 table_pages=int(job_metrics.get("table_pages", 0)),
                 median_price=job_metrics.get("median_price"),
                 low_price_rate=float(job_metrics.get("low_price_rate", 0.0)),
-                price_coverage=float(job_metrics["price_coverage"]),
+                price_coverage=float(job_metrics.get("price_coverage", 0.0)),
                 manual_review_required=bool(manual_review_required),
             )
             if manifest_rel:
