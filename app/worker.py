@@ -1167,8 +1167,8 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         )
     except Exception as exc:
         log(
-            "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=build_messages error=%s"
-            % (tenant_id, lead_id, exc)
+            "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=build_messages error=%s payload=%s"
+            % (tenant_id, lead_id, exc, event)
         )
         return
 
