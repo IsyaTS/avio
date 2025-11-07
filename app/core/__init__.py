@@ -349,8 +349,27 @@ TENANT_PUBKEYS_HASH = "tenant_pubkeys"
 
 # --------------------------- состояние диалогов -----------------------------
 STATE_KEY_PREFIX = "sales_state"
-STATE_TTL_SECONDS = 8 * 3600
+STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", str(8 * 3600)))
 _STATE_CACHE: Dict[str, "SalesState"] = {}
+
+
+def _reset_state_store() -> None:
+    def _clear(client: redis_sync.Redis) -> None:
+        pattern = f"{STATE_KEY_PREFIX}:*"
+        cursor = 0
+        while True:
+            cursor, keys = client.scan(cursor=cursor, match=pattern, count=500)
+            if keys:
+                client.delete(*keys)
+            if cursor == 0:
+                break
+
+    _with_sync_redis(_clear, None)
+    _STATE_CACHE.clear()
+
+
+if _env_bool("RESET_SALES_STATE_ON_START", False):
+    _reset_state_store()
 
 
 def _state_key(tenant: int | None, contact_id: int | None) -> str:
