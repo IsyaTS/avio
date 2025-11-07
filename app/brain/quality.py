@@ -50,15 +50,28 @@ def _normalize(text: str) -> str:
     return (text or "").strip()
 
 
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _tokenize(text: str) -> list[str]:
+    raw_tokens = _TOKEN_RE.findall((text or "").lower())
+    return [token.replace("ё", "е") for token in raw_tokens if token]
+
+
 def question_fingerprint(question: str) -> str:
-    cleaned = re.sub(r"[\s\?\!\.]+", " ", question or "").strip().lower()
-    cleaned = cleaned.replace("ё", "е")
-    return cleaned
+    tokens = sorted(_tokenize(question))
+    return " ".join(tokens)
 
 
 def _question_present(question: str, reply: str) -> bool:
-    pattern = re.escape(question.strip())
-    return bool(re.search(pattern, reply, flags=re.IGNORECASE))
+    q_tokens = set(_tokenize(question))
+    if not q_tokens:
+        return False
+    for sentence in re.split(r"[\\n\\r]+|[.!?]", reply or ""):
+        sentence_tokens = set(_tokenize(sentence))
+        if sentence_tokens and q_tokens.issubset(sentence_tokens):
+            return True
+    return False
 
 
 def _looks_like_channel_switch(question: str) -> bool:
@@ -196,8 +209,11 @@ def enforce_plan_alignment(
             if not re.search(r"[\)\]»☺😊😀😄😃😉😎❤️]", text):
                 text = text + " \U0001F60A"
 
+    if ctx.disable_channel_switch_prompts and (ctx.channel or "").lower() != "avito":
+        text = _strip_channel_switch_blocks(text)
+    text = _strip_forbidden_cta(text, ctx.allow_cta)
     text = _dedupe_repeated_blocks(text)
-    return text
+    return text.strip()
 
 
 def _dedupe_repeated_blocks(text: str) -> str:
@@ -250,6 +266,51 @@ def _dedupe_repeated_blocks(text: str) -> str:
         blank_pending = False
 
     return "\n".join(cleaned)
+
+
+def _strip_channel_switch_blocks(text: str) -> str:
+    if not text:
+        return text
+    blocks = [block for block in text.split("\n\n") if block.strip()]
+    kept: list[str] = []
+    for block in blocks:
+        paragraph = block.strip()
+        if not paragraph:
+            continue
+        if _looks_like_channel_switch(paragraph):
+            continue
+        kept.append(block)
+    return "\n\n".join(kept) or ""
+
+
+_CTA_KEYWORDS = (
+    "готов",
+    "заброниру",
+    "оформ",
+    "подтверж",
+    "закреп",
+    "оставьте контакт",
+    "перейд",
+    "давайте",
+    "зафиксир",
+)
+
+
+def _strip_forbidden_cta(text: str, allow_cta: bool) -> str:
+    if allow_cta or not text:
+        return text
+    blocks = [block for block in text.split("\n\n") if block.strip()]
+    while blocks:
+        last = blocks[-1].strip()
+        if not last:
+            blocks.pop()
+            continue
+        lowered = last.lower()
+        if any(keyword in lowered for keyword in _CTA_KEYWORDS):
+            blocks.pop()
+            continue
+        break
+    return "\n\n".join(blocks).strip()
 
 
 __all__ = [
