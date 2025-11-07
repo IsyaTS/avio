@@ -739,9 +739,8 @@ async def catalog_upload(tenant: int, request: Request, file: UploadFile = File(
         return {"ok": False, "error": "csv_write_failed", "detail": str(exc)}
 
     # Update tenant config: newest first, preserve prior entries with different path
-    cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        cfg = {}
+    cfg_raw = C.read_tenant_config(tenant)
+    cfg = dict(cfg_raw) if isinstance(cfg_raw, dict) else {}
     catalogs = cfg.get("catalogs") if isinstance(cfg.get("catalogs"), list) else []
     catalog_type = "pdf" if ext == ".pdf" else ("excel" if ext in {".xlsx", ".xls"} else "csv")
     entry: dict[str, object] = {"name": "uploaded", "path": relative_path, "type": catalog_type, "csv_path": csv_rel_path}
@@ -757,7 +756,12 @@ async def catalog_upload(tenant: int, request: Request, file: UploadFile = File(
     cfg["catalogs"] = [entry] + [e for e in catalogs if isinstance(e, dict) and e.get("path") != relative_path]
 
     # Also surface upload metadata for UI status panel
-    integrations = cfg.setdefault("integrations", {})
+    integrations_raw = cfg.get("integrations")
+    if isinstance(integrations_raw, dict):
+        integrations = dict(integrations_raw)
+    else:
+        integrations = {}
+    cfg["integrations"] = integrations
     uploaded_meta: dict[str, object] = {
         "path": relative_path,
         "original": filename,

@@ -194,6 +194,32 @@ def test_catalog_upload_detects_cp1251_encoding(api_client):
     assert items[0].get("name") == "Товар"
 
 
+def test_client_upload_handles_non_dict_integrations(api_client):
+    tenants_dir = Path(os.getenv("TENANTS_DIR", ""))
+    tenant_root = tenants_dir / "1"
+    tenant_root.mkdir(parents=True, exist_ok=True)
+
+    broken_cfg = {
+        "passport": {"tenant_id": 1, "public_key": "secret"},
+        "integrations": "",
+    }
+    (tenant_root / "tenant.json").write_text(json.dumps(broken_cfg, ensure_ascii=False), encoding="utf-8")
+
+    response = api_client.post(
+        "/client/1/catalog/upload",
+        files={"file": ("catalog.csv", "title,price\nProduct,100", "text/csv")},
+        headers={"X-Access-Key": "secret"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload.get("ok") is True
+
+    cfg = json.loads((tenant_root / "tenant.json").read_text(encoding="utf-8"))
+    integrations = cfg.get("integrations")
+    assert isinstance(integrations, dict)
+    assert isinstance(integrations.get("uploaded_catalog"), dict)
+
+
 def test_catalog_upload_indexes_pdf(api_client, tmp_path):
     import core
 

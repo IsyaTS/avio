@@ -3720,9 +3720,8 @@ async def catalog_upload(
             )
 
             # Persist config updates
-            cfg = common.read_tenant_config(tenant_id)
-            if not isinstance(cfg, dict):
-                cfg = {}
+            cfg_raw = common.read_tenant_config(tenant_id)
+            cfg = dict(cfg_raw) if isinstance(cfg_raw, dict) else {}
             raw_catalogs = cfg.get("catalogs")
             catalogs = raw_catalogs if isinstance(raw_catalogs, list) else []
             catalog_type = "pdf" if ext == ".pdf" else ("excel" if ext in {".xlsx", ".xls"} else "csv")
@@ -3762,7 +3761,12 @@ async def catalog_upload(
                 ],
             ]
 
-            integrations = cfg.setdefault("integrations", {})
+            integrations_raw = cfg.get("integrations")
+            if isinstance(integrations_raw, dict):
+                integrations = dict(integrations_raw)
+            else:
+                integrations = {}
+            cfg["integrations"] = integrations
             uploaded_meta: dict[str, Any] = {
                 "path": relative_path,
                 "original": filename,

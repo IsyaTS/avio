@@ -123,3 +123,34 @@ def test_public_upload_ignores_legacy_catalog_entries(api_client):
     uploaded = integrations.get("uploaded_catalog")
     assert isinstance(uploaded, dict)
     assert uploaded.get("csv_path") == status.get("csv_path")
+
+
+def test_public_upload_coerces_non_dict_integrations(api_client):
+    tenants_dir = Path(os.getenv("TENANTS_DIR", ""))
+    tenant_root = tenants_dir / "1"
+    tenant_root.mkdir(parents=True, exist_ok=True)
+
+    broken_cfg = {
+        "passport": {"tenant_id": 1, "public_key": "secret"},
+        "integrations": "",
+    }
+    (tenant_root / "tenant.json").write_text(json.dumps(broken_cfg, ensure_ascii=False), encoding="utf-8")
+
+    response = api_client.post(
+        "/pub/catalog/upload?k=secret&tenant=1",
+        files={"file": ("catalog.csv", "title,price\nProduct,100", "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    job_id = payload["job_id"]
+
+    status_path = tenant_root / "catalog_jobs" / job_id / "status.json"
+    status = _wait_for_status(status_path)
+    assert status.get("state") == "done", status
+
+    cfg = json.loads((tenant_root / "tenant.json").read_text(encoding="utf-8"))
+    integrations = cfg.get("integrations")
+    assert isinstance(integrations, dict)
+    uploaded = integrations.get("uploaded_catalog")
+    assert isinstance(uploaded, dict)
+    assert uploaded.get("csv_path") == status.get("csv_path")
