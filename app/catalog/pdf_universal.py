@@ -17,8 +17,7 @@ as an alternative backend.
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Literal, Sequence, Tuple
 import collections
-import math
-import os
+import logging
 import re
 
 from .text_normalize import (
@@ -309,7 +308,10 @@ def _normalize_attr_key(text: str, seen: set[str]) -> str:
 def detect_title_and_price(blocks: Sequence[Block]) -> Tuple[str | None, int | None]:
     """Pick the top-most large block as title and parse thin-space aware price values.
 
-    Thin space details: https://en.wikipedia.org/wiki/Thin_space
+    PyMuPDF keeps line ordering stable when using ``get_text("words", sort=True)``
+    (see https://pymupdf.readthedocs.io/en/latest/textpage.html#get-text) so we
+    rely on bounding-box Y coordinates to find the top rows. Thin-space and
+    thousands separator nuances follow https://en.wikipedia.org/wiki/Thin_space .
     """
 
     if not blocks:
@@ -363,7 +365,11 @@ def extract_items(
     stats.low_confidence_pages = set(text_extractor.low_confidence_pages)
     stats.empty_pages = set(text_extractor.empty_pages)
 
-    tables = table_extractor.extract(pdf_path)
+    try:
+        tables = table_extractor.extract(pdf_path)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.debug("table extraction failed", exc_info=exc)
+        tables = []
     tables_by_page: Dict[int, List[TableBlock]] = collections.defaultdict(list)
     for table in tables:
         tables_by_page[table.page_num].append(table)
@@ -475,3 +481,4 @@ def _update_price_stats(stats: ExtractionStats, new_items: Sequence[dict]) -> No
         price_text = str(row.get("price") or "").strip()
         if price_text:
             stats.price_hits += 1
+logger = logging.getLogger(__name__)
