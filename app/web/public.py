@@ -3742,7 +3742,6 @@ async def catalog_upload(
                 uploaded_meta["encoding"] = detected_encoding
             if detected_delimiter:
                 uploaded_meta["delimiter"] = detected_delimiter
-            if catalog_type == "pdf" and isinstance(meta, dict):
             uploaded_meta = {k: v for k, v in uploaded_meta.items() if v is not None}
             integrations["uploaded_catalog"] = uploaded_meta
 
