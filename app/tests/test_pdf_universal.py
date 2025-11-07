@@ -1,8 +1,8 @@
-import importlib
 from pathlib import Path
 
-import fitz
 import pytest
+
+fitz = pytest.importorskip("fitz")
 
 from app.catalog import pdf_universal
 from app.catalog.text_normalize import (

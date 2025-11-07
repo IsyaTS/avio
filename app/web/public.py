@@ -21,7 +21,7 @@ import secrets
 import html
 import subprocess
 import tempfile
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Literal, Mapping, Optional, Sequence
 
 import qrcode
 from qrcode.image.svg import SvgImage
@@ -1108,7 +1108,7 @@ def _collapse_items_one_per_page(index, items: list[dict[str, Any]]) -> list[dic
 _TABLE_ENGINES = {"plumber", "camelot"}
 
 
-def _resolve_table_engine(raw: str | None) -> str:
+def _resolve_table_engine(raw: str | None) -> Literal["plumber", "camelot"]:
     candidate = (raw or "plumber").strip().lower()
     return candidate if candidate in _TABLE_ENGINES else "plumber"
 
@@ -1242,7 +1242,7 @@ def _process_pdf(
         try:
             extraction_result = pdf_universal.extract_items(
                 str(saved_path),
-                table_engine=table_engine,  # type: ignore[arg-type]
+                table_engine=table_engine,
             )
         except Exception as exc:  # pragma: no cover - defensive fallback
             logger.warning("universal_pdf_pipeline_failed", exc_info=exc)
@@ -1258,7 +1258,7 @@ def _process_pdf(
                         try:
                             extraction_result = pdf_universal.extract_items(
                                 str(ocr_path),
-                                table_engine=table_engine,  # type: ignore[arg-type]
+                                table_engine=table_engine,
                             )
                         finally:
                             try:
