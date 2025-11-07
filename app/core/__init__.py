@@ -3570,6 +3570,18 @@ async def build_llm_messages(
     if context_items:
         engine.register_recommendations(context_items)
 
+    try:
+        logger.info(
+            "event=build_llm_messages_diag contact_id=%s tenant=%s channel=%s needs=%s context_items=%s",
+            contact_id,
+            tenant,
+            channel_name,
+            json.dumps(needs_snapshot, ensure_ascii=False),
+            json.dumps(context_items, ensure_ascii=False),
+        )
+    except Exception:
+        logger.debug("context_items_diag_log_failed", exc_info=True)
+
     system_blocks = [persona.strip()]
     system_blocks.append(
         " | ".join(
@@ -3639,6 +3651,43 @@ async def build_llm_messages(
     return messages
 
 
+class LLMReply(str):
+    """String wrapper that carries planner/enforcement diagnostics for logging."""
+
+    __slots__ = ("llm_plan", "llm_raw_answer", "llm_refined")
+
+    def __new__(
+        cls,
+        content: str,
+        *,
+        plan: Optional[Dict[str, Any]] = None,
+        raw_answer: Optional[str] = None,
+    ) -> "LLMReply":
+        obj = str.__new__(cls, content)
+        obj.llm_plan = plan
+        obj.llm_raw_answer = raw_answer
+        obj.llm_refined = content
+        return obj
+
+
+def _wrap_llm_reply(
+    text: str,
+    *,
+    plan: Optional[planner.GeneratedPlan | Dict[str, Any]] = None,
+    raw_answer: Optional[str] = None,
+) -> LLMReply:
+    plan_payload: Optional[Dict[str, Any]] = None
+    if plan is not None:
+        if isinstance(plan, dict):
+            plan_payload = dict(plan)
+        elif hasattr(plan, "to_dict"):
+            try:
+                plan_payload = plan.to_dict()  # type: ignore[attr-defined]
+            except Exception:
+                plan_payload = None
+    return LLMReply(text, plan=plan_payload, raw_answer=raw_answer if raw_answer is not None else text)
+
+
 async def ask_llm(
     messages: List[Dict[str, str]],
     tenant: int | None = None,
@@ -3661,7 +3710,8 @@ async def ask_llm(
     # Без ключа — быстрый локальный ответ
     client = _get_openai_client()
     if client is None:
-        return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+        fallback = make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+        return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
     try:
         openai.api_key = settings.OPENAI_API_KEY  # type: ignore
@@ -3689,8 +3739,9 @@ async def ask_llm(
             _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
             state.last_plan = plan.to_dict()
             save_sales_state(state)
-            record_bot_reply(contact_ref, tenant, channel_name, refined)
-            return refined
+            result = _wrap_llm_reply(refined, plan=plan, raw_answer=answer)
+            record_bot_reply(contact_ref, tenant, channel_name, str(result))
+            return result
         except planner.PlannerError as exc:  # type: ignore[attr-defined]
             logger.warning("planner failed: %s", exc)
         except APITimeoutError as exc:
@@ -3727,18 +3778,21 @@ async def ask_llm(
             )
             _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
             save_sales_state(state)
-            record_bot_reply(contact_ref, tenant, channel_name, refined_answer)
-            return refined_answer
+            result = _wrap_llm_reply(refined_answer, plan=dummy_plan, raw_answer=answer)
+            record_bot_reply(contact_ref, tenant, channel_name, str(result))
+            return result
         except APITimeoutError as exc:
             logger.warning("direct llm timeout: %s", exc)
         except Exception as exc:
             logger.exception("direct llm call failed", exc_info=exc)
 
-        return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+        fallback = make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+        return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
     except Exception as exc:
         logger.exception("ask_llm unexpected error", exc_info=exc)
-        return make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+        fallback = make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
+        return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
 __all__ = [

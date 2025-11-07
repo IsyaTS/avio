@@ -189,6 +189,36 @@ def log(*parts: object):
     else:
         print(" ".join(str(p) for p in parts), flush=True)
 
+
+def _log_smart_reply_diag(channel: str, tenant_id: int, lead_id: int | None, reply: Any) -> None:
+    """Emit debug info about planner output for downstream analysis."""
+
+    try:
+        plan_data = getattr(reply, "llm_plan", None)
+        next_questions: list[str] = []
+        if isinstance(plan_data, Mapping):
+            raw_questions = plan_data.get("next_questions")
+            if isinstance(raw_questions, (list, tuple)):
+                next_questions = [str(q) for q in raw_questions if q]
+        raw_answer = getattr(reply, "llm_raw_answer", None)
+        refined = str(reply or "")
+        log(
+            "event=smart_reply_diag channel=%s tenant=%s lead_id=%s plan_next_questions=%s answer=%s refined=%s"
+            % (
+                channel,
+                tenant_id,
+                lead_id if lead_id is not None else 0,
+                json.dumps(next_questions, ensure_ascii=False),
+                json.dumps(raw_answer or "", ensure_ascii=False),
+                json.dumps(refined, ensure_ascii=False),
+            )
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_diag_failed channel=%s tenant=%s lead_id=%s error=%s"
+            % (channel, tenant_id, lead_id if lead_id is not None else 0, exc)
+        )
+
 AVITO_CHAT_CACHE: Dict[int, str] = {}
 
 def _digits(s: str) -> str:
@@ -959,6 +989,7 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         return
 
     reply_text = (reply or "").strip()
+    _log_smart_reply_diag("telegram", tenant_id, lead_id, reply)
     if not reply_text:
         log(
             f"event=smart_reply_empty channel=telegram tenant={tenant_id} lead_id={lead_id}"
@@ -1187,6 +1218,7 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         return
 
     reply_text = (reply or "").strip()
+    _log_smart_reply_diag("whatsapp", tenant_id, lead_id, reply)
     if not reply_text:
         log(
             f"event=smart_reply_empty channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
@@ -1382,6 +1414,7 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         return
 
     reply_text = (reply or "").strip()
+    _log_smart_reply_diag("avito", tenant_id, lead_id, reply)
     if not reply_text:
         log(
             f"event=smart_reply_empty channel=avito tenant={tenant_id} lead_id={lead_id}"
