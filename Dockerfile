@@ -38,8 +38,7 @@ RUN apt-get update \
         libxrender1 \
         libxext6 \
         libgl1 \
-        libgl1-mesa-glx \
-        libharfbuzz-icu \
+        libglu1-mesa \
         libjpeg62-turbo \
         libpng16-16 \
         libopenblas-dev \
