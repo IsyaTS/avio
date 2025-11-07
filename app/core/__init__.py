@@ -3471,6 +3471,7 @@ def make_rule_based_reply(
     branding = _branding_for_tenant(tenant, channel)
     channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
     channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
+    channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
 
     cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
     if tenant is not None:
