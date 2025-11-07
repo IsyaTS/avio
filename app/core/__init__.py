@@ -1826,7 +1826,7 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                     csv_path = _resolve_path(raw_csv)
                     if csv_path:
                         csv_meta = dict(entry)
-                        csv_meta["type"] = csv_meta.get("type") or "csv"
+                        csv_meta["type"] = "csv"
                         csv_meta["path"] = raw_csv
                         merged_csv_meta = _merge_csv_mapping_meta(csv_meta, persona_meta)
                         candidates.append((csv_path, merged_csv_meta))
