@@ -55,7 +55,12 @@ _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 def _tokenize(text: str) -> list[str]:
     raw_tokens = _TOKEN_RE.findall((text or "").lower())
-    return [token.replace("ё", "е") for token in raw_tokens if token]
+    normalized: list[str] = []
+    for token in raw_tokens:
+        cleaned = token.replace("ё", "е")
+        stemmed = cleaned.rstrip("ауоияеыюьй")
+        normalized.append(stemmed or cleaned)
+    return [token for token in normalized if token]
 
 
 def question_fingerprint(question: str) -> str:

@@ -3470,6 +3470,7 @@ def make_rule_based_reply(
 ) -> str:
     branding = _branding_for_tenant(tenant, channel)
     channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
+    channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
 
     cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
     if tenant is not None:
@@ -3525,13 +3526,13 @@ async def build_llm_messages(
     state = observe_user_message(
         contact_id,
         tenant,
-        channel or branding["CHANNEL"],
+        channel_name,
         last_user_text or "",
         tenant_cfg=cfg,
         branding=branding,
         persona_hints=persona_hints,
     )
-    engine = SalesConversationEngine(state, branding, cfg, channel or branding["CHANNEL"], persona_hints=persona_hints)
+    engine = SalesConversationEngine(state, branding, cfg, channel_name, persona_hints=persona_hints)
     summary = engine.summary_for_llm()
 
     cta_cfg = cfg.get("cta", {}) if isinstance(cfg, dict) else {}
@@ -3554,6 +3555,16 @@ async def build_llm_messages(
     if context_items:
         engine.register_recommendations(context_items)
 
+    reply_rules: list[str] = []
+    if channel_name.lower() in {"whatsapp", "telegram"}:
+        reply_rules.append(
+            f"Мы уже общаемся в {channel_name}. Не предлагай менять канал и не спрашивай, где удобнее общаться."
+        )
+    if not cta_allowed:
+        reply_rules.append("В этом ответе не используй CTA и не закрывай сделку.")
+    if reply_rules:
+        system_blocks.append("Правила текущего ответа:\n- " + "\n- ".join(reply_rules))
+
     system_blocks = [persona.strip()]
     system_blocks.append(
         " | ".join(
@@ -3561,8 +3572,12 @@ async def build_llm_messages(
                 None,
                 [
                     f"Бренд: {branding['BRAND']} ({branding['CITY']})",
-                    f"Канал: {channel or branding['CHANNEL']}",
-                    f"CTA: {cta_cfg.get('primary') or 'держи жёсткий CTA в конце'}",
+                    f"Канал: {channel_name}",
+                    (
+                        "CTA: запрещён в этом ответе"
+                        if not cta_allowed
+                        else f"CTA: {cta_cfg.get('primary') or 'держи жёсткий CTA в конце'}"
+                    ),
                     f"Каталог на ответ: {limits_cfg.get('catalog_page_size', 8)} позиций",
                 ],
             )

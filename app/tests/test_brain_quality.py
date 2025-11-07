@@ -50,3 +50,28 @@ def test_enforce_plan_alignment_appends_cta_when_allowed():
 
     assert "Зафиксирую цену" in result
     assert ctx.applied_cta == "Зафиксирую цену — подтверждаем?"
+
+
+def test_question_present_handles_paraphrased_phrases():
+    base = "В каком городе установка?"
+    reply = "Подскажите, в каком городе планируете установку двери?"
+    assert quality._question_present(base, reply)
+
+
+def test_enforce_plan_alignment_removes_channel_switch_lines_from_reply():
+    plan = planner.GeneratedPlan()
+    ctx = quality.EnforcementContext(channel="whatsapp", disable_channel_switch_prompts=True)
+    reply = "Где удобнее общаться — в WhatsApp или Telegram?"
+
+    result = quality.enforce_plan_alignment(reply, plan, None, context=ctx)
+
+    assert "удобнее" not in result.lower()
+
+
+def test_enforce_plan_alignment_strips_forbidden_cta():
+    plan = planner.GeneratedPlan()
+    ctx = quality.EnforcementContext(channel="whatsapp", allow_cta=False)
+
+    result = quality.enforce_plan_alignment("Готов зафиксировать цену, подтверждаем?", plan, None, context=ctx)
+
+    assert not result
