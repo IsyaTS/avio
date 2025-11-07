@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from app.catalog import ml_pipeline
