@@ -45,12 +45,11 @@ def _import_alias(module: str):
 
 catalog_module = _import_alias("catalog")
 catalog_index = _import_alias("catalog_index")
-from app.catalog.pdf_catalog_pipeline import CatalogPipeline
+from app.catalog.pdf_catalog_miniprog import CatalogMiniPipeline
 
 # NOTE: reference helpers locally to keep call sites compact
 write_catalog_csv = catalog_module.write_catalog_csv
 CatalogIndexError = catalog_index.CatalogIndexError
-build_pdf_index = catalog_index.build_pdf_index
 
 try:  # pragma: no cover - optional dependency during import time
     from openpyxl import load_workbook  # type: ignore
@@ -1143,56 +1142,29 @@ def _process_pdf(
     saved_rel_path: pathlib.Path,
     original_name: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
-    behavior: dict[str, Any] = {}
-    try:
-        cfg = common.read_tenant_config(tenant)
-        raw_behavior = cfg.get("behavior")
-        if isinstance(raw_behavior, dict):
-            behavior.update(raw_behavior)
-    except Exception:
-        behavior = {}
-
-    index_dir = tenant_root / "indexes"
-    index = build_pdf_index(
-        saved_path,
-        output_dir=index_dir,
-        source_relpath=str(saved_rel_path),
-        original_name=original_name,
-    )
-    manifest_path = index.index_path.with_suffix(".manifest.json")
-    manifest_rel = _relative_to(manifest_path, tenant_root) if manifest_path.exists() else None
-    try:
-        rel_index = _relative_to(index.index_path, tenant_root)
-    except Exception:
-        rel_index = str(index.index_path)
-
     table_engine = getattr(settings, "PDF_TABLES_ENGINE", "plumber")
     render_dpi = int(getattr(settings, "PDF_RENDER_DPI", 220) or 220)
-    pipeline = CatalogPipeline(table_engine=table_engine, render_dpi=render_dpi)
+    pipeline = CatalogMiniPipeline(
+        table_engine=table_engine,
+        render_dpi=render_dpi,
+        ocr_fallback=bool(getattr(settings, "PDF_OCR_FALLBACK", False)),
+    )
+
     try:
         items = pipeline.extract_items(str(saved_path))
         extraction_metrics = dict(getattr(pipeline, "metrics", {}))
     except Exception as exc:
-        logger.warning("catalog_pipeline_failed", exc_info=exc)
+        logger.warning("catalog_miniprog_failed", exc_info=exc)
         items = []
         extraction_metrics = {}
 
-    one_per_page = bool(behavior.get("pdf_one_item_per_page"))
-    if one_per_page:
-        items = _collapse_items_one_per_page(index, items)
-
     meta: dict[str, Any] = {
         "type": "pdf",
-        "index_path": rel_index,
-        "indexed_at": index.generated_at,
-        "chunk_count": index.chunk_count,
-        "sha1": index.sha1,
-        "page_count": index.page_count,
         "source_path": str(saved_rel_path),
         "original": original_name,
         "encoding": "utf-8-sig",
         "delimiter": ";",
-        "pipeline_mode": "catalog",
+        "pipeline_mode": "mini",
         "preserve_page_column": True,
         "extraction": extraction_metrics,
     }
@@ -1200,7 +1172,7 @@ def _process_pdf(
     normalized = _normalize_catalog_items(items, meta)
     job_metrics = _resolve_job_metrics(meta, normalized)
     meta["extraction"] = job_metrics
-    return normalized, meta, manifest_rel
+    return normalized, meta, None
 
 
 def _coerce_int(value: Any) -> int | None:
