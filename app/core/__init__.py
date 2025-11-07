@@ -3555,16 +3555,6 @@ async def build_llm_messages(
     if context_items:
         engine.register_recommendations(context_items)
 
-    reply_rules: list[str] = []
-    if channel_name.lower() in {"whatsapp", "telegram"}:
-        reply_rules.append(
-            f"Мы уже общаемся в {channel_name}. Не предлагай менять канал и не спрашивай, где удобнее общаться."
-        )
-    if not cta_allowed:
-        reply_rules.append("В этом ответе не используй CTA и не закрывай сделку.")
-    if reply_rules:
-        system_blocks.append("Правила текущего ответа:\n- " + "\n- ".join(reply_rules))
-
     system_blocks = [persona.strip()]
     system_blocks.append(
         " | ".join(
@@ -3605,6 +3595,16 @@ async def build_llm_messages(
             transcript = "\n".join(f"{msg['role']}: {msg['content']}" for msg in trimmed)
             if transcript.strip():
                 system_blocks.append(f"Недавний диалог:\n{transcript}")
+
+    reply_rules: list[str] = []
+    if channel_name.lower() in {"whatsapp", "telegram"}:
+        reply_rules.append(
+            f"Мы уже общаемся в {channel_name}. Не предлагай менять канал и не спрашивай, где удобнее общаться."
+        )
+    if not cta_allowed:
+        reply_rules.append("В этом ответе не используй CTA и не закрывай сделку.")
+    if reply_rules:
+        system_blocks.append("Правила текущего ответа:\n- " + "\n- ".join(reply_rules))
 
     system_blocks.append(f"Идентификатор контакта: {contact_id}")
 
