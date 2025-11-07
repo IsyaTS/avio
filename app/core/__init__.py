@@ -3470,6 +3470,7 @@ def make_rule_based_reply(
 ) -> str:
     branding = _branding_for_tenant(tenant, channel)
     channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
+    channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
 
     cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
     if tenant is not None:
@@ -3514,6 +3515,7 @@ async def build_llm_messages(
     fingerprint = hashlib.sha1(persona.encode("utf-8")).hexdigest() if persona else ""
     _PERSONA_HINTS_CACHE[cache_key] = (fingerprint, persona_hints)
     branding = _branding_for_tenant(tenant, channel)
+    channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
 
     cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
     if tenant is not None:
