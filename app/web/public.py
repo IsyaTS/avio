@@ -1135,51 +1135,6 @@ def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[
     return metrics
 
 
-def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    metrics = {
-        "items_found": len(rows),
-        "pages_low_conf": 0,
-        "table_blocks": 0,
-        "kv_blocks": 0,
-        "ocr_pages": 0,
-        "price_coverage": _calc_price_coverage(rows),
-        "pages_total": 0,
-        "pages_skipped_no_price": 0,
-        "table_pages": 0,
-        "median_price": None,
-        "low_price_rate": 0.0,
-    }
-    if isinstance(meta, Mapping):
-        extraction = meta.get("extraction")
-        if isinstance(extraction, Mapping):
-            for key in (
-                "pages_low_conf",
-                "table_blocks",
-                "kv_blocks",
-                "ocr_pages",
-                "pages_total",
-                "pages_skipped_no_price",
-                "table_pages",
-            ):
-                value = extraction.get(key)
-                if isinstance(value, (int, float)):
-                    metrics[key] = int(value)
-            value = extraction.get("price_coverage")
-            if isinstance(value, (int, float)):
-                metrics["price_coverage"] = float(value)
-            value = extraction.get("items_found")
-            if isinstance(value, (int, float)):
-                metrics["items_found"] = int(value)
-            value = extraction.get("median_price")
-            if isinstance(value, (int, float)):
-                metrics["median_price"] = value
-            value = extraction.get("low_price_rate")
-            if isinstance(value, (int, float)):
-                metrics["low_price_rate"] = float(value)
-    metrics["items_found"] = len(rows)
-    return metrics
-
-
 def _process_pdf(
     *,
     tenant: int,
