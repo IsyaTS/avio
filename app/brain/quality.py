@@ -160,6 +160,10 @@ def _select_cta(
     return ""
 
 
+def _cta_is_question(cta: str) -> bool:
+    return "?" in cta or cta.strip().endswith("?")
+
+
 def enforce_plan_alignment(
     reply: str,
     plan: GeneratedPlan,
@@ -215,9 +219,15 @@ def enforce_plan_alignment(
         recent_cta=ctx.recent_cta,
         recent_cta_ts=ctx.recent_cta_ts,
     )
+    applied_cta = ""
     if selected_cta and not _cta_present(selected_cta, text):
-        text = _append_block(text, selected_cta)
-    ctx.applied_cta = selected_cta
+        should_append = True
+        if _cta_is_question(selected_cta) and _question_present(selected_cta, text):
+            should_append = False
+        if should_append:
+            text = _append_block(text, selected_cta)
+            applied_cta = selected_cta
+    ctx.applied_cta = applied_cta or selected_cta or ""
 
     if persona_hints and persona_hints.wants_friendly():
         pass

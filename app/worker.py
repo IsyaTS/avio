@@ -196,19 +196,22 @@ def _log_smart_reply_diag(channel: str, tenant_id: int, lead_id: int | None, rep
     try:
         plan_data = getattr(reply, "llm_plan", None)
         next_questions: list[str] = []
+        plan_cta = None
         if isinstance(plan_data, Mapping):
             raw_questions = plan_data.get("next_questions")
             if isinstance(raw_questions, (list, tuple)):
                 next_questions = [str(q) for q in raw_questions if q]
+            plan_cta = plan_data.get("cta")
         raw_answer = getattr(reply, "llm_raw_answer", None)
         refined = str(reply or "")
         log(
-            "event=smart_reply_diag channel=%s tenant=%s lead_id=%s plan_next_questions=%s answer=%s refined=%s"
+            "event=smart_reply_diag channel=%s tenant=%s lead_id=%s plan_next_questions=%s plan_cta=%s answer=%s refined=%s"
             % (
                 channel,
                 tenant_id,
                 lead_id if lead_id is not None else 0,
                 json.dumps(next_questions, ensure_ascii=False),
+                json.dumps(plan_cta or "", ensure_ascii=False),
                 json.dumps(raw_answer or "", ensure_ascii=False),
                 json.dumps(refined, ensure_ascii=False),
             )
