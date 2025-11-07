@@ -156,16 +156,25 @@ class CatalogMiniPipeline:
         for idx, layout in enumerate(iterator, start=1):
             lines: List[Line] = []
             for element in layout:
-                if isinstance(element, (LTTextBoxHorizontal, LTTextLineHorizontal)):
+                if isinstance(element, LTTextLineHorizontal):
                     lines.extend(self._lines_from_text_container(element))
-                elif isinstance(element, LTTextContainer):
-                    lines.extend(self._lines_from_text_container(element))
+                elif isinstance(element, (LTTextBoxHorizontal, LTTextContainer)):
+                    for child in element:
+                        if isinstance(child, LTTextLineHorizontal):
+                            lines.extend(self._lines_from_text_container(child))
             pages.append({"page": idx, "lines": lines})
         return pages
 
-    def _lines_from_text_container(self, container: LTTextContainer) -> List[Line]:
+    def _lines_from_text_container(self, container: LTTextContainer | LTTextLineHorizontal) -> List[Line]:
         lines: List[Line] = []
-        for line in container:
+        targets: List[LTTextLineHorizontal] = []
+        if isinstance(container, LTTextLineHorizontal):
+            targets.append(container)
+        else:
+            for child in container:
+                if isinstance(child, LTTextLineHorizontal):
+                    targets.append(child)
+        for line in targets:
             if not hasattr(line, "get_text"):
                 continue
             raw = line.get_text()

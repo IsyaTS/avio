@@ -1,23 +1,24 @@
 from pathlib import Path
 
-from app.catalog import text_normalize
+from app.catalog.pdf_catalog_miniprog import CatalogMiniPipeline, _normalize_text
 from app.catalog.io import write_catalog_csv
-from app.catalog.pdf_catalog_pipeline import CatalogPipeline
 
 
-def test_normalization_nfkc_and_thin_spaces():
-    value = "29\u00A0\u202F500"
-    normalized = text_normalize.collapse_spaces(text_normalize.normalize_unicode_nfkc(value))
-    assert normalized == "29 500"
-    assert text_normalize.unify_dashes_and_decimals("7 . 5 — размер") == "7.5 - размер"
+def test_normalization_handles_nfkc_and_thin_spaces():
+    sample = "Модель\u00A0\u202FALPHA\u2009-100"
+    normalized = _normalize_text(sample)
+    assert "\u00A0" not in normalized
+    assert "\u202F" not in normalized
+    assert normalized.replace(" ", "").endswith("-100")
 
 
-def test_price_regex_accepts_thousands_and_rejects_small_values():
-    pipeline = CatalogPipeline(table_engine="plumber", render_dpi=100)
-    assert pipeline._normalize_price("29 500", 1)[0] == "29500"
-    assert pipeline._normalize_price("29500", 2)[0] == "29500"
-    assert pipeline._normalize_price("999", 1)[0] == ""
-    assert pipeline._normalize_price("2", 2)[0] == ""
+def test_price_detector_accepts_thousands_and_rejects_small_values():
+    pipeline = CatalogMiniPipeline()
+    assert pipeline._detect_price("Цена 29 500 ₽", 1) == "29500"
+    assert pipeline._detect_price("29\u202f500", 2) == "29500"
+    assert pipeline._detect_price("Стоимость 29500", 3) == "29500"
+    assert pipeline._detect_price("999 ₽", 1) == ""
+    assert pipeline._detect_price("Стр. 2", 2) == ""
 
 
 def _write_pdf(path: Path, lines: list[str]) -> None:
@@ -69,16 +70,13 @@ def _write_pdf(path: Path, lines: list[str]) -> None:
     path.write_bytes(bytes(output))
 
 
-def test_catalog_pipeline_integration(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "sample.pdf"
+def test_smoke_pipeline_creates_csv(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "catalog.pdf"
     _write_pdf(pdf_path, ["Model ALPHA-1", "Цена: 12 500 ₽", "Цвет: белый"])
 
-    pipeline = CatalogPipeline(table_engine="plumber", render_dpi=120)
+    pipeline = CatalogMiniPipeline(table_engine="plumber", render_dpi=110, ocr_fallback=False)
     items = pipeline.extract_items(str(pdf_path))
-    assert items, "Pipeline should extract at least one item"
-    metrics = pipeline.metrics
-    assert metrics["items_found"] >= 1
-    assert metrics["median_price"] is None or metrics["median_price"] >= 1000
+    assert items and items[0]["price"]
 
     tenants_dir = tmp_path / "tenants"
     tenants_dir.mkdir(parents=True, exist_ok=True)
@@ -91,9 +89,13 @@ def test_catalog_pipeline_integration(tmp_path, monkeypatch):
         return str(path)
 
     monkeypatch.setattr(catalog_io.core_module, "tenant_dir", _tenant_dir)
-    monkeypatch.setattr(catalog_io.core_module, "ensure_tenant_files", lambda tenant: Path(_tenant_dir(tenant)).mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr(
+        catalog_io.core_module,
+        "ensure_tenant_files",
+        lambda tenant: Path(_tenant_dir(tenant)).mkdir(parents=True, exist_ok=True),
+    )
 
     meta = {"type": "pdf", "preserve_page_column": True}
-    rel_path, header = write_catalog_csv(1, items, "catalog_pipeline_test", meta)
+    rel_path, header = write_catalog_csv(1, items, "mini_pipeline_test", meta)
     assert header[:4] == ["id", "title", "price", "page"]
     assert (tenants_dir / "1" / rel_path).exists()
