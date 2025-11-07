@@ -58,6 +58,12 @@ def test_question_present_handles_paraphrased_phrases():
     assert quality._question_present(base, reply)
 
 
+def test_question_present_handles_partial_overlap():
+    base = "Сориентируйте, пожалуйста, по бюджету — чтобы предложить наиболее подходящие варианты."
+    reply = "Сориентируйте, пожалуйста, по бюджету — чтобы я мог предложить оптимальные варианты из каталога."
+    assert quality._question_present(base, reply)
+
+
 def test_enforce_plan_alignment_removes_channel_switch_lines_from_reply():
     plan = planner.GeneratedPlan()
     ctx = quality.EnforcementContext(channel="whatsapp", disable_channel_switch_prompts=True)

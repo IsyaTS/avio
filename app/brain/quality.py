@@ -72,9 +72,13 @@ def _question_present(question: str, reply: str) -> bool:
     q_tokens = set(_tokenize(question))
     if not q_tokens:
         return False
-    for sentence in re.split(r"[\\n\\r]+|[.!?]", reply or ""):
+    min_overlap = max(1, int(len(q_tokens) * 0.6))
+    for sentence in re.split(r"[\n\r]+|[.!?]", reply or ""):
         sentence_tokens = set(_tokenize(sentence))
-        if sentence_tokens and q_tokens.issubset(sentence_tokens):
+        if not sentence_tokens:
+            continue
+        overlap = len(q_tokens & sentence_tokens)
+        if overlap >= min_overlap:
             return True
     return False
 
