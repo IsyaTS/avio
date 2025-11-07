@@ -1010,91 +1010,6 @@ def _read_excel_bytes(raw: bytes) -> tuple[list[dict[str, str]], dict[str, Any]]
     return normalized, meta
 
 
-def _collapse_items_one_per_page(index, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_page: dict[str, dict[str, Any]] = {}
-    def score(it: dict[str, Any]) -> tuple[int, int]:
-        price = str(it.get("price") or "").strip()
-        has_price = 1 if price else 0
-        attr_count = len([k for k in it.keys() if k not in {"id", "title", "price"}])
-        title_len = len(str(it.get("title") or ""))
-        return (has_price, max(attr_count, title_len))
-
-    def _is_attr_like_title(title: str) -> bool:
-        t = (title or "").strip().lower()
-        if not t:
-            return True
-        attr_tokens = (
-            "толщина", "размер", "ширина", "высота", "диаметр",
-            "материал", "цвет", "уплотнен", "замок", "замк",
-        )
-        if any(tok in t for tok in attr_tokens):
-            # Allow if looks like model (letters+digits mixed)
-            has_letter = any(ch.isalpha() for ch in t)
-            has_digit = any(ch.isdigit() for ch in t)
-            if has_letter and has_digit:
-                return False
-            return True
-        return False
-
-    def _strong_enough(it: dict[str, Any]) -> bool:
-        price = str(it.get("price") or "").strip()
-        has_price = bool(price)
-        attr_count = len([k for k in it.keys() if k not in {"id", "title", "price", "page"}])
-        if has_price:
-            return True
-        return attr_count >= 2 and not _is_attr_like_title(it.get("title") or "")
-
-    for it in items:
-        page = str(it.get("page") or "")
-        if not page:
-            continue
-        current = by_page.get(page)
-        # Prefer items that are strong-enough and not attribute-like titles
-        if (current is None) or (score(it) > score(current)):
-            by_page[page] = it
-
-    # Optionally fabricate items for pages без распознанных блоков,
-    # но не для стоп-разделов.
-    try:
-        STOP_RE = getattr(catalog_index, '_STOP_KEYWORDS_RE', None)
-    except Exception:
-        STOP_RE = None
-    chunks = list(getattr(index, "chunks", []) or [])
-    for ch in chunks:
-        pg = str(getattr(ch, "page", "") or "")
-        if not pg or pg in by_page:
-            continue
-        title = str(getattr(ch, "title", "") or "")
-        if STOP_RE is not None and STOP_RE.search(title or ""):
-            continue
-        by_page[pg] = {"title": title, "price": "", "page": pg}
-
-    def page_key(k: str) -> int:
-        try:
-            return int(k)
-        except Exception:
-            return 0
-
-    # Build map for quick chunk title lookup
-    chunk_title_by_page: dict[str, str] = {}
-    for ch in getattr(index, "chunks", []) or []:
-        pg = str(getattr(ch, "page", "") or "")
-        if pg and pg not in chunk_title_by_page:
-            chunk_title_by_page[pg] = str(getattr(ch, "title", "") or "")
-
-    result: list[dict[str, Any]] = []
-    for page in sorted(by_page.keys(), key=page_key):
-        candidate = dict(by_page[page])
-        # If кандидат выглядит как характеристика — заменим заголовок на заголовок чанка
-        if _is_attr_like_title(candidate.get("title") or ""):
-            chunk_title = chunk_title_by_page.get(page) or (candidate.get("title") or "")
-            candidate["title"] = chunk_title
-        # Удаляем служебные поля
-        candidate.pop("page", None)
-        result.append(candidate)
-    return result
-
-
 def _calc_price_coverage(rows: Sequence[Mapping[str, Any]]) -> float:
     if not rows:
         return 0.0
@@ -3790,11 +3705,6 @@ async def catalog_upload(
                 catalog_entry["encoding"] = detected_encoding
             if detected_delimiter:
                 catalog_entry["delimiter"] = detected_delimiter
-            if catalog_type == "pdf":
-                if isinstance(meta, dict):
-                    for key in ("index_path", "indexed_at", "chunk_count", "sha1"):
-                        if meta.get(key) is not None:
-                            catalog_entry[key] = meta.get(key)
 
             if csv_rel_path:
                 catalog_entry["csv_path"] = csv_rel_path
@@ -3833,16 +3743,6 @@ async def catalog_upload(
             if detected_delimiter:
                 uploaded_meta["delimiter"] = detected_delimiter
             if catalog_type == "pdf" and isinstance(meta, dict):
-                index_meta = {
-                    "path": meta.get("index_path"),
-                    "generated_at": meta.get("indexed_at"),
-                    "chunks": meta.get("chunk_count"),
-                    "pages": meta.get("page_count"),
-                    "sha1": meta.get("sha1"),
-                }
-                index_meta = {k: v for k, v in index_meta.items() if v is not None}
-                if index_meta:
-                    uploaded_meta["index"] = index_meta
             uploaded_meta = {k: v for k, v in uploaded_meta.items() if v is not None}
             integrations["uploaded_catalog"] = uploaded_meta
 
