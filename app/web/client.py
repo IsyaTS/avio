@@ -778,6 +778,9 @@ async def catalog_upload(tenant: int, request: Request, file: UploadFile = File(
             uploaded_meta["encoding"] = meta.get("encoding")  # type: ignore[index]
         if catalog_type == "csv" and meta.get("delimiter") is not None:
             uploaded_meta["delimiter"] = meta.get("delimiter")  # type: ignore[index]
+        extraction_meta = meta.get("extraction")
+        if isinstance(extraction_meta, dict):
+            uploaded_meta["extraction"] = extraction_meta
         if catalog_type == "pdf":
             # Normalize index metadata keys to a stable shape
             idx = {

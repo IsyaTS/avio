@@ -54,8 +54,19 @@ def write_catalog_csv(
     safe_base = _sanitize_base_name(base_name or "catalog")
     csv_path = catalogs_dir / f"{safe_base}.csv"
 
-    rows = list(normalized_rows or [])
+    rows = [dict(row) for row in (normalized_rows or [])]
+    preserve_page = bool(isinstance(meta, Mapping) and meta.get("preserve_page_column"))
+    page_values: list[str] = []
+    if preserve_page:
+        page_values = [_stringify(row.get("page", "")) for row in rows]
     finalized_rows, header, report = finalize_catalog_rows(rows)
+    if preserve_page:
+        for idx, row in enumerate(finalized_rows):
+            page_value = page_values[idx] if idx < len(page_values) else ""
+            row["page"] = page_value
+        if "page" not in header:
+            header = header[:3] + ["page"] + header[3:]
+            report.columns = header
 
     source_type = ""
     if isinstance(meta, Mapping):

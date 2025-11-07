@@ -1171,6 +1171,32 @@ def _calc_price_coverage(rows: Sequence[Mapping[str, Any]]) -> float:
     return filled / len(rows)
 
 
+def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    metrics = {
+        "items_found": len(rows),
+        "pages_low_conf": 0,
+        "table_blocks": 0,
+        "kv_blocks": 0,
+        "ocr_pages": 0,
+        "price_coverage": _calc_price_coverage(rows),
+    }
+    if isinstance(meta, Mapping):
+        extraction = meta.get("extraction")
+        if isinstance(extraction, Mapping):
+            for key in ("pages_low_conf", "table_blocks", "kv_blocks", "ocr_pages"):
+                value = extraction.get(key)
+                if isinstance(value, (int, float)):
+                    metrics[key] = int(value)
+            value = extraction.get("price_coverage")
+            if isinstance(value, (int, float)):
+                metrics["price_coverage"] = float(value)
+            value = extraction.get("items_found")
+            if isinstance(value, (int, float)):
+                metrics["items_found"] = int(value)
+    metrics["items_found"] = len(rows)
+    return metrics
+
+
 def _process_pdf(
     *,
     tenant: int,
@@ -1255,7 +1281,6 @@ def _process_pdf(
     if one_per_page:
         items = _collapse_items_one_per_page(index, items)
 
-    manifest_path = index.index_path.with_suffix(".manifest.json")
     meta: dict[str, Any] = {
         "type": "pdf",
         "index_path": rel_index,
@@ -1265,8 +1290,6 @@ def _process_pdf(
         "page_count": index.page_count,
         "source_path": str(saved_rel_path),
         "original": original_name,
-        "encoding": "utf-8-sig",
-        "delimiter": ";",
         "encoding": "utf-8-sig",
         "delimiter": ";",
     }
@@ -3824,6 +3847,10 @@ async def catalog_upload(
                 fail("processing_failed", detail=str(exc))
                 return
 
+            job_metrics = _resolve_job_metrics(meta if isinstance(meta, Mapping) else None, normalized_rows)
+            manual_review_required = bool(
+                job_metrics["items_found"] == 0 or job_metrics["price_coverage"] < 0.5
+            )
             try:
                 parsed_count = len(normalized_rows)
             except Exception:
@@ -3857,6 +3884,13 @@ async def catalog_upload(
                 metadata=meta,
                 source_path=relative_path,
                 message="completed",
+                items_found=int(job_metrics["items_found"]),
+                pages_low_conf=int(job_metrics["pages_low_conf"]),
+                table_blocks=int(job_metrics["table_blocks"]),
+                kv_blocks=int(job_metrics["kv_blocks"]),
+                ocr_pages=int(job_metrics["ocr_pages"]),
+                price_coverage=float(job_metrics["price_coverage"]),
+                manual_review_required=bool(manual_review_required),
             )
             if manifest_rel:
                 write_status(None, manifest_path=manifest_rel)
@@ -3866,6 +3900,7 @@ async def catalog_upload(
                 items=items,
                 columns=len(ordered_columns),
                 pipeline=pipeline_info,
+                metrics=job_metrics,
             )
 
             # Persist config updates
@@ -3927,6 +3962,9 @@ async def catalog_upload(
             }
             if pipeline_info:
                 uploaded_meta["pipeline"] = pipeline_info
+            extraction_meta = meta.get("extraction") if isinstance(meta, dict) else None
+            if isinstance(extraction_meta, dict):
+                uploaded_meta["extraction"] = extraction_meta
             if detected_encoding:
                 uploaded_meta["encoding"] = detected_encoding
             if detected_delimiter:
