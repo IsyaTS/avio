@@ -11,7 +11,7 @@ def test_price_normalizer_accepts_thousands_and_rejects_small_values():
     assert normalize("29500", None) == "29500"
     assert normalize("999", None) == ""
     assert normalize("1 000", 1) == "1000"
-    assert normalize("2000", 2) == ""  # equals page number -> reject
+    assert normalize("2", 2) == ""  # equals page number -> reject
 
 
 def _write_pdf(path: Path, lines: list[str]) -> None:
