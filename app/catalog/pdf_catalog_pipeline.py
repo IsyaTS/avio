@@ -54,6 +54,8 @@ from .text_normalize import (
 )
 
 logger = logging.getLogger(__name__)
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+logging.getLogger("pypdf.generic").setLevel(logging.ERROR)
 
 # Разрешаем пробелы, в т.ч. тонкие (U+00A0/U+202F/U+2009), и опциональную дробь.
 PRICE_REGEX = re.compile(
