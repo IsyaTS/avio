@@ -19,8 +19,6 @@ import base64
 import random
 import secrets
 import html
-import subprocess
-import tempfile
 from typing import Any, Iterable, Literal, Mapping, Optional, Sequence
 
 import qrcode
@@ -47,21 +45,7 @@ def _import_alias(module: str):
 
 catalog_module = _import_alias("catalog")
 catalog_index = _import_alias("catalog_index")
-try:
-    from app.catalog import ml_pipeline  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover
-    ml_pipeline = None  # type: ignore
-try:
-    from app.catalog import ml_donut  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover
-    ml_donut = None  # type: ignore
-try:
-    from app.catalog import pdf_universal  # type: ignore[attr-defined]
-except ImportError:  # pragma: no cover - fallback when package alias differs
-    try:
-        pdf_universal = importlib.import_module("catalog.pdf_universal")  # type: ignore[assignment]
-    except Exception:  # pragma: no cover
-        pdf_universal = None  # type: ignore[assignment]
+from app.catalog.pdf_catalog_pipeline import CatalogPipeline
 
 # NOTE: reference helpers locally to keep call sites compact
 write_catalog_csv = catalog_module.write_catalog_csv
@@ -1111,65 +1095,6 @@ def _collapse_items_one_per_page(index, items: list[dict[str, Any]]) -> list[dic
         candidate.pop("page", None)
         result.append(candidate)
     return result
-
-
-_TABLE_ENGINES = {"plumber", "camelot"}
-
-
-def _resolve_table_engine(raw: str | None) -> Literal["plumber", "camelot"]:
-    candidate = (raw or "plumber").strip().lower()
-    return candidate if candidate in _TABLE_ENGINES else "plumber"
-
-
-def _run_ocrmypdf(source_path: pathlib.Path) -> pathlib.Path | None:
-    """Invoke OCRmyPDF to rebuild the document with a rus+eng OCR layer."""
-
-    tmp_handle = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    tmp_handle.close()
-    target_path = pathlib.Path(tmp_handle.name)
-    cmd = [
-        "ocrmypdf",
-        "--redo-ocr",
-        "--force-ocr",
-        "--skip-text",
-        "--language",
-        "rus+eng",
-        str(source_path),
-        str(target_path),
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        logger.warning("ocrmypdf binary missing; OCR fallback skipped")
-        target_path.unlink(missing_ok=True)
-        return None
-    if result.returncode != 0:
-        logger.warning(
-            "ocrmypdf failed",
-            extra={
-                "code": result.returncode,
-                "stdout": (result.stdout or "")[:500],
-                "stderr": (result.stderr or "")[:500],
-            },
-        )
-        target_path.unlink(missing_ok=True)
-        return None
-    return target_path
-
-
-def _stats_to_metrics(stats: Any | None, preliminary_count: int) -> dict[str, Any]:
-    if stats is None:
-        return {}
-    low_conf = set(getattr(stats, "low_confidence_pages", set()) or set())
-    empty_pages = set(getattr(stats, "empty_pages", set()) or set())
-    return {
-        "items_found": preliminary_count,
-        "pages_low_conf": len(low_conf | empty_pages),
-        "table_blocks": int(getattr(stats, "table_blocks", 0) or 0),
-        "kv_blocks": int(getattr(stats, "kv_blocks", 0) or 0),
-        "ocr_pages": int(getattr(stats, "ocr_pages", 0) or 0),
-        "price_coverage": float(getattr(stats, "price_coverage", 0.0) or 0.0),
-    }
 
 
 def _calc_price_coverage(rows: Sequence[Mapping[str, Any]]) -> float:
