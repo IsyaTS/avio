@@ -214,9 +214,7 @@ def enforce_plan_alignment(
     ctx.applied_cta = selected_cta
 
     if persona_hints and persona_hints.wants_friendly():
-        if not getattr(persona_hints, "no_emoji", False):
-            if not re.search(r"[\)\]»☺😊😀😄😃😉😎❤️]", text):
-                text = text + " \U0001F60A"
+        pass
 
     if ctx.disable_channel_switch_prompts and (ctx.channel or "").lower() != "avito":
         text = _strip_channel_switch_blocks(text)

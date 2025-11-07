@@ -3258,8 +3258,6 @@ class SalesConversationEngine:
         if self.channel_name.lower() == "avito" and handoff:
             return handoff
         candidate = cta_primary or cta_fallback or "Готов подключиться и довести до заказа — двигаемся?"
-        if self.persona_hints.wants_friendly() and candidate and not re.search(r"[)☺😊🙂]$", candidate):
-            candidate = candidate.rstrip(".") + ". 🙂"
         return candidate
 
     def _personalized_greeting(self) -> str:
@@ -3267,14 +3265,10 @@ class SalesConversationEngine:
         greeting = (self.persona_hints.greeting or default_greeting).strip()
         if not greeting:
             greeting = default_greeting
-        friendly = self.persona_hints.wants_friendly() and not self.persona_hints.no_emoji
-        if friendly and greeting and not re.search(r"[)☺😊🙂]$", greeting):
-            greeting = greeting.rstrip(".") + " 🙂"
+        friendly = False
         visits = int((self.state.profile or {}).get("visits", 0))
         if visits > 1:
             addon = "Рады снова вас видеть и продолжить подбор."
-            if friendly:
-                addon = addon.rstrip(".") + " 🙂"
             if addon not in greeting:
                 if greeting.endswith(('.', '!', '…')):
                     greeting = f"{greeting.rstrip('.')}. {addon}"
