@@ -1813,12 +1813,30 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                 for entry in catalogs:
                     if not isinstance(entry, dict):
                         continue
+
+                    def _resolve_path(raw: str | pathlib.Path | None) -> pathlib.Path | None:
+                        if not raw:
+                            return None
+                        path = pathlib.Path(str(raw))
+                        if not path.is_absolute():
+                            path = tenant_dir(tenant) / path
+                        return path
+
+                    raw_csv = entry.get("csv_path")
+                    csv_path = _resolve_path(raw_csv)
+                    if csv_path:
+                        csv_meta = dict(entry)
+                        csv_meta["type"] = csv_meta.get("type") or "csv"
+                        csv_meta["path"] = raw_csv
+                        merged_csv_meta = _merge_csv_mapping_meta(csv_meta, persona_meta)
+                        candidates.append((csv_path, merged_csv_meta))
+                        has_custom_catalogs = True
+                        # Continue processing original entry as fallback (PDF/Excel)
+
                     raw_path = entry.get("path")
-                    if not raw_path:
+                    path = _resolve_path(raw_path)
+                    if not path:
                         continue
-                    path = pathlib.Path(str(raw_path))
-                    if not path.is_absolute():
-                        path = tenant_dir(tenant) / path
                     merged_meta = _merge_csv_mapping_meta(entry, persona_meta)
                     candidates.append((path, merged_meta))
                     has_custom_catalogs = True
