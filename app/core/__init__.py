@@ -165,6 +165,12 @@ class Settings:
     PDF_OCR_FALLBACK = _env_bool("PDF_OCR_FALLBACK", False)
     _PDF_TABLES_ENGINE_RAW = (os.getenv("PDF_TABLES_ENGINE") or "plumber").strip().lower()
     PDF_TABLES_ENGINE = _PDF_TABLES_ENGINE_RAW if _PDF_TABLES_ENGINE_RAW in {"plumber", "camelot"} else "plumber"
+    PDF_ML_PIPELINE = _env_bool("PDF_ML_PIPELINE", False)
+    PDF_ML_USE_DONUT = _env_bool("PDF_ML_USE_DONUT", False)
+    try:
+        PDF_RENDER_DPI = int(os.getenv("PDF_RENDER_DPI", "220"))
+    except ValueError:
+        PDF_RENDER_DPI = 220
 
     # Админка
     ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "").strip()

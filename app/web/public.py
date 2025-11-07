@@ -1187,11 +1187,24 @@ def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[
         "kv_blocks": 0,
         "ocr_pages": 0,
         "price_coverage": _calc_price_coverage(rows),
+        "pages_total": 0,
+        "pages_skipped_no_price": 0,
+        "table_pages": 0,
+        "median_price": None,
+        "low_price_rate": 0.0,
     }
     if isinstance(meta, Mapping):
         extraction = meta.get("extraction")
         if isinstance(extraction, Mapping):
-            for key in ("pages_low_conf", "table_blocks", "kv_blocks", "ocr_pages"):
+            for key in (
+                "pages_low_conf",
+                "table_blocks",
+                "kv_blocks",
+                "ocr_pages",
+                "pages_total",
+                "pages_skipped_no_price",
+                "table_pages",
+            ):
                 value = extraction.get(key)
                 if isinstance(value, (int, float)):
                     metrics[key] = int(value)
@@ -1201,6 +1214,12 @@ def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[
             value = extraction.get("items_found")
             if isinstance(value, (int, float)):
                 metrics["items_found"] = int(value)
+            value = extraction.get("median_price")
+            if isinstance(value, (int, float)):
+                metrics["median_price"] = value
+            value = extraction.get("low_price_rate")
+            if isinstance(value, (int, float)):
+                metrics["low_price_rate"] = float(value)
     metrics["items_found"] = len(rows)
     return metrics
 
@@ -3880,7 +3899,8 @@ async def catalog_upload(
 
             job_metrics = _resolve_job_metrics(meta if isinstance(meta, Mapping) else None, normalized_rows)
             manual_review_required = bool(
-                job_metrics["items_found"] == 0 or job_metrics["price_coverage"] < 0.5
+                job_metrics["items_found"] == 0
+                or float(job_metrics.get("low_price_rate", 0.0)) > 0.2
             )
             try:
                 parsed_count = len(normalized_rows)
@@ -3920,6 +3940,11 @@ async def catalog_upload(
                 table_blocks=int(job_metrics["table_blocks"]),
                 kv_blocks=int(job_metrics["kv_blocks"]),
                 ocr_pages=int(job_metrics["ocr_pages"]),
+                pages_total=int(job_metrics.get("pages_total", 0)),
+                pages_skipped_no_price=int(job_metrics.get("pages_skipped_no_price", 0)),
+                table_pages=int(job_metrics.get("table_pages", 0)),
+                median_price=job_metrics.get("median_price"),
+                low_price_rate=float(job_metrics.get("low_price_rate", 0.0)),
                 price_coverage=float(job_metrics["price_coverage"]),
                 manual_review_required=bool(manual_review_required),
             )
