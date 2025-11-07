@@ -48,6 +48,14 @@ def _import_alias(module: str):
 catalog_module = _import_alias("catalog")
 catalog_index = _import_alias("catalog_index")
 try:
+    from app.catalog import ml_pipeline  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    ml_pipeline = None  # type: ignore
+try:
+    from app.catalog import ml_donut  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    ml_donut = None  # type: ignore
+try:
     from app.catalog import pdf_universal  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - fallback when package alias differs
     try:
@@ -1236,46 +1244,78 @@ def _process_pdf(
     except Exception:
         rel_index = str(index.index_path)
 
+    items: list[dict[str, Any]] = []
     extraction_metrics: dict[str, Any] = {}
-    universal_items: list[dict[str, Any]] | None = None
-    if use_universal and pdf_universal is not None:
+    ml_used = False
+    if getattr(settings, "PDF_ML_PIPELINE", False) and ml_pipeline is not None:
         try:
-            extraction_result = pdf_universal.extract_items(
-                str(saved_path),
-                table_engine=table_engine,
+            extractor = ml_pipeline.MLCatalogExtractor(
+                dpi=int(getattr(settings, "PDF_RENDER_DPI", 220) or 220),
             )
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("universal_pdf_pipeline_failed", exc_info=exc)
-            extraction_result = None
-        if extraction_result is not None:
-            universal_items = list(extraction_result)
-            stats = extraction_result.stats
-            if getattr(settings, "PDF_OCR_FALLBACK", False):
-                trigger_pages = set(stats.low_confidence_pages or []) | set(stats.empty_pages or [])
-                if trigger_pages:
-                    ocr_path = _run_ocrmypdf(saved_path)
-                    if ocr_path:
-                        try:
-                            extraction_result = pdf_universal.extract_items(
-                                str(ocr_path),
-                                table_engine=table_engine,
-                            )
-                        finally:
-                            try:
-                                ocr_path.unlink()
-                            except OSError:
-                                pass
-                        universal_items = list(extraction_result)
-                        stats = extraction_result.stats
-                        stats.ocr_pages = len(trigger_pages)
-                    else:
-                        logger.warning("ocr_fallback_failed", extra={"tenant": tenant})
-            extraction_metrics = _stats_to_metrics(getattr(extraction_result, "stats", None), len(universal_items))
+            ml_result = extractor.extract(str(saved_path))
+            items = list(ml_result.items)
+            extraction_metrics = dict(ml_result.metrics or {})
+            ml_used = True
+            use_donut = bool(getattr(settings, "PDF_ML_USE_DONUT", False))
+            if use_donut and ml_donut is not None and ml_result.fallback_images:
+                donut = ml_donut.DonutFallback()
+                donut_items, rescued_pages = donut.process(ml_result.fallback_images)
+                if donut_items:
+                    items.extend(donut_items)
+                    extraction_metrics["items_found"] = len(items)
+                    extraction_metrics["pages_skipped_no_price"] = max(
+                        extraction_metrics.get("pages_skipped_no_price", 0) - len(rescued_pages),
+                        0,
+                    )
+        except Exception as exc:
+            logger.warning("ml_pipeline_failed", exc_info=exc)
+            items = []
+            extraction_metrics = {}
+            ml_used = False
+    elif getattr(settings, "PDF_ML_PIPELINE", False) and ml_pipeline is None:
+        logger.warning("ml_pipeline_unavailable", extra={"tenant": tenant})
 
-    items = universal_items if universal_items else index_to_catalog_items(index)
-    universal_used = bool(universal_items)
-    if not universal_used:
-        extraction_metrics = {}
+    universal_used = False
+    if not items:
+        universal_items: list[dict[str, Any]] | None = None
+        if use_universal and pdf_universal is not None:
+            try:
+                extraction_result = pdf_universal.extract_items(
+                    str(saved_path),
+                    table_engine=table_engine,
+                )
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("universal_pdf_pipeline_failed", exc_info=exc)
+                extraction_result = None
+            if extraction_result is not None:
+                universal_items = list(extraction_result)
+                stats = extraction_result.stats
+                if getattr(settings, "PDF_OCR_FALLBACK", False):
+                    trigger_pages = set(stats.low_confidence_pages or []) | set(stats.empty_pages or [])
+                    if trigger_pages:
+                        ocr_path = _run_ocrmypdf(saved_path)
+                        if ocr_path:
+                            try:
+                                extraction_result = pdf_universal.extract_items(
+                                    str(ocr_path),
+                                    table_engine=table_engine,
+                                )
+                            finally:
+                                try:
+                                    ocr_path.unlink()
+                                except OSError:
+                                    pass
+                            universal_items = list(extraction_result)
+                            stats = extraction_result.stats
+                            stats.ocr_pages = len(trigger_pages)
+                        else:
+                            logger.warning("ocr_fallback_failed", extra={"tenant": tenant})
+                extraction_metrics = _stats_to_metrics(getattr(extraction_result, "stats", None), len(universal_items))
+
+        items = universal_items if universal_items else index_to_catalog_items(index)
+        universal_used = bool(universal_items)
+        if not universal_used:
+            extraction_metrics = {}
 
     one_per_page = bool(behavior.get("pdf_one_item_per_page"))
     if one_per_page:
@@ -1293,24 +1333,15 @@ def _process_pdf(
         "encoding": "utf-8-sig",
         "delimiter": ";",
     }
-    if universal_used:
+    if ml_used:
+        meta["pipeline_mode"] = "ml"
         meta["preserve_page_column"] = True
+    elif universal_used:
         meta["pipeline_mode"] = "universal"
+        meta["preserve_page_column"] = True
     normalized = _normalize_catalog_items(items, meta)
-    price_coverage = _calc_price_coverage(normalized)
-    if extraction_metrics:
-        extraction_metrics["items_found"] = len(normalized)
-        extraction_metrics["price_coverage"] = price_coverage
-    else:
-        extraction_metrics = {
-            "items_found": len(normalized),
-            "pages_low_conf": 0,
-            "table_blocks": 0,
-            "kv_blocks": 0,
-            "ocr_pages": 0,
-            "price_coverage": price_coverage,
-        }
-    meta["extraction"] = extraction_metrics
+    job_metrics = _resolve_job_metrics({**meta, "extraction": extraction_metrics}, normalized)
+    meta["extraction"] = job_metrics
     return normalized, meta, manifest_rel
 
 
