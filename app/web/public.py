@@ -19,7 +19,7 @@ import base64
 import random
 import secrets
 import html
-from typing import Any, Iterable, Literal, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import qrcode
 from qrcode.image.svg import SvgImage
@@ -51,7 +51,6 @@ from app.catalog.pdf_catalog_pipeline import CatalogPipeline
 write_catalog_csv = catalog_module.write_catalog_csv
 CatalogIndexError = catalog_index.CatalogIndexError
 build_pdf_index = catalog_index.build_pdf_index
-index_to_catalog_items = catalog_index.index_to_catalog_items
 
 try:  # pragma: no cover - optional dependency during import time
     from openpyxl import load_workbook  # type: ignore
