@@ -307,6 +307,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     lead_id = int(lead_id_value)
 
     channel = provider or "whatsapp"
+    resolved_provider = channel
     peer_for_log = ""
     if provider == "telegram":
         if peer_value is not None:
@@ -435,6 +436,44 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 "stage=incoming_enqueue_failed ch=%s tenant=%s", channel, tenant
             )
         event_enqueued = True
+
+    async def _queue_text_reply(
+        text: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return False
+        out: Dict[str, Any] = {
+            "lead_id": lead_id,
+            "text": cleaned,
+            "provider": resolved_provider,
+            "ch": resolved_provider,
+            "tenant_id": int(tenant),
+            "tenant": int(tenant),
+            "message_id": message_id or str(lead_id),
+            "attachments": attachments or [],
+        }
+        if resolved_provider == "telegram":
+            if telegram_user_id:
+                out["telegram_user_id"] = int(telegram_user_id)
+            if peer_value:
+                out["peer"] = peer_value
+            if peer_id is not None:
+                out["peer_id"] = int(peer_id)
+            if not out.get("telegram_user_id") and not out.get("peer"):
+                return False
+        else:
+            if not whatsapp_phone:
+                return False
+            out["to"] = whatsapp_phone
+        await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(out, ensure_ascii=False))
+        try:
+            core.record_bot_reply(refer_id, tenant, provider, cleaned, tenant_cfg=cfg)
+        except Exception:
+            pass
+        return True
 
     contact_id = 0
     try:
@@ -625,7 +664,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 file_url,
             )
         catalog_text = (catalog_text_override or caption or "Каталог во вложении (PDF).").strip()
-        resolved_provider = provider or "whatsapp"
         catalog_out: Dict[str, Any] = {
             "lead_id": lead_id,
             "text": catalog_text,
@@ -660,6 +698,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             catalog_sent_now = True
 
     if catalog_sent_now and not text:
+        await _enqueue_incoming_event()
         return _ok({"queued": True, "leadId": lead_id})
 
     if price_question and not catalog_sent_now:
@@ -689,7 +728,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     stock_int = None
                 if stock_int is not None and stock_int > 0:
                     reply_text += " В наличии."
-            resolved_provider = provider or "whatsapp"
             price_out: Dict[str, Any] = {
                 "lead_id": lead_id,
                 "text": reply_text,
@@ -714,53 +752,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 core.record_bot_reply(refer_id, tenant, provider, reply_text, tenant_cfg=cfg)
             except Exception:
                 pass
+            auto_reply_handled = True
+            await _enqueue_incoming_event()
             return _ok({"queued": True, "leadId": lead_id})
-
-    fallback_reply = (
-        "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
-    )
-    reply: str | None = None
-    if smart_reply_enabled(tenant):
-        try:
-            msgs = await build_llm_messages(refer_id, text or "", provider, tenant=tenant)
-            reply = await ask_llm(msgs, tenant=tenant, contact_id=refer_id, channel=provider)
-        except Exception:
-            reply = fallback_reply
-    else:
-        logger.info(
-            "event=smart_reply_disabled tenant=%s channel=%s lead_id=%s",
-            tenant,
-            provider,
-            lead_id,
-        )
-
-    reply_text = str(reply or "").strip()
-    if not reply_text:
-        return _ok({"queued": False, "leadId": lead_id, "smartReply": False})
-
-    if provider == "telegram":
-        logger.info(
-            "event=smart_reply_deferred tenant=%s channel=%s lead_id=%s",
-            tenant,
-            provider,
-            lead_id,
-        )
-        return _ok({"queued": False, "leadId": lead_id, "smartReply": True})
-
-    resolved_provider = provider or "whatsapp"
-    out: Dict[str, Any] = {
-        "lead_id": lead_id,
-        "text": reply_text,
-        "provider": resolved_provider,
-        "ch": resolved_provider,
-        "tenant_id": int(tenant),
-        "tenant": int(tenant),
-        "message_id": message_id or str(lead_id),
-        "attachments": [],
-    }
-    out["to"] = whatsapp_phone
-
-    await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(out, ensure_ascii=False))
 
     behavior = behavior or {}
     always_full = bool(behavior.get("always_full_catalog")) if behavior else False
@@ -797,7 +791,29 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             if cache_key:
                 _catalog_sent_cache[cache_key] = time.time()
 
-    return _ok({"queued": True, "leadId": lead_id})
+    fallback_text = default_fallback_reply()
+    if not smart_reply_enabled(tenant):
+        logger.info(
+            "event=smart_reply_disabled tenant=%s channel=%s lead_id=%s",
+            tenant,
+            provider,
+            lead_id,
+        )
+        fallback_sent = await _queue_text_reply(fallback_text)
+        auto_reply_handled = True
+        await _enqueue_incoming_event()
+        return _ok({"queued": bool(fallback_sent), "leadId": lead_id, "smartReply": False})
+
+    if provider == "telegram":
+        logger.info(
+            "event=smart_reply_deferred tenant=%s channel=%s lead_id=%s",
+            tenant,
+            provider,
+            lead_id,
+        )
+
+    await _enqueue_incoming_event()
+    return _ok({"queued": False, "leadId": lead_id, "smartReply": True})
 
 
 def _extract_token(request: Request) -> str:
