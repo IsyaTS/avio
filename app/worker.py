@@ -716,6 +716,10 @@ def _tokenize_attachment_mapping(attachment: Mapping[str, Any]) -> dict[str, Any
             if size >= 0:
                 prepared.setdefault("path", resolved_path)
                 prepared.setdefault("size", size)
+                url_value = prepared.get("url")
+                if isinstance(url_value, str) and _is_internal_path(url_value):
+                    prepared["internal_url"] = url_value
+                    prepared.pop("url", None)
         except OSError:
             pass
 
