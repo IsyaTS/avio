@@ -119,12 +119,6 @@ except Exception:
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 QUEUES = [OUTBOX_QUEUE_KEY]
 
-SMART_REPLY_TIMEOUT_SECONDS = _env_float("SMART_REPLY_TIMEOUT_SECONDS", 25.0)
-if SMART_REPLY_TIMEOUT_SECONDS < 5.0:
-    SMART_REPLY_TIMEOUT_SECONDS = 5.0
-
-FALLBACK_REPLY_TEXT = (default_fallback_reply() or "").strip()
-
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
 # ==== Utils ====
@@ -150,6 +144,12 @@ def _bool_env(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw not in _FALSE_VALUES
+
+SMART_REPLY_TIMEOUT_SECONDS = _env_float("SMART_REPLY_TIMEOUT_SECONDS", 25.0)
+if SMART_REPLY_TIMEOUT_SECONDS < 5.0:
+    SMART_REPLY_TIMEOUT_SECONDS = 5.0
+
+FALLBACK_REPLY_TEXT = (default_fallback_reply() or "").strip()
 
 PDF_COMPRESS_ENABLED = _bool_env("WA_PDF_COMPRESS", True)
 PDF_COMPRESS_SETTINGS = (os.getenv("WA_PDF_COMPRESS_SETTINGS") or "/screen").strip() or "/screen"
