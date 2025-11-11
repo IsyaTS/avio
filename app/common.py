@@ -49,6 +49,17 @@ SMART_REPLY_ENABLED_DEFAULT = (
 )
 AI_ENABLED_DEFAULT = SMART_REPLY_ENABLED_DEFAULT
 
+_FALLBACK_REPLY_DEFAULT = (
+    os.getenv("SMART_REPLY_FALLBACK_TEXT")
+    or "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
+)
+
+
+def default_fallback_reply() -> str:
+    """Return configurable fallback reply text used when LLM is unavailable."""
+
+    return _FALLBACK_REPLY_DEFAULT
+
 
 @dataclass(frozen=True)
 class OutboxWhitelist:
@@ -215,6 +226,7 @@ __all__ = [
     "whitelist_contains_number",
     "normalize_username",
     "smart_reply_enabled",
+    "default_fallback_reply",
     "SMART_REPLY_ENABLED_DEFAULT",
     "AI_ENABLED_DEFAULT",
 ]

@@ -1444,6 +1444,103 @@ def persona_catalog_csv(tenant: int) -> Optional[pathlib.Path]:
     return _resolve_persona_relative_path(tenant, raw_path)
 
 
+def _normalize_catalog_pdf_candidate(
+    tenant: int,
+    candidate: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    path_value = candidate.get("path") or candidate.get("relative_path")
+    if not isinstance(path_value, str):
+        return None
+    cleaned = path_value.replace("\\", "/").strip()
+    if not cleaned:
+        return None
+    try:
+        safe = pathlib.PurePosixPath(cleaned)
+    except Exception:
+        return None
+    if safe.is_absolute() or ".." in safe.parts:
+        return None
+    tenant_root = tenant_dir(tenant)
+    target = tenant_root / str(safe)
+    if not target.exists() or not target.is_file():
+        return None
+    try:
+        stat = target.stat()
+    except OSError:
+        return None
+    filename = str(candidate.get("original") or candidate.get("filename") or safe.name)
+    mime = str(
+        candidate.get("mime")
+        or candidate.get("mime_type")
+        or candidate.get("mimetype")
+        or "application/pdf"
+    ).strip() or "application/pdf"
+    return {
+        "relative_path": str(safe),
+        "absolute_path": str(target),
+        "filename": filename,
+        "mime": mime,
+        "size": stat.st_size,
+        "updated_at": int(stat.st_mtime),
+    }
+
+
+def resolve_catalog_pdf_meta(tenant: int, cfg: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+    if cfg is None:
+        try:
+            cfg = load_tenant(tenant)
+        except Exception:
+            cfg = {}
+
+    candidates: list[Mapping[str, Any]] = []
+    if isinstance(cfg, dict):
+        integrations = cfg.get("integrations")
+        if isinstance(integrations, Mapping):
+            uploaded = integrations.get("uploaded_catalog")
+            if isinstance(uploaded, Mapping):
+                candidates.append(uploaded)
+            for alt_key in ("uploaded_catalog_pdf", "catalog_pdf", "pdf_catalog"):
+                alt_meta = integrations.get(alt_key)
+                if isinstance(alt_meta, Mapping):
+                    candidates.append(alt_meta)
+        raw_catalogs = cfg.get("catalogs")
+        if isinstance(raw_catalogs, list):
+            for entry in raw_catalogs:
+                if not isinstance(entry, Mapping):
+                    continue
+                entry_type = str(entry.get("type") or "").strip().lower()
+                if entry_type == "pdf":
+                    candidates.append(entry)
+
+    for candidate in candidates:
+        normalized = _normalize_catalog_pdf_candidate(tenant, candidate)
+        if normalized:
+            return normalized
+
+    persona_meta = persona_catalog_pdf(tenant)
+    if persona_meta:
+        normalized = _normalize_catalog_pdf_candidate(tenant, persona_meta)
+        if normalized:
+            return normalized
+
+    default_path = tenant_dir(tenant) / "uploads" / "catalog.pdf"
+    if default_path.exists() and default_path.is_file():
+        try:
+            stat = default_path.stat()
+        except OSError:
+            stat = None
+        if stat:
+            return {
+                "relative_path": "uploads/catalog.pdf",
+                "absolute_path": str(default_path),
+                "filename": default_path.name,
+                "mime": "application/pdf",
+                "size": stat.st_size,
+                "updated_at": int(stat.st_mtime),
+            }
+    return None
+
+
 # ---------------------- простая rule-based логика ----------------------------
 CATALOG_CSV = DATA_DIR / "catalog_sample.csv"
 
@@ -3845,6 +3942,7 @@ __all__ = [
     "read_persona", "write_persona",
     "load_tenant", "load_persona", "PersonaHints", "extract_persona_hints", "load_persona_hints",
     "load_persona_structured", "persona_meta_config", "persona_catalog_pdf", "persona_catalog_csv",
+    "resolve_catalog_pdf_meta",
     "build_llm_messages", "ask_llm",
     # helpers ниже могут понадобиться в других частях
     "infer_user_needs", "search_catalog", "format_needs_for_prompt",

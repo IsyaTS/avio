@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover
 from app.integrations import avito
 
 from .ui import templates  # noqa: F401 - ensure templates loaded for compatibility
-from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
+from app.common import OUTBOX_QUEUE_KEY, smart_reply_enabled, default_fallback_reply
 from app.metrics import DB_ERRORS_COUNTER, WEBHOOK_PROVIDER_COUNTER
 from app.repo import provider_tokens as provider_tokens_repo
 
@@ -123,47 +123,19 @@ def _resolve_catalog_attachment(
     tenant: int,
     request: Request | None = None,
 ) -> tuple[dict | None, str]:
-    meta: dict | None = None
-    if isinstance(cfg, dict):
-        integrations = cfg.get("integrations", {}) if isinstance(cfg.get("integrations"), dict) else {}
-        if isinstance(integrations, dict):
-            candidates: list[dict[str, Any]] = []
-            raw_meta = integrations.get("uploaded_catalog")
-            if isinstance(raw_meta, dict) and raw_meta:
-                candidates.append(raw_meta)
-            for alt_key in ("uploaded_catalog_pdf", "catalog_pdf", "pdf_catalog"):
-                alt_meta = integrations.get(alt_key)
-                if isinstance(alt_meta, dict) and alt_meta:
-                    candidates.append(alt_meta)
-            for candidate in candidates:
-                meta_type = str(candidate.get("type") or "").lower()
-                if meta_type in {"pdf", "document"}:
-                    meta = candidate
-                    break
-    if not meta:
-        persona_meta = core.persona_catalog_pdf(int(tenant))
-        if persona_meta:
-            meta = persona_meta
-    if not isinstance(meta, dict):
-        return None, ""
-    if (meta.get("type") or "").lower() != "pdf":
-        return None, ""
-    raw_path = (meta.get("path") or "").replace("\\", "/")
-    if not raw_path:
-        return None, ""
     try:
-        safe = pathlib.PurePosixPath(raw_path)
+        resolved_meta = core.resolve_catalog_pdf_meta(int(tenant), cfg)
     except Exception:
-        return None, ""
-    if safe.is_absolute() or ".." in safe.parts:
+        resolved_meta = None
+    if not resolved_meta:
         return None, ""
 
-    try:
-        tenant_root = core.tenant_dir(tenant)
-        target = tenant_root / str(safe)
-    except Exception:
-        return None, ""
+    relative_path = resolved_meta.get("relative_path") or ""
+    absolute_path = resolved_meta.get("absolute_path") or ""
+    filename = resolved_meta.get("filename") or pathlib.Path(relative_path or "catalog.pdf").name
+    mime = resolved_meta.get("mime") or "application/pdf"
 
+    target = pathlib.Path(absolute_path or "")
     if not target.exists() or not target.is_file():
         return None, ""
 
@@ -177,14 +149,12 @@ def _resolve_catalog_attachment(
 
     from urllib.parse import quote
 
-    url = f"{base}?path={quote(str(safe), safe='/')}"
+    url = f"{base}?path={quote(str(relative_path), safe='/')}"
     token = getattr(C, "WA_INTERNAL_TOKEN", "") or ""
     if token:
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}token={quote(token)}"
 
-    filename = meta.get("original") or safe.name
-    mime = meta.get("mime") or "application/pdf"
     caption = f"Каталог в PDF: {filename}"
 
     attachment = {
@@ -432,26 +402,39 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "user_id": avito_user_id,
             "login": avito_login,
         }
-    if provider not in {"telegram", "avito"}:
-        normalized_event["auto_reply_handled"] = True
+    auto_reply_handled = False
+    event_enqueued = False
 
-    try:
-        await _redis_queue.lpush(
-            INCOMING_QUEUE_KEY, json.dumps(normalized_event, ensure_ascii=False)
-        )
-        if channel == "telegram":
-            await _redis_queue.incrby("metrics:telegram:incoming", 1)
-        elif channel == "whatsapp":
-            await _redis_queue.incrby("metrics:whatsapp:incoming", 1)
-        elif channel == "avito":
-            await _redis_queue.incrby("metrics:avito:incoming", 1)
-        logger.info(
-            "stage=incoming_enqueued ch=%s tenant=%s message_id=%s", channel, tenant, normalized_event["message_id"]
-        )
-    except Exception:
-        logger.exception(
-            "stage=incoming_enqueue_failed ch=%s tenant=%s", channel, tenant
-        )
+    async def _enqueue_incoming_event() -> None:
+        nonlocal event_enqueued
+        if event_enqueued:
+            return
+        payload = dict(normalized_event)
+        if auto_reply_handled:
+            payload["auto_reply_handled"] = True
+        else:
+            payload.pop("auto_reply_handled", None)
+        try:
+            await _redis_queue.lpush(
+                INCOMING_QUEUE_KEY, json.dumps(payload, ensure_ascii=False)
+            )
+            if channel == "telegram":
+                await _redis_queue.incrby("metrics:telegram:incoming", 1)
+            elif channel == "whatsapp":
+                await _redis_queue.incrby("metrics:whatsapp:incoming", 1)
+            elif channel == "avito":
+                await _redis_queue.incrby("metrics:avito:incoming", 1)
+            logger.info(
+                "stage=incoming_enqueued ch=%s tenant=%s message_id=%s",
+                channel,
+                tenant,
+                payload.get("message_id") or "",
+            )
+        except Exception:
+            logger.exception(
+                "stage=incoming_enqueue_failed ch=%s tenant=%s", channel, tenant
+            )
+        event_enqueued = True
 
     contact_id = 0
     try:
