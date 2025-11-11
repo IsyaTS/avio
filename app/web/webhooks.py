@@ -612,6 +612,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         use_file_link = True
 
     lowered_text = text.lower() if isinstance(text, str) else ""
+    effective_cache_state = int(catalog_already_sent)
     forced_catalog = bool(text and _user_requested_catalog(text))
     price_question = any(
         token in lowered_text
@@ -628,6 +629,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     has_attachment = bool(attachment)
     has_file_link = bool(file_url)
     should_send_catalog = (has_attachment or has_file_link) and (forced_catalog or not catalog_already_sent)
+    logger.warning(
+        "catalog_flow tenant=%s text=%r has_attachment=%s has_link=%s forced=%s already_sent=%s cache_key=%s",
+        tenant,
+        text,
+        int(has_attachment),
+        int(has_file_link),
+        int(forced_catalog),
+        effective_cache_state,
+        cache_key,
+    )
     if price_question and not forced_catalog:
         should_send_catalog = False
     logger.warning(
