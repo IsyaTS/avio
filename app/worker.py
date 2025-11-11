@@ -229,6 +229,35 @@ def _log_smart_reply_diag(channel: str, tenant_id: int, lead_id: int | None, rep
             % (channel, tenant_id, lead_id if lead_id is not None else 0, exc)
         )
 
+async def _ask_llm_with_fallback(
+    messages: list[dict[str, Any]],
+    *,
+    tenant_id: int,
+    contact_id: int | None,
+    channel: str,
+) -> str:
+    try:
+        return await asyncio.wait_for(
+            ask_llm(
+                messages,
+                tenant=tenant_id,
+                contact_id=contact_id,
+                channel=channel,
+            ),
+            timeout=SMART_REPLY_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        log(
+            "event=smart_reply_timeout channel=%s tenant=%s contact=%s timeout=%.1f"
+            % (channel, tenant_id, contact_id or 0, SMART_REPLY_TIMEOUT_SECONDS)
+        )
+    except Exception as exc:
+        log(
+            "event=smart_reply_failed channel=%s tenant=%s contact=%s stage=ask_llm error=%s fallback=1"
+            % (channel, tenant_id, contact_id or 0, exc)
+        )
+    return FALLBACK_REPLY_TEXT
+
 AVITO_CHAT_CACHE: Dict[int, str] = {}
 
 def _digits(s: str) -> str:
@@ -984,19 +1013,12 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
-    try:
-        reply = await ask_llm(
-            messages,
-            tenant=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="telegram",
-        )
-    except Exception as exc:
-        log(
-            "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=ask_llm error=%s"
-            % (tenant_id, lead_id, exc)
-        )
-        return
+    reply = await _ask_llm_with_fallback(
+        messages,
+        tenant_id=tenant_id,
+        contact_id=refer_id if refer_id > 0 else None,
+        channel="telegram",
+    )
 
     reply_text = (reply or "").strip()
     _log_smart_reply_diag("telegram", tenant_id, lead_id, reply)
@@ -1213,19 +1235,12 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
-    try:
-        reply = await ask_llm(
-            messages,
-            tenant=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="whatsapp",
-        )
-    except Exception as exc:
-        log(
-            "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=ask_llm error=%s"
-            % (tenant_id, lead_id, exc)
-        )
-        return
+    reply = await _ask_llm_with_fallback(
+        messages,
+        tenant_id=tenant_id,
+        contact_id=refer_id if refer_id > 0 else None,
+        channel="whatsapp",
+    )
 
     reply_text = (reply or "").strip()
     _log_smart_reply_diag("whatsapp", tenant_id, lead_id, reply)
@@ -1409,19 +1424,12 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
-    try:
-        reply = await ask_llm(
-            messages,
-            tenant=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="avito",
-        )
-    except Exception as exc:
-        log(
-            "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=ask_llm error=%s"
-            % (tenant_id, lead_id, exc)
-        )
-        return
+    reply = await _ask_llm_with_fallback(
+        messages,
+        tenant_id=tenant_id,
+        contact_id=refer_id if refer_id > 0 else None,
+        channel="avito",
+    )
 
     reply_text = (reply or "").strip()
     _log_smart_reply_diag("avito", tenant_id, lead_id, reply)
