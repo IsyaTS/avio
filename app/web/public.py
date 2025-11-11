@@ -3791,17 +3791,19 @@ def catalog_view_public(tenant: int, request: Request):
     if tenant_id <= 0:
         raise HTTPException(status_code=404, detail="not_found")
 
-    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
-    pdf_path = tenant_root / "uploads" / "catalog.pdf"
-    has_catalog = pdf_path.exists() and pdf_path.is_file()
+    try:
+        meta = core_module.resolve_catalog_pdf_meta(tenant_id)
+    except Exception:
+        meta = None
 
     catalog_url: str | None = None
     catalog_size_mb: float | None = None
     catalog_updated_at: int | None = None
+    has_catalog = bool(meta)
 
-    if has_catalog:
+    if meta:
         try:
-            stat = pdf_path.stat()
+            stat = pathlib.Path(meta["absolute_path"]).stat()
         except OSError:
             stat = None
         if stat:
@@ -3852,24 +3854,18 @@ def public_catalog_file(tenant: int):
     if tenant_id <= 0:
         raise HTTPException(status_code=404, detail="not_found")
 
-    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
-    pdf_path = tenant_root / "uploads" / "catalog.pdf"
+    try:
+        meta = core_module.resolve_catalog_pdf_meta(tenant_id)
+    except Exception:
+        meta = None
+    if not meta:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    pdf_path = pathlib.Path(meta["absolute_path"])
     if not pdf_path.exists() or not pdf_path.is_file():
         raise HTTPException(status_code=404, detail="not_found")
 
-    filename = pdf_path.name
-    try:
-        cfg = core_module.load_tenant(tenant_id)
-    except Exception:
-        cfg = {}
-    if isinstance(cfg, dict):
-        integrations = cfg.get("integrations") if isinstance(cfg.get("integrations"), dict) else {}
-        if isinstance(integrations, dict):
-            uploaded_meta = integrations.get("uploaded_catalog")
-            if isinstance(uploaded_meta, dict):
-                alt_name = str(uploaded_meta.get("original") or "").strip()
-                if alt_name:
-                    filename = alt_name
+    filename = str(meta.get("filename") or pdf_path.name)
 
     response = FileResponse(
         pdf_path,
@@ -3878,6 +3874,11 @@ def public_catalog_file(tenant: int):
     )
     response.headers.setdefault("Cache-Control", "public, max-age=300")
     response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+    updated_at = meta.get("updated_at")
+    if isinstance(updated_at, int):
+        response.headers["Last-Modified"] = time.strftime(
+            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(updated_at)
+        )
     return response
 
 

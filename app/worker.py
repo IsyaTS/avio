@@ -62,6 +62,7 @@ from app.common import (
     normalize_username,
     smart_reply_enabled,
     whitelist_contains_number,
+    default_fallback_reply,
 )
 from app.core import build_llm_messages, ask_llm
 from app.integrations import avito as avito_integration
@@ -117,6 +118,12 @@ except Exception:
     INBOX_BLOCK_TIMEOUT = 5
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 QUEUES = [OUTBOX_QUEUE_KEY]
+
+SMART_REPLY_TIMEOUT_SECONDS = _env_float("SMART_REPLY_TIMEOUT_SECONDS", 25.0)
+if SMART_REPLY_TIMEOUT_SECONDS < 5.0:
+    SMART_REPLY_TIMEOUT_SECONDS = 5.0
+
+FALLBACK_REPLY_TEXT = (default_fallback_reply() or "").strip()
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
 

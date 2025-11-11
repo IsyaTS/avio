@@ -60,8 +60,6 @@ INCOMING_DEDUP_TTL = 60 * 60 * 24  # 24 hours
 router = APIRouter()
 
 
-ask_llm = core.ask_llm  # type: ignore[attr-defined]
-build_llm_messages = core.build_llm_messages  # type: ignore[attr-defined]
 settings = core.settings  # type: ignore[attr-defined]
 
 
