@@ -8,6 +8,7 @@ import logging
 import random
 import re
 from typing import Any, Dict, Tuple, Mapping, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -605,16 +606,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 attachment_path = None
                 attachment_size = 0
                 attachment_mtime = 0
-    file_url = ""
-    if request is not None:
-        try:
-            file_raw = str(request.url_for("public_catalog_file", tenant=str(tenant)))
-            if attachment_mtime:
-                separator = "&" if "?" in file_raw else "?"
-                file_raw = f"{file_raw}{separator}v={attachment_mtime}"
-            file_url = file_raw
-        except Exception:
-            file_url = ""
+    file_url = _build_public_catalog_url(tenant, attachment_mtime, request)
     use_file_link = False
     if file_url and attachment_size and CATALOG_INLINE_LIMIT_BYTES and attachment_size > CATALOG_INLINE_LIMIT_BYTES:
         use_file_link = True
@@ -812,6 +804,49 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     await _enqueue_incoming_event()
     return _ok({"queued": False, "leadId": lead_id, "smartReply": True})
+
+
+def _build_public_catalog_url(
+    tenant: int,
+    attachment_mtime: int,
+    request: Request | None,
+) -> str:
+    base_override = (getattr(settings, "APP_PUBLIC_URL", "") or "").strip()
+    raw_url = ""
+    if request is not None:
+        try:
+            raw_url = str(request.url_for("public_catalog_file", tenant=str(tenant)))
+        except Exception:
+            raw_url = ""
+    if not raw_url:
+        fallback_base = (
+            base_override
+            or getattr(settings, "APP_INTERNAL_URL", "") 
+            or getattr(settings, "APP_PUBLIC_URL", "")
+            or "http://app:8000"
+        )
+        raw_url = f"{fallback_base.rstrip('/')}/pub/catalog/file/{tenant}"
+    if base_override:
+        try:
+            current = urlsplit(raw_url)
+            target = urlsplit(base_override)
+            path = current.path or f"/pub/catalog/file/{tenant}"
+            query = current.query
+            raw_url = urlunsplit(
+                (
+                    target.scheme or current.scheme or "https",
+                    target.netloc or current.netloc,
+                    path,
+                    query,
+                    current.fragment,
+                )
+            )
+        except Exception:
+            raw_url = f"{base_override.rstrip('/')}/pub/catalog/file/{tenant}"
+    if attachment_mtime:
+        separator = "&" if "?" in raw_url else "?"
+        raw_url = f"{raw_url}{separator}v={attachment_mtime}"
+    return raw_url
 
 
 def _extract_token(request: Request) -> str:
