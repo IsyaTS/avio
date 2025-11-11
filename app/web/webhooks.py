@@ -625,7 +625,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "прайс на",
         )
     )
-    should_send_catalog = bool(attachment) and (forced_catalog or not catalog_already_sent)
+    has_attachment = bool(attachment)
+    has_file_link = bool(file_url)
+    should_send_catalog = (has_attachment or has_file_link) and (forced_catalog or not catalog_already_sent)
     if price_question and not forced_catalog:
         should_send_catalog = False
     logger.warning(
@@ -664,7 +666,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "message_id": message_id or str(lead_id),
             "attachments": [attachment] if attachment else [],
         }
-        catalog_out["attachment"] = attachment
+        if attachment:
+            catalog_out["attachment"] = attachment
         if resolved_provider == "telegram":
             if telegram_user_id:
                 catalog_out["telegram_user_id"] = int(telegram_user_id)
