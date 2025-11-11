@@ -1468,6 +1468,20 @@ def _normalize_catalog_pdf_candidate(
         stat = target.stat()
     except OSError:
         return None
+
+    type_hint = str(candidate.get("type") or candidate.get("kind") or "").strip().lower()
+    mime_hint = str(
+        candidate.get("mime")
+        or candidate.get("mime_type")
+        or candidate.get("mimetype")
+        or ""
+    ).strip().lower()
+    extension = safe.suffix.lower()
+    if type_hint and type_hint not in {"pdf", "document"}:
+        return None
+    if not type_hint and extension not in {".pdf", ".pdfx"} and "pdf" not in mime_hint:
+        return None
+
     filename = str(candidate.get("original") or candidate.get("filename") or safe.name)
     mime = str(
         candidate.get("mime")
