@@ -173,7 +173,6 @@ def _reset_session(channel: str, tenant_id: int) -> None:
     contact_id = _contact_id_for(channel, tenant_id)
     core.reset_sales_state(tenant_id, lead_id)
     core.reset_sales_state(tenant_id, contact_id)
-    worker_module._catalog_sent_cache.clear()
     _redis_client.delete(core._state_key(tenant_id, lead_id))
     _redis_client.delete(core._state_key(tenant_id, contact_id))
 
