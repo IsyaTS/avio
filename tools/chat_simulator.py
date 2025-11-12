@@ -6,10 +6,16 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import yaml
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from app import core
 from app.common import OUTBOX_QUEUE_KEY
