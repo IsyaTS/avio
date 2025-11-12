@@ -7,7 +7,6 @@ import asyncio
 import fnmatch
 import json
 import time
-from dataclasses import dataclass
 from typing import Any
 
 from app import core
@@ -103,7 +102,7 @@ def _fake_with_sync_redis(func: Any, default: Any = None) -> Any:
         return default
 
 
-def _stub_get_or_create_by_peer(
+async def _stub_get_or_create_by_peer(
     *,
     channel: str,
     lead_id_hint: int | None = None,
