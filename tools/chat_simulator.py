@@ -7,18 +7,16 @@ import asyncio
 import fnmatch
 import json
 import time
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from app import core
 from app.common import OUTBOX_QUEUE_KEY
 from app import worker as worker_module
 
-TENANT_ID = 1
-WHATSAPP_LEAD_ID = 100
-WHATSAPP_CONTACT_ID = 9001
-AVITO_LEAD_ID = 200
-AVITO_CONTACT_ID = 9002
-PHONE_JID = "79991112233@c.us"
+WHATSAPP_JID = "79991112233@c.us"
 AVITO_CHAT_ID = "demo-chat-1"
 
 
@@ -111,8 +109,8 @@ async def _stub_get_or_create_by_peer(
 ) -> int:
     if lead_id_hint:
         return lead_id_hint
-    mapping = {"whatsapp": WHATSAPP_LEAD_ID, "avito": AVITO_LEAD_ID}
-    return mapping.get(channel.lower(), WHATSAPP_LEAD_ID)
+    mapping = {"whatsapp": _lead_id_for("whatsapp", TENANT_ID_DEFAULT), "avito": _lead_id_for("avito", TENANT_ID_DEFAULT)}
+    return mapping.get(channel.lower(), mapping["whatsapp"])
 
 
 async def _stub_async(*_: Any, **__: Any) -> None:
