@@ -1,0 +1,22 @@
+api.avio.website {
+  reverse_proxy http://app:8000
+}
+
+static.avio.website {
+  reverse_proxy http://app:8000
+
+  header {
+    # Разрешаем подключения fetch к своему origin
+    Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    # Явно уберём H3 на время диагностики
+    -Alt-Svc
+  }
+
+  @js_assets {
+    path *.js
+  }
+  header @js_assets {
+    Content-Type "application/javascript"
+    X-Content-Type-Options "nosniff"
+  }
+}

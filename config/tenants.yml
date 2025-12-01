@@ -1,0 +1,16 @@
+tenants:
+  - id: 1
+    name: "Tenant 1"
+    waweb:
+      host: "waweb-1"
+      port: 9001
+  - id: 2
+    name: "Tenant 2"
+    waweb:
+      host: "waweb-2"
+      port: 9001
+  - id: 3
+    name: "Tenant 3"
+    waweb:
+      host: "waweb-3"
+      port: 9001

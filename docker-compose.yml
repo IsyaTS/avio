@@ -1,0 +1,196 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server","--appendonly","yes"]
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    image: avio/app:local
+    env_file: .env
+    environment:
+      TENANTS_DIR: /data/tenants
+      TG_SESSIONS_DIR: /app/tg-sessions
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
+      WORKER_BASE_URL: http://tgworker:8000
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WAWEB_BASE_URL: http://waweb:9001
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      PUBLIC_KEY: ${PUBLIC_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      OUTBOX_ENABLED: ${OUTBOX_ENABLED:-false}
+      SMART_REPLY_ENABLED: ${SMART_REPLY_ENABLED:-1}
+      AI_ENABLED: ${AI_ENABLED:-1}
+      TENANT: ${TENANT:-1}
+      OUTBOX_DB_WORKER: "0"
+      PYTHONPATH: /app
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      ASSET_VERSION: ${ASSET_VERSION:-}
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-45}
+      PLANNER_ATTEMPTS: ${PLANNER_ATTEMPTS:-3}
+    depends_on: [redis, postgres]
+    working_dir: /app
+    command: gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:8000 apps.api.main:app --timeout 60 --keep-alive 20
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./data/tenants:/data/tenants
+      - ./tg-sessions:/app/tg-sessions:ro
+    ports:
+      - "0.0.0.0:${APP_PORT:-8000}:8000"
+
+  worker:
+    image: avio/app:local
+    env_file: .env
+    environment:
+      TENANTS_DIR: /data/tenants
+      PYTHONPATH: /app
+      WORKER_BASE_URL: http://tgworker:8000
+      TG_SESSIONS_DIR: /app/tg-sessions
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      OUTBOX_ENABLED: 1
+      OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-*}
+      OUTBOX_QUEUE: outbox
+      OUT_QUEUES: outbox,outbox:send
+      APP_BASE_URL: ${APP_BASE_URL:-http://app:8000}
+      TENANT: ${TENANT:-1}
+      SMART_REPLY_ENABLED: ${SMART_REPLY_ENABLED:-1}
+      AI_ENABLED: ${AI_ENABLED:-1}
+      INBOX_ENABLED: 1
+      INCOMING_QUEUE_KEY: inbox:message_in
+      OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-45}
+      PLANNER_ATTEMPTS: ${PLANNER_ATTEMPTS:-3}
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_started
+    working_dir: /app
+    command: ["/bin/sh","-c","uvicorn apps.worker.http:app --host 0.0.0.0 --port 8000 & exec python -m apps.worker.main"]
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL","curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./data:/data
+      - ./data/tenants:/data/tenants
+      - ./tg-sessions:/app/tg-sessions:rw
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+
+  tgworker:
+    image: avio/app:local
+    env_file: .env
+    environment:
+      - TG_SESSIONS_DIR=/app/tg-sessions
+      - TENANT_DEFAULT=${TENANT_DEFAULT:-1}
+      - TENANTS_DIR=/data/tenants
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_QR_TTL=${TELEGRAM_QR_TTL:-120}
+      - TELEGRAM_QR_POLL_INTERVAL=${TELEGRAM_QR_POLL_INTERVAL:-1s}
+      - PUBLIC_KEY=${PUBLIC_KEY}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - APP_BASE_URL=http://app:8000
+      - APP_INTERNAL_URL=http://app:8000
+      - TENANT=${TENANT:-1}
+      - PYTHONPATH=/app
+      - TG_DEVICE_MODEL=${TG_DEVICE_MODEL:-Avio tgworker}
+      - TG_SYSTEM_VERSION=${TG_SYSTEM_VERSION:-1.0}
+      - TG_APP_VERSION=${TG_APP_VERSION:-1.0}
+      - TG_LANG=ru
+      - TZ=Europe/Moscow
+    depends_on: [app, redis]
+    working_dir: /app
+    command: ["uvicorn","apps.tgworker.api:create_app","--host","0.0.0.0","--port","8000","--workers","1"]
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    restart: unless-stopped
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD-SHELL","curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./data/tenants:/data/tenants
+      - ./tg-sessions:/app/tg-sessions:rw
+
+  wabaileys:
+    build:
+      context: .
+      dockerfile: apps/wabaileys/Dockerfile
+    image: avio/wabaileys:local
+    env_file: .env
+    environment:
+      PORT: 9002
+      STATE_DIR: /data/wabaileys
+      APP_BASE_URL: http://app:8000
+      APP_WEBHOOK_URL: http://app:8000/webhook
+      LOG_LEVEL: ${WABA_LOG_LEVEL:-info}
+    volumes:
+      - ./data/wabaileys:/data/wabaileys
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL","curl -fsS http://127.0.0.1:9002/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "0.0.0.0:9002:9002"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare-tunnel
+    entrypoint: ["cloudflared","--no-autoupdate"]
+    command: ["tunnel","run","--token","${CF_TOKEN}"]
+    env_file: [ .env ]
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  pg-data:
+  redis-data:
+  caddy-data:
+  caddy-config:

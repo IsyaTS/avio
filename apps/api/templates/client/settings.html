@@ -1,0 +1,221 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Настройки клиента' %}
+{% set tenant_id = tenant_id if tenant_id is defined else tenant %}
+{% set client_state_source = state_payload if state_payload is defined else state %}
+{% set client_state_fallback = {
+    'tenant': tenant,
+    'key': key,
+    'urls': {
+        'settings_get': '/pub/settings/get',
+        'settings_save': '/pub/settings/save',
+        'save_settings': '/client/' ~ tenant_id ~ '/settings/save',
+        'save_persona': '/client/' ~ tenant_id ~ '/persona',
+        'upload_catalog': '/pub/catalog/upload',
+        'csv_get': '/pub/catalog/csv',
+        'csv_save': '/pub/catalog/csv',
+        'training_upload': '/pub/training/upload',
+        'training_status': '/pub/training/status',
+        'whatsapp_export': '/pub/wa/export'
+    }
+} %}
+{% set client_state_json = (client_state_source if client_state_source is defined else client_state_fallback) | tojson %}
+{% set extra_head %}
+<script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
+<script src="/static/js/boot.js?v={{ asset_version }}" defer></script>
+<script src="/static/js/catalog-upload.js?v={{ asset_version }}" defer></script>
+<script src="/static/js/client-settings.js?v={{ asset_version }}" defer></script>
+{% endset %}
+{% block content %}
+<section class="surface stack" data-testid="client-hero">
+    <div class="toolbar">
+        <div class="stack" style="gap: 10px;">
+            <h1 class="section-title">Личный кабинет клиента АНТИЛОПА</h1>
+            <p class="section-subtitle">Обновляйте паспорт бренда, голос ассистента и каталоги. Изменения активируются сразу после сохранения.</p>
+            <div class="status-text muted">Версия клиентских настроек: {{ client_settings_version }}</div>
+        </div>
+        <div class="hint" style="min-width: 220px;">
+            <div style="font-size:0.85rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em;">Tenant</div>
+            <div style="font-size:1.1rem; font-weight:600;">#{{ tenant }}</div>
+            <div style="margin-top:8px; font-size:0.9rem;">Ключ доступа:</div>
+            <code class="code-inline" style="margin-top:4px;">{{ key }}</code>
+        </div>
+    </div>
+</section>
+
+<section class="surface stack" data-testid="client-passport">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Паспорт бренда</h2>
+        <p class="section-subtitle">Эти данные используются в промптах, чтобы ассистент звучал как ваша команда.</p>
+    </div>
+    <form id="settings-form" class="form-grid" autocomplete="off">
+        <label>
+            <span class="label">Бренд</span>
+            <input name="brand" value="{{ form.brand }}" placeholder="Например: Avio">
+        </label>
+        <label>
+            <span class="label">Имя ассистента</span>
+            <input name="agent" value="{{ form.agent }}" placeholder="Ирина">
+        </label>
+        <label>
+            <span class="label">Город</span>
+            <input name="city" value="{{ form.city }}" placeholder="Москва">
+        </label>
+        <label>
+            <span class="label">Валюта</span>
+            <input name="currency" value="{{ form.currency }}" placeholder="₽">
+        </label>
+        <label>
+            <span class="label">Тональность</span>
+            <input name="tone" value="{{ form.tone }}" placeholder="Дружелюбная, помогает и поддерживает">
+        </label>
+    </form>
+    <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <button id="save-settings" type="button" class="btn">Сохранить паспорт</button>
+        <span id="settings-message" class="status-text"></span>
+    </div>
+</section>
+
+<section class="surface stack" data-testid="client-persona">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Персона</h2>
+        <p class="section-subtitle">Полноценное описание ассистента. Лучше дать 1–2 абзаца.</p>
+    </div>
+    <textarea id="persona-text" rows="10" class="textarea" placeholder="Опишите голос, цели и стиль общения ассистента">{{ persona }}</textarea>
+    <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <button id="save-persona" type="button" class="btn">Сохранить</button>
+        <button id="download-config" type="button" class="btn btn--secondary">Скачать JSON конфиг</button>
+        <span id="persona-message" class="status-text"></span>
+      </div>
+    </section>
+    <script>
+      (function () {
+        const tenant = {{ tenant | tojson }};
+        const key = {{ key | tojson }};
+        const button = document.getElementById('save-persona');
+        const messageNode = document.getElementById('persona-message');
+        const textarea = document.getElementById('persona-text');
+        if (!button || !textarea) return;
+        button.addEventListener('click', async () => {
+          if (!textarea.value) {
+            if (messageNode) {
+              messageNode.textContent = 'Текст пустой';
+              messageNode.className = 'status-text alert';
+            }
+            return;
+          }
+          try {
+            const url = `/client/${tenant}/persona${key ? `?k=${encodeURIComponent(key)}` : ''}`;
+            const response = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: textarea.value }),
+            });
+            if (!response.ok) {
+              const detail = await response.text();
+              throw new Error(detail || 'Ошибка сохранения');
+            }
+            if (messageNode) {
+              messageNode.textContent = 'Персона сохранена';
+              messageNode.className = 'status-text muted';
+            }
+          } catch (error) {
+            if (messageNode) {
+              messageNode.textContent = `Ошибка: ${error.message || error}`;
+              messageNode.className = 'status-text alert';
+            }
+          }
+        });
+      })();
+    </script>
+
+<section class="surface stack" data-testid="client-catalog">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Каталог: загрузка и CSV</h2>
+        <p class="section-subtitle">Загрузите CSV, XLS(X) или PDF. После PDF создадим CSV автоматически.</p>
+    </div>
+    <form id="catalog-upload-form"
+          class="stack"
+          style="gap: 12px;">
+        <label class="stack" style="gap: 6px;">
+            <span class="label">Файл каталога (CSV, XLSX/XLS, PDF)</span>
+            <input id="catalog-file" type="file" name="file" accept=".csv,.xlsx,.xls,.pdf" required>
+        </label>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+            <button class="btn" type="button" id="catalog-upload-btn">Загрузить</button>
+        </div>
+        <div id="catalog-upload-status" class="status-text"></div>
+        <progress id="catalog-upload-progress" value="0" max="100" hidden></progress>
+    </form>
+
+    {# CSV editor placeholder is separate to keep message visible when таблица скрыта #}
+    <div id="csv-empty" class="surface status-text hidden" style="padding: 16px;" hidden></div>
+    <div id="csv-section" class="surface stack hidden" style="gap: 12px;" hidden>
+        <h3 class="section-title" style="font-size:1.1rem;">CSV редактор</h3>
+        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            <button class="btn btn--secondary" id="csv-refresh" type="button">Обновить данные</button>
+            <button class="btn btn--secondary" id="csv-add-row" type="button">Добавить строку</button>
+            <button class="btn" id="csv-save" type="button">Сохранить CSV</button>
+            <span id="csv-message" class="status-text"></span>
+        </div>
+        <div id="csv-container" class="surface hidden" style="padding:0; overflow:auto;" hidden>
+            <table id="csv-table" class="table">
+                <thead></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<section class="surface stack" data-testid="client-training">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Диалоги и обучение</h2>
+        <p class="section-subtitle">Добавляйте собственные примеры диалогов, чтобы ассистент отвечал по вашим сценариям.</p>
+    </div>
+
+    <div class="surface stack" style="gap:12px;">
+        <h3 class="section-title" style="font-size:1.1rem;">Загрузка своих диалогов</h3>
+        <form id="training-upload-form"
+              class="stack"
+              style="gap:12px;"
+              method="post"
+              enctype="multipart/form-data"
+              action="/client/{{ tenant_id }}/training/upload{% if key %}?k={{ key }}{% endif %}"
+              data-upload-url="/client/{{ tenant_id }}/training/upload{% if key %}?k={{ key }}{% endif %}">
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Файл (JSONL/JSON/CSV)</span>
+                <input id="training-upload-file" type="file" name="file" accept=".jsonl,.json,.csv" required>
+            </label>
+            <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+                <button type="submit" class="btn btn--secondary" id="training-upload-submit" data-role="training-upload-submit">Загрузить диалоги</button>
+                <button type="button" id="training-check-status" class="btn btn--secondary">Проверить статус</button>
+                <span id="training-upload-message" class="status-text"></span>
+            </div>
+            <div id="training-status" class="status-text muted"></div>
+        </form>
+    </div>
+
+    <div class="surface stack" style="gap:12px;">
+        <h3 class="section-title" style="font-size:1.1rem;">Экспорт переписок из БД</h3>
+        <div class="status-text">WhatsApp: ZIP с отдельными .txt по диалогу</div>
+        <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Дней назад</span>
+                <input id="exp-days" type="number" value="30" min="0" step="1">
+            </label>
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Количество диалогов</span>
+                <input id="exp-limit" type="number" value="200" min="1" step="1">
+            </label>
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Сообщений на диалог</span>
+                <input id="exp-per" type="number" value="0" min="0" step="1">
+            </label>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+            <button class="btn" id="export-download" type="button">Скачать архив</button>
+            <span id="export-status" class="status-text"></span>
+        </div>
+    </div>
+</section>
+
+{% endblock %}

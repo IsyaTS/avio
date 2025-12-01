@@ -1,0 +1,2693 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import io
+import logging
+import math
+import os
+import secrets
+import sys
+import time
+import random
+from dataclasses import dataclass, is_dataclass, asdict
+from datetime import date, datetime, time as time_type, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Sequence
+
+import httpx
+import json
+try:  # pragma: no cover - optional dependency
+    import orjson
+except ImportError:  # pragma: no cover - fallback to stdlib json
+    orjson = None  # type: ignore[assignment]
+import qrcode
+from fastapi.encoders import jsonable_encoder
+from prometheus_client import Counter, Gauge
+from libs.core.lib.transport_utils import message_in_asdict
+from libs.core.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
+from libs.core.schemas import Attachment, MessageIn
+from .metrics import TG_LOGIN_SUCCESS_TOTAL
+import telethon
+from telethon import TelegramClient, events, functions
+from telethon.errors import BadRequestError, RPCError, SessionPasswordNeededError
+from telethon.errors.rpcerrorlist import (
+    AuthKeyUnregisteredError,
+    FloodWaitError,
+    PasswordHashInvalidError,
+    PhonePasswordFloodError,
+)
+from telethon.tl.functions.contacts import ImportContactsRequest
+from telethon.tl.types import InputPhoneContact
+from telethon.tl.types import InputPeerSelf
+
+try:  # pragma: no cover - optional dependency
+    from pyrogram import Client as PyrogramClient  # type: ignore
+except ImportError:  # pragma: no cover - pyrogram not installed
+    PyrogramClient = None  # type: ignore[assignment]
+
+
+LOGGER = logging.getLogger("tgworker")
+LOGGER.setLevel(logging.INFO)
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    LOGGER.addHandler(handler)
+
+PY_VERSION = sys.version.replace("\n", " ")
+TELETHON_VERSION = getattr(telethon, "__version__", "unknown")
+
+
+async def _log_self_identity_async(tenant: int, client: TelegramClient) -> None:
+    try:
+        me_obj = await client.get_me()
+        me_id = getattr(me_obj, "id", None)
+        LOGGER.info(
+            "tg_diag:self_identity tenant_id=%s self_id=%s username=%s phone=%s py=%s telethon=%s",
+            tenant,
+            me_id,
+            getattr(me_obj, "username", None),
+            getattr(me_obj, "phone", None),
+            PY_VERSION,
+            TELETHON_VERSION,
+        )
+    except Exception:
+        LOGGER.exception("tg_diag:self_identity_failed tenant_id=%s", tenant)
+
+def _resolve_session_dir() -> Path:
+    raw = (os.getenv("TG_SESSIONS_DIR") or "/app/tg-sessions").strip()
+    path = Path(raw)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        fallback = Path("/tmp/tg-sessions")
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+    return path
+
+
+SESSION_DIR = _resolve_session_dir()
+LEGACY_DIR = Path("/app/data/tg-sessions")
+
+
+def session_file_path(tenant: int) -> Path:
+    return SESSION_DIR / f"{tenant}.session"
+
+
+QR_LOGIN_TIMEOUT = 120.0
+NEEDS_2FA_TTL = 90.0
+PASSWORD_FLOOD_BACKOFF = 60.0
+INCOMING_DEDUP_TTL = 300.0
+
+
+SESSIONS_AUTHORIZED = Gauge(
+    "tgworker_sessions_authorized",
+    "Number of Telegram sessions that are currently authorized",
+)
+SESSIONS_WAITING = Gauge(
+    "tgworker_sessions_waiting",
+    "Number of Telegram sessions waiting for QR authorization",
+)
+SESSIONS_NEEDS_2FA = Gauge(
+    "tgworker_sessions_needs_2fa",
+    "Number of Telegram sessions requiring manual 2FA confirmation",
+)
+EVENT_ERRORS = Counter(
+    "tgworker_events_errors_total",
+    "Telegram session errors grouped by category",
+    labelnames=("type",),
+)
+AUTHORIZED_DISCONNECTS = Counter(
+    "tgworker_authorized_disconnect_total",
+    "Authorized Telegram sessions transitioning to disconnected without manual logout",
+    labelnames=("reason",),
+)
+
+
+def _ensure_datetime_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return _ensure_datetime_iso(value)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, time_type):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump())
+        except Exception:
+            return _json_safe(dict(value))  # type: ignore[arg-type]
+    if hasattr(value, "dict"):
+        try:
+            return _json_safe(value.dict())  # type: ignore[call-arg]
+        except Exception:
+            pass
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, set):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+class QRNotFoundError(Exception):
+    """Raised when a QR identifier is unknown or no longer tracked."""
+
+
+class QRExpiredError(Exception):
+    """Raised when a QR identifier has expired and should not be reused."""
+
+    def __init__(self, valid_until: Optional[float] = None) -> None:
+        super().__init__("qr_expired")
+        self.valid_until = valid_until
+
+
+class NotAuthorizedError(RuntimeError):
+    """Raised when a Telegram session is not authorized."""
+
+
+@dataclass(slots=True)
+class CachedQR:
+    tenant_id: int
+    png: bytes
+    expires_at: Optional[float] = None
+
+
+@dataclass(slots=True)
+class SessionState:
+    tenant_id: int
+    status: str = "disconnected"
+    qr_id: Optional[str] = None
+    qr_png: Optional[bytes] = None
+    qr_url: Optional[str] = None
+    qr_expires_at: Optional[float] = None
+    qr_login: Optional[Any] = None
+    waiting_task: Optional[asyncio.Task[Any]] = None
+    last_error: Optional[str] = None
+    needs_2fa: bool = False
+    awaiting_password: bool = False
+    needs_2fa_expires_at: Optional[float] = None
+    last_seen: Optional[float] = None
+    can_restart: bool = False
+    last_needs_2fa_at: Optional[float] = None
+    restart_pending: bool = False
+    twofa_pending: bool = False
+    twofa_since: Optional[float] = None
+    twofa_backoff_until: Optional[float] = None
+
+
+@dataclass(slots=True)
+class TwoFASubmitResult:
+    status_code: int
+    body: Dict[str, Any]
+    headers: Optional[Dict[str, str]] = None
+
+    def is_ok(self) -> bool:
+        return 200 <= int(self.status_code) < 300
+
+
+@dataclass(slots=True)
+class LoginFlowStateSnapshot:
+    tenant_id: int
+    status: str
+    qr_id: Optional[str]
+    qr_login_obj: Any | None
+    qr_png: Optional[bytes]
+    qr_expires_at: Optional[float]
+    last_error: Optional[str]
+    needs_2fa: bool
+    twofa_pending: bool
+
+
+class TelegramSessionManager:
+    """Manage tenant-scoped TelegramClient instances and QR flows."""
+
+    def __init__(
+        self,
+        api_id: int,
+        api_hash: str,
+        sessions_dir: Path | None,
+        webhook_url: str,
+        *,
+        device_model: str,
+        system_version: str,
+        app_version: str,
+        lang_code: str,
+        system_lang_code: str,
+        webhook_token: str | None = None,
+        http_timeout: float = 10.0,
+        qr_ttl: float,
+        qr_poll_interval: float,
+    ) -> None:
+        global SESSION_DIR
+        self._api_id = api_id
+        self._api_hash = api_hash
+        resolved_dir = sessions_dir if sessions_dir is not None else SESSION_DIR
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+        SESSION_DIR = resolved_dir
+        self._sessions_dir = resolved_dir
+        LOGGER.info("stage=session_dir_resolved path=%s", self._sessions_dir)
+        self._webhook_url = webhook_url.rstrip("/")
+        self._webhook_token = (webhook_token or "").strip() or None
+        self._admin_token = (os.getenv("ADMIN_TOKEN") or "").strip() or None
+        self._device_model = device_model
+        self._system_version = system_version
+        self._app_version = app_version
+        self._lang_code = lang_code
+        self._system_lang_code = system_lang_code
+        self._http = httpx.AsyncClient(timeout=http_timeout)
+        self._clients: Dict[int, TelegramClient] = {}
+        self._states: Dict[int, SessionState] = {}
+        self._qr_lookup: Dict[str, int] = {}
+        self._qr_cache: Dict[str, CachedQR] = {}
+        self._expired_qr: Dict[str, float] = {}
+        self._lock = asyncio.Lock()
+        self._loop = asyncio.get_event_loop()
+        self._started = False
+        self._delivered_incoming: int = 0
+        self._self_ids: Dict[int, Any] = {}
+        self._incoming_dedup: Dict[int, Dict[int, float]] = {}
+        self._bootstrap_task: Optional[asyncio.Task[None]] = None
+        self._bootstrap_ready = asyncio.Event()
+        self._bootstrap_ready.set()
+        self._qr_ttl = max(float(qr_ttl), 1.0)
+        self._qr_poll_interval = max(float(qr_poll_interval), 0.1)
+
+    async def start(self, *, background: bool = False) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._bootstrap_ready.clear()
+        if background:
+            self._bootstrap_task = self._loop.create_task(self._run_bootstrap())
+        else:
+            await self._run_bootstrap()
+
+    async def wait_until_ready(self) -> None:
+        await self._bootstrap_ready.wait()
+        task = self._bootstrap_task
+        if task and not task.done():
+            with contextlib.suppress(Exception):
+                await task
+
+    async def _run_bootstrap(self) -> None:
+        try:
+            self._migrate_legacy_sessions()
+            await self._bootstrap_existing_sessions()
+        except Exception:
+            LOGGER.exception("stage=bootstrap_failed_unhandled")
+        finally:
+            self._bootstrap_task = None
+            self._bootstrap_ready.set()
+
+    def _migrate_legacy_sessions(self) -> None:
+        if not LEGACY_DIR.exists():
+            return
+        for legacy_path in sorted(LEGACY_DIR.glob("*.session")):
+            tenant = self._tenant_from_path(legacy_path)
+            if tenant is not None:
+                target_path = session_file_path(tenant)
+            else:
+                target_path = SESSION_DIR / legacy_path.name
+            if target_path.exists():
+                continue
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                legacy_path.replace(target_path)
+                tenant = tenant if tenant is not None else self._tenant_from_path(target_path)
+                LOGGER.info(
+                    "stage=session_migrated tenant_id=%s source=%s dest=%s",
+                    tenant if tenant is not None else "unknown",
+                    legacy_path,
+                    target_path,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "stage=session_migrate_failed source=%s dest=%s",
+                    legacy_path,
+                    target_path,
+                )
+
+    @staticmethod
+    def _qr_valid_until_ms(expires_at: Optional[float]) -> Optional[int]:
+        if not expires_at:
+            return None
+        try:
+            return int(expires_at * 1000)
+        except Exception:
+            return None
+
+    def _cleanup_expired_qr_cache(self) -> None:
+        cutoff = time.time() - 900
+        stale_keys = [
+            qr_id for qr_id, ts in list(self._expired_qr.items()) if ts and ts < cutoff
+        ]
+        for qr_id in stale_keys:
+            self._expired_qr.pop(qr_id, None)
+        now = time.time()
+        expired_cached = [
+            qr_id
+            for qr_id, cached in list(self._qr_cache.items())
+            if cached.expires_at and cached.expires_at <= now
+        ]
+        for qr_id in expired_cached:
+            self._qr_cache.pop(qr_id, None)
+            self._qr_lookup.pop(qr_id, None)
+
+    def _ensure_session_permissions(self, path: Path) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+        except OSError as exc:
+            LOGGER.warning(
+                "event=session_file_prepare_failed path=%s error=%s",
+                path,
+                exc,
+            )
+            return
+        try:
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            LOGGER.warning(
+                "event=session_file_chmod_failed path=%s error=%s",
+                path,
+                exc,
+            )
+
+    def _set_status(
+        self,
+        tenant: int,
+        state: SessionState,
+        status: str,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        previous = state.status or "unknown"
+        if previous != status:
+            if reason:
+                LOGGER.info(
+                    "stage=state_transition tenant_id=%s from=%s to=%s reason=%s",
+                    tenant,
+                    previous,
+                    status,
+                    reason,
+                )
+            else:
+                LOGGER.info(
+                    "stage=state_transition tenant_id=%s from=%s to=%s",
+                    tenant,
+                    previous,
+                    status,
+                )
+        if previous != "authorized" and status == "authorized":
+            TG_LOGIN_SUCCESS_TOTAL.inc()
+        if previous == "authorized" and status == "disconnected" and reason != "manual_logout":
+            AUTHORIZED_DISCONNECTS.labels(reason or "unknown").inc()
+        state.status = status
+
+    def _record_qr_expired(
+        self,
+        tenant: int,
+        qr_id: str,
+        valid_until: Optional[float],
+        *,
+        reason: str,
+    ) -> None:
+        if not qr_id:
+            return
+        self._cleanup_expired_qr_cache()
+        timestamp = valid_until if valid_until is not None else time.time()
+        self._expired_qr[qr_id] = timestamp
+        LOGGER.info(
+            "event=qr_expired tenant_id=%s qr_id=%s qr_valid_until=%s reason=%s",
+            tenant,
+            qr_id,
+            self._qr_valid_until_ms(valid_until),
+            reason,
+        )
+        if reason in {"needs_2fa", "timeout", "expired"}:
+            self._qr_cache.pop(qr_id, None)
+            self._qr_lookup.pop(qr_id, None)
+
+    @staticmethod
+    def _clear_qr_state_locked(state: SessionState) -> None:
+        state.qr_id = None
+        state.qr_png = None
+        state.qr_url = None
+        state.qr_expires_at = None
+        state.qr_login = None
+
+    def _expire_qr_locked(
+        self,
+        tenant: int,
+        state: SessionState,
+        *,
+        reason: str,
+        set_error: bool = True,
+    ) -> None:
+        if not state.qr_id:
+            return
+        qr_id = state.qr_id
+        self._qr_lookup.pop(qr_id, None)
+        valid_until = state.qr_expires_at
+        self._record_qr_expired(tenant, qr_id, valid_until, reason=reason)
+        self._clear_qr_state_locked(state)
+        if set_error:
+            state.last_error = "qr_expired"
+        state.can_restart = True
+
+    def _extend_needs_2fa_ttl(self, state: SessionState) -> None:
+        state.needs_2fa_expires_at = time.time() + NEEDS_2FA_TTL
+
+    def _expire_needs_2fa_locked(
+        self, tenant: int, state: SessionState
+    ) -> tuple[Optional[TelegramClient], bool]:
+        client: Optional[TelegramClient] = None
+        expired = False
+        if (
+            state.status == "needs_2fa"
+            and state.needs_2fa_expires_at is not None
+            and state.needs_2fa_expires_at <= time.time()
+        ):
+            client = self._clients.pop(tenant, None)
+            if state.qr_id:
+                self._qr_cache.pop(state.qr_id, None)
+                self._qr_lookup.pop(state.qr_id, None)
+            self._set_status(tenant, state, "disconnected", reason="twofa_timeout")
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.needs_2fa_expires_at = None
+            state.qr_id = None
+            state.qr_png = None
+            state.qr_expires_at = None
+            state.waiting_task = None
+            state.qr_login = None
+            state.last_error = "twofa_timeout"
+            state.last_seen = time.time()
+            state.restart_pending = False
+            state.last_needs_2fa_at = None
+            state.twofa_pending = False
+            state.twofa_since = None
+            state.twofa_backoff_until = None
+            state.can_restart = True
+            expired = True
+            LOGGER.warning(
+                "stage=needs_2fa_timeout event=twofa_timeout tenant_id=%s", tenant
+            )
+            self._update_metrics()
+        return client, expired
+
+    async def shutdown(self) -> None:
+        await self.wait_until_ready()
+        task = self._bootstrap_task
+        if task and not task.done():
+            with contextlib.suppress(Exception):
+                await task
+        for state in list(self._states.values()):
+            if state.waiting_task and not state.waiting_task.done():
+                state.waiting_task.cancel()
+        for client in list(self._clients.values()):
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+        self._clients.clear()
+        await self._http.aclose()
+        self._update_metrics()
+
+    async def _bootstrap_existing_sessions(self) -> None:
+        for path in sorted(self._sessions_dir.glob("*.session")):
+            tenant = self._tenant_from_path(path)
+            if tenant is None:
+                continue
+            try:
+                client = self._build_client(tenant)
+                await client.connect()
+                if await client.is_user_authorized():
+                    self._clients[tenant] = client
+                    self._states[tenant] = SessionState(
+                        tenant_id=tenant, status="authorized", last_seen=time.time()
+                    )
+                    self._register_handlers(tenant, client)
+                    LOGGER.info("stage=authorized tenant_id=%s event=bootstrap", tenant)
+                else:
+                    await client.disconnect()
+                    self._states[tenant] = SessionState(tenant_id=tenant, status="disconnected")
+            except Exception as exc:
+                LOGGER.exception("stage=bootstrap_failed tenant_id=%s error=%s", tenant, exc)
+                self._states[tenant] = SessionState(
+                    tenant_id=tenant,
+                    status="disconnected",
+                    last_error=str(exc),
+                )
+        self._update_metrics()
+
+    def _build_client(self, tenant: int) -> TelegramClient:
+        session_path = session_file_path(tenant)
+        self._ensure_session_permissions(session_path)
+        return TelegramClient(
+            str(session_path),
+            self._api_id,
+            self._api_hash,
+            device_model=self._device_model,
+            system_version=self._system_version,
+            app_version=self._app_version,
+            lang_code=self._lang_code,
+            system_lang_code=self._system_lang_code,
+        )
+
+    def _tenant_from_path(self, path: Path) -> Optional[int]:
+        try:
+            return int(path.stem)
+        except ValueError:
+            return None
+
+    def _mark_authkey_unregistered_locked(
+        self, tenant: int, state: SessionState
+    ) -> Optional[asyncio.Task[Any]]:
+        task: Optional[asyncio.Task[Any]] = None
+        if state.waiting_task and not state.waiting_task.done():
+            task = state.waiting_task
+        state.waiting_task = None
+        if state.qr_id:
+            self._qr_lookup.pop(state.qr_id, None)
+        self._clear_qr_state_locked(state)
+        self._set_status(tenant, state, "disconnected", reason="authkey_unregistered")
+        state.last_error = "authkey_unregistered"
+        state.needs_2fa = False
+        state.awaiting_password = False
+        state.needs_2fa_expires_at = None
+        state.restart_pending = False
+        state.last_needs_2fa_at = None
+        state.last_seen = time.time()
+        state.twofa_pending = False
+        state.twofa_since = None
+        state.qr_login = None
+        state.can_restart = True
+        self._states[tenant] = state
+        self._update_metrics()
+        return task
+
+    def _hard_reset_state_locked(
+        self,
+        tenant: int,
+        state: Optional[SessionState] = None,
+        *,
+        reason: str = "reset",
+        remove_session_file: bool = False,
+    ) -> tuple[SessionState, Optional[TelegramClient], Optional[asyncio.Task[Any]], bool]:
+        state = state or self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+        client = self._clients.pop(tenant, None)
+        task: Optional[asyncio.Task[Any]] = None
+        if state.waiting_task and not state.waiting_task.done():
+            task = state.waiting_task
+        state.waiting_task = None
+        if state.qr_id:
+            self._expire_qr_locked(tenant, state, reason=reason, set_error=False)
+        removed_session_file = False
+        if remove_session_file:
+            path = session_file_path(tenant)
+            try:
+                path.unlink()
+                removed_session_file = True
+            except FileNotFoundError:
+                removed_session_file = False
+        self._set_status(tenant, state, "disconnected", reason=reason)
+        self._clear_qr_state_locked(state)
+        state.last_error = None
+        state.needs_2fa = False
+        if state.needs_2fa_expires_at and state.needs_2fa_expires_at <= time.time():
+            state.awaiting_password = False
+            state.needs_2fa_expires_at = None
+        state.can_restart = False
+        state.restart_pending = False
+        state.last_needs_2fa_at = None
+        state.last_seen = time.time()
+        state.twofa_pending = False
+        state.twofa_since = None
+        state.twofa_backoff_until = None
+        state.qr_login = None
+        self._states[tenant] = state
+        self._update_metrics()
+        return state, client, task, removed_session_file
+
+    async def hard_reset(self, tenant: int) -> SessionState:
+        await self.wait_until_ready()
+        client_to_disconnect: Optional[TelegramClient] = None
+        task_to_cancel: Optional[asyncio.Task[Any]] = None
+        removed_file = False
+        async with self._lock:
+            state = self._states.get(tenant)
+            state, client_to_disconnect, task_to_cancel, removed_file = self._hard_reset_state_locked(
+                tenant, state, reason="hard_reset", remove_session_file=True
+            )
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_to_cancel
+        if client_to_disconnect:
+            with contextlib.suppress(Exception):
+                await client_to_disconnect.disconnect()
+        LOGGER.info(
+            "stage=hard_reset tenant_id=%s removed_session_file=%s", tenant, removed_file
+        )
+        return self._states[tenant]
+
+    async def start_session(self, tenant: int, *, force: bool = False) -> SessionState:
+        await self.wait_until_ready()
+        clients_to_disconnect: list[TelegramClient] = []
+        tasks_to_cancel: list[asyncio.Task[Any]] = []
+        result_state: Optional[SessionState] = None
+        resume_client: Optional[TelegramClient] = None
+        should_resume = False
+        need_new_qr = force
+
+        async with self._lock:
+            state = self._states.get(tenant)
+            if state:
+                client, _ = self._expire_needs_2fa_locked(tenant, state)
+                if client:
+                    clients_to_disconnect.append(client)
+            state = self._states.get(tenant) or state or SessionState(tenant_id=tenant)
+            self._states[tenant] = state
+            state.restart_pending = False
+
+            if state.twofa_pending:
+                state.can_restart = False
+                result_state = state
+                need_new_qr = False
+            else:
+                session_path = session_file_path(tenant)
+                if not force and session_path.exists():
+                    client = self._clients.get(tenant)
+                    if client is None:
+                        client = self._build_client(tenant)
+                        self._clients[tenant] = client
+                    resume_client = client
+                    should_resume = True
+
+                if not need_new_qr:
+                    if state.status == "authorized":
+                        result_state = state
+                    elif state.status == "needs_2fa":
+                        if state.twofa_pending:
+                            state.can_restart = False
+                            result_state = state
+                            should_resume = False
+                        else:
+                            need_new_qr = True
+                    else:
+                        stuck_statuses = {"disconnected", "error", "twofa_timeout"}
+                        if state.status in stuck_statuses:
+                            if state.last_error == "twofa_timeout" and not force:
+                                result_state = state
+                            else:
+                                need_new_qr = True
+                        elif state.last_error == "twofa_timeout" and not force:
+                            result_state = state
+                        elif state.last_error == "qr_login_timeout":
+                            need_new_qr = True
+                        elif state.status == "waiting_qr":
+                            if not state.qr_id or (
+                                state.waiting_task and state.waiting_task.done()
+                            ):
+                                need_new_qr = True
+                            else:
+                                should_resume = False
+                        else:
+                            need_new_qr = True
+
+                if result_state is None and not need_new_qr:
+                    result_state = state
+
+                if (
+                    not force
+                    and result_state is state
+                    and state.last_error == "twofa_timeout"
+                ):
+                    should_resume = False
+
+        need_new_qr_after_resume = need_new_qr
+        if (
+            should_resume
+            and resume_client is not None
+            and (result_state is None or result_state.status != "authorized")
+        ):
+            try:
+                if not resume_client.is_connected():
+                    await resume_client.connect()
+                if await resume_client.is_user_authorized():
+                    async with self._lock:
+                        state = self._states.setdefault(
+                            tenant, SessionState(tenant_id=tenant)
+                        )
+                        self._set_status(tenant, state, "authorized", reason="session_resume")
+                        state.last_error = None
+                        state.needs_2fa = False
+                        state.awaiting_password = False
+                        state.needs_2fa_expires_at = None
+                        state.last_seen = time.time()
+                        state.waiting_task = None
+                        state.qr_login = None
+                        state.can_restart = False
+                        state.twofa_pending = False
+                        state.twofa_since = None
+                        self._states[tenant] = state
+                        self._update_metrics()
+                        result_state = state
+                    self._register_handlers(tenant, resume_client)
+                    LOGGER.info("stage=authorized tenant_id=%s event=session_resume", tenant)
+                    need_new_qr_after_resume = False
+                else:
+                    need_new_qr_after_resume = True
+            except AuthKeyUnregisteredError:
+                EVENT_ERRORS.labels("authkey_unregistered").inc()
+                async with self._lock:
+                    state = self._states.setdefault(
+                        tenant, SessionState(tenant_id=tenant)
+                    )
+                    task = self._mark_authkey_unregistered_locked(tenant, state)
+                    if task:
+                        tasks_to_cancel.append(task)
+                    stored = self._clients.pop(tenant, None)
+                    if stored and stored is not resume_client:
+                        clients_to_disconnect.append(stored)
+                    result_state = state
+                clients_to_disconnect.append(resume_client)
+                LOGGER.warning(
+                    "stage=authkey_unregistered tenant_id=%s source=start_session_resume",
+                    tenant,
+                )
+                need_new_qr_after_resume = False
+            except Exception as exc:
+                LOGGER.exception(
+                    "stage=session_resume_failed tenant_id=%s error=%s", tenant, exc
+                )
+                async with self._lock:
+                    state = self._states.setdefault(
+                        tenant, SessionState(tenant_id=tenant)
+                    )
+                    state.last_error = str(exc)
+                    state.last_seen = time.time()
+                    self._states[tenant] = state
+                stored = self._clients.pop(tenant, None)
+                if stored and stored is not resume_client:
+                    clients_to_disconnect.append(stored)
+                clients_to_disconnect.append(resume_client)
+                need_new_qr_after_resume = True
+
+        async with self._lock:
+            state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+            if state.twofa_pending:
+                state.can_restart = False
+                result_state = state
+                need_new_qr_after_resume = False
+
+            if need_new_qr_after_resume:
+                state, client, task, _ = self._hard_reset_state_locked(
+                    tenant, state, reason="regen", remove_session_file=False
+                )
+                if client:
+                    clients_to_disconnect.append(client)
+                if task:
+                    tasks_to_cancel.append(task)
+
+                client = self._build_client(tenant)
+                phase = "connect"
+                try:
+                    await client.connect()
+                    self._clients[tenant] = client
+                    phase = "qr_login"
+                    qr_login = await client.qr_login()
+                except AuthKeyUnregisteredError:
+                    EVENT_ERRORS.labels("authkey_unregistered").inc()
+                    state = self._states.setdefault(
+                        tenant, SessionState(tenant_id=tenant)
+                    )
+                    task = self._mark_authkey_unregistered_locked(tenant, state)
+                    if task:
+                        tasks_to_cancel.append(task)
+                    self._clients.pop(tenant, None)
+                    clients_to_disconnect.append(client)
+                    LOGGER.warning(
+                        "stage=authkey_unregistered tenant_id=%s source=start_session_%s",
+                        tenant,
+                        phase,
+                    )
+                    result_state = state
+                else:
+                    png = self._build_qr_png(qr_login.url)
+                    qr_id = secrets.token_urlsafe(16)
+
+                    qr_expires_at = time.time() + self._qr_ttl
+                    expires_raw = getattr(qr_login, "expires", None)
+                    if isinstance(expires_raw, (int, float)):
+                        qr_expires_at = float(expires_raw)
+                    else:
+                        try:
+                            qr_expires_at = float(expires_raw.timestamp())  # type: ignore[arg-type]
+                        except Exception:
+                            pass
+
+                    self._set_status(tenant, state, "waiting_qr", reason="qr_login")
+                    state.qr_id = qr_id
+                    state.qr_png = png
+                    state.qr_url = qr_login.url
+                    state.qr_expires_at = qr_expires_at
+                    state.qr_login = qr_login
+                    state.last_error = None
+                    state.needs_2fa = False
+                    state.awaiting_password = False
+                    state.needs_2fa_expires_at = None
+                    state.can_restart = False
+                    state.restart_pending = False
+                    state.last_needs_2fa_at = None
+                    state.last_seen = time.time()
+                    state.twofa_pending = False
+                    state.twofa_since = None
+                    state.twofa_backoff_until = None
+                    self._qr_lookup[qr_id] = tenant
+                    LOGGER.info("stage=qr_start tenant_id=%s qr_id=%s", tenant, qr_id)
+                    LOGGER.info(
+                        "event=qr_new tenant_id=%s qr_id=%s qr_valid_until=%s",
+                        tenant,
+                        qr_id,
+                        self._qr_valid_until_ms(state.qr_expires_at),
+                    )
+
+                    state.waiting_task = None
+                    self._update_metrics()
+                    self._qr_cache[qr_id] = CachedQR(
+                        tenant_id=tenant,
+                        png=png,
+                        expires_at=state.qr_expires_at,
+                    )
+                    result_state = state
+            else:
+                self._update_metrics()
+                if result_state is None:
+                    result_state = state
+
+        for task in tasks_to_cancel:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for client in clients_to_disconnect:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+
+        if result_state is None:
+            result_state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+
+        return result_state
+
+    async def poll_login(self, tenant: int) -> None:
+        await self.wait_until_ready()
+        async with self._lock:
+            state = self._states.get(tenant)
+            if not state:
+                return
+            if state.status != "waiting_qr" or state.qr_login is None:
+                return
+            if state.waiting_task and not state.waiting_task.done():
+                return
+            client = self._clients.get(tenant)
+            if client is None:
+                LOGGER.warning("stage=poll_login_skip tenant_id=%s reason=no_client", tenant)
+                return
+            qr_login = state.qr_login
+            task = self._loop.create_task(
+                self._poll_login_loop(tenant, client, state, qr_login)
+            )
+            state.waiting_task = task
+
+    async def _poll_login_loop(self, tenant: int, client: TelegramClient, state: SessionState, qr_login) -> None:
+        qr_id = state.qr_id
+        valid_until = state.qr_expires_at or (time.time() + self._qr_ttl)
+        deadline = valid_until if valid_until else time.time() + self._qr_ttl
+        poll_step = self._qr_poll_interval
+        try:
+            while True:
+                now = time.time()
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                timeout = poll_step if poll_step < remaining else remaining
+                if timeout <= 0:
+                    raise asyncio.TimeoutError
+                timeout = min(max(timeout, 0.1), remaining)
+                try:
+                    result = await qr_login.wait(timeout=timeout)
+                except asyncio.TimeoutError:
+                    continue
+                if result is None:
+                    await asyncio.sleep(0.1)
+                    continue
+                LOGGER.info("stage=qr_ready tenant_id=%s", tenant)
+                self._set_status(tenant, state, "authorized", reason="qr_ready")
+                state.last_error = None
+                if qr_id:
+                    LOGGER.info(
+                        "event=qr_scanned tenant_id=%s qr_id=%s qr_valid_until=%s",
+                        tenant,
+                        qr_id,
+                        self._qr_valid_until_ms(valid_until),
+                    )
+                    self._record_qr_expired(tenant, qr_id, valid_until, reason="scanned")
+                self._clear_qr_state_locked(state)
+                state.needs_2fa = False
+                state.last_seen = time.time()
+                state.twofa_pending = False
+                state.twofa_since = None
+                state.twofa_backoff_until = None
+                self._register_handlers(tenant, client)
+                LOGGER.info("stage=authorized tenant_id=%s", tenant)
+                break
+        except SessionPasswordNeededError:
+            self._set_status(tenant, state, "needs_2fa", reason="qr_password_required")
+            state.needs_2fa = True
+            state.awaiting_password = True
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="needs_2fa")
+            self._clear_qr_state_locked(state)
+            state.last_error = "two_factor_required"
+            state.last_seen = time.time()
+            self._extend_needs_2fa_ttl(state)
+            timestamp_sec = time.time()
+            state.last_needs_2fa_at = timestamp_sec
+            state.twofa_pending = True
+            state.twofa_since = int(timestamp_sec * 1000.0)
+            state.qr_id = None
+            state.qr_expires_at = None
+            state.qr_login = None
+            state.can_restart = False
+            state.twofa_backoff_until = None
+            EVENT_ERRORS.labels("needs_2fa").inc()
+            LOGGER.warning(
+                "stage=needs_2fa state=needs_2fa ttl=%ss tenant_id=%s",
+                int(NEEDS_2FA_TTL),
+                tenant,
+            )
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant, client, source="poll_login_loop"
+            )
+        except asyncio.TimeoutError:
+            self._set_status(tenant, state, "disconnected", reason="qr_login_timeout")
+            state.last_error = "qr_login_timeout"
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.twofa_pending = False
+            state.twofa_since = None
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="timeout")
+            self._clear_qr_state_locked(state)
+            EVENT_ERRORS.labels("timeout").inc()
+            LOGGER.warning("stage=qr_timeout event=qr_timeout tenant_id=%s", tenant)
+        except asyncio.CancelledError:
+            LOGGER.info("stage=qr_cancel tenant_id=%s", tenant)
+            raise
+        except RPCError as exc:
+            self._set_status(tenant, state, "disconnected", reason="rpc_error")
+            state.last_error = str(exc)
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.twofa_pending = False
+            state.twofa_since = None
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="rpc_error")
+            self._clear_qr_state_locked(state)
+            EVENT_ERRORS.labels("rpc_error").inc()
+            LOGGER.error("stage=send_fail tenant_id=%s error=%s", tenant, exc)
+        except Exception as exc:
+            self._set_status(tenant, state, "disconnected", reason="exception")
+            state.last_error = str(exc)
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.twofa_pending = False
+            state.twofa_since = None
+            if qr_id:
+                self._record_qr_expired(tenant, qr_id, valid_until, reason="exception")
+            self._clear_qr_state_locked(state)
+            EVENT_ERRORS.labels("exception").inc()
+            LOGGER.exception("stage=qr_fail tenant_id=%s", tenant)
+        finally:
+            if qr_id:
+                self._qr_lookup.pop(qr_id, None)
+            state.waiting_task = None
+            state.qr_login = None
+            self._update_metrics()
+
+
+
+    async def submit_password(self, tenant: int, password: str) -> TwoFASubmitResult:
+        await self.wait_until_ready()
+        secret = password or ""
+        if not secret.strip():
+            return TwoFASubmitResult(
+                status_code=400,
+                body={"error": "password_required"},
+            )
+
+        client_to_disconnect: Optional[TelegramClient] = None
+        expired_twofa = False
+        client: Optional[TelegramClient] = None
+        early_result: Optional[TwoFASubmitResult] = None
+
+        async with self._lock:
+            state = self._states.get(tenant)
+            if not state:
+                return TwoFASubmitResult(
+                    status_code=409,
+                    body={"error": "twofa_not_pending"},
+                )
+
+            client_to_disconnect, expired_twofa = self._expire_needs_2fa_locked(tenant, state)
+            if not expired_twofa:
+                awaiting_valid = (
+                    state.awaiting_password
+                    and (
+                        state.needs_2fa_expires_at is None
+                        or state.needs_2fa_expires_at > time.time()
+                    )
+                )
+                accepts_password = (
+                    state.status == "needs_2fa" or state.twofa_pending or awaiting_valid
+                )
+                if not accepts_password:
+                    if state.status == "authorized":
+                        early_result = TwoFASubmitResult(
+                            status_code=200,
+                            body={"ok": True},
+                        )
+                    else:
+                        early_result = TwoFASubmitResult(
+                            status_code=409,
+                            body={"error": "twofa_not_pending"},
+                        )
+                else:
+                    now = time.time()
+                    if state.twofa_backoff_until and state.twofa_backoff_until > now:
+                        retry_after = max(
+                            1, int(math.ceil(state.twofa_backoff_until - now))
+                        )
+                        detail = f"flood_wait {retry_after}"
+                        LOGGER.warning(
+                            "stage=password_failed event=backoff_active tenant_id=%s detail=%s",
+                            tenant,
+                            detail,
+                        )
+                        early_result = TwoFASubmitResult(
+                            status_code=429,
+                            body={
+                                "error": "flood_wait",
+                                "retry_after": retry_after,
+                                "detail": detail,
+                            },
+                            headers={"Retry-After": str(retry_after)},
+                        )
+                    else:
+                        client = self._clients.get(tenant)
+                        if client is None:
+                            client = self._build_client(tenant)
+                            await client.connect()
+                            self._clients[tenant] = client
+                        elif not client.is_connected():
+                            await client.connect()
+
+                        self._set_status(tenant, state, "needs_2fa", reason="password_submit")
+                        state.needs_2fa = True
+                        state.awaiting_password = True
+                        state.twofa_pending = True
+                        if state.twofa_since is None:
+                            state.twofa_since = int(time.time() * 1000.0)
+                        state.qr_id = None
+                        state.qr_png = None
+                        state.qr_expires_at = None
+                        state.last_seen = time.time()
+                        state.last_needs_2fa_at = time.time()
+                        state.twofa_backoff_until = None
+                        self._extend_needs_2fa_ttl(state)
+
+        if client_to_disconnect:
+            with contextlib.suppress(Exception):
+                await client_to_disconnect.disconnect()
+
+        if expired_twofa:
+            return TwoFASubmitResult(
+                status_code=409,
+                body={"error": "twofa_expired"},
+            )
+
+        if early_result is not None:
+            return early_result
+
+        if client is None:
+            return TwoFASubmitResult(
+                status_code=400,
+                body={"error": "password_exception", "detail": "client_unavailable"},
+            )
+
+        async def _mark_failure(
+            reason: str,
+            error_code: str,
+            *,
+            backoff: Optional[float] = None,
+            last_error: Optional[str] = None,
+        ) -> None:
+            async with self._lock:
+                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                self._set_status(tenant, state, "needs_2fa", reason=reason)
+                state.needs_2fa = True
+                state.awaiting_password = True
+                state.last_error = last_error if last_error is not None else error_code
+                state.last_seen = time.time()
+                self._extend_needs_2fa_ttl(state)
+                state.twofa_pending = True
+                state.twofa_since = int(time.time() * 1000.0)
+                if backoff and backoff > 0:
+                    state.twofa_backoff_until = time.time() + backoff
+                else:
+                    state.twofa_backoff_until = None
+                self._update_metrics()
+
+        async def _failure_response(
+            *,
+            status: int,
+            error: str,
+            event: str,
+            detail: Optional[str] = None,
+            retry_after: Optional[int] = None,
+            backoff: Optional[float] = None,
+            exc: Optional[Exception] = None,
+            extra: Optional[Dict[str, Any]] = None,
+            last_error: Optional[str] = None,
+        ) -> TwoFASubmitResult:
+            EVENT_ERRORS.labels("password_failed").inc()
+            await _mark_failure(event, error, backoff=backoff, last_error=last_error)
+            parts = [f"stage=password_failed event={event} tenant_id={tenant}"]
+            detail_value = detail or error
+            if retry_after is not None:
+                parts.append(f"retry_after={retry_after}")
+            if detail_value:
+                parts.append(f"detail={detail_value}")
+            message = " ".join(parts)
+            if event == "password_exception":
+                if exc is not None:
+                    LOGGER.exception(message, exc_info=exc)
+                else:
+                    LOGGER.error(message)
+            else:
+                LOGGER.warning(message)
+            headers = None
+            body: Dict[str, Any] = {"error": error}
+            if detail_value:
+                body["detail"] = detail_value
+            if retry_after is not None:
+                body["retry_after"] = int(retry_after)
+                if status == 429:
+                    headers = {"Retry-After": str(int(retry_after))}
+            if extra:
+                body.update(extra)
+            return TwoFASubmitResult(status_code=status, body=body, headers=headers)
+
+        async def _sign_in_with_compat() -> None:
+            try:
+                await client.sign_in(password=secret)
+            except TypeError as exc_type:
+                message = str(exc_type) if exc_type else ""
+                if "unexpected keyword" in message or "logout_other_sessions" in message:
+                    LOGGER.warning(
+                        "stage=password_warn event=sign_in_retry tenant_id=%s detail=%s",
+                        tenant,
+                        message or "unexpected_keyword",
+                    )
+                    await client.sign_in(secret)
+                    return
+                raise
+
+        def _is_network_or_mtproto_error(exc: Exception) -> bool:
+            if isinstance(exc, RPCError):
+                return True
+            if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+                return True
+            return False
+
+        max_attempts = 2
+        signed_in = False
+        for attempt in range(max_attempts):
+            try:
+                await client(functions.account.GetPasswordRequest())
+            except BadRequestError as exc_bad_request:
+                detail = str(exc_bad_request) or "get_password_bad_request"
+                return await _failure_response(
+                    status=400,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_bad_request,
+                    last_error="password_exception",
+                )
+            except Exception as exc:
+                status = 502 if _is_network_or_mtproto_error(exc) else 400
+                detail = str(exc) or "get_password_failed"
+                return await _failure_response(
+                    status=status,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc,
+                    last_error="password_exception",
+                )
+
+            try:
+                await _sign_in_with_compat()
+                signed_in = True
+                break
+            except PasswordHashInvalidError:
+                return await _failure_response(
+                    status=400,
+                    error="password_invalid",
+                    event="password_invalid",
+                    detail="password_invalid",
+                    last_error="password_exception",
+                )
+            except PhonePasswordFloodError as exc_flood:
+                wait_seconds = getattr(exc_flood, "seconds", None)
+                if wait_seconds is None or int(wait_seconds) <= 0:
+                    wait_seconds = int(PASSWORD_FLOOD_BACKOFF)
+                wait_seconds = max(1, int(wait_seconds))
+                return await _failure_response(
+                    status=429,
+                    error="flood_wait",
+                    event="phone_password_flood",
+                    retry_after=wait_seconds,
+                    backoff=float(wait_seconds),
+                    detail=f"phone_password_flood {wait_seconds}",
+                    extra={"ttl": int(wait_seconds)},
+                )
+            except FloodWaitError as exc_wait:
+                wait_seconds = max(
+                    1, int(getattr(exc_wait, "seconds", PASSWORD_FLOOD_BACKOFF))
+                )
+                return await _failure_response(
+                    status=429,
+                    error="flood_wait",
+                    event="flood_wait",
+                    retry_after=wait_seconds,
+                    backoff=float(wait_seconds),
+                    detail=f"flood_wait {wait_seconds}",
+                    extra={"ttl": int(wait_seconds)},
+                )
+            except BadRequestError as exc_bad:
+                message = (
+                    getattr(exc_bad, "message", None)
+                    or getattr(exc_bad, "rpc_error", None)
+                    or str(exc_bad)
+                    or ""
+                )
+                normalized = message.upper()
+                if "SRP_ID_INVALID" in normalized:
+                    if attempt + 1 >= max_attempts:
+                        return await _failure_response(
+                            status=409,
+                            error="srp_invalid",
+                            event="srp_invalid",
+                            detail="srp_invalid",
+                        )
+                    LOGGER.warning(
+                        "stage=password_failed event=srp_invalid tenant_id=%s attempt=%s detail=srp_invalid",
+                        tenant,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+                return await _failure_response(
+                    status=400,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=message or "bad_request_error",
+                    exc=exc_bad,
+                    last_error="password_exception",
+                )
+            except RPCError as exc_rpc:
+                detail = str(exc_rpc) or "telegram_error"
+                return await _failure_response(
+                    status=502,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_rpc,
+                    last_error="password_exception",
+                )
+            except SessionPasswordNeededError:
+                return TwoFASubmitResult(
+                    status_code=409,
+                    body={"error": "twofa_pending"},
+                )
+            except TypeError as exc_type:
+                detail = str(exc_type) or "type_error"
+                return await _failure_response(
+                    status=400,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_type,
+                    last_error="password_exception",
+                )
+            except Exception as exc_generic:
+                detail = str(exc_generic) or "exception"
+                status = 502 if _is_network_or_mtproto_error(exc_generic) else 400
+                return await _failure_response(
+                    status=status,
+                    error="password_exception",
+                    event="password_exception",
+                    detail=detail,
+                    exc=exc_generic,
+                    last_error="password_exception",
+                )
+
+        if not signed_in:
+            return await _failure_response(
+                status=400,
+                error="password_exception",
+                event="password_exception",
+                detail="password_loop_exhausted",
+                last_error="password_exception",
+            )
+
+        async with self._lock:
+            state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+            self._set_status(tenant, state, "authorized", reason="password_ok")
+            state.qr_id = None
+            state.qr_png = None
+            state.qr_expires_at = None
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.needs_2fa_expires_at = None
+            state.last_error = None
+            state.last_seen = time.time()
+            state.waiting_task = None
+            state.last_needs_2fa_at = None
+            state.twofa_pending = False
+            state.twofa_since = None
+            state.can_restart = False
+            state.twofa_backoff_until = None
+            self._register_handlers(tenant, client)
+            self._update_metrics()
+
+        with contextlib.suppress(Exception):
+            session_obj = getattr(client, "session", None)
+            if session_obj is not None:
+                session_obj.save()
+
+        self._ensure_session_permissions(session_file_path(tenant))
+        LOGGER.info(
+            "stage=password_ok event=password_ok tenant_id=%s detail=password_ok",
+            tenant,
+        )
+        return TwoFASubmitResult(status_code=200, body={"ok": True})
+    def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
+        if getattr(client, "_avio_handlers_registered", False):
+            return
+
+        # Log identity and versions once per tenant at handler registration.
+        try:
+            asyncio.create_task(_log_self_identity_async(tenant, client))
+        except Exception:
+            LOGGER.exception("tg_diag:self_identity_failed tenant_id=%s", tenant)
+
+        @client.on(events.NewMessage(incoming=True, outgoing=True))
+        async def _on_message(event):
+            try:
+                # Diagnostic: log all private new messages before branching.
+                try:
+                    message = getattr(event, "message", None)
+                    LOGGER.info(
+                        "tg_diag:new_message tenant_id=%s msg_id=%s is_private=%s out=%s sender_id=%s chat_id=%s peer_id=%s self_id=%s class=%s",
+                        tenant,
+                        getattr(message, "id", None),
+                        getattr(event, "is_private", None),
+                        getattr(message, "out", None),
+                        getattr(message, "sender_id", None),
+                        getattr(message, "chat_id", None),
+                        getattr(event, "peer_id", None),
+                        self._self_ids.get(tenant),
+                        event.__class__.__name__,
+                    )
+                except Exception:
+                    LOGGER.exception("tg_diag:new_message_log_failed tenant_id=%s", tenant)
+                if getattr(event, "out", False):
+                    await self._handle_outgoing_message(tenant, client, event)
+                else:
+                    await self._handle_new_message(tenant, client, event)
+            except asyncio.CancelledError:
+                raise
+            except AuthKeyUnregisteredError:
+                await self._handle_authkey_unregistered(
+                    tenant, client, source="on_message_wrapper"
+                )
+            except RPCError as exc:
+                error = str(exc) or "telegram_error"
+                EVENT_ERRORS.labels("event_rpc_error").inc()
+                LOGGER.error(
+                    "stage=event_handler_error tenant_id=%s source=on_message_wrapper error=%s",
+                    tenant,
+                    error,
+                )
+                await self._handle_event_disconnect(
+                    tenant,
+                    client,
+                    error=error,
+                    source="on_message_wrapper",
+                )
+            except Exception as exc:
+                EVENT_ERRORS.labels("event_exception").inc()
+                LOGGER.exception(
+                    "stage=event_handler_error tenant_id=%s source=on_message_wrapper",
+                    tenant,
+                )
+                await self._handle_event_disconnect(
+                    tenant,
+                    client,
+                    error=str(exc) or "event_handler_error",
+                    source="on_message_wrapper",
+                )
+
+        client._avio_handlers_registered = True  # type: ignore[attr-defined]
+
+        @client.on(events.Raw)
+        async def _on_raw_update(update):
+            try:
+                update_cls = update.__class__.__name__
+                user_id = getattr(update, "user_id", None) or getattr(update, "from_id", None)
+                peer_id = getattr(update, "peer_id", None) or getattr(update, "peer", None)
+                msg_id = getattr(update, "id", None) or getattr(update, "message_id", None)
+                out_flag = getattr(update, "out", None)
+                try:
+                    flags = getattr(update, "flags", None)
+                except Exception:
+                    flags = None
+                LOGGER.info(
+                    "tg_diag:raw_update tenant_id=%s type=%s msg_id=%s out=%s user_id=%s peer_id=%s flags=%s",
+                    tenant,
+                    update_cls,
+                    msg_id,
+                    out_flag,
+                    user_id,
+                    peer_id,
+                    flags,
+                )
+            except Exception:
+                LOGGER.exception("tg_diag:raw_update_log_failed tenant_id=%s", tenant)
+
+    async def _handle_outgoing_message(self, tenant: int, client: TelegramClient, event: events.NewMessage.Event) -> None:
+        message = event.message
+        if message is None:
+            return
+
+        # Resolve peer early to reuse in multiple branches.
+        peer_id = None
+        try:
+            if message.peer_id is not None:
+                peer_id = (
+                    getattr(message.peer_id, "user_id", None)
+                    or getattr(message.peer_id, "channel_id", None)
+                    or getattr(message.peer_id, "chat_id", None)
+                )
+        except AttributeError:
+            peer_id = getattr(message, "chat_id", None)
+        if peer_id is None:
+            return
+
+        try:
+            LOGGER.info(
+                "tg_diag:outgoing_handler tenant_id=%s msg_id=%s out=%s sender_id=%s peer_id=%s self_id=%s",
+                tenant,
+                getattr(message, "id", None),
+                getattr(message, "out", None),
+                getattr(message, "sender_id", None),
+                peer_id,
+                self._self_ids.get(tenant),
+            )
+        except Exception:
+            LOGGER.exception("tg_diag:outgoing_log_failed tenant_id=%s", tenant)
+
+        text_raw = getattr(message, "message", None)
+        if text_raw is None:
+            text_value = ""
+        elif isinstance(text_raw, str):
+            text_value = text_raw
+        else:
+            text_value = str(text_raw)
+
+        ts = getattr(message, "date", None)
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts_unix = int(ts.timestamp())
+        else:
+            ts_unix = int(time.time())
+
+        me = self._self_ids.get(tenant)
+        if me is None:
+            with contextlib.suppress(Exception):
+                me_info = await client.get_me()
+                me = getattr(me_info, "id", None)
+                if me is not None:
+                    self._self_ids[tenant] = me
+
+        normalized = MessageIn(
+            tenant=tenant,
+            channel="telegram",
+            from_id=peer_id,
+            to=me or peer_id,
+            text=text_value,
+            attachments=[],
+            ts=ts_unix,
+            message_id=getattr(message, "id", None),
+            provider_raw=jsonable_encoder(_json_safe(getattr(message, "to_dict", lambda: {})())),
+            telegram_user_id=peer_id if isinstance(peer_id, int) else None,
+            peer=str(peer_id) if peer_id is not None else None,
+            peer_id=int(peer_id) if isinstance(peer_id, int) else None,
+        )
+        await self._send_webhook(normalized, extra={"manager": True, "out": True})
+
+    async def _handle_new_message(self, tenant: int, client: TelegramClient, event: events.NewMessage.Event) -> None:
+        is_private = bool(getattr(event, "is_private", False))
+        if not is_private:
+            is_group = bool(getattr(event, "is_group", False))
+            is_channel = bool(getattr(event, "is_channel", False))
+            reason = "group" if is_group else "channel" if is_channel else "non_private"
+            chat = getattr(event, "chat", None)
+            chat_id = getattr(chat, "id", None) if chat is not None else getattr(event, "chat_id", None)
+            LOGGER.debug(
+                "stage=incoming_skip_non_private tenant_id=%s chat_id=%s reason=%s",
+                tenant,
+                chat_id,
+                reason,
+            )
+            return
+        state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+        self._set_status(tenant, state, "authorized", reason="incoming_message")
+        state.last_seen = time.time()
+        self._update_metrics()
+
+        try:
+            message = event.message
+            message_out = bool(getattr(message, "out", False))
+            message_id = getattr(message, "id", None)
+            if isinstance(message_id, int):
+                cache = self._incoming_dedup.setdefault(tenant, {})
+                now_ts = time.time()
+                stale_ids = [mid for mid, ts in cache.items() if now_ts - ts > INCOMING_DEDUP_TTL]
+                for mid in stale_ids:
+                    cache.pop(mid, None)
+                if message_id in cache:
+                    LOGGER.debug(
+                        "stage=incoming_dedup_skip tenant_id=%s message_id=%s", tenant, message_id
+                    )
+                    return
+                cache[message_id] = now_ts
+            peer_id = None
+            try:
+                if message.peer_id is not None:
+                    peer_id = (
+                        getattr(message.peer_id, "user_id", None)
+                        or getattr(message.peer_id, "channel_id", None)
+                        or getattr(message.peer_id, "chat_id", None)
+                    )
+            except AttributeError:
+                peer_id = getattr(message, "chat_id", None)
+            sender = await event.get_sender()
+            username = getattr(sender, "username", None) or getattr(event.chat, "username", None)
+
+            sender_id = getattr(message, "sender_id", None)
+            if sender_id is None:
+                from_peer = getattr(message, "from_id", None)
+                sender_id = (
+                    getattr(from_peer, "user_id", None)
+                    or getattr(from_peer, "channel_id", None)
+                    or getattr(from_peer, "chat_id", None)
+                )
+            me = self._self_ids.get(tenant)
+            with contextlib.suppress(Exception):
+                me_info = await client.get_me()
+                me_id = getattr(me_info, "id", None)
+                if me_id is not None:
+                    me = me_id
+                    self._self_ids[tenant] = me_id
+            manager_outgoing = False
+            if message_out:
+                manager_outgoing = True
+            elif me is not None and sender_id is not None and int(sender_id) == int(me):
+                manager_outgoing = True
+            elif sender_id is None and me is not None:
+                # Telethon sometimes omits sender_id/out for own messages; treat as manager.
+                manager_outgoing = True
+            provider_raw_obj = _json_safe(getattr(message, "to_dict", lambda: {})())
+            raw_outgoing = False
+            if isinstance(provider_raw_obj, Mapping):
+                raw_outgoing = bool(
+                    provider_raw_obj.get("out")
+                    or provider_raw_obj.get("outgoing")
+                    or provider_raw_obj.get("fromMe")
+                    or provider_raw_obj.get("outgoing")
+                )
+                if not raw_outgoing and me is not None:
+                    raw_from = provider_raw_obj.get("from_id") or provider_raw_obj.get("from")
+                    if isinstance(raw_from, Mapping):
+                        raw_from_id = (
+                            raw_from.get("user_id")
+                            or raw_from.get("channel_id")
+                            or raw_from.get("chat_id")
+                        )
+                        try:
+                            if raw_from_id is not None and int(raw_from_id) == int(me):
+                                raw_outgoing = True
+                        except Exception:
+                            pass
+            if raw_outgoing:
+                manager_outgoing = True
+            # Additional guard: if peer_id == self and message_out is False, treat as manager (self echo).
+            try:
+                if me is not None and peer_id is not None and int(peer_id) == int(me):
+                    manager_outgoing = True
+            except Exception:
+                pass
+            LOGGER.info(
+                "stage=manager_detect tenant_id=%s msg_id=%s out=%s raw_out=%s sender_id=%s self=%s manager=%s peer_id=%s",
+                tenant,
+                message_id,
+                int(message_out),
+                int(raw_outgoing),
+                sender_id,
+                me,
+                int(manager_outgoing),
+                peer_id,
+            )
+            if manager_outgoing:
+                ts_out = getattr(message, "date", None)
+                if isinstance(ts_out, datetime):
+                    if ts_out.tzinfo is None:
+                        ts_out = ts_out.replace(tzinfo=timezone.utc)
+                    ts_out_unix = int(ts_out.timestamp())
+                else:
+                    ts_out_unix = int(time.time())
+                normalized_out = MessageIn(
+                    tenant=tenant,
+                    channel="telegram",
+                    from_id=me or sender_id or peer_id or tenant,
+                    to=peer_id or me or tenant,
+                    text=getattr(message, "message", "") or "",
+                    attachments=[],
+                    ts=ts_out_unix,
+                    message_id=message_id,
+                    provider_raw=jsonable_encoder(provider_raw_obj),
+                    telegram_user_id=int(me) if isinstance(me, int) else None,
+                    username=username or None,
+                    peer=str(peer_id) if peer_id is not None else None,
+                    peer_id=int(peer_id) if isinstance(peer_id, int) else None,
+                )
+                await self._send_webhook(
+                    normalized_out,
+                    extra={"manager": True, "out": True, "origin": "telegram:manager"},
+                )
+                LOGGER.info(
+                    "tg_diag:webhook_outgoing tenant_id=%s msg_id=%s payload_manager=%s",
+                    tenant,
+                    getattr(message, "id", None),
+                    True,
+                )
+                return
+            if me is not None and sender_id is not None and int(sender_id) == int(me):
+                # Manager wrote from the connected account — mark handoff and stop auto-replies.
+                try:
+                    ts_out = getattr(message, "date", None)
+                    if isinstance(ts_out, datetime):
+                        if ts_out.tzinfo is None:
+                            ts_out = ts_out.replace(tzinfo=timezone.utc)
+                        ts_out_unix = int(ts_out.timestamp())
+                    else:
+                        ts_out_unix = int(time.time())
+                    normalized_out = MessageIn(
+                        tenant=tenant,
+                        channel="telegram",
+                        from_id=sender_id,
+                        to=peer_id or sender_id,
+                        text=getattr(message, "message", "") or "",
+                        attachments=[],
+                        ts=ts_out_unix,
+                        message_id=message_id,
+                        provider_raw=jsonable_encoder(_json_safe(getattr(message, "to_dict", lambda: {})())),
+                        telegram_user_id=sender_id if isinstance(sender_id, int) else None,
+                        username=username or None,
+                        peer=str(peer_id) if peer_id is not None else None,
+                        peer_id=peer_id if isinstance(peer_id, int) else None,
+                    )
+                    await self._send_webhook(
+                        normalized_out,
+                        extra={"manager": True, "out": True, "origin": "telegram:manager"},
+                    )
+                finally:
+                    return
+
+            me = self._self_ids.get(tenant)
+            if me is None:
+                with contextlib.suppress(Exception):
+                    me_info = await client.get_me()
+                    me = getattr(me_info, "id", None)
+                    if me is not None:
+                        self._self_ids[tenant] = me
+
+            attachments: list[Attachment] = []
+            if message.media:
+                att_type = message.media.__class__.__name__
+                file_obj = getattr(message, "file", None)
+                name = getattr(file_obj, "name", None)
+                mime = getattr(file_obj, "mime_type", None)
+                size = getattr(file_obj, "size", None)
+                fallback_id = getattr(message, "id", None)
+                url = f"telegram://{tenant}/{fallback_id or 0}"
+                try:
+                    attachments.append(
+                        Attachment(type=att_type, url=url, name=name, mime=mime, size=size)
+                    )
+                except Exception:
+                    LOGGER.debug(
+                        "stage=attachment_normalize_fail tenant_id=%s attachment_type=%s",
+                        tenant,
+                        att_type,
+                    )
+
+            ts = getattr(message, "date", None)
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts_unix = int(ts.timestamp())
+            else:
+                ts_unix = int(time.time())
+
+            provider_raw = jsonable_encoder(provider_raw_obj)
+
+            message_id_value = message_id
+            message_id_int: Optional[int]
+            try:
+                message_id_int = int(message_id) if message_id is not None else None
+            except (TypeError, ValueError):
+                message_id_int = None
+
+            peer_id_value: Optional[int]
+            if isinstance(peer_id, int):
+                peer_id_value = peer_id
+            else:
+                try:
+                    peer_id_value = int(peer_id) if peer_id is not None else None
+                except (TypeError, ValueError):
+                    peer_id_value = None
+            sender_id_value = sender_id if isinstance(sender_id, int) else None
+            peer_value = str(peer_id_value) if peer_id_value is not None else None
+            telegram_username = username or None
+            chat_id_value = peer_id_value
+
+            text_raw = getattr(message, "message", None)
+            if text_raw is None:
+                text_value = ""
+            elif isinstance(text_raw, str):
+                text_value = text_raw
+            else:
+                text_value = str(text_raw)
+
+            extra = {
+                "message_id": message_id_int,
+                "chat_id": chat_id_value,
+            }
+            extra = {key: value for key, value in extra.items() if value is not None}
+
+            manager_like_incoming = False
+            if message_out or raw_outgoing:
+                manager_like_incoming = True
+            elif me is not None and sender_id_value is not None and int(sender_id_value) == int(me):
+                manager_like_incoming = True
+            elif isinstance(provider_raw_obj, Mapping):
+                key_obj = provider_raw_obj.get("key") if isinstance(provider_raw_obj.get("key"), Mapping) else {}
+                if provider_raw_obj.get("fromMe") or key_obj.get("fromMe"):
+                    manager_like_incoming = True
+                if provider_raw_obj.get("out") or provider_raw_obj.get("outgoing"):
+                    manager_like_incoming = True
+
+            normalized = MessageIn(
+                tenant=tenant,
+                channel="telegram",
+                from_id=sender_id or username or "unknown",
+                to=me or peer_id_value or peer_id or tenant,
+                text=text_value,
+                attachments=attachments,
+                ts=ts_unix,
+                provider_raw=provider_raw,
+                message_id=message_id_value,
+                telegram_user_id=sender_id_value,
+                username=telegram_username,
+                peer=peer_value,
+                peer_id=peer_id_value,
+            )
+            extra_payload = dict(extra)
+            if manager_like_incoming:
+                extra_payload.setdefault("manager", True)
+                extra_payload.setdefault("out", True)
+                extra_payload.setdefault("origin", "telegram:manager")
+            delivered = await self._send_webhook(normalized, extra=extra_payload)
+            if delivered:
+                self._delivered_incoming += 1
+                MESSAGE_IN_COUNTER.labels("telegram").inc()
+            else:
+                cache = self._incoming_dedup.get(tenant)
+                if cache and isinstance(message_id, int):
+                    cache.pop(message_id, None)
+            LOGGER.info(
+                "event=message_in stage=incoming tenant_id=%s from_id=%s to_id=%s",  # noqa: G004
+                tenant,
+                sender_id or username,
+                me or peer_id or tenant,
+            )
+        except asyncio.CancelledError:
+            raise
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant, client, source="handle_new_message"
+            )
+        except RPCError as exc:
+            error = str(exc) or "telegram_error"
+            EVENT_ERRORS.labels("event_rpc_error").inc()
+            LOGGER.error(
+                "stage=event_handler_error tenant_id=%s source=handle_new_message error=%s",
+                tenant,
+                error,
+            )
+            await self._handle_event_disconnect(
+                tenant,
+                client,
+                error=error,
+                source="handle_new_message",
+            )
+        except Exception as exc:
+            EVENT_ERRORS.labels("event_exception").inc()
+            LOGGER.exception(
+                "stage=event_handler_error tenant_id=%s source=handle_new_message",
+                tenant,
+            )
+            await self._handle_event_disconnect(
+                tenant,
+                client,
+                error=str(exc) or "event_handler_error",
+                source="handle_new_message",
+            )
+
+    async def _send_webhook(
+        self, message: MessageIn, extra: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        headers = {"Content-Type": "application/json"}
+        if self._webhook_token:
+            headers["X-Webhook-Token"] = self._webhook_token
+        if self._admin_token:
+            headers["X-Admin-Token"] = self._admin_token
+        try:
+            payload_dict = message_in_asdict(message)
+            if extra:
+                cleaned_extra = {key: value for key, value in extra.items() if value is not None}
+                if cleaned_extra:
+                    payload_dict.update(cleaned_extra)
+                    message_payload = payload_dict.get("message")
+                    base_message: dict[str, Any]
+                    if isinstance(message_payload, dict):
+                        base_message = dict(message_payload)
+                    else:
+                        base_message = {}
+                    base_message.update(cleaned_extra)
+                    payload_dict["message"] = base_message
+            payload = jsonable_encoder(_json_safe(payload_dict))
+            payload_keys = ",".join(sorted(payload.keys())) if isinstance(payload, dict) else ""
+            if isinstance(payload, dict):
+                expected_keys = {
+                    "message",
+                    "text",
+                    "telegram_user_id",
+                    "username",
+                    "peer",
+                    "peer_id",
+                    "source",
+                    "channel",
+                    "tenant",
+                }
+                present_keys = set(payload.keys())
+                missing_keys = sorted(expected_keys - present_keys)
+                if missing_keys:
+                    LOGGER.warning(
+                        "stage=webhook_payload_missing tenant_id=%s missing=%s payload_keys=%s",
+                        message.tenant,
+                        ",".join(missing_keys),
+                        payload_keys,
+                    )
+                else:
+                    LOGGER.debug(
+                        "stage=webhook_payload_verified tenant_id=%s payload_keys=%s",
+                        message.tenant,
+                        payload_keys,
+                    )
+            LOGGER.info(
+                "stage=webhook_request tenant_id=%s url=%s payload_keys=%s",
+                message.tenant,
+                self._webhook_url,
+                payload_keys,
+            )
+            if orjson is not None:
+                payload_bytes = orjson.dumps(payload)
+            else:
+                payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            for attempt in range(3):
+                try:
+                    LOGGER.info(
+                        "event=webhook_push stage=request tenant_id=%s attempt=%s",
+                        message.tenant,
+                        attempt + 1,
+                    )
+                    response = await self._http.post(
+                        self._webhook_url,
+                        content=payload_bytes,
+                        headers=headers,
+                        timeout=10.0,
+                    )
+                except httpx.TimeoutException:
+                    LOGGER.warning(
+                        "event=webhook_push stage=timeout tenant_id=%s attempt=%s",
+                        message.tenant,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
+                    continue
+                except httpx.HTTPError as exc:
+                    EVENT_ERRORS.labels("webhook").inc()
+                    SEND_FAIL_COUNTER.labels("telegram", "http_error").inc()
+                    LOGGER.exception(
+                        "event=webhook_push stage=exception tenant_id=%s attempt=%s",
+                        message.tenant,
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
+                    continue
+
+                LOGGER.info(
+                    "event=webhook_push stage=response tenant_id=%s status=%s attempt=%s",
+                    message.tenant,
+                    response.status_code,
+                    attempt + 1,
+                )
+                if 200 <= response.status_code < 300:
+                    return True
+                reason = f"status_{response.status_code}"
+                SEND_FAIL_COUNTER.labels("telegram", reason).inc()
+                if response.status_code not in {429} and response.status_code < 500:
+                    break
+                await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
+        except Exception:
+            EVENT_ERRORS.labels("webhook").inc()
+            SEND_FAIL_COUNTER.labels("telegram", "exception").inc()
+            LOGGER.exception(
+                "event=webhook_push stage=exception tenant_id=%s",
+                message.tenant,
+            )
+        LOGGER.error(
+            "event=webhook_push stage=failed tenant_id=%s",
+            message.tenant,
+        )
+        return False
+
+    async def get_status(self, tenant: int) -> SessionState:
+        await self.wait_until_ready()
+        client_to_disconnect: Optional[TelegramClient] = None
+        async with self._lock:
+            state = self._states.get(tenant)
+            if not state:
+                state = SessionState(tenant_id=tenant, status="disconnected")
+                self._states[tenant] = state
+            else:
+                client_to_disconnect, _ = self._expire_needs_2fa_locked(tenant, state)
+                if state.status == "needs_2fa" or state.needs_2fa:
+                    state.needs_2fa = True
+                    if state.status != "needs_2fa":
+                        self._set_status(tenant, state, "needs_2fa", reason="status_poll")
+                    if not state.twofa_pending:
+                        state.twofa_pending = True
+                        if state.twofa_since is None:
+                            state.twofa_since = int(time.time() * 1000.0)
+                    state.awaiting_password = True
+                    state.last_seen = time.time()
+                    self._extend_needs_2fa_ttl(state)
+                    if state.qr_id:
+                        self._qr_lookup.pop(state.qr_id, None)
+                        self._clear_qr_state_locked(state)
+            client = self._clients.get(tenant)
+            is_active = bool(client and client.is_connected())
+            if state.twofa_pending:
+                state.can_restart = False
+            elif state.status in {"waiting_qr", "needs_2fa"} and not is_active:
+                state.can_restart = True
+            else:
+                state.can_restart = False
+            now = time.time()
+            if state.status == "waiting_qr" and state.qr_id:
+                if state.qr_expires_at and state.qr_expires_at <= now:
+                    self._expire_qr_locked(tenant, state, reason="expired")
+                    if not state.restart_pending:
+                        state.restart_pending = True
+                    state.can_restart = True
+                    LOGGER.info(
+                        "stage=qr_expired tenant_id=%s reason=status_poll", tenant
+                    )
+                elif (
+                    state.qr_expires_at
+                    and state.qr_expires_at - now <= 15.0
+                    and not state.restart_pending
+                ):
+                    state.restart_pending = True
+                    state.can_restart = True
+                    LOGGER.info(
+                        "stage=qr_expiring tenant_id=%s seconds_left=%.2f",
+                        tenant,
+                        max(state.qr_expires_at - now, 0.0),
+                    )
+            result = state
+
+        if client_to_disconnect:
+            with contextlib.suppress(Exception):
+                await client_to_disconnect.disconnect()
+
+        return result
+
+    async def _soft_disconnect(
+        self,
+        tenant: int,
+        *,
+        client: Optional[TelegramClient] = None,
+        error: Optional[str] = None,
+        allow_restart: bool = True,
+        remove_session: bool = False,
+    ) -> bool:
+        task_to_cancel: Optional[asyncio.Task[Any]] = None
+        client_to_disconnect = client
+        extra_client: Optional[TelegramClient] = None
+        session_path: Optional[Path] = None
+        async with self._lock:
+            state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+            if state.waiting_task and not state.waiting_task.done():
+                task_to_cancel = state.waiting_task
+            state.waiting_task = None
+            if state.qr_id:
+                self._qr_lookup.pop(state.qr_id, None)
+            self._clear_qr_state_locked(state)
+            base_reason = "manual_logout" if error is None else (error or "unknown")
+            metric_reason = base_reason.strip().lower().replace(" ", "_") or "unknown"
+            if len(metric_reason) > 64:
+                metric_reason = metric_reason[:64]
+            self._set_status(tenant, state, "disconnected", reason=metric_reason)
+            state.last_error = error
+            state.needs_2fa = False
+            state.awaiting_password = False
+            state.needs_2fa_expires_at = None
+            state.restart_pending = False
+            state.last_needs_2fa_at = None
+            state.last_seen = time.time()
+            state.twofa_pending = False
+            state.twofa_since = None
+            state.qr_login = None
+            state.can_restart = allow_restart
+            stored_client = self._clients.pop(tenant, None)
+            if client_to_disconnect is None:
+                client_to_disconnect = stored_client
+            elif stored_client and stored_client is not client_to_disconnect:
+                extra_client = stored_client
+            self._states[tenant] = state
+            self._update_metrics()
+            if remove_session:
+                session_path = session_file_path(tenant)
+
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_to_cancel
+
+        for instance in (client_to_disconnect, extra_client):
+            if instance is None:
+                continue
+            with contextlib.suppress(Exception):
+                await instance.disconnect()
+
+        removed_file = False
+        if session_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                session_path.unlink()
+                removed_file = True
+
+        return removed_file
+
+    async def _handle_event_disconnect(
+        self,
+        tenant: int,
+        client: TelegramClient,
+        *,
+        error: str,
+        source: str,
+        remove_session: bool = False,
+    ) -> None:
+        removed = await self._soft_disconnect(
+            tenant,
+            client=client,
+            error=error,
+            allow_restart=True,
+            remove_session=remove_session,
+        )
+        LOGGER.warning(
+            "stage=event_disconnect tenant_id=%s source=%s error=%s removed_session_file=%s",
+            tenant,
+            source,
+            error,
+            removed,
+        )
+
+    async def _handle_authkey_unregistered(
+        self,
+        tenant: int,
+        client: TelegramClient,
+        *,
+        source: str,
+        remove_session: bool = False,
+    ) -> None:
+        EVENT_ERRORS.labels("authkey_unregistered").inc()
+        removed = await self._soft_disconnect(
+            tenant,
+            client=client,
+            error="authkey_unregistered",
+            allow_restart=True,
+            remove_session=remove_session,
+        )
+        LOGGER.warning(
+            "stage=authkey_unregistered tenant_id=%s source=%s removed_session_file=%s",
+            tenant,
+            source,
+            removed,
+        )
+
+    async def logout(self, tenant: int, *, force: bool = False) -> None:
+        await self.wait_until_ready()
+        removed = await self._soft_disconnect(
+            tenant,
+            error=None,
+            allow_restart=True,
+            remove_session=force,
+        )
+        LOGGER.info(
+            "stage=logout tenant_id=%s removed_session_file=%s",
+            tenant,
+            removed,
+        )
+
+    async def get_client(self, tenant: int) -> Optional[TelegramClient]:
+        await self.wait_until_ready()
+        return await self._ensure_authorized_client(tenant)
+
+    async def send_message(
+        self,
+        tenant: int,
+        text: str | None = None,
+        peer_id: Any | None = None,
+        telegram_user_id: int | None = None,
+        username: str | None = None,
+        attachments: Optional[list[Dict[str, Any]]] = None,
+        reply_to: str | None = None,
+    ) -> dict[str, Any]:
+        await self.wait_until_ready()
+        client = await self._ensure_authorized_client(tenant)
+        if client is None:
+            return {"error": "not_authorized"}
+
+        try:
+            if not await client.is_user_authorized():
+                return {"error": "not_authorized"}
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant,
+                client,
+                source="send_message_precheck",
+                remove_session=False,
+            )
+            return {"error": "authkey_unregistered"}
+
+        entity: Any | None = None
+        if peer_id is not None:
+            entity = peer_id
+        elif telegram_user_id:
+            entity = telegram_user_id
+        elif username:
+            entity = username
+        if entity is None:
+            raise ValueError("missing_target")
+
+        reply_to_id: Optional[int | str] = None
+        if reply_to:
+            try:
+                reply_to_id = int(reply_to)
+            except (TypeError, ValueError):
+                reply_to_id = reply_to
+
+        attachments_list = attachments or []
+        sent_text = False
+        last_message_id: int | None = None
+        resolved_peer_id: int | None = None
+        if isinstance(peer_id, int):
+            resolved_peer_id = peer_id
+
+        def _extract_identity(result: Any) -> tuple[int | None, int | None]:
+            message_obj: Any | None = None
+            if isinstance(result, (list, tuple)):
+                for item in reversed(result):
+                    if getattr(item, "id", None) is not None:
+                        message_obj = item
+                        break
+            else:
+                message_obj = result
+
+            message_id = getattr(message_obj, "id", None) if message_obj is not None else None
+            peer_obj = getattr(message_obj, "peer_id", None) if message_obj is not None else None
+
+            peer_candidate: Any = None
+            if peer_obj is not None:
+                for attr in ("user_id", "channel_id", "chat_id"):
+                    value = getattr(peer_obj, attr, None)
+                    if value is not None:
+                        peer_candidate = value
+                        break
+            if peer_candidate is None and message_obj is not None:
+                peer_candidate = getattr(message_obj, "chat_id", None)
+
+            try:
+                peer_value = int(peer_candidate) if peer_candidate is not None else None
+            except (TypeError, ValueError):
+                peer_value = None
+
+            try:
+                message_value = int(message_id) if message_id is not None else None
+            except (TypeError, ValueError):
+                message_value = None
+
+            return message_value, peer_value
+
+        try:
+            if attachments_list:
+                async with httpx.AsyncClient(timeout=15.0) as session:
+                    for attachment in attachments_list:
+                        url = attachment.get("url") if isinstance(attachment, dict) else None
+                        if not url:
+                            continue
+                        try:
+                            resp = await session.get(url)
+                            resp.raise_for_status()
+                            data = resp.content
+                        except httpx.HTTPError as exc:
+                            EVENT_ERRORS.labels("attachment_fetch").inc()
+                            LOGGER.error(
+                                "stage=send_fetch_fail tenant_id=%s url=%s error=%s",
+                                tenant,
+                                url,
+                                exc,
+                            )
+                            continue
+                        caption = None
+                        if isinstance(attachment, dict):
+                            caption = attachment.get("caption") or attachment.get("text")
+                        caption_text = caption if isinstance(caption, str) else None
+                        if text and not sent_text:
+                            caption_text = text
+                            sent_text = True
+                        result = await client.send_file(
+                            entity,
+                            file=io.BytesIO(data),
+                            caption=caption_text or "",
+                            reply_to=reply_to_id,
+                        )
+                        message_value, peer_value = _extract_identity(result)
+                        if message_value is not None:
+                            last_message_id = message_value
+                        if peer_value is not None:
+                            resolved_peer_id = peer_value
+            if text and not sent_text:
+                result = await client.send_message(entity, text or "", reply_to=reply_to_id)
+                message_value, peer_value = _extract_identity(result)
+                if message_value is not None:
+                    last_message_id = message_value
+                if peer_value is not None:
+                    resolved_peer_id = peer_value
+            elif not attachments_list:
+                result = await client.send_message(entity, text or "", reply_to=reply_to_id)
+                message_value, peer_value = _extract_identity(result)
+                if message_value is not None:
+                    last_message_id = message_value
+                if peer_value is not None:
+                    resolved_peer_id = peer_value
+            MESSAGE_OUT_COUNTER.labels("telegram", "success").inc()
+            target_hint: Any = peer_id if peer_id is not None else username
+            LOGGER.info(
+                "event=message_out stage=send_ok tenant_id=%s peer_id=%s",
+                tenant,
+                target_hint,
+            )
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant,
+                client,
+                source="send_message",
+                remove_session=False,
+            )
+            return {"error": "authkey_unregistered"}
+        except RPCError as exc:
+            EVENT_ERRORS.labels("rpc_error").inc()
+            SEND_FAIL_COUNTER.labels("telegram", "rpc_error").inc()
+            LOGGER.error(
+                "event=message_out stage=send_fail tenant_id=%s peer_id=%s error=%s",
+                tenant,
+                peer_id or username,
+                exc,
+            )
+            raise
+        except Exception:
+            EVENT_ERRORS.labels("exception").inc()
+            SEND_FAIL_COUNTER.labels("telegram", "exception").inc()
+            LOGGER.exception(
+                "event=message_out stage=send_fail tenant_id=%s peer_id=%s",
+                tenant,
+                peer_id or username,
+            )
+            raise
+
+        return {
+            "peer_id": int(resolved_peer_id) if resolved_peer_id is not None else None,
+            "message_id": int(last_message_id) if last_message_id is not None else None,
+            "error": None,
+        }
+
+    async def resolve_self_peer(self, tenant: int) -> Any:
+        client = await self.get_client(tenant)
+        if client is None:
+            raise NotAuthorizedError("session_not_authorized")
+
+        if isinstance(client, TelegramClient):
+            return InputPeerSelf()
+
+        cached_self = self._self_ids.get(tenant)
+        if cached_self is not None:
+            return cached_self
+
+        if PyrogramClient is not None and isinstance(client, PyrogramClient):
+            try:
+                me = await client.get_me()
+            except Exception as exc:  # pragma: no cover - pyrogram specific
+                raise RuntimeError("self_peer_resolution_failed") from exc
+            if me is None:
+                raise NotAuthorizedError("session_not_authorized")
+            identifier = getattr(me, "id", None)
+            if identifier is None:
+                return me
+            self._self_ids[tenant] = identifier
+            return identifier
+
+        if hasattr(client, "get_me"):
+            info = await client.get_me()
+            if info is None:
+                raise NotAuthorizedError("session_not_authorized")
+            identifier = getattr(info, "id", None)
+            if identifier is not None:
+                self._self_ids[tenant] = identifier
+                return identifier
+            return info
+
+        raise AttributeError("resolve_self_peer_unsupported")
+
+    async def resolve_peer_by_phone(
+        self,
+        tenant: int,
+        phone: str,
+    ) -> tuple[Optional[int], Optional[int]]:
+        await self.wait_until_ready()
+        client = await self._ensure_authorized_client(tenant)
+        if client is None:
+            raise NotAuthorizedError("not_authorized")
+
+        try:
+            if not await client.is_user_authorized():
+                raise NotAuthorizedError("not_authorized")
+        except AuthKeyUnregisteredError:
+            await self._handle_authkey_unregistered(
+                tenant,
+                client,
+                source="resolve_peer_by_phone",
+                remove_session=False,
+            )
+            raise NotAuthorizedError("authkey_unregistered")
+
+        try:
+            contact = InputPhoneContact(
+                client_id=random.randint(1, 2**31 - 1),
+                phone=phone,
+                first_name=".",
+                last_name="",
+            )
+            # Older Telethon versions do not support the ``replace`` argument.
+            result = await client(ImportContactsRequest(contacts=[contact]))
+        except BadRequestError as exc:
+            LOGGER.warning(
+                "event=resolve_phone_failed tenant_id=%s error=%s",
+                tenant,
+                exc,
+            )
+            return None, None
+
+        user = None
+        if result and getattr(result, "users", None):
+            users_list = list(result.users)
+            if users_list:
+                user = users_list[0]
+
+        if user is None:
+            return None, None
+
+        user_id = getattr(user, "id", None)
+        try:
+            peer_id = int(user_id) if user_id is not None else None
+        except (TypeError, ValueError):
+            peer_id = None
+
+        return peer_id, peer_id
+
+    def delivered_incoming_total(self) -> int:
+        return self._delivered_incoming
+
+    async def _ensure_authorized_client(self, tenant: int) -> Optional[TelegramClient]:
+        clients_to_disconnect: list[TelegramClient] = []
+        task_to_cancel: Optional[asyncio.Task[Any]] = None
+        async with self._lock:
+            state = self._states.get(tenant)
+            if state:
+                client_to_disconnect, _ = self._expire_needs_2fa_locked(tenant, state)
+                if client_to_disconnect:
+                    clients_to_disconnect.append(client_to_disconnect)
+            client = self._clients.get(tenant)
+            if client is None:
+                client = self._build_client(tenant)
+                await client.connect()
+                self._clients[tenant] = client
+            elif not client.is_connected():
+                await client.connect()
+
+            try:
+                authorized = await client.is_user_authorized()
+            except AuthKeyUnregisteredError:
+                EVENT_ERRORS.labels("authkey_unregistered").inc()
+                state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                task = self._mark_authkey_unregistered_locked(tenant, state)
+                if task:
+                    task_to_cancel = task
+                self._clients.pop(tenant, None)
+                clients_to_disconnect.append(client)
+                LOGGER.warning(
+                    "stage=authkey_unregistered tenant_id=%s source=ensure_authorized_client",
+                    tenant,
+                )
+                result = None
+            else:
+                if authorized:
+                    state = self._states.setdefault(tenant, SessionState(tenant_id=tenant))
+                    self._set_status(tenant, state, "authorized", reason="ensure_authorized")
+                    state.last_seen = time.time()
+                    self._register_handlers(tenant, client)
+                    self._update_metrics()
+                    result = client
+                else:
+                    result = None
+
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_to_cancel
+
+        for instance in clients_to_disconnect:
+            with contextlib.suppress(Exception):
+                await instance.disconnect()
+
+        return result
+
+    def _resolve_qr_state(self, qr_id: str) -> tuple[int, SessionState]:
+        tenant = self._qr_lookup.get(qr_id)
+        if tenant is None:
+            expired_ts = self._expired_qr.get(qr_id)
+            if expired_ts is not None:
+                raise QRExpiredError(expired_ts)
+            raise QRNotFoundError(qr_id)
+        state = self._states.get(tenant)
+        if not state or state.qr_id != qr_id:
+            expired_ts = self._expired_qr.get(qr_id)
+            if expired_ts is not None:
+                raise QRExpiredError(expired_ts)
+            raise QRNotFoundError(qr_id)
+        return tenant, state
+
+    def get_qr_png(self, qr_id: str, tenant: int | None = None) -> bytes:
+        cached = self._qr_cache.get(qr_id)
+        if cached is not None:
+            if tenant is not None and cached.tenant_id != tenant:
+                raise QRNotFoundError(qr_id)
+            expires_at = cached.expires_at
+            if expires_at and expires_at <= time.time():
+                self._qr_cache.pop(qr_id, None)
+                state = self._states.get(cached.tenant_id)
+                if state is not None and state.qr_id == qr_id:
+                    self._expire_qr_locked(cached.tenant_id, state, reason="timeout")
+                else:
+                    self._record_qr_expired(
+                        cached.tenant_id, qr_id, expires_at, reason="expired"
+                    )
+                raise QRExpiredError(expires_at)
+            return cached.png
+
+        tenant_id, state = self._resolve_qr_state(qr_id)
+        if tenant is not None and tenant_id != tenant:
+            raise QRNotFoundError(qr_id)
+        if state.qr_expires_at and state.qr_expires_at <= time.time():
+            valid_until = state.qr_expires_at
+            self._expire_qr_locked(tenant_id, state, reason="timeout")
+            if not state.restart_pending:
+                state.restart_pending = True
+            state.can_restart = True
+            LOGGER.info("stage=qr_expired tenant_id=%s reason=qr_fetch", tenant_id)
+            raise QRExpiredError(valid_until)
+        if not state.qr_png:
+            raise QRNotFoundError(qr_id)
+        self._qr_cache[qr_id] = CachedQR(
+            tenant_id=tenant_id,
+            png=state.qr_png,
+            expires_at=state.qr_expires_at,
+        )
+        return state.qr_png
+
+    def get_qr_url(self, qr_id: str) -> str:
+        tenant, state = self._resolve_qr_state(qr_id)
+        if state.qr_expires_at and state.qr_expires_at <= time.time():
+            valid_until = state.qr_expires_at
+            self._expire_qr_locked(tenant, state, reason="timeout")
+            if not state.restart_pending:
+                state.restart_pending = True
+            state.can_restart = True
+            LOGGER.info("stage=qr_expired tenant_id=%s reason=qr_url", tenant)
+            raise QRExpiredError(valid_until)
+        if not state.qr_url:
+            raise QRNotFoundError(qr_id)
+        return state.qr_url
+
+    def _build_qr_png(self, url: str) -> bytes:
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=14,
+            border=4,
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="#000000", back_color="#FFFFFF").convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def stats_snapshot(self) -> Dict[str, Any]:
+        authorized = sum(1 for state in self._states.values() if state.status == "authorized")
+        waiting = sum(1 for state in self._states.values() if state.status == "waiting_qr")
+        needs_2fa = sum(1 for state in self._states.values() if state.status == "needs_2fa")
+        return {
+            "authorized": authorized,
+            "waiting": waiting,
+            "needs_2fa": needs_2fa,
+        }
+
+    async def login_flow_state(self, tenant: int) -> LoginFlowStateSnapshot:
+        await self.wait_until_ready()
+        async with self._lock:
+            state = self._states.get(tenant)
+            if not state:
+                return LoginFlowStateSnapshot(
+                    tenant_id=tenant,
+                    status="idle",
+                    qr_id=None,
+                    qr_login_obj=None,
+                    qr_png=None,
+                    qr_expires_at=None,
+                    last_error=None,
+                    needs_2fa=False,
+                    twofa_pending=False,
+                )
+            return LoginFlowStateSnapshot(
+                tenant_id=tenant,
+                status=state.status,
+                qr_id=state.qr_id,
+                qr_login_obj=state.qr_login,
+                qr_png=state.qr_png,
+                qr_expires_at=state.qr_expires_at,
+                last_error=state.last_error,
+                needs_2fa=bool(state.needs_2fa or state.awaiting_password),
+                twofa_pending=bool(state.twofa_pending),
+            )
+
+    def _update_metrics(self) -> None:
+        snapshot = self.stats_snapshot()
+        SESSIONS_AUTHORIZED.set(snapshot["authorized"])
+        SESSIONS_WAITING.set(snapshot["waiting"])
+        SESSIONS_NEEDS_2FA.set(snapshot["needs_2fa"])

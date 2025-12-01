@@ -1,0 +1,49 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Подключение Telegram' %}
+{% block content %}
+<section class="surface stack" style="gap: 24px;">
+    <div class="stack" style="gap: 8px;">
+        <h1 class="section-title">Подключение Telegram</h1>
+        <p class="section-subtitle">Сканируйте QR-код в приложении Telegram (Настройки → Устройства). После входа статус сменится на «Подключено».</p>
+    </div>
+
+    <div id="tg-status" class="status-text muted">Готовим QR-код…</div>
+
+    <div id="tg-qr-block" class="surface surface--muted stack" style="gap: 12px; align-items: flex-start;">
+        <img
+            id="tg-qr-image"
+            alt="QR-код Telegram"
+            style="display:none; width: 260px; max-width: 100%; background:#fff; border-radius:12px; border:1px solid rgba(15,23,42,0.1); padding:12px; box-shadow:0 8px 24px rgba(15,23,42,0.1);"
+        >
+        <div id="tg-qr-placeholder" class="muted">QR генерируется…</div>
+        <button id="tg-qr-refresh" type="button" class="btn btn--secondary">Обновить QR</button>
+    </div>
+
+    <div id="tg-2fa-block" class="surface stack" style="gap: 12px; max-width: 360px; display:none;">
+        <form id="tg-2fa-form" class="stack" style="gap: 12px;" autocomplete="off">
+            <label class="grid" style="grid-template-columns: 1fr; gap: 6px;">
+                <span class="label">Пароль 2FA</span>
+                <input id="tg-2fa-password" type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <div class="stack" style="gap: 10px; align-items: flex-start;">
+                <button id="tg-2fa-submit" type="submit" class="btn">Отправить</button>
+                <div id="tg-2fa-error" class="status-text alert" style="display:none;"></div>
+            </div>
+        </form>
+    </div>
+
+    <div class="btn-row" style="gap: 8px; flex-wrap: wrap;">
+        <a class="btn secondary" href="/connect/wa?tenant={{ tenant }}&k={{ tenant_key or key }}">Подключить WhatsApp</a>
+        <a class="btn secondary" href="/connect/avito?tenant={{ tenant }}&k={{ tenant_key or key }}">Подключить Avito</a>
+    </div>
+
+    {% if persona_preview %}
+    <!-- Persona preview: {{ persona_preview }} -->
+    {% endif %}
+</section>
+{% endblock %}
+
+{% set extra_scripts %}
+<script>window.__tgConnectConfig = {{ tg_connect_config | tojson }};</script>
+<script src="{{ static_url(request, 'js/connect-tg.js') }}" defer></script>
+{% endset %}

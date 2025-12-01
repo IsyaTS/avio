@@ -1,0 +1,55 @@
+{
+  "color": {
+    "background": {
+      "base": "#070c1b",
+      "surface": "#0d1a33",
+      "surfaceAlt": "#101f3d",
+      "highlight": "#182c56",
+      "inverse": "#f8fbff"
+    },
+    "primary": {
+      "600": "#2563eb",
+      "500": "#3b82f6",
+      "400": "#60a5fa"
+    },
+    "success": {
+      "500": "#22c55e"
+    },
+    "warning": {
+      "500": "#f59e0b"
+    },
+    "danger": {
+      "500": "#ef4444"
+    },
+    "text": {
+      "strong": "#eaf1ff",
+      "body": "#cbd5f5",
+      "muted": "#94a3c6"
+    },
+    "border": {
+      "soft": "#1f2d4d",
+      "strong": "#2f3f63"
+    }
+  },
+  "font": {
+    "family": "'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', sans-serif",
+    "mono": "'JetBrains Mono', 'Fira Code', 'SFMono-Regular', monospace"
+  },
+  "space": {
+    "xs": "0.25rem",
+    "sm": "0.5rem",
+    "md": "0.75rem",
+    "lg": "1rem",
+    "xl": "1.5rem",
+    "2xl": "2rem"
+  },
+  "radius": {
+    "sm": "0.5rem",
+    "md": "0.75rem",
+    "lg": "1rem"
+  },
+  "shadow": {
+    "sm": "0 4px 12px rgba(3, 7, 18, 0.25)",
+    "md": "0 12px 30px rgba(3, 7, 18, 0.35)"
+  }
+}

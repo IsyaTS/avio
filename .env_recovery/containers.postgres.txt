@@ -1,0 +1,10 @@
+### postgres
+06dd75d305cd3870ee62b3932e661c624543eaf9ae2ba37cdec0a4f8edd051d2
+1.19
+15
+15.14
+en_US.utf8
+llvm19-dev 		clang19
+postgres
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+/var/lib/postgresql/data

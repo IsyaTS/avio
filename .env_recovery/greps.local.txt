@@ -1,0 +1,6 @@
+/opt/avio/.env.bak.2025-10-27T03:41:39+03:00:1:ADMIN_TOKEN=sueta
+/opt/avio/.env.bak.2025-10-27T03:41:39+03:00:2:DATABASE_URL=postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio
+/opt/avio/.env.bak.2025-10-27T03:41:39+03:00:3:PUBLIC_KEY=673f513b4b141d46c5ac2edcf00807ba
+/opt/avio/.env:1:ADMIN_TOKEN=sueta
+/opt/avio/.env:2:DATABASE_URL=postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio
+/opt/avio/.env:3:PUBLIC_KEY=673f513b4b141d46c5ac2edcf00807ba
