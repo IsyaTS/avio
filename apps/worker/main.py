@@ -49,8 +49,13 @@ from libs.core.db import (
     get_lead_peer,
     update_message_status,
     has_recent_incoming_message,
+    get_contact_id_by_lead,
+    get_contact_id_by_phone,
+    get_contact_phone_by_lead,
     resolve_or_create_contact,
     link_lead_contact,
+    update_contact_phone,
+    update_contact_telegram,
 )
 from libs.core.dao.leads import get_or_create_by_peer
 from libs.core.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
@@ -60,6 +65,8 @@ from libs.core.common import (
     get_outbox_whitelist,
     normalize_username,
     smart_reply_enabled,
+    notification_chat_ids,
+    notification_event_enabled,
     whitelist_contains_number,
     default_fallback_reply,
     HANDOFF_SILENCE_TTL_SECONDS,
@@ -82,6 +89,8 @@ APP_VERSION = os.getenv("APP_VERSION", _default_version)
 REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
 # TTL for deduplicating Telegram outreach triggered by Avito phone detection.
 AVITO_PHONE_TG_TTL_SECONDS = int(os.getenv("AVITO_PHONE_TG_TTL", "86400"))
+# Allow disabling phone→tg deduplication (for diagnostics/edge cases).
+AVITO_PHONE_TG_DEDUP_ENABLED = (os.getenv("AVITO_PHONE_TG_DEDUP_ENABLED") or "").strip().lower() in {"1", "true", "yes"}
 # TTL for suppressing repeated Avito auto-replies in the same chat/lead.
 AVITO_AUTO_REPLY_TTL_SECONDS = int(os.getenv("AVITO_AUTO_REPLY_TTL", "86400"))
 # Match waweb INTERNAL_SYNC_TOKEN resolution (shared with the web layer)
@@ -123,19 +132,140 @@ TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 QUEUES = [OUTBOX_QUEUE_KEY]
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
+NOTIFY_EVENT_MANAGER = "manager_requested"
+NOTIFY_BOT_TOKEN = (os.getenv("NOTIFY_BOT_TOKEN") or "").strip()
+NOTIFY_BOT_PARSE_MODE = (os.getenv("NOTIFY_BOT_PARSE_MODE") or "Markdown").strip()
+try:
+    NOTIFY_BOT_ID = int(NOTIFY_BOT_TOKEN.split(":")[0]) if NOTIFY_BOT_TOKEN else None
+except Exception:
+    NOTIFY_BOT_ID = None
 
-async def _mark_handoff_silence(tenant_id: int, lead_id: int) -> None:
+
+def _notification_link(tenant_id: int, lead_id: int) -> str:
+    base = APP_BASE_URL or getattr(core_settings, "APP_PUBLIC_URL", "").strip().rstrip("/")
+    if not base:
+        return ""
+    return f"{base}/admin?tenant={tenant_id}&lead={lead_id}"
+
+
+def _notification_lead_title(lead_id: int, contact_phone: str | None) -> str:
+    if contact_phone:
+        return f"Лид {contact_phone}"
+    return f"Лид {lead_id}"
+
+
+def _build_chat_link(username: str | None, phone: str | None, peer: str | None) -> str | None:
+    """
+    Build a link to chat with priority:
+    1) phone (digits) -> https://t.me/+<phone> (Telegram phone search)
+    2) username -> https://t.me/username
+    3) peer/id -> tg://user?id=<id> (best effort)
+    """
+    if phone:
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        if digits:
+            return f"https://t.me/+{digits}"
+    if username:
+        return f"https://t.me/{username.lstrip('@')}"
+    if peer:
+        digits = "".join(ch for ch in peer if ch.isdigit())
+        if digits:
+            return f"tg://user?id={digits}"
+    return None
+
+
+async def _enqueue_notification_payload(payload: Mapping[str, Any]) -> None:
+    try:
+        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        log(
+            f"event=notify_enqueue_failed tenant={payload.get('tenant_id') or payload.get('tenant')} "
+            f"lead_id={payload.get('lead_id') or '-'}"
+        )
+
+
+async def _notify_manager_handoff(
+    tenant_id: int,
+    lead_id: int,
+    reason: str | None,
+    contact_hint: str | None = None,
+    username_hint: str | None = None,
+) -> None:
     if tenant_id <= 0 or lead_id <= 0:
         return
+    if not notification_event_enabled(tenant_id, NOTIFY_EVENT_MANAGER):
+        return
+    chat_ids = notification_chat_ids(tenant_id, NOTIFY_EVENT_MANAGER)
+    if not chat_ids:
+        return
+    link = _notification_link(tenant_id, lead_id)
+    reason_hint = "прислал файл" if reason == "photo_received" else (reason or "требуется участие менеджера")
+    lead_phone = None
+    try:
+        lead_phone = await get_contact_phone_by_lead(int(lead_id))
+    except Exception:
+        lead_phone = None
+    # Prefer numeric peer for link/title when available.
+    peer_hint = None
+    if contact_hint:
+        digits_hint = "".join(ch for ch in str(contact_hint) if ch.isdigit())
+        if digits_hint:
+            peer_hint = digits_hint
+    chat_phone = lead_phone if isinstance(lead_phone, str) else None
+
+    # Prefer phone as target; fallback to peer.
+    chat_target = chat_phone or peer_hint
+    title = _notification_lead_title(lead_id, chat_phone)
+    chat_link = _build_chat_link(username_hint, chat_phone, chat_target or peer_hint)
+    if chat_link:
+        text = f"{title}: <a href=\"{chat_link}\">ссылка</a> - {reason_hint}"
+    else:
+        text = f"{title}: {reason_hint}"
+    log(
+        f"event=notify_prepare tenant={tenant_id} lead_id={lead_id} reason={reason_hint} chat_ids={chat_ids}"
+    )
+    payload = {
+        "type": "notify",
+        "event": NOTIFY_EVENT_MANAGER,
+        "tenant": int(tenant_id),
+        "tenant_id": int(tenant_id),
+        "lead_id": int(lead_id),
+        "chat_ids": chat_ids,
+        "text": text.strip(),
+    }
+    # Send immediately (do not rely on queue, which is shared with outbox).
+    await _process_notification(payload)
+
+async def _mark_handoff_silence(
+    tenant_id: int,
+    lead_id: int,
+    reason: str | None = None,
+    contact_hint: str | None = None,
+    username_hint: str | None = None,
+    notify: bool = True,
+) -> None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    silence_key = handoff_silence_key(int(tenant_id), int(lead_id))
     try:
         await r.set(
-            handoff_silence_key(int(tenant_id), int(lead_id)),
+            silence_key,
             str(int(time.time())),
             ex=HANDOFF_SILENCE_TTL_SECONDS,
         )
     except Exception:
         log(
             f"event=handoff_flag_set_failed tenant={tenant_id} lead_id={lead_id}"  # noqa: G004
+        )
+        return
+
+    if notify:
+        await _notify_manager_handoff(
+            int(tenant_id),
+            int(lead_id),
+            reason,
+            contact_hint=contact_hint,
+            username_hint=username_hint,
         )
 
 
@@ -146,6 +276,59 @@ async def _is_handoff_silenced(tenant_id: int, lead_id: int) -> bool:
         return bool(await r.exists(handoff_silence_key(int(tenant_id), int(lead_id))))
     except Exception:
         return False
+
+
+def _coerce_chat_ids(raw: Any) -> list[int]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        result: list[int] = []
+        for item in raw:
+            try:
+                val = int(item)
+            except Exception:
+                continue
+            if val:
+                result.append(val)
+        return result
+    try:
+        candidate = int(raw)
+    except Exception:
+        return []
+    return [candidate] if candidate else []
+
+
+async def _send_notify_bot(chat_id: int, text: str) -> tuple[bool, int, str]:
+    token = NOTIFY_BOT_TOKEN
+    if not token:
+        return False, 0, "notify_bot_token_missing"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    async def _post(payload: dict[str, Any]) -> tuple[int, str]:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json={k: v for k, v in payload.items() if v is not None})
+        except httpx.HTTPError as exc:
+            return 0, str(exc)
+        if 200 <= resp.status_code < 300:
+            return resp.status_code, ""
+        try:
+            data = resp.json()
+            err = data.get("description") or data.get("error") or resp.text
+        except Exception:
+            err = resp.text
+        return resp.status_code, err or "send_failed"
+
+    base_payload = {
+        "chat_id": int(chat_id),
+        "text": text,
+        "parse_mode": "HTML",  # используем HTML для ссылки
+        "disable_web_page_preview": True,
+    }
+    status, error = await _post(base_payload)
+    if 200 <= status < 300:
+        return True, status, ""
+    return False, status, error or "send_failed"
 
 
 def _looks_like_manager_outgoing(event: Mapping[str, Any]) -> bool:
@@ -325,20 +508,18 @@ AVITO_CHAT_CACHE: Dict[int, str] = {}
 
 def _avito_auto_reply_text(tenant_id: int) -> str:
     try:
-        persona_meta = persona_meta_config(int(tenant_id))
+        cfg = read_tenant_config(int(tenant_id))
     except Exception:
-        persona_meta = {}
-    if not isinstance(persona_meta, Mapping):
-        return ""
-    # Accept both nested YAML key `meta.avito_auto_reply` and plain `avito_auto_reply`.
-    raw_candidates = {}
-    for key in ("avito_auto_reply", "avito_auto_reply_text", "avito_cta_text", "meta.avito_auto_reply"):
-        raw_candidates[key] = persona_meta.get(key)
-    for key in ("avito_auto_reply", "avito_auto_reply_text", "avito_cta_text", "meta.avito_auto_reply"):
-        value = raw_candidates.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    # No other fallback: if persona is empty, return empty string to disable auto-reply.
+        cfg = None
+    if isinstance(cfg, Mapping):
+        behavior = cfg.get("behavior")
+        if isinstance(behavior, Mapping):
+            auto_flag = behavior.get("auto_reply")
+            if auto_flag is not None and not bool(auto_flag):
+                return ""
+            text_value = behavior.get("auto_reply_text")
+            if isinstance(text_value, str) and text_value.strip():
+                return text_value.strip()
     return ""
 
 
@@ -379,6 +560,96 @@ def _avito_smart_reply_enabled(tenant_id: int) -> bool:
     return False
 
 
+def _behavior_triggers(tenant_id: int) -> list[dict[str, Any]]:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = None
+    if not isinstance(cfg, Mapping):
+        return []
+    behavior = cfg.get("behavior")
+    if not isinstance(behavior, Mapping):
+        return []
+    triggers = behavior.get("triggers")
+    if not isinstance(triggers, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in triggers:
+        if not isinstance(item, Mapping):
+            continue
+        phrases = [p.strip() for p in item.get("phrases", []) if isinstance(p, str) and p.strip()]
+        if not phrases:
+            continue
+        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp"]
+        channels: list[str] = []
+        if isinstance(channels_raw, (list, tuple, set)):
+            for ch in channels_raw:
+                if isinstance(ch, str) and ch.strip():
+                    channels.append(ch.strip().lower())
+        elif isinstance(channels_raw, str) and channels_raw.strip():
+            channels.append(channels_raw.strip().lower())
+        if not channels:
+            channels = ["telegram", "avito", "whatsapp"]
+        result.append(
+            {
+                "phrases": phrases,
+                "channels": channels,
+                "silence": bool(item.get("silence", True)),
+                "notify": bool(item.get("notify", False)),
+            }
+        )
+    return result
+
+
+def _match_behavior_trigger(tenant_id: int, channel: str, text: str) -> dict[str, Any] | None:
+    if not text or not channel:
+        return None
+    candidates = _behavior_triggers(tenant_id)
+    if not candidates:
+        return None
+    lowered = text.lower()
+    channel_norm = channel.strip().lower()
+    for rule in candidates:
+        channels = rule.get("channels") or []
+        if channels and channel_norm not in channels:
+            continue
+        phrases = rule.get("phrases") or []
+        for phrase in phrases:
+            if isinstance(phrase, str) and phrase.strip() and phrase.strip().lower() in lowered:
+                return rule
+    return None
+
+
+def _photo_expectation_config(tenant_id: int) -> tuple[list[str], str, int]:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        return [], "", 0
+    if not isinstance(cfg, Mapping):
+        return [], "", 0
+    behavior = cfg.get("behavior")
+    if not isinstance(behavior, Mapping):
+        return [], "", 0
+    markers_raw = behavior.get("photo_expected_markers") or []
+    markers: list[str] = []
+    if isinstance(markers_raw, (list, tuple, set)):
+        for ph in markers_raw:
+            if isinstance(ph, str) and ph.strip():
+                markers.append(ph.strip())
+    elif isinstance(markers_raw, str) and markers_raw.strip():
+        for ph in markers_raw.split(","):
+            if ph.strip():
+                markers.append(ph.strip())
+    reply_text = behavior.get("photo_expected_reply")
+    reply = reply_text if isinstance(reply_text, str) else str(reply_text or "")
+    try:
+        ttl_val = int(behavior.get("photo_expected_ttl") or 0)
+    except Exception:
+        ttl_val = 0
+    ttl = ttl_val if ttl_val > 0 else 0
+    return markers, reply, ttl
+
+
 def _extract_ru_phone(text: str) -> str:
     if not text:
         return ""
@@ -398,6 +669,7 @@ async def _send_telegram_to_phone(
     text: str,
     *,
     lead_id: int | None = None,
+    contact_id: int | None = None,
 ) -> tuple[int, str]:
     headers: dict[str, str] = {}
     if TG_WORKER_TOKEN:
@@ -405,13 +677,33 @@ async def _send_telegram_to_phone(
     if ADMIN_TOKEN:
         headers["X-Admin-Token"] = ADMIN_TOKEN
 
-    return await telegram_transport.send(
+    status_code, body_text = await telegram_transport.send(
         tenant=tenant_id,
         phone=phone,
         text=text,
         lead_id=lead_id,
+        meta={"contact_id": contact_id} if contact_id else None,
         headers=headers,
     )
+    # If tgworker returned resolved peer_id, remember phone scoped to that peer for subsequent inbound messages.
+    if status_code and status_code < 500:
+        try:
+            parsed = json.loads(body_text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            peer_id_value = parsed.get("peer_id")
+            try:
+                if peer_id_value is not None:
+                    await r.set(
+                        f"cache:avito_phone:{tenant_id}:{peer_id_value}",
+                        phone,
+                        ex=3600 * 24 * 7,
+                    )
+            except Exception:
+                pass
+
+    return status_code, body_text
 
 
 async def _enqueue_avito_auto_reply(
@@ -793,7 +1085,7 @@ def _has_photo_attachment(blobs: Iterable[Mapping[str, Any]] | None) -> bool:
             or item.get("mimetype")
             or ""
         ).strip().lower()
-        if type_raw in {"image", "photo", "picture"}:
+        if type_raw in {"image", "photo", "picture"} or "photo" in type_raw:
             return True
         if mime_raw.startswith("image/"):
             return True
@@ -808,7 +1100,7 @@ def _has_photo_attachment(blobs: Iterable[Mapping[str, Any]] | None) -> bool:
             or blob.get("mimetype")
             or ""
         ).strip().lower()
-        if type_raw in {"image", "photo", "picture"}:
+        if type_raw in {"image", "photo", "picture"} or "photo" in type_raw:
             return True
         if mime_raw.startswith("image/"):
             return True
@@ -1342,8 +1634,183 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
-    if has_photo:
-        await _mark_handoff_silence(tenant_id, lead_id)
+    # Никогда не отвечаем и не обрабатываем сообщения от бота уведомлений.
+    if NOTIFY_BOT_ID and telegram_user_id and int(telegram_user_id) == int(NOTIFY_BOT_ID):
+        log(
+            f"event=skip_notify_bot channel=telegram tenant={tenant_id} lead_id={lead_id} peer={peer_log_hint or '-'}"
+        )
+        return
+
+    # Try to merge with existing contact by phone (from cache or linked leads).
+    existing_contact_id = None
+    try:
+        existing_contact_id = await get_contact_id_by_lead(lead_id)
+    except Exception:
+        existing_contact_id = None
+
+    # Phone scoped to lead/chat to avoid races.
+    phone_norm: str | None = None
+    if lead_id:
+        try:
+            phone_candidate = await r.get(f"cache:lead_phone:{tenant_id}:{lead_id}")
+            if phone_candidate and str(phone_candidate).strip():
+                phone_norm = (
+                    phone_candidate.decode()
+                    if isinstance(phone_candidate, (bytes, bytearray))
+                    else str(phone_candidate).strip()
+                )
+        except Exception:
+            phone_norm = None
+    if not phone_norm and peer_value:
+        try:
+            phone_candidate = await r.get(f"cache:avito_phone:{tenant_id}:{peer_value}")
+            if phone_candidate and str(phone_candidate).strip():
+                phone_norm = (
+                    phone_candidate.decode()
+                    if isinstance(phone_candidate, (bytes, bytearray))
+                    else str(phone_candidate).strip()
+                )
+        except Exception:
+            phone_norm = None
+
+    # Skip phone linking for the notify bot itself.
+    if phone_norm and NOTIFY_BOT_ID and telegram_user_id and int(telegram_user_id) == int(NOTIFY_BOT_ID):
+        log(
+            f"event=telegram_contact_link_skip reason=notify_bot tenant={tenant_id} lead_id={lead_id} phone={phone_norm}"
+        )
+        phone_norm = None
+
+    merged_contact_id = None
+    if phone_norm:
+        try:
+            phone_owner_id = None
+            try:
+                phone_owner_id = await get_contact_id_by_phone(phone_norm)
+            except Exception:
+                phone_owner_id = None
+            target_contact_id = phone_owner_id or await resolve_or_create_contact(
+                phone=phone_norm,
+                whatsapp_phone=phone_norm,
+                telegram_user_id=telegram_user_id,
+                telegram_username=username,
+            )
+            if existing_contact_id and existing_contact_id != target_contact_id:
+                await link_lead_contact(
+                    lead_id,
+                    target_contact_id,
+                    channel="telegram",
+                    peer=peer_value or peer_log_hint,
+                )
+                await update_contact_telegram(target_contact_id, telegram_user_id, username)
+                log(
+                    f"event=telegram_contact_relinked_by_phone tenant={tenant_id} lead_id={lead_id} from_contact={existing_contact_id} to_contact={target_contact_id} phone={phone_norm}"
+                )
+            else:
+                if existing_contact_id:
+                    await update_contact_telegram(existing_contact_id, telegram_user_id, username)
+                await update_contact_phone(target_contact_id, phone_norm)
+                await link_lead_contact(
+                    lead_id,
+                    target_contact_id,
+                    channel="telegram",
+                    peer=peer_value or peer_log_hint,
+                )
+                log(
+                    f"event=telegram_contact_linked_by_phone tenant={tenant_id} lead_id={lead_id} contact_id={target_contact_id} phone={phone_norm}"
+                )
+        except Exception as exc:
+            log(
+                f"event=telegram_contact_link_failed tenant={tenant_id} lead_id={lead_id} phone={phone_norm} error={exc}"
+            )
+            merged_contact_id = None
+    elif existing_contact_id:
+        try:
+            await update_contact_telegram(existing_contact_id, telegram_user_id, username)
+        except Exception:
+            pass
+
+    # Поведение по триггерам (фразы → тишина/уведомление).
+    if text:
+        trigger_rule = _match_behavior_trigger(tenant_id, "telegram", text)
+        if trigger_rule and trigger_rule.get("silence", True):
+            notify_flag = bool(trigger_rule.get("notify"))
+            await _mark_handoff_silence(
+                tenant_id,
+                lead_id,
+                reason="trigger_match",
+                contact_hint=peer_log_hint or peer_value or contact_hint,
+                username_hint=username,
+                notify=notify_flag,
+            )
+            log(
+                f"event=trigger_match channel=telegram tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
+            )
+            return
+
+    # Фото-ожидание: если пришло фото/вложение и мы ждали — отвечаем и не ставим тишину.
+    if has_photo or attachments:
+        markers, photo_reply, photo_ttl = _photo_expectation_config(tenant_id)
+        state_key = f"conv:state:{tenant_id}:{lead_id}"
+        waiting_photo = False
+        try:
+            state_val = await r.get(state_key)
+            if isinstance(state_val, str) and state_val == "waiting_photo":
+                waiting_photo = True
+        except Exception:
+            waiting_photo = False
+        if waiting_photo:
+            if photo_reply and photo_reply.strip():
+                out_payload = {
+                    "lead_id": int(lead_id),
+                    "tenant": int(tenant_id),
+                    "tenant_id": int(tenant_id),
+                    "provider": "telegram",
+                    "ch": "telegram",
+                    "channel": "telegram",
+                    "text": photo_reply.strip(),
+                    "attachments": [],
+                    "peer": peer_value or peer_log_hint,
+                    "peer_id": peer_value or peer_log_hint,
+                }
+                try:
+                    await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
+                    log(
+                        f"event=photo_expected_reply_sent tenant={tenant_id} lead_id={lead_id} peer={peer_log_hint or '-'}"
+                    )
+                except Exception as exc:
+                    log(
+                        f"event=photo_expected_reply_failed tenant={tenant_id} lead_id={lead_id} error={exc}"
+                    )
+            # Уведомим менеджера, но без постановки тишины.
+            try:
+                await _notify_manager_handoff(
+                    int(tenant_id),
+                    int(lead_id),
+                    reason="photo_received",
+                    contact_hint=peer_log_hint or peer_value or contact_hint,
+                    username_hint=username,
+                )
+            except Exception:
+                pass
+            try:
+                await r.delete(state_key)
+            except Exception:
+                pass
+            return
+
+    if attachments:
+        log(
+            f"event=incoming_attachments channel=telegram tenant={tenant_id} lead_id={lead_id} count={len(attachments)} has_photo={int(has_photo)}"
+        )
+
+    if has_photo or attachments:
+        await _mark_handoff_silence(
+            tenant_id,
+            lead_id,
+            reason="photo_received",
+            contact_hint=peer_log_hint or peer_value or contact_hint,
+            username_hint=username,
+        )
         log(
             f"event=handoff_marked channel=telegram tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
@@ -1351,7 +1818,13 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
 
     manager_outgoing = _looks_like_manager_outgoing(event) or _is_manager_message(event)
     if manager_outgoing:
-        await _mark_handoff_silence(tenant_id, lead_id)
+        await _mark_handoff_silence(
+            tenant_id,
+            lead_id,
+            reason="manager_outgoing",
+            contact_hint=peer_log_hint or peer_value or contact_hint,
+            username_hint=username,
+        )
         log(
             f"event=handoff_marked channel=telegram tenant={tenant_id} lead_id={lead_id} reason=manager_outgoing"
         )
@@ -1363,6 +1836,59 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
             f"event=smart_reply_silenced channel=telegram tenant={tenant_id} lead_id={lead_id}"
         )
         return
+
+    # Link telegram lead to existing contact by phone (if known from other channels/cache).
+    try:
+        existing_phone = await get_contact_phone_by_lead(lead_id)
+    except Exception:
+        existing_phone = None
+    merged_contact_id = None
+    if not existing_phone:
+        cached_phone_norm: str | None = None
+        try:
+            cached_phone = await r.get(f"cache:lead_phone:{tenant_id}:{lead_id}")
+            if cached_phone and str(cached_phone).strip():
+                cached_phone_norm = (
+                    cached_phone.decode()
+                    if isinstance(cached_phone, (bytes, bytearray))
+                    else str(cached_phone).strip()
+                )
+        except Exception:
+            cached_phone_norm = None
+        if not cached_phone_norm and peer_value:
+            try:
+                cached_phone = await r.get(f"cache:avito_phone:{tenant_id}:{peer_value}")
+                if cached_phone and str(cached_phone).strip():
+                    cached_phone_norm = (
+                        cached_phone.decode()
+                        if isinstance(cached_phone, (bytes, bytearray))
+                        else str(cached_phone).strip()
+                    )
+            except Exception:
+                cached_phone_norm = None
+        if (
+            cached_phone_norm
+            and NOTIFY_BOT_ID
+            and telegram_user_id
+            and int(telegram_user_id) == int(NOTIFY_BOT_ID)
+        ):
+            cached_phone_norm = None
+        if cached_phone_norm:
+            try:
+                merged_contact_id = await resolve_or_create_contact(phone=cached_phone_norm)
+                await link_lead_contact(
+                    lead_id,
+                    merged_contact_id,
+                    channel="telegram",
+                    peer=peer_value or peer_log_hint,
+                )
+                await update_contact_phone(merged_contact_id, cached_phone_norm)
+                log(
+                    f"event=telegram_contact_linked_by_phone tenant={tenant_id} lead_id={lead_id} contact_id={merged_contact_id} phone={cached_phone_norm}"
+                )
+            except Exception:
+                merged_contact_id = None
+
 
     if not text:
         log(
@@ -1406,6 +1932,25 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     log(
         f"event=smart_reply_generated channel=telegram tenant={tenant_id} lead_id={lead_id}"
     )
+
+    # Если ответ содержит маркеры ожидания фото — ставим state waiting_photo (TTL из behavior).
+    markers, _, photo_ttl = _photo_expectation_config(tenant_id)
+    if markers:
+        lowered = reply_text.lower()
+        for marker in markers:
+            if isinstance(marker, str) and marker.strip() and marker.strip().lower() in lowered:
+                ttl = photo_ttl if photo_ttl > 0 else HANDOFF_SILENCE_TTL_SECONDS
+                state_key = f"conv:state:{tenant_id}:{lead_id}"
+                try:
+                    await r.set(state_key, "waiting_photo", ex=ttl)
+                    log(
+                        f"event=photo_expected_set channel=telegram tenant={tenant_id} lead_id={lead_id} ttl={ttl} marker={marker}"
+                    )
+                except Exception as exc:
+                    log(
+                        f"event=photo_expected_set_failed channel=telegram tenant={tenant_id} lead_id={lead_id} error={exc}"
+                    )
+                break
 
     out_payload: Dict[str, Any] = {
         "lead_id": int(lead_id),
@@ -1611,8 +2156,37 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
 
     refer_id = contact_id if contact_id and contact_id > 0 else lead_id
 
-    if has_photo:
-        await _mark_handoff_silence(tenant_id, lead_id)
+    # Поведение по триггерам (фразы → тишина/уведомление).
+    if text:
+        trigger_rule = _match_behavior_trigger(tenant_id, "whatsapp", text)
+        if trigger_rule and trigger_rule.get("silence", True):
+            notify_flag = bool(trigger_rule.get("notify"))
+            await _mark_handoff_silence(
+                tenant_id,
+                lead_id,
+                reason="trigger_match",
+                contact_hint=event.get("peer") or event.get("contact"),
+                username_hint=event.get("username"),
+                notify=notify_flag,
+            )
+            log(
+                f"event=trigger_match channel=whatsapp tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
+            )
+            return
+
+    if attachments:
+        log(
+            f"event=incoming_attachments channel=whatsapp tenant={tenant_id} lead_id={lead_id} count={len(attachments)} has_photo={int(has_photo)}"
+        )
+
+    if has_photo or attachments:
+        await _mark_handoff_silence(
+            tenant_id,
+            lead_id,
+            reason="photo_received",
+            contact_hint=event.get("peer") or event.get("contact"),
+            username_hint=event.get("username"),
+        )
         log(
             f"event=handoff_marked channel=whatsapp tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
@@ -1738,6 +2312,20 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     phone_template = _avito_phone_tg_template(tenant_id) if phone_value else ""
     if phone_value:
         log(f"event=avito_phone_detected tenant={tenant_id} phone={phone_value}")
+        try:
+            await r.set(
+                f"cache:avito_phone:{tenant_id}:{chat_id}",
+                phone_value,
+                ex=3600 * 24 * 7,
+            )
+            if lead_id:
+                await r.set(
+                    f"cache:lead_phone:{tenant_id}:{lead_id}",
+                    phone_value,
+                    ex=3600 * 24 * 7,
+                )
+        except Exception:
+            pass
         if not phone_template:
             log(
                 f"event=avito_phone_tg_skip reason=empty_template channel=avito tenant={tenant_id} phone={phone_value}"
@@ -1813,13 +2401,53 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
             % (tenant_id, chat_id, exc)
         )
         lead_id = int(lead_id_hint or avito_integration.stable_lead_id(tenant_id, chat_id))
+    # Ensure lead row exists to avoid FK failures downstream
+    try:
+        exists = await lead_exists(lead_id, tenant_id)
+    except Exception:
+        exists = True  # fall through and let inserts raise if needed
+    if not exists:
+        try:
+            await upsert_lead(
+                lead_id,
+                channel="avito",
+                tenant_id=tenant_id,
+                peer=chat_id,
+                source_real_id=account_id,
+                contact=login,
+            )
+            exists = await lead_exists(lead_id, tenant_id)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("upsert_lead_retry").inc()
+            log(
+                "event=warning reason=db_error operation=ensure_lead channel=avito tenant=%s chat_id=%s lead_id=%s error=%s"
+                % (tenant_id, chat_id, lead_id, exc)
+            )
+            exists = False
+    if not exists:
+        log(
+            "event=skip_missing_lead channel=avito tenant=%s chat_id=%s lead_id=%s"
+            % (tenant_id, chat_id, lead_id)
+        )
+        return
 
     contact_id = 0
     try:
-        contact_id = await resolve_or_create_contact(
-            avito_user_id=user_id,
-            avito_login=login,
-        )
+        contact_kwargs: Dict[str, Any] = {
+            "avito_user_id": user_id,
+            "avito_login": login,
+            "phone": phone_value,
+            "whatsapp_phone": phone_value,
+        }
+        contact_id = await resolve_or_create_contact(**contact_kwargs)
+        if contact_id and phone_value:
+            try:
+                await update_contact_phone(contact_id, phone_value)
+                log(
+                    f"event=contact_phone_updated channel=avito tenant={tenant_id} lead_id={lead_id} contact_id={contact_id} phone={phone_value}"
+                )
+            except Exception:
+                pass
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("resolve_contact").inc()
         log(
@@ -1856,12 +2484,32 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
             % (tenant_id, lead_id, exc)
         )
 
+    trigger_rule = _match_behavior_trigger(tenant_id, "avito", text)
+    if trigger_rule and trigger_rule.get("silence", True):
+        notify_flag = bool(trigger_rule.get("notify"))
+        await _mark_handoff_silence(
+            tenant_id,
+            lead_id,
+            reason="trigger_match",
+            contact_hint=chat_id,
+            username_hint=login,
+            notify=notify_flag,
+        )
+        log(
+            f"event=trigger_match channel=avito tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
+        )
+        return
+
     if phone_value and phone_template and lead_id > 0:
         dedup_key = f"avito:phone_tg_sent:{tenant_id}:{lead_id}"
-        try:
-            already_sent = await r.get(dedup_key)
-        except Exception:
-            already_sent = None
+        already_sent = None
+        # Force disable dedup regardless of env
+        AVITO_PHONE_TG_DEDUP_ENABLED_LOCAL = False
+        if AVITO_PHONE_TG_DEDUP_ENABLED_LOCAL:
+            try:
+                already_sent = await r.get(dedup_key)
+            except Exception:
+                already_sent = None
         if already_sent:
             log(
                 f"event=avito_phone_tg_skip reason=dedup channel=avito tenant={tenant_id} lead_id={lead_id} phone={phone_value}"
@@ -1873,6 +2521,7 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                     phone=phone_value,
                     text=phone_template,
                     lead_id=lead_id,
+                    contact_id=contact_id or None,
                 )
             except Exception as exc:
                 log(
@@ -1880,10 +2529,11 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 )
                 return
             if 200 <= status_code < 300:
-                try:
-                    await r.set(dedup_key, "1", ex=AVITO_PHONE_TG_TTL_SECONDS)
-                except Exception:
-                    pass
+                if AVITO_PHONE_TG_DEDUP_ENABLED_LOCAL:
+                    try:
+                        await r.set(dedup_key, "1", ex=AVITO_PHONE_TG_TTL_SECONDS)
+                    except Exception:
+                        pass
                 log(
                     f"event=avito_phone_tg_sent channel=avito tenant={tenant_id} lead_id={lead_id} phone={phone_value} status={status_code}"
                 )
@@ -1893,7 +2543,7 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 )
 
     if has_photo:
-        await _mark_handoff_silence(tenant_id, lead_id)
+        await _mark_handoff_silence(tenant_id, lead_id, reason="photo_received")
         log(
             f"event=handoff_marked channel=avito tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
@@ -2436,6 +3086,11 @@ async def send_telegram(
 ) -> tuple[int, str]:
 
     target = int(chat_id)
+
+    if NOTIFY_BOT_ID and int(target) == int(NOTIFY_BOT_ID):
+        log(f"event=telegram_send_skip reason=notify_bot tenant={tenant_id} target={target}")
+        return (0, "skip_notify_bot")
+
     normalized_attachments = _normalize_attachments(attachments or [])
     text_value = str(text or "").strip()
 
@@ -2816,7 +3471,13 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
 
     manager_message = _is_manager_message(item)
     if manager_message and actual_lead_id > 0:
-        await _mark_handoff_silence(tenant, actual_lead_id)
+        await _mark_handoff_silence(
+            tenant,
+            actual_lead_id,
+            reason="manager_outgoing",
+            contact_hint=event.get("peer") or event.get("contact"),
+            username_hint=event.get("username"),
+        )
 
     if channel == "whatsapp":
         prepared_attachment = (
@@ -3135,6 +3796,84 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
     log(f"[worker] reply -> lead {lead_id}: {text[:160]} ({sent_status})")
 
 
+# Notification dispatcher
+async def _process_notification(item: Mapping[str, Any]) -> None:
+    event_name = str(item.get("event") or "notify").strip() or "notify"
+    tenant_raw = item.get("tenant_id") or item.get("tenant") or os.getenv("TENANT_ID", "1")
+    try:
+        tenant_id = int(tenant_raw)
+    except Exception:
+        tenant_id = int(os.getenv("TENANT_ID", "1"))
+    lead_raw = item.get("lead_id")
+    try:
+        lead_id = int(lead_raw) if lead_raw is not None else 0
+    except Exception:
+        lead_id = 0
+    chat_ids = _coerce_chat_ids(item.get("chat_ids"))
+    if not chat_ids:
+        chat_ids = notification_chat_ids(tenant_id, event_name)
+    text = (item.get("text") or "").strip()
+    if not text:
+        log(
+            f"event=notify_skip reason=empty_text tenant={tenant_id} lead_id={lead_id} event={event_name}"
+        )
+        return
+    if not chat_ids:
+        log(
+            f"event=notify_skip reason=missing_chat_ids tenant={tenant_id} lead_id={lead_id} event={event_name}"
+        )
+        return
+
+    log(
+        f"event=notify_dispatch tenant={tenant_id} lead_id={lead_id} event={event_name} chat_ids={chat_ids}"
+    )
+    for chat_id in chat_ids:
+        try:
+            target = int(chat_id)
+        except Exception:
+            continue
+        log(
+            f"event=notify_send_attempt tenant={tenant_id} lead_id={lead_id} event={event_name} chat_id={target}"
+        )
+        send_ok = False
+        send_status = 0
+        send_error = ""
+        # Prefer dedicated notify bot if token is present. If есть токен, не падаем в fallback на tgworker.
+        if NOTIFY_BOT_TOKEN:
+            send_ok, send_status, send_error = await _send_notify_bot(target, text)
+            if not send_ok:
+                log(
+                    "event=notify_send_failed tenant=%s lead_id=%s event=%s chat_id=%s status=%s error=%s"
+                    % (tenant_id, lead_id, event_name, target, send_status, send_error or "-")
+                )
+                continue
+        if not send_ok:
+            headers = {}
+            if ADMIN_TOKEN:
+                headers["X-Admin-Token"] = ADMIN_TOKEN
+            status_code, body_text = await telegram_transport.send(
+                tenant=tenant_id,
+                peer=str(target),
+                text=text,
+                headers=headers or None,
+            )
+            send_status = status_code
+            if status_code == 200:
+                send_ok = True
+            else:
+                send_error = body_text
+        if send_ok:
+            log(
+                f"event=notify_send_success tenant={tenant_id} lead_id={lead_id} event={event_name} chat_id={target} status={send_status}"
+            )
+            continue
+        log(
+            "event=notify_send_failed tenant=%s lead_id=%s event=%s chat_id=%s status=%s error=%s"
+            % (tenant_id, lead_id, event_name, target, send_status, send_error or "-")
+        )
+
+# Debug helper: log when notify type payload is seen in queue.
+
 # ==== Loop ====
 async def process_incoming_queue() -> None:
     log(
@@ -3203,6 +3942,23 @@ async def process_queue():
                 item = json.loads(raw_item)
             except json.JSONDecodeError:
                 log(f"[worker] json decode err: {raw_item[:200]}")
+                continue
+            if isinstance(item, Mapping) and item.get("type") == "notify":
+                log(
+                    f"event=notify_queue_item tenant={item.get('tenant') or item.get('tenant_id') or '-'} "
+                    f"lead_id={item.get('lead_id') or '-'} event={item.get('event') or 'notify'}"
+                )
+                try:
+                    await _process_notification(item)
+                except Exception:
+                    log(
+                        "event=notify_unhandled tenant=%s lead_id=%s event=%s"
+                        % (
+                            item.get("tenant_id") or item.get("tenant") or "-",
+                            item.get("lead_id") or "-",
+                            item.get("event") or "notify",
+                        )
+                    )
                 continue
 
             if _is_status_echo(item):

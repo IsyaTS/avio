@@ -87,6 +87,293 @@
         <span id="persona-message" class="status-text"></span>
       </div>
     </section>
+
+<section class="surface stack" data-testid="client-behavior">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Поведение и триггеры</h2>
+        <p class="section-subtitle">Настройте автоответ Avito и фразы, при которых бот замолкает и зовёт менеджера.</p>
+    </div>
+    <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items: end;">
+        <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="behavior-auto-reply">
+            <span class="label" style="margin:0;">Включить автоответ Avito</span>
+        </label>
+        <label style="grid-column: 1 / -1;">
+            <span class="label">Текст автоответа Avito</span>
+            <textarea id="behavior-auto-reply-text" rows="3" class="textarea" placeholder="Например: Спасибо за обращение! Скоро ответим."></textarea>
+        </label>
+    </div>
+
+    <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items: end;">
+        <label style="grid-column: 1 / -1;">
+            <span class="label">Фразы, после которых ждём фото/файл (по одной в строке)</span>
+            <textarea id="behavior-photo-markers" rows="3" class="textarea" placeholder="Например: пришлите фото проёма&#10;фото изделия"></textarea>
+        </label>
+        <label style="grid-column: 1 / -1;">
+            <span class="label">Ответ на фото/файл, если ждали</span>
+            <textarea id="behavior-photo-reply" rows="3" class="textarea" placeholder="Спасибо! Подскажите ещё ..."></textarea>
+        </label>
+        <label>
+            <span class="label">TTL ожидания (сек)</span>
+            <input type="number" id="behavior-photo-ttl" min="0" placeholder="например, 3600">
+        </label>
+    </div>
+
+    <div class="stack" style="gap: 8px;">
+        <div class="stack" style="gap:4px;">
+            <h3 class="section-title" style="font-size:1.1rem;">Триггеры тишины</h3>
+            <p class="section-subtitle">Если сообщение клиента содержит любую из фраз, бот ставит тишину и, при желании, уведомляет менеджера.</p>
+        </div>
+        <div id="trigger-rows" class="stack" style="gap:10px;"></div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+            <button id="add-trigger" type="button" class="btn btn--secondary">Добавить правило</button>
+        </div>
+    </div>
+
+    <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+        <button id="save-behavior" type="button" class="btn">Сохранить поведение</button>
+        <span id="behavior-message" class="status-text"></span>
+    </div>
+</section>
+
+<script>
+  (function () {
+    const stateNode = document.getElementById('client-settings-state');
+    let state = {};
+    try {
+      state = JSON.parse(stateNode.textContent || '{}');
+    } catch (e) {
+      console.warn('client-settings-state parse failed', e);
+    }
+    const behavior = (state && state.behavior) ? state.behavior : {};
+    const urls = (state && state.urls) ? state.urls : {};
+    const tenant = state.tenant;
+    const key = state.key;
+
+    const autoReplyToggle = document.getElementById('behavior-auto-reply');
+    const autoReplyText = document.getElementById('behavior-auto-reply-text');
+    const triggerRows = document.getElementById('trigger-rows');
+    const addTriggerBtn = document.getElementById('add-trigger');
+    const saveBehaviorBtn = document.getElementById('save-behavior');
+    const behaviorMessage = document.getElementById('behavior-message');
+    const photoMarkersNode = document.getElementById('behavior-photo-markers');
+    const photoReplyNode = document.getElementById('behavior-photo-reply');
+    const photoTtlNode = document.getElementById('behavior-photo-ttl');
+
+    let triggers = Array.isArray(behavior.triggers) ? behavior.triggers.slice() : [];
+
+    function phrasesToText(rule) {
+      return (rule.phrases || []).join('\n');
+    }
+
+    function normalizePhrases(text) {
+      return String(text || '')
+        .split(/\n|,/)
+        .map((v) => v.trim())
+        .filter(Boolean);
+    }
+
+    function renderTriggers() {
+      if (!triggerRows) return;
+      triggerRows.innerHTML = '';
+      if (!triggers.length) {
+        triggerRows.innerHTML = '<div class="hint">Правил пока нет. Добавьте фразы, при которых бот замолкает.</div>';
+        return;
+      }
+      triggers.forEach((rule, idx) => {
+        const row = document.createElement('div');
+        row.className = 'surface stack';
+        row.style.padding = '12px';
+        row.style.gap = '8px';
+        row.dataset.index = String(idx);
+
+        const topBar = document.createElement('div');
+        topBar.style.display = 'flex';
+        topBar.style.gap = '12px';
+        topBar.style.alignItems = 'center';
+        topBar.style.flexWrap = 'wrap';
+
+        const channelsLabel = document.createElement('div');
+        channelsLabel.className = 'stack';
+        channelsLabel.style.gap = '4px';
+        channelsLabel.innerHTML = '<span class="label">Каналы</span>';
+        const chWrap = document.createElement('div');
+        chWrap.style.display = 'flex';
+        chWrap.style.gap = '12px';
+        chWrap.style.flexWrap = 'wrap';
+        const channels = ['telegram', 'avito', 'whatsapp'];
+        channels.forEach((ch) => {
+          const label = document.createElement('label');
+          label.style.display = 'flex';
+          label.style.alignItems = 'center';
+          label.style.gap = '6px';
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.className = `trigger-channel trigger-${ch}`;
+          input.checked = !rule.channels || !rule.channels.length || rule.channels.includes(ch);
+          label.appendChild(input);
+          label.appendChild(document.createTextNode(ch));
+          chWrap.appendChild(label);
+        });
+        channelsLabel.appendChild(chWrap);
+        topBar.appendChild(channelsLabel);
+
+        const notifyWrap = document.createElement('label');
+        notifyWrap.style.display = 'flex';
+        notifyWrap.style.alignItems = 'center';
+        notifyWrap.style.gap = '6px';
+        const notifyInput = document.createElement('input');
+        notifyInput.type = 'checkbox';
+        notifyInput.className = 'trigger-notify';
+        notifyInput.checked = !!rule.notify;
+        notifyWrap.appendChild(notifyInput);
+        notifyWrap.appendChild(document.createTextNode('Уведомлять менеджера'));
+        topBar.appendChild(notifyWrap);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn btn--secondary';
+        removeBtn.textContent = 'Удалить';
+        removeBtn.addEventListener('click', () => {
+          triggers.splice(idx, 1);
+          renderTriggers();
+        });
+        topBar.appendChild(removeBtn);
+
+        const phrasesLabel = document.createElement('label');
+        phrasesLabel.className = 'stack';
+        phrasesLabel.style.gap = '4px';
+        const title = document.createElement('span');
+        title.className = 'label';
+        title.textContent = 'Фразы (по одной в строке или через запятую)';
+        const textarea = document.createElement('textarea');
+        textarea.className = 'textarea trigger-phrases';
+        textarea.rows = 3;
+        textarea.value = phrasesToText(rule);
+        phrasesLabel.appendChild(title);
+        phrasesLabel.appendChild(textarea);
+
+        row.appendChild(topBar);
+        row.appendChild(phrasesLabel);
+        triggerRows.appendChild(row);
+      });
+    }
+
+    function collectTriggers() {
+      if (!triggerRows) return [];
+      const rows = Array.from(triggerRows.querySelectorAll('.surface.stack'));
+      const collected = [];
+      rows.forEach((row) => {
+        const phrasesNode = row.querySelector('.trigger-phrases');
+        const phrases = normalizePhrases(phrasesNode ? phrasesNode.value : '');
+        if (!phrases.length) return;
+        const channels = [];
+        const chTg = row.querySelector('.trigger-telegram');
+        const chAvito = row.querySelector('.trigger-avito');
+        const chWa = row.querySelector('.trigger-whatsapp');
+        if (chTg && chTg.checked) channels.push('telegram');
+        if (chAvito && chAvito.checked) channels.push('avito');
+        if (chWa && chWa.checked) channels.push('whatsapp');
+        const notifyNode = row.querySelector('.trigger-notify');
+        const notify = notifyNode ? !!notifyNode.checked : false;
+        collected.push({
+          phrases,
+          channels: channels.length ? channels : ['telegram', 'avito', 'whatsapp'],
+          silence: true,
+          notify,
+        });
+      });
+      return collected;
+    }
+
+    function addTrigger() {
+      triggers.push({
+        phrases: [],
+        channels: ['telegram', 'avito', 'whatsapp'],
+        silence: true,
+        notify: true,
+      });
+      renderTriggers();
+    }
+
+    if (autoReplyToggle) autoReplyToggle.checked = !!behavior.auto_reply;
+    if (autoReplyText) autoReplyText.value = behavior.auto_reply_text || '';
+    if (photoMarkersNode) {
+      const markers = Array.isArray(behavior.photo_expected_markers) ? behavior.photo_expected_markers : [];
+      photoMarkersNode.value = markers.join('\n');
+    }
+    if (photoReplyNode) {
+      photoReplyNode.value = behavior.photo_expected_reply || '';
+    }
+    if (photoTtlNode) {
+      photoTtlNode.value = behavior.photo_expected_ttl ? String(behavior.photo_expected_ttl) : '';
+    }
+    renderTriggers();
+
+    if (addTriggerBtn) {
+      addTriggerBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        addTrigger();
+      });
+    }
+
+    async function saveBehavior() {
+      if (!saveBehaviorBtn) return;
+      saveBehaviorBtn.disabled = true;
+      if (behaviorMessage) {
+        behaviorMessage.textContent = 'Сохраняем...';
+        behaviorMessage.className = 'status-text muted';
+      }
+      const payload = {
+        auto_reply: autoReplyToggle ? !!autoReplyToggle.checked : false,
+        auto_reply_text: autoReplyText ? autoReplyText.value : '',
+        triggers: collectTriggers(),
+        photo_expected_markers: photoMarkersNode ? normalizePhrases(photoMarkersNode.value) : [],
+        photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',
+        photo_expected_ttl: photoTtlNode ? Number.parseInt(photoTtlNode.value || '0', 10) || 0 : 0,
+      };
+      const endpoint = urls.save_behavior || (state.tenant ? `/client/${state.tenant}/behavior/save` : '');
+      if (!endpoint) {
+        if (behaviorMessage) {
+          behaviorMessage.textContent = 'Не найден endpoint сохранения';
+          behaviorMessage.className = 'status-text alert';
+        }
+        saveBehaviorBtn.disabled = false;
+        return;
+      }
+      const withKey = key ? `${endpoint}?k=${encodeURIComponent(key)}` : endpoint;
+      try {
+        const resp = await fetch(withKey, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+          const detail = await resp.text();
+          throw new Error(detail || 'Ошибка сохранения');
+        }
+        if (behaviorMessage) {
+          behaviorMessage.textContent = 'Настройки сохранены';
+          behaviorMessage.className = 'status-text muted';
+        }
+      } catch (err) {
+        if (behaviorMessage) {
+          behaviorMessage.textContent = (err && err.message) ? err.message : 'Ошибка сохранения';
+          behaviorMessage.className = 'status-text alert';
+        }
+      } finally {
+        saveBehaviorBtn.disabled = false;
+      }
+    }
+
+    if (saveBehaviorBtn) {
+      saveBehaviorBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        saveBehavior();
+      });
+    }
+  })();
+</script>
     <script>
       (function () {
         const tenant = {{ tenant | tojson }};

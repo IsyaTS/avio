@@ -520,6 +520,18 @@ def client_settings(tenant: int, request: Request):
     passport_raw = cfg.get("passport", {})
     passport = passport_raw if isinstance(passport_raw, dict) else {}
 
+    behavior_raw = cfg.get("behavior", {})
+    behavior_cfg = behavior_raw if isinstance(behavior_raw, dict) else {}
+    triggers_raw = behavior_cfg.get("triggers") if isinstance(behavior_cfg.get("triggers"), list) else []
+    behavior_state = {
+        "auto_reply": bool(behavior_cfg.get("auto_reply")),
+        "auto_reply_text": behavior_cfg.get("auto_reply_text") or "",
+        "triggers": triggers_raw,
+        "photo_expected_markers": behavior_cfg.get("photo_expected_markers") or [],
+        "photo_expected_reply": behavior_cfg.get("photo_expected_reply") or "",
+        "photo_expected_ttl": behavior_cfg.get("photo_expected_ttl") or 0,
+    }
+
     integrations_raw = cfg.get("integrations", {})
     integrations = integrations_raw if isinstance(integrations_raw, dict) else {}
     uploaded_meta = integrations.get("uploaded_catalog", {})
@@ -535,6 +547,7 @@ def client_settings(tenant: int, request: Request):
         "settings_get": "/pub/settings/get",
         "settings_save": "/pub/settings/save",
         "save_settings": f"/client/{tenant}/settings/save",
+        "save_behavior": f"/client/{tenant}/behavior/save",
         "save_persona": f"/client/{tenant}/persona",
         "upload_catalog": "/pub/catalog/upload",
         "csv_get": "/pub/catalog/csv",
@@ -555,6 +568,7 @@ def client_settings(tenant: int, request: Request):
         "urls": urls,
         "max_days": EXPORT_MAX_DAYS,
         "webhook_secret": webhook_secret,
+        "behavior": behavior_state,
     }
 
     form_payload = {
@@ -566,6 +580,7 @@ def client_settings(tenant: int, request: Request):
 
     state_payload = dict(state)
     state_payload["form"] = form_payload
+    state_payload["behavior"] = behavior_state
 
     asset_version_value = C.asset_version()
 
@@ -587,6 +602,7 @@ def client_settings(tenant: int, request: Request):
         "client_settings_version": C.client_settings_version(),
         "webhook_secret": webhook_secret,
         "asset_version": asset_version_value,
+        "behavior": behavior_state,
     }
     response = render_template("client/settings.html", context)
     response.headers["Cache-Control"] = "no-store"
@@ -628,6 +644,85 @@ async def save_form(tenant: int, request: Request):
     )
 
     passport["currency"] = "₽"
+    C.write_tenant_config(tenant, cfg)
+    return {"ok": True}
+
+
+def _sanitize_triggers(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        phrases_raw = item.get("phrases") or item.get("keywords") or []
+        phrases: list[str] = []
+        if isinstance(phrases_raw, (list, tuple, set)):
+            for ph in phrases_raw:
+                if isinstance(ph, str) and ph.strip():
+                    phrases.append(ph.strip())
+        elif isinstance(phrases_raw, str) and phrases_raw.strip():
+            for ph in phrases_raw.split(","):
+                if ph.strip():
+                    phrases.append(ph.strip())
+        if not phrases:
+            continue
+        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp"]
+        channels: list[str] = []
+        if isinstance(channels_raw, (list, tuple, set)):
+            for ch in channels_raw:
+                if isinstance(ch, str) and ch.strip():
+                    channels.append(ch.strip().lower())
+        elif isinstance(channels_raw, str) and channels_raw.strip():
+            channels.append(channels_raw.strip().lower())
+        if not channels:
+            channels = ["telegram", "avito", "whatsapp"]
+        result.append(
+            {
+                "phrases": phrases,
+                "channels": channels,
+                "silence": bool(item.get("silence", True)),
+                "notify": bool(item.get("notify", False)),
+            }
+        )
+    return result
+
+
+@router.post("/client/{tenant}/behavior/save")
+async def save_behavior(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = await request.json()
+    cfg = C.read_tenant_config(tenant)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    behavior = cfg.get("behavior")
+    if not isinstance(behavior, dict):
+        behavior = {}
+    behavior["auto_reply"] = bool(payload.get("auto_reply"))
+    behavior["auto_reply_enabled"] = behavior["auto_reply"]
+    behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
+    behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
+    markers_raw = payload.get("photo_expected_markers") or []
+    markers: list[str] = []
+    if isinstance(markers_raw, (list, tuple, set)):
+        for ph in markers_raw:
+            if isinstance(ph, str) and ph.strip():
+                markers.append(ph.strip())
+    elif isinstance(markers_raw, str) and markers_raw.strip():
+        for ph in markers_raw.split(","):
+            if ph.strip():
+                markers.append(ph.strip())
+    behavior["photo_expected_markers"] = markers
+    reply_text = payload.get("photo_expected_reply") or ""
+    behavior["photo_expected_reply"] = reply_text if isinstance(reply_text, str) else str(reply_text)
+    try:
+        ttl_val = int(payload.get("photo_expected_ttl") or 0)
+    except Exception:
+        ttl_val = 0
+    behavior["photo_expected_ttl"] = ttl_val if ttl_val > 0 else 0
+    cfg["behavior"] = behavior
     C.write_tenant_config(tenant, cfg)
     return {"ok": True}
 

@@ -41,6 +41,20 @@ from libs.core.metrics import DB_ERRORS_COUNTER, WEBHOOK_PROVIDER_COUNTER
 from libs.core.repo import provider_tokens as provider_tokens_repo
 
 
+def _json_safe(value: Any) -> Any:
+    """Make payload JSON-safe by stringifying unknown types."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe(v) for v in value]
+    try:
+        return str(value)
+    except Exception:
+        return repr(value)
+
+
 logger = logging.getLogger("app.web.webhooks")
 
 INCOMING_QUEUE_KEY = (
@@ -444,6 +458,26 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if extra_media:
         attachments.extend([dict(item) for item in extra_media if isinstance(item, Mapping)])
 
+    if provider == "telegram":
+        # Force treat media/photo from provider_raw as attachment to avoid loss in downstream logic.
+        if not attachments and isinstance(provider_raw, Mapping):
+            media_obj = _as_mapping(provider_raw.get("media"))
+            photo_obj = _as_mapping(provider_raw.get("photo"))
+            forced = []
+            for obj in (media_obj, photo_obj):
+                if not obj:
+                    continue
+                kind = str(obj.get("_") or obj.get("type") or "photo")
+                photo_id = obj.get("id") or (obj.get("photo") or {}).get("id") if isinstance(obj, Mapping) else None
+                attachment = {"type": kind}
+                if photo_id:
+                    attachment["photo_id"] = photo_id
+                    attachment["url"] = f"telegram://{tenant}/{photo_id}"
+                forced.append(attachment)
+            if forced:
+                attachments = forced
+                msg["attachments"] = attachments
+                body["attachments"] = attachments
     has_photo = _has_photo_attachment(attachments)
     logger.debug(
         "webhook_photo_probe provider=%s tenant=%s lead_hint=%s has_photo_initial=%s attachments_len=%s provider_raw_keys=%s",
@@ -626,6 +660,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "stage=incoming_duplicate ch=telegram tenant=%s message_id=%s", tenant, message_id
         )
         return _ok({"skipped": True, "reason": "duplicate"})
+    logger.info(
+        "stage=pre_reply_checks ch=%s tenant=%s lead_id=%s msg=%s has_photo=%s attachments=%s text_len=%s",
+        channel,
+        tenant,
+        lead_id,
+        message_id or "",
+        int(bool(has_photo)),
+        len(attachments),
+        len(text or ""),
+    )
 
     stored_incoming = False
     ts_ms = int(time.time() * 1000)
@@ -716,6 +760,14 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         else:
             payload.pop("auto_reply_handled", None)
         try:
+            payload = _json_safe(payload)
+            logger.info(
+                "stage=incoming_enqueue_attempt ch=%s tenant=%s message_id=%s attachments=%s",
+                channel,
+                tenant,
+                payload.get("message_id") or "",
+                len(payload.get("attachments") or []),
+            )
             await _redis_queue.lpush(
                 INCOMING_QUEUE_KEY, json.dumps(payload, ensure_ascii=False)
             )
@@ -859,8 +911,17 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     telegram_user_id=telegram_user_id,
                 )
                 stored_incoming = True
+        logger.info(
+            "stage=contact_resolved tenant=%s lead_id=%s contact_id=%s has_photo=%s text_len=%s attachments=%s",
+            tenant,
+            lead_id,
+            contact_id,
+            int(bool(has_photo)),
+            len(text or ""),
+            len(attachments),
+        )
     except Exception:
-        pass
+        logger.exception("contact_upsert_err tenant=%s lead_id=%s", tenant, lead_id)
 
     if text and not stored_incoming:
         try:
@@ -883,7 +944,33 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             )
         except Exception:
             logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
-        return _ok({"queued": False, "smartReply": False, "handoff": True, "reason": "photo_received"})
+        try:
+            logger.info(
+                "event=handoff_enqueue_has_photo ch=%s tenant=%s lead_id=%s attachments=%s keys=%s",
+                channel,
+                tenant,
+                lead_id,
+                len(attachments),
+                list(normalized_event.keys()),
+            )
+            payload = dict(normalized_event)
+            payload["handoff"] = True
+            serialized = json.dumps(_json_safe(payload), ensure_ascii=False)
+            await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
+            if channel == "telegram":
+                await _redis_queue.incrby("metrics:telegram:incoming", 1)
+            logger.info(
+                "stage=incoming_enqueued_photo ch=%s tenant=%s message_id=%s",
+                channel,
+                tenant,
+                payload.get("message_id") or "",
+            )
+        except Exception:
+            logger.exception(
+                "stage=incoming_enqueue_photo_failed ch=%s tenant=%s", channel, tenant
+            )
+            raise HTTPException(status_code=500, detail="queue_error")
+        return _ok({"queued": True, "leadId": lead_id, "smartReply": False, "handoff": True, "reason": "photo_received"})
 
     refer_id = contact_id or lead_id
 
@@ -1163,6 +1250,32 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             provider,
             lead_id,
         )
+
+    if has_photo:
+        logger.info(
+            "event=handoff_enqueue_has_photo ch=%s tenant=%s lead_id=%s attachments=%s keys=%s",
+            channel,
+            tenant,
+            lead_id,
+            len(attachments),
+            list(normalized_event.keys()),
+        )
+        try:
+            serialized = json.dumps(_json_safe(normalized_event), ensure_ascii=False)
+            await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
+            await _redis_queue.incrby("metrics:telegram:incoming", 1)
+            logger.info(
+                "stage=incoming_enqueued_photo ch=%s tenant=%s message_id=%s",
+                channel,
+                tenant,
+                normalized_event.get("message_id") or "",
+            )
+        except Exception:
+            logger.exception(
+                "stage=incoming_enqueue_photo_failed ch=%s tenant=%s", channel, tenant
+            )
+            raise HTTPException(status_code=500, detail="queue_error")
+        return _ok({"queued": True, "leadId": lead_id, "smartReply": False, "handoff": True})
 
     await _enqueue_incoming_event()
     return _ok({"queued": False, "leadId": lead_id, "smartReply": True})
@@ -1475,6 +1588,14 @@ async def telegram_webhook(request: Request):
     if not isinstance(payload, dict):
         payload = {}
 
+    try:
+        logger.info(
+            "telegram_webhook_raw keys=%s",
+            list(payload.keys()),
+        )
+    except Exception:
+        logger.exception("telegram_webhook_raw_log_failed")
+
     # Diagnostic: log raw webhook body to inspect missing manager/out flags.
     try:
         logger.info(
@@ -1514,6 +1635,28 @@ async def telegram_webhook(request: Request):
         message["media"] = payload.get("media")
     if "attachments" not in message and isinstance(payload.get("attachments"), list):
         message["attachments"] = payload.get("attachments")
+    # Enrich attachments from provider_raw.media (e.g., MessageMediaPhoto) so worker sees photos.
+    try:
+        provider_raw = payload.get("provider_raw") if isinstance(payload.get("provider_raw"), dict) else {}
+        media_obj = message.get("media") if isinstance(message.get("media"), dict) else provider_raw.get("media") if isinstance(provider_raw, dict) else None
+        attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+        if media_obj and isinstance(media_obj, Mapping):
+            media_type = str(media_obj.get("_") or media_obj.get("type") or "").strip()
+            attachment: dict[str, Any] = {"type": media_type or "photo"}
+            photo_obj = media_obj.get("photo") if isinstance(media_obj.get("photo"), Mapping) else None
+            photo_id = photo_obj.get("id") if isinstance(photo_obj, Mapping) else None
+            if photo_id:
+                attachment["photo_id"] = photo_id
+                attachment["url"] = f"telegram://{tenant}/{photo_id}"
+            if attachment not in attachments:
+                attachments = list(attachments)
+                attachments.append(attachment)
+                message["attachments"] = attachments
+                payload["attachments"] = attachments
+        elif isinstance(message.get("attachments"), list):
+            payload["attachments"] = message["attachments"]
+    except Exception:
+        logger.exception("telegram_webhook_attach_enrich_failed tenant=%s", tenant)
     # preserve raw transport payload to inspect media (e.g., MessageMediaPhoto) and flags
     if "provider_raw" not in message and payload.get("provider_raw") is not None:
         message["provider_raw"] = payload.get("provider_raw")

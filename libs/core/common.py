@@ -17,11 +17,11 @@ _FALSE_TOKENS = {"0", "false", "no", "off", "disabled"}
 _TRUE_TOKENS = {"1", "true", "yes", "on", "enabled"}
 
 
-def _coerce_bool(value: Any | None) -> bool | None:
-    """Convert env/config values to booleans with lenient parsing."""
+def _coerce_bool(value: Any | None, default: bool | None = None) -> bool | None:
+    """Convert env/config values to booleans with lenient parsing (supports default)."""
 
     if value is None:
-        return None
+        return default
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -29,7 +29,7 @@ def _coerce_bool(value: Any | None) -> bool | None:
     if isinstance(value, str):
         lowered = value.strip().lower()
         if not lowered:
-            return None
+            return default
         if lowered in _FALSE_TOKENS:
             return False
         if lowered in _TRUE_TOKENS:
@@ -254,6 +254,7 @@ def _parse_str_set(raw: str) -> set[str]:
 
 _MANAGER_TG_IDS = _parse_int_set(os.getenv("MANAGER_TELEGRAM_IDS", ""))
 _MANAGER_WA_NUMBERS = _parse_str_set(os.getenv("MANAGER_WHATSAPP_NUMBERS", ""))
+_NOTIFY_DEFAULT_CHAT_IDS = _parse_int_set(os.getenv("NOTIFY_DEFAULT_CHAT_IDS", ""))
 
 
 def is_manager_telegram(user_id: int | None) -> bool:
@@ -270,6 +271,81 @@ def is_manager_whatsapp(digits: str | None) -> bool:
     return any(item in _MANAGER_WA_NUMBERS for item in candidates)
 
 
+def _normalize_chat_ids(raw: Any) -> list[int]:
+    """Coerce chat ids from config/env to a list of ints."""
+
+    if raw is None:
+        return []
+
+    if isinstance(raw, (int, float)):
+        try:
+            candidate = int(raw)
+        except Exception:
+            return []
+        return [candidate] if candidate else []
+
+    if isinstance(raw, str):
+        if not raw.strip():
+            return []
+        return sorted(_parse_int_set(raw))
+
+    if isinstance(raw, (list, tuple, set)):
+        result: list[int] = []
+        for item in raw:
+            try:
+                candidate = int(item)
+            except Exception:
+                continue
+            if candidate:
+                result.append(candidate)
+        return result
+
+    return []
+
+
+def _read_notifications_config(tenant: int) -> Mapping[str, Any]:
+    try:
+        cfg = sales_core_module.read_tenant_config(int(tenant))
+    except Exception:
+        return {}
+    if not isinstance(cfg, Mapping):
+        return {}
+    raw = cfg.get("notifications")
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def notification_chat_ids(tenant: int, event: str | None = None) -> list[int]:
+    """Resolve chat ids for notifications (event-specific -> tenant-wide -> env default)."""
+
+    notifications = _read_notifications_config(tenant)
+    chat_ids: list[int] = []
+    if event:
+        event_cfg = notifications.get(event)
+        if isinstance(event_cfg, Mapping):
+            chat_ids = _normalize_chat_ids(event_cfg.get("chat_ids"))
+    if not chat_ids:
+        chat_ids = _normalize_chat_ids(notifications.get("chat_ids"))
+    if not chat_ids and _NOTIFY_DEFAULT_CHAT_IDS:
+        chat_ids = sorted(_NOTIFY_DEFAULT_CHAT_IDS)
+    return chat_ids
+
+
+def notification_event_enabled(tenant: int, event: str) -> bool:
+    """Check whether notification event enabled for tenant (defaults to False)."""
+
+    notifications = _read_notifications_config(tenant)
+    if not isinstance(notifications, Mapping):
+        return False
+    event_cfg = notifications.get(event)
+    if isinstance(event_cfg, Mapping) and "enabled" in event_cfg:
+        return _coerce_bool(event_cfg.get("enabled"), False)
+
+    global_flag = notifications.get("enabled")
+    if global_flag is not None:
+        return _coerce_bool(global_flag, False)
+    return False
+
+
 __all__ = [
     "OUTBOX_QUEUE_KEY",
     "OUTBOX_DLQ_KEY",
@@ -278,6 +354,8 @@ __all__ = [
     "whitelist_contains_number",
     "normalize_username",
     "smart_reply_enabled",
+    "notification_event_enabled",
+    "notification_chat_ids",
     "default_fallback_reply",
     "SMART_REPLY_ENABLED_DEFAULT",
     "AI_ENABLED_DEFAULT",

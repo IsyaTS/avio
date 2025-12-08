@@ -22,14 +22,21 @@
 
 ## Telegram фото → handoff (тишина)
 - В `/webhook/telegram` парсится `message.provider_raw`/`media`/`photo` (в т.ч. Telethon `MessageMediaPhoto`). Фото/любое вложение ставит `has_photo=True`.
-- Если `has_photo=True`, API сразу ставит флаг тишины: Redis ключ `handoff:silence:<tenant>:<lead_id>`, TTL `HANDOFF_SILENCE_TTL_SECONDS` (по умолчанию 86400). Smart reply/LLM не отправляются до истечения TTL.
+- По умолчанию любое фото/вложение ставит флаг тишины: Redis ключ `handoff:silence:<tenant>:<lead_id>`, TTL `HANDOFF_SILENCE_TTL_SECONDS` (по умолчанию 86400). Smart reply/LLM не отправляются до истечения TTL.
+- Если у арендатора включено ожидание фото (`behavior.photo_expected_markers`), то:
+  - когда бот отправляет ответ с любым маркером, ставится `conv:state:<tenant>:<lead_id>=waiting_photo` (TTL `photo_expected_ttl` или TTL тишины по умолчанию);
+  - если в этот момент клиент присылает фото/файл, бот отправляет `behavior.photo_expected_reply` (если задан), state очищается, тишина не ставится, но уведомление менеджеру отправляется;
+  - любое другое фото без состояния работает по старой схеме (тишина + уведомление).
 - Воркер при входящих в этот чат пишет `event=smart_reply_silenced`. Снять тишину: `redis-cli DEL handoff:silence:<tenant>:<lead_id>`.
 - Каталог кешируется отдельно ключом `catalog:sent:<tenant>:tg:<peer>` (TTL `STATE_TTL_SECONDS`), он не влияет на тишину, только на повторную отправку каталога.
 
 ## Avito ответы
-- Для Avito события воркер берёт автоответ из `persona meta` (`avito_auto_reply` / `avito_auto_reply_text` / `avito_cta_text`; поддерживается и ключ `meta.avito_auto_reply`). Если поля нет, автоответ не отправляется и включится обычный smart reply.
-- Если в Avito-сообщении найден российский номер телефона (формат `+7`/`7`/`8`, приводим к `+7XXXXXXXXXX`, строго 11 цифр), воркер один раз отправляет лидеру сообщение в Telegram от сессии этого же тенанта. Текст берётся из `persona.meta.avito_phone_tg_template` (поддерживаются ключи `avito_phone_tg_template`, `meta.avito_phone_tg_template`, `persona.meta.avito_phone_tg_template`); пустое значение отключает фичу. Дедуп по ключу `avito:phone_tg_sent:<tenant>:<lead_id>` с TTL `AVITO_PHONE_TG_TTL` (по умолчанию 86400).
+- Для Avito события воркер берёт автоответ из настроек арендатора `behavior.auto_reply_text` (UI: раздел «Поведение и триггеры»). Если текста нет или флаг `behavior.auto_reply` выключен, автоответ не отправляется. Персона больше не используется для Avito-автоответа.
+- Если в Avito-сообщении найден российский номер телефона (формат `+7`/`7`/`8`, приводим к `+7XXXXXXXXXX`, строго 11 цифр), воркер один раз отправляет лидеру сообщение в Telegram от сессии этого же тенанта. Текст берётся из `persona.meta.avito_phone_tg_template` (поддерживаются ключи `avito_phone_tg_template`, `meta.avito_phone_tg_template`, `persona.meta.avito_phone_tg_template`); пустое значение отключает фичу. Дедуп по ключу `avito:phone_tg_sent:<tenant>:<lead_id>` с TTL `AVITO_PHONE_TG_TTL` (по умолчанию 86400, отключается `AVITO_PHONE_TG_DEDUP_DISABLED=1`).
 - Автоответ Avito отправляется один раз на lead/chat: при удачной постановке в очередь ставится ключ `avito:auto_reply_sent:<tenant>:<lead_id>` с TTL `AVITO_AUTO_REPLY_TTL` (по умолчанию 86400).
+- Сбросить дедуп автоответа: `redis-cli DEL avito:auto_reply_sent:<tenant>:<lead_id>` (для dev `docker compose exec redis ...`).
+- Триггеры тишины: в UI «Поведение и триггеры» можно задать фразы + каналы (TG/Avito/WA). При совпадении воркер ставит тишину и (по желанию) уведомляет менеджера; автоответчик/LLM не отвечают.
+- Настройки поведения и триггеры лежат в `tenant.json` → `behavior` (`auto_reply`, `auto_reply_text`, `triggers`).
 
 #### Авито → Telegram по номеру (подробно)
 - Где включается: в `persona.md` через `meta.avito_phone_tg_template`. Пусто — фича выключена.
@@ -198,6 +205,12 @@ GET /pub/settings/get?k=<PUBLIC_KEY>&tenant=<TENANT>
 | Переменная | Назначение |
 |------------|------------|
 | `TELEGRAM_API_ID` | идентификатор приложения Telegram | 
+
+## Dev → Prod мердж и деплой
+- Фичи делаем в `dev` (или feature-ветке от `dev`). Проверяем на дев-стенде: `docker compose -f docker-compose.yml -f docker-compose.override.dev.yml --env-file .env.dev up -d --build`, прогоняем нужные тесты.
+- Перед выкладкой: `git checkout dev && git pull`, затем `git checkout prod && git pull`, после чего merge `dev` → `prod` (или PR). Dev-only файлы (`.env.dev`, `docker-compose.override.dev.yml`, локальные прототипы) не тащим в прод-ветку.
+- На прод-сервере `/opt/avio`: `git checkout prod && git pull`, затем `docker compose up -d --build` (без dev override). Если есть миграции — выполнить их перед/после рестарта по чек-листу фичи.
+- После деплоя проверить health контейнеров (app/worker/tgworker/wabaileys), доступность API и критичные логи. Если что-то пропущено в проверках — явно зафиксировать это в запросе на ревью/деплой.
 | `TELEGRAM_API_HASH` | hash приложения Telegram |
 | `PUBLIC_KEY` | публичный ключ для доступа к `/pub/tg/*` и `/pub/wa/*` |
 | `ADMIN_TOKEN` | админ-токен для приватных RPC эндпоинтов |
@@ -812,6 +825,12 @@ vps test 2025-10-23T12:59:53+03:00
   }
 }
 ```
+
+## Связка Avito ↔ Telegram и уведомления (AvioAlarm)
+- Авито номер → ТГ: при детекте телефона в авито-сообщении воркер обновляет/создаёт контакт по номеру, линкует lead и кладёт номер в Redis (`cache:lead_phone:<tenant>:<lead_id>` и `cache:avito_phone:<tenant>:<chat_id>`, TTL 7 дней). Далее отправляет автоответ в ТГ через tgworker по этому номеру. При успешной отправке tgworker возвращает `peer_id`, воркер кеширует связку `peer_id → phone` в `cache:avito_phone` — это нужно для последующих входящих из ТГ.
+- Входящий Telegram: после резолва lead воркер ищет телефон в БД; если нет — берёт из `cache:lead_phone` по lead_id, затем из `cache:avito_phone` по peer. Глобальный `last_phone` не используется. Если сообщение пришло от уведомительного бота (AvioAlarmDevBot), телефон не линкуется. Найденный телефон связывает существующий контакт либо создаёт новый и перелинкует lead на него, обновляя telegram_user_id/username.
+- Уведомления AvioAlarm: при handoff (фото или явный вызов) воркер шлёт уведомление через бота AvioAlarmDevBot на авторизованный в tgworker аккаунт арендатора. Формат: «Лид <телефон/username/peer> - <причина>» (например, «прислал фото»). Ссылка на админку в тексте не добавляется.
+- Диагностика: ключевые логи — `avito_phone_detected`, `avito_phone_tg_sent`, `telegram_contact_linked_by_phone`/`relinked_by_phone`, `notify_prepare`/`notify_send_success`. Убедитесь, что tgworker в статусе authorized, иначе вызовы `/send` вернут `authkey_unregistered`/`not_authorized`.
 
 ## Healthcheck
 - Скрипт `avio-healthcheck.sh` теперь только логирует сбои (`/var/log/avio-healthcheck.log`) и не перезапускает контейнеры при ошибке внешнего `/health`.

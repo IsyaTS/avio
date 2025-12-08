@@ -1172,6 +1172,66 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
         text_value = str(text_raw)
     behavior["auto_reply_text"] = text_value
 
+    triggers_raw = behavior.get("triggers")
+    triggers: list[dict[str, Any]] = []
+    if isinstance(triggers_raw, list):
+        for item in triggers_raw:
+            if not isinstance(item, Mapping):
+                continue
+            phrases_raw = item.get("phrases") or item.get("keywords") or []
+            phrases: list[str] = []
+            if isinstance(phrases_raw, (list, tuple, set)):
+                for ph in phrases_raw:
+                    if isinstance(ph, str) and ph.strip():
+                        phrases.append(ph.strip())
+            elif isinstance(phrases_raw, str) and phrases_raw.strip():
+                for ph in phrases_raw.split(","):
+                    if ph.strip():
+                        phrases.append(ph.strip())
+            if not phrases:
+                continue
+            channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp"]
+            channels: list[str] = []
+            if isinstance(channels_raw, (list, tuple, set)):
+                for ch in channels_raw:
+                    if isinstance(ch, str) and ch.strip():
+                        channels.append(ch.strip().lower())
+            elif isinstance(channels_raw, str) and channels_raw.strip():
+                channels.append(channels_raw.strip().lower())
+            if not channels:
+                channels = ["telegram", "avito", "whatsapp"]
+            silence_flag = _coerce_bool(item.get("silence"), True)
+            notify_flag = _coerce_bool(item.get("notify"), False)
+            triggers.append(
+                {
+                    "phrases": phrases,
+                    "channels": channels,
+                    "silence": silence_flag,
+                    "notify": notify_flag,
+                }
+            )
+    behavior["triggers"] = triggers
+
+    # Настройка ожидания фото/файла после заданного вопроса.
+    photo_markers_raw = behavior.get("photo_expected_markers") or behavior.get("photo_markers") or []
+    photo_markers: list[str] = []
+    if isinstance(photo_markers_raw, (list, tuple, set)):
+        for ph in photo_markers_raw:
+            if isinstance(ph, str) and ph.strip():
+                photo_markers.append(ph.strip())
+    elif isinstance(photo_markers_raw, str) and photo_markers_raw.strip():
+        for ph in photo_markers_raw.split(","):
+            if ph.strip():
+                photo_markers.append(ph.strip())
+    behavior["photo_expected_markers"] = photo_markers
+    photo_reply_raw = behavior.get("photo_expected_reply") or behavior.get("photo_reply") or ""
+    behavior["photo_expected_reply"] = photo_reply_raw if isinstance(photo_reply_raw, str) else str(photo_reply_raw or "")
+    try:
+        ttl_value = int(behavior.get("photo_expected_ttl") or 0)
+    except Exception:
+        ttl_value = 0
+    behavior["photo_expected_ttl"] = ttl_value if ttl_value > 0 else 0
+
     whatsapp_cfg = normalized.get("whatsapp")
     whatsapp: dict[str, Any] = {}
     if isinstance(whatsapp_cfg, dict):
@@ -1182,6 +1242,13 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
         provider_value = default_provider
     whatsapp["provider"] = provider_value
     normalized["whatsapp"] = whatsapp
+
+    notifications_raw = normalized.get("notifications")
+    if isinstance(notifications_raw, dict):
+        notifications = dict(notifications_raw)
+    else:
+        notifications = {}
+    normalized["notifications"] = notifications
 
     normalized["behavior"] = behavior
     return normalized

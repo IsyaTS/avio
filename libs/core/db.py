@@ -676,6 +676,7 @@ async def lead_exists(lead_id: int, tenant_id: Optional[int] = None) -> bool:
 # -------- Contacts / linking --------
 
 async def resolve_or_create_contact(
+    phone: Optional[str] = None,
     whatsapp_phone: Optional[str] = None,
     avito_user_id: Optional[int] = None,
     avito_login: Optional[str] = None,
@@ -684,8 +685,18 @@ async def resolve_or_create_contact(
 ) -> int:
     # поиск по приоритету: whatsapp_phone -> avito_user_id -> avito_login
     contact_id: int | None = None
+    phone_norm = None
+    if phone:
+        try:
+            phone_norm = normalize_e164_digits(phone)
+        except Exception:
+            phone_norm = None
     if whatsapp_phone:
         row = await _fetchrow("SELECT id FROM contacts WHERE whatsapp_phone=$1", whatsapp_phone)
+        if row:
+            contact_id = row["id"]
+    if contact_id is None and phone_norm:
+        row = await _fetchrow("SELECT id FROM contacts WHERE phone=$1", phone_norm)
         if row:
             contact_id = row["id"]
     if contact_id is None and avito_user_id:
@@ -724,15 +735,28 @@ async def resolve_or_create_contact(
                 contact_id,
                 telegram_username,
             )
+        if phone_norm:
+            await _exec(
+                """
+                UPDATE contacts
+                SET phone = COALESCE(phone, $2),
+                    whatsapp_phone = COALESCE(whatsapp_phone, $2),
+                    updated_at = now()
+                WHERE id = $1;
+                """,
+                contact_id,
+                phone_norm,
+            )
         return int(contact_id)
 
     row = await _fetchrow(
         """
-        INSERT INTO contacts(whatsapp_phone, avito_user_id, avito_login, telegram_user_id, telegram_username)
-        VALUES($1,$2,$3,$4::bigint,$5)
+        INSERT INTO contacts(phone, whatsapp_phone, avito_user_id, avito_login, telegram_user_id, telegram_username)
+        VALUES($1,$2,$3,$4,$5::bigint,$6)
         RETURNING id
     """,
-        whatsapp_phone,
+        phone_norm or whatsapp_phone,
+        whatsapp_phone or phone_norm,
         avito_user_id,
         avito_login,
         telegram_user_id,
@@ -769,6 +793,42 @@ async def link_lead_contact(
 async def get_contact_id_by_lead(lead_id: int) -> Optional[int]:
     row = await _fetchrow("SELECT contact_id FROM lead_contacts WHERE lead_id=$1::bigint", lead_id)
     return row["contact_id"] if row else None
+
+
+async def get_contact_phone_by_lead(lead_id: int) -> Optional[str]:
+    row = await _fetchrow(
+        """
+        SELECT COALESCE(c.phone, c.whatsapp_phone) AS phone
+        FROM contacts c
+        JOIN lead_contacts lc ON lc.contact_id = c.id
+        WHERE lc.lead_id = $1::bigint
+        LIMIT 1
+        """,
+        lead_id,
+    )
+    if row and row.get("phone"):
+        return row["phone"]
+    return None
+
+
+async def get_contact_id_by_phone(phone: str | None) -> Optional[int]:
+    """Return contact id that owns the phone (either phone or whatsapp_phone)."""
+    if not phone:
+        return None
+    from libs.core.transport import normalize_e164_digits  # local import to avoid circular dep
+
+    try:
+        digits = normalize_e164_digits(phone)
+    except Exception:
+        # fallback to stripping non-digits
+        digits = re.sub(r"\D", "", str(phone))
+    if not digits:
+        return None
+    row = await _fetchrow(
+        "SELECT id FROM contacts WHERE whatsapp_phone=$1 OR phone=$1 LIMIT 1",
+        digits,
+    )
+    return int(row["id"]) if row and "id" in row and row["id"] is not None else None
 
 # -------- Outbox --------
 
@@ -1849,3 +1909,54 @@ async def insert_webhook_event(provider: str, event_type: str, lead_id: Optional
             INSERT INTO webhook_events(provider, event_type, lead_id, payload)
             VALUES($1, $2, $3, $4::jsonb);
         """, provider, event_type, lead_id, json.dumps(payload, ensure_ascii=False))
+async def update_contact_phone(contact_id: int, phone: str | None) -> None:
+    """Update contact phone if provided."""
+    if not contact_id or not phone:
+        return
+    from libs.core.transport import normalize_e164_digits  # local import to avoid circular dependency
+    raw_value = phone.decode() if isinstance(phone, (bytes, bytearray)) else str(phone)
+    digits = None
+    try:
+        digits = normalize_e164_digits(raw_value)
+    except Exception as exc:
+        # Fallback: strip all non-digits to avoid silent drops.
+        stripped = re.sub(r"\D", "", raw_value)
+        if not stripped:
+            _log.warning(
+                "contact_phone_normalize_failed contact_id=%s phone=%s error=%s",
+                contact_id,
+                phone,
+                exc,
+            )
+            return
+        digits = stripped
+        _log.debug(
+            "contact_phone_normalize_fallback contact_id=%s phone=%s digits=%s error=%s",
+            contact_id,
+            phone,
+            digits,
+            exc,
+        )
+    await _exec(
+        "UPDATE contacts SET phone = $1, whatsapp_phone = COALESCE(whatsapp_phone, $1), updated_at = now() WHERE id = $2",
+        digits,
+        contact_id,
+    )
+
+
+async def update_contact_telegram(contact_id: int, telegram_user_id: int | None, telegram_username: str | None) -> None:
+    """Update contact with Telegram identifiers if missing."""
+    if not contact_id:
+        return
+    await _exec(
+        """
+        UPDATE contacts
+        SET telegram_user_id = COALESCE(telegram_user_id, $2::bigint),
+            telegram_username = COALESCE(NULLIF($3, ''), telegram_username),
+            updated_at = now()
+        WHERE id = $1;
+        """,
+        contact_id,
+        telegram_user_id,
+        telegram_username,
+    )

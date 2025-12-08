@@ -40,12 +40,14 @@ def login(request: Request, token: str | None = None):
         token = token.strip()
         if token and token == admin_token:
             resp = RedirectResponse(url="/admin", status_code=303)
+            # In dev (http) secure cookies are not stored, so only mark secure when using https.
+            secure_flag = request.url.scheme == "https"
             resp.set_cookie(
                 ADMIN_COOKIE,
                 admin_token,
                 max_age=60 * 60 * 24 * 14,
                 httponly=True,
-                secure=True,
+                secure=secure_flag,
                 samesite="lax",
             )
             return resp
@@ -194,6 +196,7 @@ def admin_key_get(tenant: int, request: Request):
             C.add_key(tenant_id, key_value, "primary")
             C.ensure_tenant_files(tenant_id)
             C.set_primary(tenant_id, key_value)
+            set_tenant_pubkey(tenant_id, key_value)
             items = C.list_keys(tenant_id)
             if items:
                 key_value = items[0].get("key", key_value)
