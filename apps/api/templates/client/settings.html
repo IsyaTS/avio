@@ -23,9 +23,10 @@
 {% set client_state_json = (client_state_source if client_state_source is defined else client_state_fallback) | tojson %}
 {% set extra_head %}
 <script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
-<script src="/static/js/boot.js?v={{ asset_version }}" defer></script>
-<script src="/static/js/catalog-upload.js?v={{ asset_version }}" defer></script>
-<script src="/static/js/client-settings.js?v={{ asset_version }}" defer></script>
+{# Добавляем доп. параметр для пробития кэша статики #}
+<script src="/static/js/boot.js?v={{ asset_version }}&fv=followups2" defer></script>
+<script src="/static/js/catalog-upload.js?v={{ asset_version }}&fv=followups2" defer></script>
+<script src="/static/js/client-settings.js?v={{ asset_version }}&fv=followups2" defer></script>
 {% endset %}
 {% block content %}
 <section class="surface stack" data-testid="client-hero">
