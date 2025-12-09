@@ -42,7 +42,19 @@
     </div>
 </section>
 
-<section class="surface stack" data-testid="client-passport">
+<nav class="tabs" data-role="tabs">
+    <button class="tab is-active" data-tab-target="brand">Паспорт бренда</button>
+    <button class="tab" data-tab-target="persona">Персона</button>
+    <button class="tab" data-tab-target="behavior">Поведение</button>
+    <button class="tab" data-tab-target="catalog">Каталог</button>
+    <button class="tab" data-tab-target="training">Диалоги и обучение</button>
+    <button class="tab" data-tab-target="export">Экспорт переписок</button>
+    <button class="tab" data-tab-target="channels">Каналы</button>
+    <button class="tab" data-tab-target="stats">Статистика</button>
+    <button class="tab" data-tab-target="dialogs">Диалоги</button>
+</nav>
+
+<section class="surface stack tab-panel" data-tab-panel="brand" data-testid="client-passport">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Паспорт бренда</h2>
         <p class="section-subtitle">Эти данные используются в промптах, чтобы ассистент звучал как ваша команда.</p>
@@ -75,7 +87,7 @@
     </div>
 </section>
 
-<section class="surface stack" data-testid="client-persona">
+<section class="surface stack tab-panel hidden" data-tab-panel="persona" data-testid="client-persona">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Персона</h2>
         <p class="section-subtitle">Полноценное описание ассистента. Лучше дать 1–2 абзаца.</p>
@@ -88,7 +100,7 @@
       </div>
     </section>
 
-<section class="surface stack" data-testid="client-behavior">
+<section class="surface stack tab-panel hidden" data-tab-panel="behavior" data-testid="client-behavior">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Поведение и триггеры</h2>
         <p class="section-subtitle">Настройте автоответ Avito и фразы, при которых бот замолкает и зовёт менеджера.</p>
@@ -415,7 +427,7 @@
       })();
     </script>
 
-<section class="surface stack" data-testid="client-catalog">
+<section class="surface stack tab-panel hidden" data-tab-panel="catalog" data-testid="client-catalog">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Каталог: загрузка и CSV</h2>
         <p class="section-subtitle">Загрузите CSV, XLS(X) или PDF. После PDF создадим CSV автоматически.</p>
@@ -453,7 +465,7 @@
     </div>
 </section>
 
-<section class="surface stack" data-testid="client-training">
+<section class="surface stack tab-panel hidden" data-tab-panel="training" data-testid="client-training">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Диалоги и обучение</h2>
         <p class="section-subtitle">Добавляйте собственные примеры диалогов, чтобы ассистент отвечал по вашим сценариям.</p>
@@ -480,29 +492,123 @@
             <div id="training-status" class="status-text muted"></div>
         </form>
     </div>
+</section>
 
-    <div class="surface stack" style="gap:12px;">
-        <h3 class="section-title" style="font-size:1.1rem;">Экспорт переписок из БД</h3>
-        <div class="status-text">WhatsApp: ZIP с отдельными .txt по диалогу</div>
-        <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
-            <label class="grid" style="grid-template-columns: 1fr;">
-                <span class="label">Дней назад</span>
-                <input id="exp-days" type="number" value="30" min="0" step="1">
-            </label>
-            <label class="grid" style="grid-template-columns: 1fr;">
-                <span class="label">Количество диалогов</span>
-                <input id="exp-limit" type="number" value="200" min="1" step="1">
-            </label>
-            <label class="grid" style="grid-template-columns: 1fr;">
-                <span class="label">Сообщений на диалог</span>
-                <input id="exp-per" type="number" value="0" min="0" step="1">
-            </label>
-        </div>
-        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-            <button class="btn" id="export-download" type="button">Скачать архив</button>
-            <span id="export-status" class="status-text"></span>
-        </div>
+<section class="surface stack tab-panel hidden" data-tab-panel="export" data-testid="client-export">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Экспорт переписок</h2>
+        <p class="section-subtitle">Скачайте архив диалогов WhatsApp.</p>
+    </div>
+    <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
+        <label class="grid" style="grid-template-columns: 1fr;">
+            <span class="label">Дней назад</span>
+            <input id="exp-days" type="number" value="30" min="0" step="1">
+        </label>
+        <label class="grid" style="grid-template-columns: 1fr;">
+            <span class="label">Количество диалогов</span>
+            <input id="exp-limit" type="number" value="200" min="1" step="1">
+        </label>
+        <label class="grid" style="grid-template-columns: 1fr;">
+            <span class="label">Сообщений на диалог</span>
+            <input id="exp-per" type="number" value="0" min="0" step="1">
+        </label>
+    </div>
+    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+        <button class="btn" id="export-download" type="button">Скачать архив</button>
+        <span id="export-status" class="status-text"></span>
     </div>
 </section>
 
+<section class="surface stack tab-panel hidden" data-tab-panel="channels" data-testid="client-channels">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Каналы</h2>
+        <p class="section-subtitle">Подключите и проверьте статусы каналов WhatsApp, Telegram и Avito.</p>
+    </div>
+    <div class="channel-grid">
+        <div class="channel-card" data-channel="wa">
+            <div class="channel-header">
+                <div class="channel-title">WhatsApp</div>
+                <span class="chip" data-channel-status="wa">—</span>
+            </div>
+            <div class="channel-actions">
+                <a class="btn" href="/connect/wa?tenant={{ tenant }}{% if key %}&k={{ key }}{% endif %}">Открыть страницу подключения</a>
+            </div>
+        </div>
+        <div class="channel-card" data-channel="tg">
+            <div class="channel-header">
+                <div class="channel-title">Telegram</div>
+                <span class="chip" data-channel-status="tg">—</span>
+            </div>
+            <div class="channel-actions">
+                <a class="btn" href="/connect/tg?tenant={{ tenant }}{% if key %}&k={{ key }}{% endif %}">Открыть страницу подключения</a>
+            </div>
+        </div>
+        <div class="channel-card" data-channel="avito">
+            <div class="channel-header">
+                <div class="channel-title">Avito</div>
+                <span class="chip" data-channel-status="avito">—</span>
+            </div>
+            <div class="channel-actions">
+                <a class="btn" href="/connect/avito?tenant={{ tenant }}{% if key %}&k={{ key }}{% endif %}">Открыть страницу подключения</a>
+            </div>
+        </div>
+    </div>
+    <div id="channels-message" class="status-text muted"></div>
+</section>
+
+<section class="surface stack tab-panel hidden" data-tab-panel="stats" data-testid="client-stats">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Статистика</h2>
+        <p class="section-subtitle">Раздел в разработке. Здесь появится аналитика по диалогам и конверсиям.</p>
+    </div>
+    <div class="placeholder">Статистика будет доступна позже.</div>
+</section>
+
+<section class="surface stack tab-panel hidden" data-tab-panel="dialogs" data-testid="client-dialogs">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Диалоги</h2>
+        <p class="section-subtitle">Раздел в разработке. Здесь будут ленты диалогов и быстрые фильтры.</p>
+    </div>
+    <div class="placeholder">Диалоги появятся позже.</div>
+</section>
+
+<script>
+  (function () {
+    const tabs = Array.from(document.querySelectorAll('[data-tab-target]'));
+    const panels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+    const hashKey = () => {
+      const hash = window.location.hash.replace('#', '').trim();
+      return hash || 'brand';
+    };
+    function setPanelVisibility(panel, active) {
+      panel.classList.toggle('hidden', !active);
+      if (active) {
+        panel.removeAttribute('hidden');
+      } else {
+        panel.setAttribute('hidden', '');
+      }
+    }
+    function activate(target) {
+      const name = target || 'brand';
+      tabs.forEach((btn) => {
+        const isActive = btn.dataset.tabTarget === name;
+        btn.classList.toggle('is-active', isActive);
+      });
+      panels.forEach((panel) => {
+        const match = panel.dataset.tabPanel === name;
+        setPanelVisibility(panel, match);
+      });
+    }
+    tabs.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const name = btn.dataset.tabTarget;
+        if (!name) return;
+        window.location.hash = name;
+        activate(name);
+      });
+    });
+    window.addEventListener('hashchange', () => activate(hashKey()));
+    activate(hashKey());
+  })();
+</script>
 {% endblock %}
