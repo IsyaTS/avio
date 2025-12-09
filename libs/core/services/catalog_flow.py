@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - fallback for worker-only usage
     Request = None  # type: ignore[assignment]
 
 from libs.core import sales_core as core
-from libs.core.common import OUTBOX_QUEUE_KEY
+from libs.core.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
 
 try:  # pragma: no cover - optional when running outside web context
     from libs.core.web import common as web_common  # type: ignore[attr-defined]
@@ -430,63 +430,102 @@ async def handle_catalog_flow(
         return result
 
     if price_question and not catalog_sent_now:
-        try:
-            catalog_matches = core.search_catalog({}, limit=5, tenant=tenant, query=text_value or "")
-        except Exception:
-            catalog_matches = []
-        if catalog_matches:
-            best = catalog_matches[0]
-            title_hint = str(best.get("title") or best.get("name") or "").strip()
-            raw_price = str(best.get("price") or "").strip()
-            digits_only = re.sub(r"\D", "", raw_price)
-            if digits_only:
-                try:
-                    formatted_price = f"{int(digits_only):,}".replace(",", " ")
-                except Exception:
-                    formatted_price = raw_price
-            else:
-                formatted_price = raw_price or "цена по запросу"
-            reply_price = title_hint or "Эта модель"
-            reply_text = f"{reply_price} стоит {formatted_price} ₽."
-            stock_value = best.get("stock")
-            if stock_value not in (None, "", "0"):
-                try:
-                    stock_int = int(str(stock_value).strip())
-                except Exception:
-                    stock_int = None
-                if stock_int is not None and stock_int > 0:
-                    reply_text += " В наличии."
-            price_out: Dict[str, Any] = {
-                "lead_id": lead_id,
-                "text": reply_text,
-                "provider": resolved_provider,
-                "ch": resolved_provider,
-                "tenant_id": int(tenant),
-                "tenant": int(tenant),
-                "message_id": message_id or str(lead_id),
-                "attachments": [],
-            }
-            if resolved_provider == "telegram":
-                if telegram_user_id:
-                    price_out["telegram_user_id"] = int(telegram_user_id)
-                if peer_value:
-                    price_out["peer"] = peer_value
-                if peer_id is not None:
-                    price_out["peer_id"] = int(peer_id)
-            else:
-                price_out["to"] = whatsapp_phone
-                if whatsapp_jid:
-                    price_out["to_jid"] = whatsapp_jid
-            await redis_conn.lpush(OUTBOX_QUEUE_KEY, json.dumps(price_out, ensure_ascii=False))
+        def _tokenize(value: str) -> tuple[set[str], set[str]]:
+            tokens = re.findall(r"[a-zA-Zа-яА-Я0-9]+", value.lower())
+            letters = {tok for tok in tokens if len(tok) >= 3 and not tok.isdigit()}
+            numbers = {tok for tok in tokens if tok.isdigit()}
+            return letters, numbers
+
+        def _has_relevance(query_text: str, item_payload: Mapping[str, Any]) -> bool:
+            letters_q, numbers_q = _tokenize(query_text)
+            price_words = {"цена", "стоимость", "прайс", "сколько", "почем", "почём"}
+            letters_q = {t for t in letters_q if t not in price_words}
+            if not letters_q and not numbers_q:
+                return False
+            fields = [
+                item_payload.get("title"),
+                item_payload.get("name"),
+                item_payload.get("sku"),
+                item_payload.get("id"),
+                item_payload.get("category"),
+                item_payload.get("color"),
+                item_payload.get("material"),
+                item_payload.get("size"),
+            ]
+            item_text = " ".join([str(f) for f in fields if f])
+            letters_i, numbers_i = _tokenize(item_text)
+            return bool(letters_q & letters_i or numbers_q & numbers_i)
+
+        def _format_price(raw: Any) -> str | None:
+            raw_text = str(raw or "").strip()
+            if not raw_text:
+                return None
+            match = re.search(r"\d[\d\s.,]*", raw_text)
+            digits = re.sub(r"\D", "", match.group(0)) if match else ""
+            if not digits:
+                return None
+            if len(digits) > 9:
+                return None
             try:
-                core.record_bot_reply(refer_id, tenant, provider, reply_text, tenant_cfg=cfg)
+                value = int(digits)
             except Exception:
-                pass
-            result.price_reply_sent = True
-            result.stop_processing = True
-            result.stop_reason = "price_reply"
-            result.auto_reply_handled = True
-            return result
+                return None
+            if value <= 0:
+                return None
+            return f"{value:,}".replace(",", " ")
+
+        if smart_reply_enabled(tenant):
+            try:
+                catalog_matches = core.search_catalog({}, limit=5, tenant=tenant, query=text_value or "")
+            except Exception:
+                catalog_matches = []
+            if catalog_matches:
+                best = catalog_matches[0]
+                if _has_relevance(text_value or "", best):
+                    formatted_price = _format_price(best.get("price"))
+                    if formatted_price:
+                        title_hint = str(best.get("title") or best.get("name") or "").strip()
+                        reply_price = title_hint or "Эта модель"
+                        reply_text = f"{reply_price} стоит {formatted_price} ₽."
+                        stock_value = best.get("stock")
+                        if stock_value not in (None, "", "0"):
+                            try:
+                                stock_int = int(str(stock_value).strip())
+                            except Exception:
+                                stock_int = None
+                            if stock_int is not None and stock_int > 0:
+                                reply_text += " В наличии."
+                        price_out: Dict[str, Any] = {
+                            "lead_id": lead_id,
+                            "text": reply_text,
+                            "provider": resolved_provider,
+                            "ch": resolved_provider,
+                            "tenant_id": int(tenant),
+                            "tenant": int(tenant),
+                            "message_id": message_id or str(lead_id),
+                            "attachments": [],
+                        }
+                        if resolved_provider == "telegram":
+                            if telegram_user_id:
+                                price_out["telegram_user_id"] = int(telegram_user_id)
+                            if peer_value:
+                                price_out["peer"] = peer_value
+                            if peer_id is not None:
+                                price_out["peer_id"] = int(peer_id)
+                        else:
+                            price_out["to"] = whatsapp_phone
+                            if whatsapp_jid:
+                                price_out["to_jid"] = whatsapp_jid
+                        await redis_conn.lpush(OUTBOX_QUEUE_KEY, json.dumps(price_out, ensure_ascii=False))
+                        try:
+                            core.record_bot_reply(refer_id, tenant, provider, reply_text, tenant_cfg=cfg)
+                        except Exception:
+                            pass
+                        result.price_reply_sent = True
+                        result.stop_processing = True
+                        result.stop_reason = "price_reply"
+                        result.auto_reply_handled = True
+                        return result
 
     behavior = behavior or {}
     always_full = bool(behavior.get("always_full_catalog")) if behavior else False
