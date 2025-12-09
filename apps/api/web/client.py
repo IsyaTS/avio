@@ -549,6 +549,8 @@ def client_settings(tenant: int, request: Request):
         "save_settings": f"/client/{tenant}/settings/save",
         "save_behavior": f"/client/{tenant}/behavior/save",
         "save_persona": f"/client/{tenant}/persona",
+        "save_followups": f"/client/{tenant}/follow-ups",
+        "get_followups": f"/client/{tenant}/follow-ups",
         "upload_catalog": "/pub/catalog/upload",
         "csv_get": "/pub/catalog/csv",
         "csv_save": "/pub/catalog/csv",
@@ -725,6 +727,76 @@ async def save_behavior(tenant: int, request: Request):
     cfg["behavior"] = behavior
     C.write_tenant_config(tenant, cfg)
     return {"ok": True}
+
+
+@router.get("/client/{tenant}/follow-ups")
+def get_follow_ups(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    cfg = C.read_tenant_config(tenant)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    follow_up_rules = cfg.get("follow_up")
+    if not isinstance(follow_up_rules, list):
+        follow_up_rules = []
+    return {"ok": True, "rules": follow_up_rules}
+
+
+@router.post("/client/{tenant}/follow-ups")
+async def save_follow_ups(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    rules_raw = payload.get("rules")
+    if not isinstance(rules_raw, list):
+        rules_raw = []
+
+    validated: list[dict[str, object]] = []
+    allowed_channels = {"telegram", "avito", "whatsapp", "any", "*"}
+
+    for rule in rules_raw:
+        if not isinstance(rule, dict):
+            continue
+        channel = str(rule.get("channel") or "").strip().lower() or "any"
+        if channel not in allowed_channels:
+            channel = "any"
+        try:
+            delay_minutes = int(rule.get("delay_minutes") or 0)
+        except Exception:
+            delay_minutes = 0
+        if delay_minutes <= 0:
+            continue
+        text_value = str(rule.get("text") or "").strip()
+        if not text_value:
+            continue
+        try:
+            max_attempts = int(rule.get("max_attempts") or 1)
+        except Exception:
+            max_attempts = 1
+        if max_attempts < 0:
+            max_attempts = 0
+        active = bool(rule.get("active", True))
+        validated.append(
+            {
+                "channel": channel,
+                "delay_minutes": delay_minutes,
+                "text": text_value,
+                "max_attempts": max_attempts,
+                "active": active,
+            }
+        )
+
+    cfg = C.read_tenant_config(tenant)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg["follow_up"] = validated
+    C.write_tenant_config(tenant, cfg)
+    return {"ok": True, "rules_saved": len(validated)}
 
 
 @router.post("/client/{tenant}/settings/json")

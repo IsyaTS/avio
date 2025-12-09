@@ -50,6 +50,7 @@
     <button class="tab" data-tab-target="training">Диалоги и обучение</button>
     <button class="tab" data-tab-target="export">Экспорт переписок</button>
     <button class="tab" data-tab-target="channels">Каналы</button>
+    <button class="tab" data-tab-target="followups">Фоллоу-апы</button>
     <button class="tab" data-tab-target="stats">Статистика</button>
     <button class="tab" data-tab-target="dialogs">Диалоги</button>
 </nav>
@@ -554,6 +555,19 @@
         </div>
     </div>
     <div id="channels-message" class="status-text muted"></div>
+</section>
+
+<section class="surface stack tab-panel hidden" data-tab-panel="followups" data-testid="client-followups">
+    <div class="stack" style="gap: 6px;">
+        <h2 class="section-title" style="font-size:1.35rem;">Фоллоу-апы</h2>
+        <p class="section-subtitle">Автоматические сообщения клиентам через заданное время после последнего контакта.</p>
+    </div>
+    <div class="stack" id="followup-rules" style="gap: 12px;"></div>
+    <div style="display:flex; flex-wrap:wrap; gap:12px;">
+        <button class="btn btn--secondary" id="followup-add">Добавить правило</button>
+        <button class="btn" id="followup-save">Сохранить фоллоу-апы</button>
+        <span id="followup-message" class="status-text"></span>
+    </div>
 </section>
 
 <section class="surface stack tab-panel hidden" data-tab-panel="stats" data-testid="client-stats">

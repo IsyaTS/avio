@@ -1078,6 +1078,8 @@ function getLocation() {
     const endpoints = {
       saveSettings: normalizeEndpointPath(urls.save_settings, '/pub/settings/save'),
       savePersona: normalizeEndpointPath(urls.save_persona, `/client/${tenant}/persona`),
+      saveFollowUps: normalizeEndpointPath(urls.save_followups || urls.followups_save, `/client/${tenant}/follow-ups`),
+      getFollowUps: normalizeEndpointPath(urls.get_followups || urls.followups_get, `/client/${tenant}/follow-ups`),
       uploadCatalog: normalizeEndpointPath(urls.upload_catalog, '/pub/catalog/upload'),
       csvGet: normalizeEndpointPath(urls.csv_get, '/pub/catalog/csv'),
       csvSave: normalizeEndpointPath(urls.csv_save, '/pub/catalog/csv'),
@@ -1103,6 +1105,10 @@ function getLocation() {
     savePersona: document.getElementById('save-persona'),
     personaMessage: document.getElementById('persona-message'),
     downloadConfig: document.getElementById('download-config'),
+    followupRules: document.getElementById('followup-rules'),
+    followupAdd: document.getElementById('followup-add'),
+    followupSave: document.getElementById('followup-save'),
+    followupMessage: document.getElementById('followup-message'),
     catalogForm: document.getElementById('catalogForm') || document.getElementById('catalog-upload-form'),
     uploadInput: document.getElementById('catalogFile') || document.getElementById('catalog-file'),
     catalogUploadButton: document.getElementById('catalogUploadBtn') || document.getElementById('catalog-upload-btn'),
@@ -1528,6 +1534,201 @@ function getLocation() {
       throw new Error(data.error);
     }
     return data;
+  }
+
+  function renderFollowUpRules(rules) {
+    const container = dom.followupRules;
+    if (!container) return;
+    container.innerHTML = '';
+    if (!Array.isArray(rules) || !rules.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = 'Правил пока нет. Добавьте новое.';
+      container.appendChild(empty);
+      return;
+    }
+    rules.forEach((rule) => {
+      const card = document.createElement('div');
+      card.className = 'surface stack';
+      card.style.gap = '10px';
+      card.dataset.type = 'followup-card';
+
+      const row = document.createElement('div');
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = 'repeat(auto-fit, minmax(160px, 1fr))';
+      row.style.gap = '10px';
+
+      const channelLabel = document.createElement('label');
+      channelLabel.className = 'stack';
+      channelLabel.style.gap = '4px';
+      const channelSpan = document.createElement('span');
+      channelSpan.className = 'label';
+      channelSpan.textContent = 'Канал';
+      const channelSelect = document.createElement('select');
+      channelSelect.className = 'followup-channel';
+      ['any', 'telegram', 'avito', 'whatsapp'].forEach((ch) => {
+        const opt = document.createElement('option');
+        opt.value = ch;
+        opt.textContent = ch === 'any' ? 'Любой' : ch;
+        if ((rule.channel || 'any') === ch) {
+          opt.selected = true;
+        }
+        channelSelect.appendChild(opt);
+      });
+      channelLabel.appendChild(channelSpan);
+      channelLabel.appendChild(channelSelect);
+      row.appendChild(channelLabel);
+
+      const delayLabel = document.createElement('label');
+      delayLabel.className = 'stack';
+      delayLabel.style.gap = '4px';
+      const delaySpan = document.createElement('span');
+      delaySpan.className = 'label';
+      delaySpan.textContent = 'Задержка, мин';
+      const delayInput = document.createElement('input');
+      delayInput.type = 'number';
+      delayInput.min = '1';
+      delayInput.value = rule.delay_minutes != null ? String(rule.delay_minutes) : '10';
+      delayInput.className = 'followup-delay';
+      delayLabel.appendChild(delaySpan);
+      delayLabel.appendChild(delayInput);
+      row.appendChild(delayLabel);
+
+      const attemptsLabel = document.createElement('label');
+      attemptsLabel.className = 'stack';
+      attemptsLabel.style.gap = '4px';
+      const attemptsSpan = document.createElement('span');
+      attemptsSpan.className = 'label';
+      attemptsSpan.textContent = 'Макс. попыток';
+      const attemptsInput = document.createElement('input');
+      attemptsInput.type = 'number';
+      attemptsInput.min = '0';
+      attemptsInput.value = rule.max_attempts != null ? String(rule.max_attempts) : '1';
+      attemptsInput.className = 'followup-attempts';
+      attemptsLabel.appendChild(attemptsSpan);
+      attemptsLabel.appendChild(attemptsInput);
+      row.appendChild(attemptsLabel);
+
+      const activeLabel = document.createElement('label');
+      activeLabel.style.display = 'flex';
+      activeLabel.style.alignItems = 'center';
+      activeLabel.style.gap = '8px';
+      const activeInput = document.createElement('input');
+      activeInput.type = 'checkbox';
+      activeInput.className = 'followup-active';
+      activeInput.checked = rule.active !== false;
+      activeLabel.appendChild(activeInput);
+      activeLabel.appendChild(document.createTextNode('Активно'));
+      row.appendChild(activeLabel);
+
+      card.appendChild(row);
+
+      const textLabel = document.createElement('label');
+      textLabel.className = 'stack';
+      textLabel.style.gap = '4px';
+      const textSpan = document.createElement('span');
+      textSpan.className = 'label';
+      textSpan.textContent = 'Текст сообщения';
+      const textArea = document.createElement('textarea');
+      textArea.className = 'textarea followup-text';
+      textArea.rows = 3;
+      textArea.value = rule.text || '';
+      textLabel.appendChild(textSpan);
+      textLabel.appendChild(textArea);
+      card.appendChild(textLabel);
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '10px';
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn btn--secondary';
+      delBtn.textContent = 'Удалить';
+      delBtn.addEventListener('click', () => {
+        card.remove();
+      });
+      actions.appendChild(delBtn);
+      card.appendChild(actions);
+
+      container.appendChild(card);
+    });
+  }
+
+  async function loadFollowUps() {
+    if (!dom.followupRules) return;
+    try {
+      const url = endpoints.getFollowUps;
+      if (!url) throw new Error('Endpoint не задан');
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('Не удалось загрузить правила');
+      const data = await resp.json();
+      const rules = Array.isArray(data.rules) ? data.rules : [];
+      renderFollowUpRules(rules);
+    } catch (error) {
+      renderFollowUpRules([]);
+      setStatus(dom.followupMessage, error.message || 'Ошибка загрузки', 'alert');
+    }
+  }
+
+  function collectFollowUpRules() {
+    if (!dom.followupRules) return [];
+    const cards = Array.from(dom.followupRules.querySelectorAll('[data-type="followup-card"]'));
+    return cards.map((card) => {
+      const channelNode = card.querySelector('.followup-channel');
+      const delayNode = card.querySelector('.followup-delay');
+      const attemptsNode = card.querySelector('.followup-attempts');
+      const activeNode = card.querySelector('.followup-active');
+      const textNode = card.querySelector('.followup-text');
+      const channel = channelNode && channelNode.value ? channelNode.value : 'any';
+      const delayRaw = delayNode && delayNode.value ? delayNode.value : '0';
+      const attemptsRaw = attemptsNode && attemptsNode.value ? attemptsNode.value : '1';
+      const active = activeNode ? !!activeNode.checked : true;
+      const text = textNode && textNode.value ? textNode.value : '';
+      return {
+        channel,
+        delay_minutes: Number.parseInt(delayRaw, 10) || 0,
+        max_attempts: Number.parseInt(attemptsRaw, 10) || 0,
+        active,
+        text,
+      };
+    }).filter((rule) => rule.delay_minutes > 0 && rule.text.trim());
+  }
+
+  function addFollowUpRule() {
+    const existing = collectFollowUpRules();
+    existing.push({
+      channel: 'any',
+      delay_minutes: 10,
+      max_attempts: 1,
+      active: true,
+      text: '',
+    });
+    renderFollowUpRules(existing);
+  }
+
+  async function saveFollowUps() {
+    if (!dom.followupSave) return;
+    const rules = collectFollowUpRules();
+    try {
+      if (!rules.length) {
+        setStatus(dom.followupMessage, 'Добавьте хотя бы одно правило', 'alert');
+        return;
+      }
+      const url = endpoints.saveFollowUps;
+      if (!url) throw new Error('Endpoint не задан');
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || 'Не удалось сохранить');
+      }
+      setStatus(dom.followupMessage, 'Сохранено', 'muted');
+    } catch (error) {
+      setStatus(dom.followupMessage, error.message || 'Ошибка сохранения', 'alert');
+    }
   }
 
   function parseIntOrNull(value) {
@@ -2375,6 +2576,22 @@ function getLocation() {
     }
   }
 
+  function bindFollowUps() {
+    if (dom.followupAdd) {
+      dom.followupAdd.addEventListener('click', (e) => {
+        e.preventDefault();
+        addFollowUpRule();
+      });
+    }
+    if (dom.followupSave) {
+      dom.followupSave.addEventListener('click', (e) => {
+        e.preventDefault();
+        saveFollowUps();
+      });
+    }
+    loadFollowUps();
+  }
+
   if (dom.trainingCheckStatus) {
     dom.trainingCheckStatus.addEventListener('click', refreshTrainingStatus);
   }
@@ -3128,6 +3345,7 @@ function getLocation() {
     safeInvoke('catalog-init', bindCatalogUpload);
     safeInvoke('training-init', bindTrainingUpload);
     safeInvoke('csv-controls', bindCsvControls);
+    safeInvoke('followups-init', bindFollowUps);
     setTimeout(fetchCsvAndRender, 0);
     try {
       const trainingPromise = refreshTrainingStatus();
