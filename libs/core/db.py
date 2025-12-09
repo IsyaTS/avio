@@ -551,7 +551,7 @@ async def upsert_lead(
             existing_id_val = int(existing_id) if existing_id is not None else 0
         except Exception:
             existing_id_val = 0
-        target_id = lead_val or existing_id_val
+        target_id = existing_id_val
         existing_tenant = existing.get("tenant_id")
         try:
             existing_tenant_val = int(existing_tenant) if existing_tenant is not None else 0

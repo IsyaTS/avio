@@ -831,6 +831,7 @@ vps test 2025-10-23T12:59:53+03:00
 - Входящий Telegram: после резолва lead воркер ищет телефон в БД; если нет — берёт из `cache:lead_phone` по lead_id, затем из `cache:avito_phone` по peer. Глобальный `last_phone` не используется. Если сообщение пришло от уведомительного бота (AvioAlarmDevBot), телефон не линкуется. Найденный телефон связывает существующий контакт либо создаёт новый и перелинкует lead на него, обновляя telegram_user_id/username.
 - Уведомления AvioAlarm: при handoff (фото или явный вызов) воркер шлёт уведомление через бота AvioAlarmDevBot на авторизованный в tgworker аккаунт арендатора. Формат: «Лид <телефон/username/peer> - <причина>» (например, «прислал фото»). Ссылка на админку в тексте не добавляется.
 - Диагностика: ключевые логи — `avito_phone_detected`, `avito_phone_tg_sent`, `telegram_contact_linked_by_phone`/`relinked_by_phone`, `notify_prepare`/`notify_send_success`. Убедитесь, что tgworker в статусе authorized, иначе вызовы `/send` вернут `authkey_unregistered`/`not_authorized`.
+- Команда для получения chat_id: curl -s "https://api.telegram.org/bot8270398713:AAEc6bubm0thzC_qWSNH8j00Di5vOIfpMtI/getUpdates"
 
 ## Healthcheck
 - Скрипт `avio-healthcheck.sh` теперь только логирует сбои (`/var/log/avio-healthcheck.log`) и не перезапускает контейнеры при ошибке внешнего `/health`.

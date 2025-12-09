@@ -1,6 +1,7 @@
 -- Контакты клиента (одна сущность для всех каналов)
 CREATE TABLE IF NOT EXISTS contacts (
   id              BIGSERIAL PRIMARY KEY,
+  phone           TEXT UNIQUE,
   whatsapp_phone  TEXT UNIQUE,
   avito_user_id   BIGINT UNIQUE,
   avito_login     TEXT,

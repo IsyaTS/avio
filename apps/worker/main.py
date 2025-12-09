@@ -2312,20 +2312,6 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     phone_template = _avito_phone_tg_template(tenant_id) if phone_value else ""
     if phone_value:
         log(f"event=avito_phone_detected tenant={tenant_id} phone={phone_value}")
-        try:
-            await r.set(
-                f"cache:avito_phone:{tenant_id}:{chat_id}",
-                phone_value,
-                ex=3600 * 24 * 7,
-            )
-            if lead_id:
-                await r.set(
-                    f"cache:lead_phone:{tenant_id}:{lead_id}",
-                    phone_value,
-                    ex=3600 * 24 * 7,
-                )
-        except Exception:
-            pass
         if not phone_template:
             log(
                 f"event=avito_phone_tg_skip reason=empty_template channel=avito tenant={tenant_id} phone={phone_value}"
@@ -2430,6 +2416,21 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
             % (tenant_id, chat_id, lead_id)
         )
         return
+
+    if phone_value:
+        try:
+            await r.set(
+                f"cache:avito_phone:{tenant_id}:{chat_id}",
+                phone_value,
+                ex=3600 * 24 * 7,
+            )
+            await r.set(
+                f"cache:lead_phone:{tenant_id}:{lead_id}",
+                phone_value,
+                ex=3600 * 24 * 7,
+            )
+        except Exception:
+            pass
 
     contact_id = 0
     try:

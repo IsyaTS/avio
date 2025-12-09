@@ -3488,7 +3488,9 @@ def format_items_for_prompt(items: List[Dict[str, Any]], currency: str = "₽") 
             or f"Позиция {idx}"
         )
         raw_price = str(it.get("price") or "").strip()
-        digits = re.sub(r"\D", "", raw_price)
+        # Берём только первую числовую группу, чтобы не склеивать все цифры из строки/CSV.
+        price_match = re.search(r"\d[\d\s.,]*", raw_price)
+        digits = re.sub(r"\D", "", price_match.group(0)) if price_match else ""
         if digits:
             try:
                 price_fmt = f"{int(digits):,}".replace(",", " ")
