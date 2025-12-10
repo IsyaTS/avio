@@ -1538,6 +1538,9 @@ function getLocation() {
   }
 
   function renderFollowUpRules(rules) {
+    try {
+      console.info('[followups] render', Array.isArray(rules) ? rules.length : 0);
+    } catch (_) {}
     const container = dom.followupRules;
     if (!container) return;
     container.innerHTML = '';
@@ -1696,6 +1699,9 @@ function getLocation() {
   }
 
   function addFollowUpRule() {
+    try {
+      console.info('[followups] add rule click');
+    } catch (_) {}
     const existing = collectFollowUpRules();
     existing.push({
       channel: 'any',
@@ -2578,6 +2584,15 @@ function getLocation() {
   }
 
   function bindFollowUps() {
+    try {
+      console.info('[followups] bind start');
+    } catch (_) {}
+    if (!dom.followupRules) {
+      try {
+        console.warn('[followups] container missing');
+      } catch (_) {}
+      return;
+    }
     if (dom.followupAdd) {
       dom.followupAdd.addEventListener('click', (e) => {
         e.preventDefault();
