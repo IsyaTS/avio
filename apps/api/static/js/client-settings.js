@@ -45,6 +45,7 @@ function getLocation() {
   const TENANT_PATH_REGEX = /\/client\/(\d+)(?:\/|$)/;
 
   let lastSettingsSnapshot = null;
+  let state = {};
   const CSV_DELIMITER_CANDIDATES = [';', ',', '\t'];
 
   function stripBom(value) {
@@ -3385,8 +3386,8 @@ function getLocation() {
     window.__EXPORT_ERROR__ = undefined;
     try {
       const bootstrap = ensureBootstrapGlobals() || {};
-      if (bootstrap.state && state && typeof state === 'object') {
-        Object.assign(state, bootstrap.state);
+      if (bootstrap.state && typeof bootstrap.state === 'object') {
+        state = mergeClientState(bootstrap.state);
       }
       if (bootstrap.endpoints && endpoints && typeof endpoints === 'object') {
         Object.assign(endpoints, bootstrap.endpoints);
