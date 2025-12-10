@@ -3426,5 +3426,5 @@ function getLocation() {
   } else if (typeof document !== 'undefined') {
     document.addEventListener('DOMContentLoaded', init, { once: true });
   }
-  });
+});
 })();
