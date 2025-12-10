@@ -1099,6 +1099,19 @@ async def health():
         status_code=200,
     )
 
+
+async def _bypass_client_settings_cache(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        if request.url.path == "/static/js/client-settings.js":
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            for header_name in ("etag", "ETag", "last-modified", "Last-Modified"):
+                if header_name in response.headers:
+                    del response.headers[header_name]
+    finally:
+        return response
+
 # Simple request logging middleware. Tests can stub FastAPI with lightweight
 # stand-ins, so register the middleware only if the instance exposes the
 # decorator method.
@@ -1131,4 +1144,5 @@ async def _log_requests(request: Request, call_next):
 
 
 if hasattr(app, "middleware"):
+    app.middleware("http")(_bypass_client_settings_cache)
     app.middleware("http")(_log_requests)
