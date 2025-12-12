@@ -347,16 +347,26 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
 
     content_raw = value.get("content") if isinstance(value.get("content"), Mapping) else {}
 
-    chat_candidate = value.get("chat_id") or value.get("conversation_id")
+    chat_candidate = (
+        value.get("chat_id")
+        or value.get("conversation_id")
+        or payload.get("chat_id")
+        or payload.get("conversation_id")
+        or event.get("chat_id")
+    )
     if isinstance(chat_candidate, Mapping):
         chat_candidate = chat_candidate.get("id")
-    if chat_candidate is None:
-        chat_candidate = payload.get("chat_id") or payload.get("conversation_id")
-    if isinstance(chat_candidate, Mapping):
-        chat_candidate = chat_candidate.get("id")
+    # Some Avito payloads ship chat_id at the root level.
+    if not chat_candidate:
+        chat_candidate = event.get("chat_id")
     chat_id = str(chat_candidate).strip() if chat_candidate else ""
     if not chat_id:
-        logger.warning("avito_webhook_skip reason=no_chat account_id=%s tenant=%s raw_event=%s", account_id, tenant, json.dumps(event, ensure_ascii=False))
+        logger.warning(
+            "avito_webhook_skip reason=no_chat account_id=%s tenant=%s raw_event=%s",
+            account_id,
+            tenant,
+            json.dumps(event, ensure_ascii=False),
+        )
         return False
 
     message_type = str(value.get("type") or "").strip().lower()

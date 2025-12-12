@@ -80,6 +80,7 @@ from libs.core.transport import (
 )
 from libs.core.transport import telegram as telegram_transport
 from apps.api.web.common import WA_INTERNAL_TOKEN as COMMON_WA_INTERNAL_TOKEN
+from apps.worker import followups
 # Guard against attribute absence when the worker boots before settings load
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
 
@@ -124,6 +125,12 @@ INCOMING_QUEUE_KEY = (
     or os.getenv("INBOX_QUEUE_KEY")
     or "inbox:message_in"
 )
+FOLLOWUPS_ENABLED = (os.getenv("FOLLOWUPS_ENABLED") or "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 try:
     INBOX_BLOCK_TIMEOUT = max(1, int(os.getenv("INBOX_BLOCK_TIMEOUT", "5")))
 except Exception:
@@ -524,13 +531,25 @@ def _avito_auto_reply_text(tenant_id: int) -> str:
 
 
 def _avito_phone_tg_template(tenant_id: int) -> str:
+    # 1) Explicit behavior config
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = None
+    if isinstance(cfg, Mapping):
+        behavior = cfg.get("behavior")
+        if isinstance(behavior, Mapping):
+            txt = behavior.get("avito_phone_tg_template")
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
+
+    # 2) Fallback to persona meta for backward compatibility
     try:
         persona_meta = persona_meta_config(int(tenant_id))
     except Exception:
         persona_meta = {}
     if not isinstance(persona_meta, Mapping):
         return ""
-    # Accept both flat and nested keys; some personas ship the fully-qualified name.
     for key in (
         "avito_phone_tg_template",
         "meta.avito_phone_tg_template",
@@ -1641,6 +1660,13 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
+    try:
+        await followups.schedule_followups(tenant_id, lead_id, "telegram")
+    except Exception as exc:
+        log(
+            f"event=followup_schedule_warn channel=telegram tenant={tenant_id} lead_id={lead_id} error={exc}"
+        )
+
     # Try to merge with existing contact by phone (from cache or linked leads).
     existing_contact_id = None
     try:
@@ -2096,6 +2122,11 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         f"event=inbox_lead_resolved channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
     )
 
+    try:
+        await followups.schedule_followups(tenant_id, lead_id, "whatsapp")
+    except Exception as exc:
+        log(f"event=followup_schedule_warn channel=whatsapp tenant={tenant_id} lead_id={lead_id} error={exc}")
+
     contact_id = 0
     if sender_digits and db_available:
         try:
@@ -2416,6 +2447,13 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
             % (tenant_id, chat_id, lead_id)
         )
         return
+
+    try:
+        await followups.schedule_followups(tenant_id, lead_id, "avito")
+    except Exception as exc:
+        log(
+            f"event=followup_schedule_warn channel=avito tenant={tenant_id} lead_id={lead_id} error={exc}"
+        )
 
     if phone_value:
         try:
@@ -4036,6 +4074,8 @@ async def main():
     tasks = [
         asyncio.create_task(process_queue(), name="outbox-loop"),
     ]
+    if FOLLOWUPS_ENABLED:
+        tasks.append(asyncio.create_task(followups.run_loop(), name="followups-loop"))
     if INBOX_ENABLED:
         tasks.append(
             asyncio.create_task(process_incoming_queue(), name="inbox-loop")

@@ -9,8 +9,22 @@
 - `libs/config` — лёгкий прокси к настройкам ядра и вспомогательные URL‑хелперы.
 - `infra/caddy` — конфиг реверс‑прокси Caddy.
 - `tools/Makefile` — утилитарные таргеты (`diag`, `migrate` и т.п.).
+- Follow-ups: планируются и отправляются воркером через Redis (см. ниже).
 
 Новые модули кладём в `apps/*` или `libs/core/*`; совместимость с старым `app.*` больше не используется.
+
+## Follow-ups и Avito автоответ
+
+- Правила follow-up лежат в `data/tenants/<id>/tenant.json` → `follow_up` (или через UI `/client/{tenant}/follow-ups`).
+- Воркер `apps/worker` ставит задачи при входящих сообщениях по каналу (avito/telegram/whatsapp) и вынимает их из Redis:
+  - ZSET `followup:schedule`, HASH `followup:job:{id}`; очередь на отправку — `OUTBOX_QUEUE_KEY`.
+  - Дедуп: `followup:scheduled:{tenant}:{lead}:{rule}` и `followup:sent:{tenant}:{lead}:{rule}` (TTL 24ч по умолчанию). Удалите их, чтобы вручную переотправить для лида.
+  - Тюнинг: `FOLLOWUPS_ENABLED` (on/off), `FOLLOWUP_POLL_INTERVAL`, `FOLLOWUP_BATCH_LIMIT`, `FOLLOWUP_SCHEDULE_DEDUP_TTL`, `FOLLOWUP_SENT_DEDUP_TTL`.
+- Avito автоответ:
+  - Включить: `behavior.auto_reply=true`, заполнить `behavior.auto_reply_text` в конфиге арендатора.
+  - Дедуп: `avito:auto_reply_sent:{tenant}:{lead}` (TTL `AVITO_AUTO_REPLY_TTL`, по умолчанию 86400).
+  - Требуются валидные токены в `integrations.avito` (`account_id`, `refresh_token`, `access_token`); иначе будет `reason=token_unavailable`.
+  - Диагностика: ищите в логах воркера `avito_auto_reply_enqueued`/`avito_auto_reply_skip`, для токенов — `token_unavailable` или ошибки Avito API.
 
 ## Avito вебхуки и multi-tenant
 - Маршрутизация Avito-событий выполняется по `account_id`. В вебхуках v3, где `account_id` отсутствует, используется fallback на `payload.value.user_id`, после чего вызывается `find_tenant_by_account`.
@@ -32,14 +46,14 @@
 
 ## Avito ответы
 - Для Avito события воркер берёт автоответ из настроек арендатора `behavior.auto_reply_text` (UI: раздел «Поведение и триггеры»). Если текста нет или флаг `behavior.auto_reply` выключен, автоответ не отправляется. Персона больше не используется для Avito-автоответа.
-- Если в Avito-сообщении найден российский номер телефона (формат `+7`/`7`/`8`, приводим к `+7XXXXXXXXXX`, строго 11 цифр), воркер один раз отправляет лидеру сообщение в Telegram от сессии этого же тенанта. Текст берётся из `persona.meta.avito_phone_tg_template` (поддерживаются ключи `avito_phone_tg_template`, `meta.avito_phone_tg_template`, `persona.meta.avito_phone_tg_template`); пустое значение отключает фичу. Дедуп по ключу `avito:phone_tg_sent:<tenant>:<lead_id>` с TTL `AVITO_PHONE_TG_TTL` (по умолчанию 86400, отключается `AVITO_PHONE_TG_DEDUP_DISABLED=1`).
+- Если в Avito-сообщении найден российский номер телефона (формат `+7`/`7`/`8`, приводим к `+7XXXXXXXXXX`, строго 11 цифр), воркер один раз отправляет лидеру сообщение в Telegram от сессии этого же тенанта. Текст берётся из `behavior.avito_phone_tg_template` (UI вкладка «Поведение»); если пусто — падаем назад на `persona.meta.avito_phone_tg_template` (старый формат). Дедуп по ключу `avito:phone_tg_sent:<tenant>:<lead_id>` с TTL `AVITO_PHONE_TG_TTL` (по умолчанию 86400, отключается `AVITO_PHONE_TG_DEDUP_DISABLED=1`).
 - Автоответ Avito отправляется один раз на lead/chat: при удачной постановке в очередь ставится ключ `avito:auto_reply_sent:<tenant>:<lead_id>` с TTL `AVITO_AUTO_REPLY_TTL` (по умолчанию 86400).
 - Сбросить дедуп автоответа: `redis-cli DEL avito:auto_reply_sent:<tenant>:<lead_id>` (для dev `docker compose exec redis ...`).
 - Триггеры тишины: в UI «Поведение и триггеры» можно задать фразы + каналы (TG/Avito/WA). При совпадении воркер ставит тишину и (по желанию) уведомляет менеджера; автоответчик/LLM не отвечают.
 - Настройки поведения и триггеры лежат в `tenant.json` → `behavior` (`auto_reply`, `auto_reply_text`, `triggers`).
 
 #### Авито → Telegram по номеру (подробно)
-- Где включается: в `persona.md` через `meta.avito_phone_tg_template`. Пусто — фича выключена.
+- Где включается: в UI «Поведение» поле «Текст для Telegram, если нашли номер в Avito» → сохраняется в `behavior.avito_phone_tg_template`. Старый вариант через `persona.meta.avito_phone_tg_template` остаётся как fallback.
 - Как работает: воркер парсит номер из текста (`+7`/`7`/`8` → `+7XXXXXXXXXX`, 11 цифр), логирует `avito_phone_detected`, кладёт дедуп-ключ `avito:phone_tg_sent:<tenant>:<lead_id>` на `AVITO_PHONE_TG_TTL` (86400 по умолчанию). Без нового lead_id повторно не отправит, пока TTL не истёк.
 - Отправка: вызывает tgworker `/send` с `phone`, добавляя заголовки `X-Auth-Token`/`X-Admin-Token`. Если Telegram не вернул peer (номер не зарегистрирован или недоступен), tgworker отвечает `peer_not_found` и воркер пишет `avito_phone_tg_fail status=404`.
 - Диагностика: `avito_phone_detected`, `avito_phone_tg_sent`, `avito_phone_tg_skip` (dedup/empty_template), `avito_phone_tg_fail status=XXX body=...`. Tgworker выводит `event=tg_send_request … raw=...` в логах при вызове `/send`.

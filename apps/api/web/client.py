@@ -705,6 +705,7 @@ async def save_behavior(tenant: int, request: Request):
     behavior["auto_reply"] = bool(payload.get("auto_reply"))
     behavior["auto_reply_enabled"] = behavior["auto_reply"]
     behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
+    behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
     behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
     markers_raw = payload.get("photo_expected_markers") or []
     markers: list[str] = []

@@ -28,6 +28,7 @@
 <script src="/static/js/boot.js?v={{ followups_bust }}" defer></script>
 <script src="/static/js/catalog-upload.js?v={{ followups_bust }}" defer></script>
 <script src="/static/js/client-settings.js?v={{ followups_bust }}" defer></script>
+<script src="/static/js/followups-inline.js?v={{ followups_bust }}" defer></script>
 {% endset %}
 {% block content %}
 <section class="surface stack" data-testid="client-hero">
@@ -119,6 +120,10 @@
             <span class="label">Текст автоответа Avito</span>
             <textarea id="behavior-auto-reply-text" rows="3" class="textarea" placeholder="Например: Спасибо за обращение! Скоро ответим."></textarea>
         </label>
+        <label style="grid-column: 1 / -1;">
+            <span class="label">Текст для Telegram, если нашли номер в Avito</span>
+            <textarea id="behavior-avito-phone-template" rows="3" class="textarea" placeholder="Например: Наш менеджер напишет вам в Telegram."></textarea>
+        </label>
     </div>
 
     <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items: end;">
@@ -169,6 +174,7 @@
 
     const autoReplyToggle = document.getElementById('behavior-auto-reply');
     const autoReplyText = document.getElementById('behavior-auto-reply-text');
+    const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
     const triggerRows = document.getElementById('trigger-rows');
     const addTriggerBtn = document.getElementById('add-trigger');
     const saveBehaviorBtn = document.getElementById('save-behavior');
@@ -315,6 +321,9 @@
 
     if (autoReplyToggle) autoReplyToggle.checked = !!behavior.auto_reply;
     if (autoReplyText) autoReplyText.value = behavior.auto_reply_text || '';
+    if (avitoPhoneTemplateNode) {
+      avitoPhoneTemplateNode.value = behavior.avito_phone_tg_template || '';
+    }
     if (photoMarkersNode) {
       const markers = Array.isArray(behavior.photo_expected_markers) ? behavior.photo_expected_markers : [];
       photoMarkersNode.value = markers.join('\n');
@@ -344,6 +353,7 @@
       const payload = {
         auto_reply: autoReplyToggle ? !!autoReplyToggle.checked : false,
         auto_reply_text: autoReplyText ? autoReplyText.value : '',
+        avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
         triggers: collectTriggers(),
         photo_expected_markers: photoMarkersNode ? normalizePhrases(photoMarkersNode.value) : [],
         photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',
