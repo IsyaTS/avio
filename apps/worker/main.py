@@ -1948,6 +1948,9 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     )
 
     reply_text = (reply or "").strip()
+    # Strip catalog links from LLM replies for telegram; файл отправляется отдельным механизмом.
+    if reply_text:
+        reply_text = re.sub(r"https?://\\S*/pub/catalog/file/\\S*", "", reply_text).strip()
     _log_smart_reply_diag("telegram", tenant_id, lead_id, reply)
     if not reply_text:
         log(
@@ -2393,10 +2396,14 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         except Exception:
             pass
 
-    lead_id_hint = _coerce_int(event.get("lead_id"))
-    if lead_id_hint is None or lead_id_hint <= 0:
-        account_hint = account_id if account_id is not None else tenant_id
-        lead_id_hint = avito_integration.stable_lead_id(account_hint, chat_id)
+    account_hint = account_id if account_id is not None else tenant_id
+    provided_lead_id = _coerce_int(event.get("lead_id"))
+    derived_lead_id = avito_integration.stable_lead_id(account_hint, chat_id)
+    if provided_lead_id and provided_lead_id != derived_lead_id:
+        log(
+            f"event=avito_lead_id_override tenant={tenant_id} provided_lead_id={provided_lead_id} derived_lead_id={derived_lead_id} chat_id={chat_id}"
+        )
+    lead_id_hint = derived_lead_id
 
     try:
         lead_id = await get_or_create_by_peer(

@@ -1098,9 +1098,6 @@ def create_app() -> FastAPI:
             }
             for att in payload.attachments
         ]
-        # Ensure attachments are included in the payload
-        if attachments:
-            payload_dict["attachments"] = attachments
 
         reply_to_value = None
         if isinstance(payload.meta, dict):

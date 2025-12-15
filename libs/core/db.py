@@ -530,7 +530,7 @@ async def upsert_lead(
             lead_val,
             tenant_val,
         )
-    if existing is None and source_val is not None:
+    if existing is None and source_val is not None and channel_val != "avito":
         existing = await _fetchrow(
             """
             SELECT id, tenant_id

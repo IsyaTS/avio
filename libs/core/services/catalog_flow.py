@@ -474,7 +474,19 @@ async def handle_catalog_flow(
                 return None
             return f"{value:,}".replace(",", " ")
 
-        if smart_reply_enabled(tenant):
+        auto_reply_flag = False
+        if isinstance(behavior, Mapping):
+            try:
+                auto_reply_flag = bool(behavior.get("auto_reply"))
+            except Exception:
+                auto_reply_flag = False
+
+        avito_price_blocked = resolved_provider == "avito" and auto_reply_flag
+        # Do not send price-replies in Avito channel at all to avoid overriding auto-reply/templates.
+        if resolved_provider == "avito":
+            avito_price_blocked = True
+
+        if smart_reply_enabled(tenant) and not avito_price_blocked:
             try:
                 catalog_matches = core.search_catalog({}, limit=5, tenant=tenant, query=text_value or "")
             except Exception:

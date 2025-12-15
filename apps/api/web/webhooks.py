@@ -1022,8 +1022,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 attachment_size = 0
                 attachment_mtime = 0
     file_url = _build_public_catalog_url(tenant, attachment_mtime, request)
+    if resolved_provider == "telegram":
+        file_url = ""
     use_file_link = False
-    if resolved_provider in {"telegram", "whatsapp"} and file_url:
+    if resolved_provider in {"whatsapp"} and file_url:
         use_file_link = True
     elif file_url and attachment_size and CATALOG_INLINE_LIMIT_BYTES and attachment_size > CATALOG_INLINE_LIMIT_BYTES:
         use_file_link = True
@@ -1123,6 +1125,11 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         return _ok({"queued": True, "leadId": lead_id})
 
     if price_question and not catalog_sent_now:
+        # Do not send price replies for Avito to avoid overriding auto-replies/templates.
+        if resolved_provider == "avito":
+            await _enqueue_incoming_event()
+            return _ok({"queued": True, "leadId": lead_id})
+
         def _tokenize(value: str) -> tuple[set[str], set[str]]:
             tokens = re.findall(r"[a-zA-Zа-яА-Я0-9]+", value.lower())
             letters = {tok for tok in tokens if len(tok) >= 3 and not tok.isdigit()}

@@ -32,6 +32,7 @@ from libs.core.schemas import Attachment, MessageIn
 from .metrics import TG_LOGIN_SUCCESS_TOTAL
 import telethon
 from telethon import TelegramClient, events, functions
+from telethon.tl.types import InputFile
 from telethon.errors import BadRequestError, RPCError, SessionPasswordNeededError
 from telethon.errors.rpcerrorlist import (
     AuthKeyUnregisteredError,
@@ -2284,6 +2285,22 @@ class TelegramSessionManager:
                 reply_to_id = reply_to
 
         attachments_list = attachments or []
+        # deduplicate attachments by (url, name, mime) to avoid sending the same file multiple times
+        deduped: list[Dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, str]] = set()
+        for attachment in attachments_list:
+            if not isinstance(attachment, dict):
+                deduped.append(attachment)
+                continue
+            key = (
+                str(attachment.get("url") or ""),
+                str(attachment.get("name") or attachment.get("filename") or ""),
+                str(attachment.get("mime") or attachment.get("mime_type") or ""),
+            )
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(attachment)
+        attachments_list = deduped
         sent_text = False
         last_message_id: int | None = None
         resolved_peer_id: int | None = None
@@ -2348,13 +2365,36 @@ class TelegramSessionManager:
                         caption = None
                         if isinstance(attachment, dict):
                             caption = attachment.get("caption") or attachment.get("text")
+                            filename_hint = (
+                                attachment.get("filename")
+                                or attachment.get("name")
+                                or attachment.get("title")
+                                or attachment.get("url")
+                            )
+                        else:
+                            filename_hint = None
+                        filename = None
+                        if isinstance(filename_hint, str) and filename_hint.strip():
+                            filename = Path(filename_hint).name
+                            if not filename:
+                                filename = None
                         caption_text = caption if isinstance(caption, str) else None
                         if text and not sent_text:
                             caption_text = text
                             sent_text = True
+                        file_payload: Any = io.BytesIO(data)
+                        if filename:
+                            try:
+                                file_payload.name = filename  # type: ignore[attr-defined]
+                            except Exception:
+                                # fallback: try to wrap in InputFile with explicit name
+                                try:
+                                    file_payload = InputFile(file=file_payload, name=filename)
+                                except Exception:
+                                    pass
                         result = await client.send_file(
                             entity,
-                            file=io.BytesIO(data),
+                            file=file_payload,
                             caption=caption_text or "",
                             reply_to=reply_to_id,
                         )
@@ -2486,6 +2526,11 @@ class TelegramSessionManager:
             )
             # Older Telethon versions do not support the ``replace`` argument.
             result = await client(ImportContactsRequest(contacts=[contact]))
+        except FloodWaitError as exc:
+            LOGGER.warning(
+                "event=resolve_phone_flood tenant_id=%s seconds=%s", tenant, getattr(exc, "seconds", None)
+            )
+            raise
         except BadRequestError as exc:
             LOGGER.warning(
                 "event=resolve_phone_failed tenant_id=%s error=%s",
@@ -2493,6 +2538,19 @@ class TelegramSessionManager:
                 exc,
             )
             return None, None
+        else:
+            users = list(result.users) if getattr(result, "users", None) is not None else []
+            retry_contacts = (
+                list(result.retry_contacts) if getattr(result, "retry_contacts", None) is not None else []
+            )
+            LOGGER.info(
+                "event=resolve_phone_diag tenant_id=%s phone=%s users=%s retry_contacts=%s retry_client_ids=%s",
+                tenant,
+                phone,
+                len(users),
+                len(retry_contacts),
+                [getattr(rc, "client_id", None) for rc in retry_contacts],
+            )
 
         user = None
         if result and getattr(result, "users", None):

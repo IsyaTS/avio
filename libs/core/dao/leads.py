@@ -18,9 +18,13 @@ def _normalize_channel(channel: str) -> str:
     return (channel or "avito").strip().lower() or "avito"
 
 
-def _normalize_peer(peer: str) -> str:
-    normalized = (peer or "").strip().lower()
-    return normalized[:255]
+def _normalize_peer(peer: str, *, channel: str) -> str:
+    normalized = (peer or "").strip()
+    if not normalized:
+        return ""
+    if channel == "avito":
+        return normalized[:255]
+    return normalized.lower()[:255]
 
 
 def _generate_lead_id(tenant_id: int, channel: str, peer: str) -> int:
@@ -50,7 +54,7 @@ async def get_or_create_by_peer(
     contact: Optional[str] = None,
 ) -> int:
     channel_value = _normalize_channel(channel)
-    peer_value = _normalize_peer(peer)
+    peer_value = _normalize_peer(peer, channel=channel_value)
     if not peer_value:
         raise ValueError("peer must be a non-empty string")
 

@@ -34,6 +34,11 @@
 - Вебхук `/webhook/telegram` требует явный tenant (`tenant` или `tenant_id`); при его отсутствии возвращает 400.
 - Воркер игнорирует входящие Telegram-события без tenant, чтобы сообщения не попадали в дефолтный арендуемый контур.
 
+## Telegram каталог (PDF)
+- PDF берётся из `data/tenants/<id>/uploads/catalog.pdf` или `meta.catalog_pdf_path` и в Telegram отправляется файлом (без ссылок на viewer).
+- tgworker проставляет имя/расширение из attachment (`filename`/`name`/`title`/`url`) при формировании `InputFile`, поэтому не должно быть `unnamed`.
+- Вложения дедуплицируются по ключу (`url`, `name`, `mime`), чтобы один и тот же файл не улетал несколько раз.
+
 ## Telegram фото → handoff (тишина)
 - В `/webhook/telegram` парсится `message.provider_raw`/`media`/`photo` (в т.ч. Telethon `MessageMediaPhoto`). Фото/любое вложение ставит `has_photo=True`.
 - По умолчанию любое фото/вложение ставит флаг тишины: Redis ключ `handoff:silence:<tenant>:<lead_id>`, TTL `HANDOFF_SILENCE_TTL_SECONDS` (по умолчанию 86400). Smart reply/LLM не отправляются до истечения TTL.
