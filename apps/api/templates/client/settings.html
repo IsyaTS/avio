@@ -1034,6 +1034,32 @@
       });
     }
 
+    // Лёгкий polling для автообновления, без лишнего трафика.
+    let pollTimer = null;
+    function startPolling() {
+      if (pollTimer) return;
+      pollTimer = window.setInterval(() => {
+        loadDialogs();
+        if (currentDialogId) {
+          loadDialogMessages(currentDialogId);
+        }
+      }, 9000);
+    }
+    function stopPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        startPolling();
+      } else {
+        stopPolling();
+      }
+    });
+
+    startPolling();
     loadDialogs();
   })();
 </script>
