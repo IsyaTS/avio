@@ -4,10 +4,13 @@ import json
 import pathlib
 from dataclasses import dataclass
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
+from libs.core import db
 from .indexer import TrainingIndex, TrainingExample
 from libs.core.sales_core import tenant_dir, read_tenant_config
+from libs.core.training import utils as training_utils
 
 
 _CACHE: Dict[int, Tuple[pathlib.Path, TrainingIndex]] = {}
@@ -54,6 +57,7 @@ class RetrievedExample:
 
 
 def retrieve_examples(tenant: int, query: str, k: int = 3) -> List[RetrievedExample]:
+    """Legacy TF-IDF retrieval from on-disk index (uploads)."""
     cfg = read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
     try:
@@ -114,3 +118,144 @@ def build_examples_block(tenant: int, query: str) -> str:
         lines.append(f"Менеджер: {a}")
     block = "\n".join(lines)
     return block.strip()
+
+
+async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> List[RetrievedExample]:
+    cfg = read_tenant_config(tenant)
+    learn = cfg.get("learning") if isinstance(cfg, dict) else {}
+    try:
+        min_chars = max(0, int((learn or {}).get("min_chars", 15)))
+    except Exception:
+        min_chars = 15
+    try:
+        top_k = max(1, int((learn or {}).get("top_k", k)))
+    except Exception:
+        top_k = k
+
+    examples = await db.get_training_examples_for_retrieval(tenant, limit=max(top_k * 5, 20))
+    examples = [ex for ex in examples if not ex.get("is_bad")]
+    if not examples or not (query or "").strip():
+        return []
+
+    sanitized_query = training_utils.sanitize_text(query)
+    texts = [training_utils.sanitize_text(ex.get("q_text")) for ex in examples]
+
+    # Try embeddings first if present
+    use_embeddings = any(ex.get("embedding") for ex in examples)
+    scores: List[Tuple[int, float]] = []
+
+    if use_embeddings:
+        try:
+            from libs.core.training import embeddings as emb_mod  # local import to avoid hard dep at import time
+
+            q_vec = await emb_mod.embed_query(sanitized_query)
+            if q_vec:
+                def _cosine(v1: List[float], v2: List[float]) -> float:
+                    if not v1 or not v2:
+                        return 0.0
+                    if len(v1) != len(v2):
+                        return 0.0
+                    dot = sum(a * b for a, b in zip(v1, v2))
+                    n1 = math.sqrt(sum(a * a for a in v1))
+                    n2 = math.sqrt(sum(b * b for b in v2))
+                    if n1 <= 0 or n2 <= 0:
+                        return 0.0
+                    return float(dot / (n1 * n2))
+
+                for idx, ex in enumerate(examples):
+                    vec = ex.get("embedding")
+                    if not isinstance(vec, (list, tuple)):
+                        continue
+                    try:
+                        vec_floats = [float(v) for v in vec]
+                    except Exception:
+                        continue
+                    score = _cosine(q_vec, vec_floats)
+                    if score > 0:
+                        scores.append((idx, score))
+        except Exception:
+            _log.exception(f"{_LOG_PREFIX} embedding_retrieve_failed tenant=%s", tenant)
+            scores = []
+
+    if not scores:
+        # TF-IDF fallback in-memory
+        try:
+            from libs.core.sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
+
+            vectorizer = TfidfVectorizer(analyzer="word", ngram_range=(1, 2), min_df=1)
+            matrix = vectorizer.fit_transform(texts)
+            q_vec = vectorizer.transform([sanitized_query])
+            import numpy as np  # type: ignore
+
+            tfidf_scores = (q_vec @ matrix.T).toarray().ravel()
+            order = np.argsort(-tfidf_scores)
+            scores = [(int(i), float(tfidf_scores[int(i)])) for i in order if tfidf_scores[int(i)] > 0]
+        except Exception:
+            _log.exception(f"{_LOG_PREFIX} tfidf_retrieve_failed tenant=%s", tenant)
+            return []
+
+    out: List[RetrievedExample] = []
+    seen_ids: set[int] = set()
+    for idx, score in scores:
+        if idx in seen_ids or idx >= len(examples):
+            continue
+        ex = examples[idx]
+        q = training_utils.sanitize_text(ex.get("q_text"))
+        a = training_utils.sanitize_text(ex.get("a_text"))
+        if len(q.strip()) < min_chars or len(a.strip()) < min_chars:
+            continue
+        out.append(
+            RetrievedExample(
+                q=q,
+                a=a,
+                score=float(score),
+                meta={"id": ex.get("id"), "source": ex.get("source")},
+            )
+        )
+        seen_ids.add(idx)
+        if len(out) >= top_k:
+            break
+
+    try:
+        await db.increment_training_examples_usage([int(ex.meta.get("id")) for ex in out if ex.meta.get("id")])
+    except Exception:
+        _log.debug(f"{_LOG_PREFIX} usage_increment_failed tenant=%s", tenant, exc_info=True)
+    try:
+        _log.info(
+            f"{_LOG_PREFIX} retrieve_db tenant=%s results=%s ids=%s",
+            tenant,
+            len(out),
+            [ex.meta.get("id") for ex in out if ex.meta.get("id")],
+        )
+    except Exception:
+        pass
+    return out
+
+
+async def retrieve_examples_async(tenant: int, query: str, k: int = 3) -> List[RetrievedExample]:
+    # Prefer DB-backed examples; if none, fallback to legacy on-disk indexes.
+    db_results = await _retrieve_examples_from_db(tenant, query, k=k)
+    if db_results:
+        return db_results
+    return retrieve_examples(tenant, query, k=k)
+
+
+async def build_examples_block_async(tenant: int, query: str) -> str:
+    cfg = read_tenant_config(tenant)
+    learn = cfg.get("learning") if isinstance(cfg, dict) else {}
+    try:
+        top_k = max(1, min(2, int((learn or {}).get("top_k", 2))))
+    except Exception:
+        top_k = 2
+    results = await retrieve_examples_async(tenant, query, k=top_k)
+    if not results:
+        return ""
+    lines: List[str] = ["Примеры обучающих диалогов:"]
+    for ex in results[:top_k]:
+        q = (ex.q or "").strip()
+        a = (ex.a or "").strip()
+        if not q or not a:
+            continue
+        lines.append(f"Клиент: {q}")
+        lines.append(f"Менеджер: {a}")
+    return "\n".join(lines).strip()

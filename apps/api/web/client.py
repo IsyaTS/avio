@@ -26,6 +26,7 @@ from libs.core import catalog_index
 from libs.core import onboarding_chat
 from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
+from libs.core.training import utils as training_utils
 from libs.core import db as db
 from libs.core.common import OUTBOX_QUEUE_KEY
 from libs.core.export import whatsapp as whatsapp_exporter
@@ -1090,8 +1091,16 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
 
     comment_raw = payload.get("comment") if rating == "dislike" else payload.get("comment") or ""
     comment = str(comment_raw).strip() if comment_raw is not None else ""
-    if rating == "dislike" and not comment:
-        return JSONResponse({"detail": "comment_required"}, status_code=400)
+    expected_answer_raw = payload.get("expected_answer") if rating == "dislike" else payload.get("expected_answer") or ""
+    expected_answer = str(expected_answer_raw).strip() if expected_answer_raw is not None else ""
+    sanitized_expected = training_utils.sanitize_text(expected_answer) if expected_answer else ""
+    if rating == "dislike":
+        if not comment:
+            return JSONResponse({"detail": "comment_required"}, status_code=400)
+        if not expected_answer:
+            return JSONResponse({"detail": "expected_answer_required"}, status_code=400)
+        if not sanitized_expected:
+            sanitized_expected = expected_answer.strip()
 
     metadata = await db.get_message_metadata(message_ref)
     if not metadata or int(metadata.get("tenant_id") or 0) != int(tenant_id):
@@ -1101,9 +1110,62 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
     if not bool(metadata.get("is_bot")):
         return JSONResponse({"detail": "feedback_not_allowed"}, status_code=400)
 
-    feedback_id = await db.create_message_feedback(tenant_id, message_ref, rating, comment or None)
+    lead_id = metadata.get("lead_id")
+    # Find the last inbound user message before this bot reply to pair Q->A
+    q_text = ""
+    try:
+        created_at = metadata.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        if created_at is None or not isinstance(created_at, datetime):
+            created_at = datetime.now(timezone.utc)
+        previous = await db.get_previous_incoming_message(int(tenant_id), int(lead_id or 0), before=created_at)
+        if previous and previous.get("text"):
+            q_text = training_utils.sanitize_text(str(previous.get("text") or ""))
+    except Exception:
+        q_text = ""
+
+    feedback_id = await db.create_message_feedback(
+        tenant_id,
+        message_ref,
+        rating,
+        comment or None,
+        lead_id=lead_id,
+        expected_answer=sanitized_expected or expected_answer or None,
+    )
     if not feedback_id:
         return JSONResponse({"detail": "feedback_failed"}, status_code=500)
+
+    # Training example: persist sanitized pair per tenant
+    try:
+        message_text = training_utils.sanitize_text(str(metadata.get("text") or ""))
+        source = "like" if rating == "like" else "correction"
+        a_text = message_text if rating == "like" else expected_answer
+        if q_text and a_text:
+            await db.record_training_example(
+                tenant_id,
+                lead_id=lead_id,
+                message_id=message_ref,
+                source=source,
+                source_feedback_id=feedback_id,
+                q_text=q_text,
+                a_text=training_utils.sanitize_text(a_text),
+                is_bad=False,
+                embedding_status="pending",
+            )
+    except Exception:
+        _dialogs_log.exception("training_example_create_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
+
+    if rating == "dislike":
+        try:
+            await db.mark_bad_bot_message(
+                tenant_id,
+                message_ref,
+                feedback_id=feedback_id,
+                reason=comment or expected_answer or "dislike",
+            )
+        except Exception:
+            _dialogs_log.exception("mark_bad_bot_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
 
     return {"ok": True, "feedback_id": feedback_id}
 

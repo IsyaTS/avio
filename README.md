@@ -483,6 +483,7 @@ docker exec avio-app-1 curl -fsS -H "X-Auth-Token:${ADMIN_TOKEN}" http://waweb-1
         forbid_tags: ["apartment_only"]
     ```
   - Эти блоки работают для любых категорий (двери, сантехника, услуги). Чтобы «натренировать» нового арендатора, добавляем словари и правила в `persona.md` и перезагружаем страницу — код автоматически помечает каталог и фильтрует рекомендации.
+- **Обучение по лайкам/дизлайкам.** Вкладка «Диалоги» сохраняет оценки боту (`/api/feedback`): дизлайк требует комментарий и корректный ответ. Для каждого тенанта создаются training_examples в Postgres, плохие ответы помечаются в `bad_bot_messages`, retrieval пер-тенант добавляется в prompt (`build_examples_block_async`). Экспорт датасета: `python scripts/finetune/export_sft_dataset.py --tenant <id> --output /tmp/sft.jsonl`; DPO-пары: `python scripts/finetune/export_dpo_dataset.py --tenant <id> --output /tmp/dpo.jsonl`. Файнтюн по умолчанию выключен (таблица `tenant_models`, флаг `use_finetune=false`).
 - **Локальная проверка диалогов.** Команда `test` (обёртка над `scripts/chat_simulator.py`) работает из `.venv`. Полезные параметры: `--tenant`, `--contact`, `--channel`, `--reset`, `--show-messages`. Внутри сессии команда `reset` очищает состояние текущего контакта.
 - **Состояния диалогов.** Redis-хранилище (`sales_state:<tenant>:<contact>`) монтируется на хост в `data/redis`. Для ручного сброса:  
   ```bash

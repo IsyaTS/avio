@@ -56,6 +56,8 @@ from libs.core.db import (
     link_lead_contact,
     update_contact_phone,
     update_contact_telegram,
+    fetch_pending_training_examples,
+    set_training_embedding,
 )
 from libs.core.dao.leads import get_or_create_by_peer
 from libs.core.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
@@ -79,6 +81,7 @@ from libs.core.transport import (
     normalize_whatsapp_recipient,
 )
 from libs.core.transport import telegram as telegram_transport
+from libs.core.training import embeddings as training_embeddings
 from apps.api.web.common import WA_INTERNAL_TOKEN as COMMON_WA_INTERNAL_TOKEN
 from apps.worker import followups
 # Guard against attribute absence when the worker boots before settings load
@@ -117,6 +120,14 @@ TGWORKER_STATUS_URL = f"{TGWORKER_BASE_URL}/status"
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
 OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW not in {"0", "false"}
+LEARNING_EMBEDDINGS_ENABLED = (os.getenv("LEARNING_EMBEDDINGS_ENABLED") or "1").strip().lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+}
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or getattr(core_settings, "EMBEDDING_MODEL", "") or "text-embedding-3-small"
 AVITO_TIMEOUT = getattr(core_settings, "AVITO_TIMEOUT", 10.0)
 _INBOX_ENABLED_RAW = (os.getenv("INBOX_ENABLED") or "").strip().lower()
 INBOX_ENABLED = _INBOX_ENABLED_RAW not in {"", "0", "false", "no", "off"}
@@ -4080,11 +4091,64 @@ async def process_queue():
 
         except Exception as e:
             try:
-                await r.lpush(OUTBOX_DLQ_KEY, json.dumps(item or {}, ensure_ascii=False))
-            except Exception:
-                pass
-            log(f"[worker] err: {e}")
-            await asyncio.sleep(0.5)
+            await r.lpush(OUTBOX_DLQ_KEY, json.dumps(item or {}, ensure_ascii=False))
+        except Exception:
+            pass
+        log(f"[worker] err: {e}")
+        await asyncio.sleep(0.5)
+
+
+async def process_training_embeddings() -> None:
+    if not LEARNING_EMBEDDINGS_ENABLED:
+        log("event=training_embeddings_disabled")
+        return
+    log(f"event=training_embeddings_loop_start model={EMBEDDING_MODEL}")
+    while True:
+        try:
+            pending = await fetch_pending_training_examples(limit=5)
+            if not pending:
+                await asyncio.sleep(5.0)
+                continue
+            texts = [str(item.get("q_text") or "") for item in pending]
+            try:
+                vectors = await training_embeddings.embed_texts(texts)
+            except Exception as exc:
+                log(f"event=training_embeddings_failed reason={exc} count={len(pending)}")
+                for item in pending:
+                    try:
+                        await set_training_embedding(
+                            item.get("id"),
+                            None,
+                            embedding_model=EMBEDDING_MODEL,
+                            status="failed",
+                            error=str(exc),
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(5.0)
+                continue
+
+            for item, vec in zip(pending, vectors):
+                try:
+                    await set_training_embedding(
+                        item.get("id"),
+                        list(vec) if isinstance(vec, (list, tuple)) else vec,
+                        embedding_model=EMBEDDING_MODEL,
+                        status="ready",
+                        error=None,
+                    )
+                    log(
+                        f"event=training_embedding_saved id={item.get('id')} tenant={item.get('tenant_id')}"
+                    )
+                except Exception as exc:
+                    log(
+                        "event=training_embedding_save_failed id=%s tenant=%s err=%s"
+                        % (item.get("id"), item.get("tenant_id"), exc)
+                    )
+            await asyncio.sleep(0.2)
+        except Exception as exc:
+            log(f"event=training_embeddings_loop_error err={exc}")
+            await asyncio.sleep(2.0)
 
 async def main():
     log(f"[worker] boot {APP_VERSION}")
@@ -4097,6 +4161,10 @@ async def main():
     if INBOX_ENABLED:
         tasks.append(
             asyncio.create_task(process_incoming_queue(), name="inbox-loop")
+        )
+    if LEARNING_EMBEDDINGS_ENABLED:
+        tasks.append(
+            asyncio.create_task(process_training_embeddings(), name="training-embeddings-loop")
         )
     try:
         await asyncio.gather(*tasks)

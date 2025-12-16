@@ -822,12 +822,18 @@
       const comment = document.createElement('textarea');
       comment.className = 'textarea feedback-comment hidden';
       comment.rows = 2;
-      comment.placeholder = 'Почему ответ не подошёл и как надо?';
+      comment.placeholder = 'Почему ответ не подошёл?';
+
+      const expected = document.createElement('textarea');
+      expected.className = 'textarea feedback-comment hidden';
+      expected.rows = 2;
+      expected.placeholder = 'Как надо было ответить (обязательно для 👎)';
 
       function disableAll() {
         likeBtn.disabled = true;
         dislikeBtn.disabled = true;
         comment.disabled = true;
+        expected.disabled = true;
         feedbackSent.add(messageId);
       }
 
@@ -837,13 +843,16 @@
         const payload = { message_id: messageId, rating };
         if (rating === 'dislike') {
           const text = (comment.value || '').trim();
-          if (!text) {
+          const expectedText = (expected.value || '').trim();
+          if (!text || !expectedText) {
             comment.classList.remove('hidden');
-            comment.focus();
-            setSendStatus('Укажите, что не так в ответе', 'alert');
+            expected.classList.remove('hidden');
+            (text ? expected : comment).focus();
+            setSendStatus('Укажите причину и корректный ответ', 'alert');
             return;
           }
           payload.comment = text;
+          payload.expected_answer = expectedText;
         }
         likeBtn.disabled = true;
         dislikeBtn.disabled = true;
@@ -869,8 +878,9 @@
       likeBtn.addEventListener('click', () => sendFeedback('like'));
       dislikeBtn.addEventListener('click', () => {
         comment.classList.remove('hidden');
+        expected.classList.remove('hidden');
         comment.focus();
-        if ((comment.value || '').trim()) {
+        if ((comment.value || '').trim() && (expected.value || '').trim()) {
           sendFeedback('dislike');
         }
       });
@@ -879,6 +889,7 @@
       actions.appendChild(dislikeBtn);
       wrapper.appendChild(actions);
       wrapper.appendChild(comment);
+      wrapper.appendChild(expected);
       return wrapper;
     }
 

@@ -4556,7 +4556,7 @@ async def build_llm_messages(
     # Добавим обучающие примеры диалогов (1–2) из базы арендатора
     if training_retriever and tenant is not None and (last_user_text or "").strip():
         try:
-            block = training_retriever.build_examples_block(int(tenant), last_user_text)
+            block = await training_retriever.build_examples_block_async(int(tenant), last_user_text)
         except Exception:
             block = ""
         if block.strip():
@@ -4647,6 +4647,8 @@ async def _direct_llm_reply(
     contact_ref: int,
     tenant: int | None,
     last_user_message: str,
+    *,
+    model_name: Optional[str] = None,
 ) -> str:
     try:
         create_fn = _resolve_chat_completion_callable(client)
@@ -4655,7 +4657,7 @@ async def _direct_llm_reply(
 
         resp = await asyncio.to_thread(
             create_fn,
-            model=settings.OPENAI_MODEL,
+            model=model_name or settings.OPENAI_MODEL,
             messages=messages,
             max_tokens=260,
             temperature=0.7,
@@ -4715,6 +4717,19 @@ async def ask_llm(
         fallback = make_rule_based_reply(last, channel_name, contact_ref, tenant=tenant)
         return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
+    model_override = settings.OPENAI_MODEL
+    if tenant is not None:
+        try:
+            from libs.core import db as _db  # local import to avoid circular
+
+            tenant_model = await _db.get_tenant_model(int(tenant))
+            if tenant_model and tenant_model.get("use_finetune") and tenant_model.get("finetune_model"):
+                model_override = tenant_model.get("finetune_model") or model_override
+            elif tenant_model and tenant_model.get("base_model"):
+                model_override = tenant_model.get("base_model") or model_override
+        except Exception:
+            logger.debug("tenant_model_lookup_failed", exc_info=True)
+
     try:
         openai.api_key = settings.OPENAI_API_KEY  # type: ignore
 
@@ -4733,7 +4748,7 @@ async def ask_llm(
                 plan, answer = await planner.generate_sales_reply(
                     messages,
                     openai_module=client,
-                    model=settings.OPENAI_MODEL,
+                    model=model_override,
                     timeout=settings.OPENAI_TIMEOUT_SECONDS,
                     persona_language=persona_hints.language if persona_hints and persona_hints.language else None,
                 )
@@ -4782,6 +4797,7 @@ async def ask_llm(
                 contact_ref,
                 tenant,
                 last,
+                model_name=model_override,
             )
         _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
         state.last_plan = plan.to_dict()
@@ -4805,6 +4821,7 @@ async def ask_llm(
         contact_ref,
         tenant,
         last,
+        model_name=model_override,
     )
 
 

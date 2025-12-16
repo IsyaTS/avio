@@ -1232,6 +1232,10 @@ async def create_message_feedback(
     message_id: int,
     rating: str,
     comment: Optional[str] = None,
+    *,
+    lead_id: Optional[int] = None,
+    expected_answer: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> int:
     try:
         tenant_val = int(tenant_id)
@@ -1242,14 +1246,17 @@ async def create_message_feedback(
         return 0
     row = await _fetchrow(
         """
-        INSERT INTO message_feedback(tenant_id, message_id, rating, comment)
-        VALUES($1, $2, $3, $4)
+        INSERT INTO message_feedback(tenant_id, lead_id, message_id, rating, comment, expected_answer, created_by)
+        VALUES($1, $2, $3, $4, $5, $6, $7)
         RETURNING id;
         """,
         tenant_val,
+        lead_id,
         message_ref,
         rating,
         comment,
+        expected_answer,
+        created_by,
     )
     if not row:
         return 0
@@ -1273,6 +1280,7 @@ async def get_message_metadata(message_id: int) -> Optional[Mapping[str, Any]]:
                tenant_id,
                direction,
                is_bot,
+               text,
                created_at
         FROM messages
         WHERE id = $1
@@ -1286,6 +1294,307 @@ async def get_message_metadata(message_id: int) -> Optional[Mapping[str, Any]]:
         return dict(row)
     except Exception:
         return row if isinstance(row, Mapping) else None
+
+
+async def get_previous_incoming_message(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    before: datetime,
+) -> Optional[Mapping[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+        lead_ref = int(lead_id)
+    except Exception:
+        return None
+    if tenant_val <= 0 or lead_ref <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT id, text, created_at
+        FROM messages
+        WHERE tenant_id = $1
+          AND lead_id = $2
+          AND direction = 0
+          AND created_at <= $3
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1;
+        """,
+        tenant_val,
+        lead_ref,
+        before,
+    )
+    if not row:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        return row if isinstance(row, Mapping) else None
+
+
+async def record_training_example(
+    tenant_id: int,
+    *,
+    lead_id: Optional[int],
+    message_id: Optional[int],
+    source: str,
+    source_feedback_id: Optional[int],
+    q_text: str,
+    a_text: str,
+    is_bad: bool = False,
+    embedding_status: str = "pending",
+    embedding_model: Optional[str] = None,
+    fingerprint: Optional[str] = None,
+) -> int:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return 0
+    if tenant_val <= 0:
+        return 0
+    lead_ref = None
+    msg_ref = None
+    fb_ref = None
+    try:
+        lead_ref = int(lead_id) if lead_id is not None else None
+    except Exception:
+        lead_ref = None
+    try:
+        msg_ref = int(message_id) if message_id is not None else None
+    except Exception:
+        msg_ref = None
+    try:
+        fb_ref = int(source_feedback_id) if source_feedback_id is not None else None
+    except Exception:
+        fb_ref = None
+
+    sig = fingerprint or sha1(f"{q_text.strip()}\t{a_text.strip()}")
+    existing = await _fetchrow(
+        """
+        SELECT id
+        FROM training_examples
+        WHERE tenant_id = $1
+          AND fingerprint = $2
+          AND is_bad = FALSE
+          AND is_active = TRUE
+        ORDER BY updated_at DESC
+        LIMIT 1;
+        """,
+        tenant_val,
+        sig,
+    )
+    if existing and "id" in existing and existing["id"] is not None:
+        try:
+            existing_id = int(existing["id"])
+            await _exec(
+                """
+                UPDATE training_examples
+                SET updated_at = now(),
+                    a_text = $2,
+                    source = COALESCE($3, source)
+                WHERE id = $1;
+                """,
+                existing_id,
+                a_text,
+                source,
+            )
+            return existing_id
+        except Exception:
+            pass
+
+    row = await _fetchrow(
+        """
+        INSERT INTO training_examples (
+            tenant_id, lead_id, message_id, source, source_feedback_id,
+            q_text, a_text, fingerprint, is_bad, is_active,
+            embedding_status, embedding_model
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11)
+        RETURNING id;
+        """,
+        tenant_val,
+        lead_ref,
+        msg_ref,
+        source,
+        fb_ref,
+        q_text,
+        a_text,
+        sig,
+        bool(is_bad),
+        embedding_status,
+        embedding_model,
+    )
+    if not row:
+        return 0
+    try:
+        return int(row["id"])
+    except Exception:
+        return 0
+
+
+async def mark_bad_bot_message(
+    tenant_id: int,
+    message_id: int,
+    *,
+    feedback_id: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> None:
+    try:
+        tenant_val = int(tenant_id)
+        msg_ref = int(message_id)
+    except Exception:
+        return
+    if tenant_val <= 0 or msg_ref <= 0:
+        return
+    fb_ref = None
+    try:
+        fb_ref = int(feedback_id) if feedback_id is not None else None
+    except Exception:
+        fb_ref = None
+    await _exec(
+        """
+        INSERT INTO bad_bot_messages(tenant_id, message_id, feedback_id, reason)
+        VALUES($1, $2, $3, $4)
+        ON CONFLICT (tenant_id, message_id) DO NOTHING;
+        """,
+        tenant_val,
+        msg_ref,
+        fb_ref,
+        reason,
+    )
+
+
+async def get_training_examples_for_retrieval(
+    tenant_id: int,
+    *,
+    limit: int = 200,
+    require_embedding: bool = False,
+) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    if tenant_val <= 0:
+        return []
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 200
+    params: list[Any] = [tenant_val]
+    sql_parts = [
+        "SELECT id, q_text, a_text, source, embedding, embedding_model, embedding_status, times_used, updated_at, created_at, is_bad",
+        "FROM training_examples",
+        "WHERE tenant_id = $1 AND is_active = TRUE AND is_bad = FALSE",
+    ]
+    if require_embedding:
+        sql_parts.append("AND embedding_status = 'ready'")
+    params.append(limit_val)
+    sql_parts.append(f"ORDER BY updated_at DESC, id DESC LIMIT ${len(params)}")
+    rows = await _fetch(" ".join(sql_parts), *params)
+    results: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            results.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                results.append(dict(row.items()))
+    return results
+
+
+async def get_tenant_model(tenant_id: int) -> Optional[Mapping[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return None
+    if tenant_val <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT tenant_id, base_model, finetune_model, use_finetune, updated_at
+        FROM tenant_models
+        WHERE tenant_id = $1
+        LIMIT 1;
+        """,
+        tenant_val,
+    )
+    if not row:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        return row if isinstance(row, Mapping) else None
+
+
+async def increment_training_examples_usage(example_ids: list[int]) -> None:
+    if not example_ids:
+        return
+    ids: list[int] = []
+    for val in example_ids:
+        try:
+            coerced = int(val)
+        except Exception:
+            continue
+        if coerced > 0:
+            ids.append(coerced)
+    if not ids:
+        return
+    await _exec(
+        "UPDATE training_examples SET times_used = times_used + 1, updated_at = now() WHERE id = ANY($1::bigint[])",
+        ids,
+    )
+
+
+async def fetch_pending_training_examples(limit: int = 10) -> list[dict[str, Any]]:
+    lim = limit if isinstance(limit, int) and limit > 0 else 10
+    rows = await _fetch(
+        """
+        SELECT id, tenant_id, q_text, a_text, embedding_model
+        FROM training_examples
+        WHERE embedding_status = 'pending'
+          AND is_active = TRUE
+          AND is_bad = FALSE
+        ORDER BY updated_at ASC, id ASC
+        LIMIT $1;
+        """,
+        lim,
+    )
+    results: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            results.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                results.append(dict(row.items()))
+    return results
+
+
+async def set_training_embedding(
+    example_id: int,
+    embedding: Optional[list[float]],
+    *,
+    embedding_model: Optional[str] = None,
+    status: str = "ready",
+    error: Optional[str] = None,
+) -> None:
+    try:
+        example_ref = int(example_id)
+    except Exception:
+        return
+    if example_ref <= 0:
+        return
+    await _exec(
+        """
+        UPDATE training_examples
+        SET embedding = $2,
+            embedding_model = COALESCE($3, embedding_model),
+            embedding_status = $4,
+            embedding_error = $5,
+            updated_at = now()
+        WHERE id = $1;
+        """,
+        example_ref,
+        embedding,
+        embedding_model,
+        status,
+        error,
+    )
 
 async def find_lead_by_telegram(
     tenant_id: int,
