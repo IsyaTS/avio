@@ -1016,7 +1016,7 @@ def _resolve_channel(item: Mapping[str, Any]) -> str:
 def _is_manager_message(item: Mapping[str, Any]) -> bool:
     origin_raw = item.get("origin")
     origin = origin_raw.strip().lower() if isinstance(origin_raw, str) else ""
-    if origin == "app.send":
+    if origin in {"app.send", "dialogs.ui", "client.dialog"}:
         return True
 
     manager_flag = item.get("manager")
@@ -3360,7 +3360,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         )
         return ("skipped", "dry-run", "", 0)
 
-    message_db_id: Optional[int] = None
+    message_db_id_raw = _coerce_int(item.get("_message_db_id"))
+    message_db_id: Optional[int] = message_db_id_raw if message_db_id_raw and message_db_id_raw > 0 else None
     title_hint: Optional[str] = None
     actual_lead_id = lead_id
 
@@ -3492,25 +3493,27 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         log(
             f"event=send_attempt channel=telegram tenant={tenant} lead_id={actual_lead_id} send_target={chat_id}"
         )
-        try:
-            message_db_id = await insert_message_out(
-                actual_lead_id,
-                text,
-                None,
-                status="queued",
-                tenant_id=tenant,
-                channel="telegram",
-                telegram_user_id=telegram_user_id,
-                telegram_username=username,
-                title=title_hint,
-            )
-        except Exception as exc:
-            DB_ERRORS_COUNTER.labels("insert_message_out").inc()
-            log(
-                "event=send_result status=skipped reason=db_error operation=insert_message_out "
-                f"channel={channel} lead_id={actual_lead_id} error={exc}"
-            )
-            return ("skipped", "db_error", "", 0)
+        if message_db_id is None:
+            try:
+                message_db_id = await insert_message_out(
+                    actual_lead_id,
+                    text,
+                    None,
+                    status="queued",
+                    tenant_id=tenant,
+                    channel="telegram",
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=username,
+                    title=title_hint,
+                    is_bot=not _is_manager_message(item),
+                )
+            except Exception as exc:
+                DB_ERRORS_COUNTER.labels("insert_message_out").inc()
+                log(
+                    "event=send_result status=skipped reason=db_error operation=insert_message_out "
+                    f"channel={channel} lead_id={actual_lead_id} error={exc}"
+                )
+                return ("skipped", "db_error", "", 0)
         if message_db_id:
             item["_message_db_id"] = message_db_id
             item["_resolved_lead_id"] = actual_lead_id
@@ -3731,6 +3734,8 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
     if not text and attachment:
         fname = attachment.get("filename") or ""
         text = f"[attachment] {fname}".strip()
+    manager_message = _is_manager_message(item)
+    sent_status = "sent"
 
     telegram_user_id = None
     peer_value: Optional[str] = None
@@ -3756,7 +3761,13 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
     username = item.get("username") if isinstance(item.get("username"), str) else None
 
     channel_name = _resolve_channel(item)
-    stored_message_id = item.get("_message_db_id")
+    stored_message_id_raw = item.get("_message_db_id")
+    try:
+        stored_message_id = int(stored_message_id_raw)
+    except Exception:
+        stored_message_id = None
+    if stored_message_id is not None and stored_message_id <= 0:
+        stored_message_id = None
     resolved_lead_override = item.get("_resolved_lead_id")
     if isinstance(resolved_lead_override, int) and resolved_lead_override > 0:
         lead_id = resolved_lead_override
@@ -3789,8 +3800,8 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
             return
 
         lead_ref = resolved_lead_id or lead_id
-        lead_available = False
-        if resolved_lead_id:
+        lead_available = bool(stored_message_id)
+        if not lead_available and resolved_lead_id:
             try:
                 lead_available = await lead_exists(resolved_lead_id, tenant_id=tenant_id)
             except Exception as exc:
@@ -3799,7 +3810,7 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
                     "event=send_result status=skipped reason=lead_check_error "
                     f"channel={channel_name} lead_id={resolved_lead_id} tenant={tenant_id} error={exc}"
                 )
-        else:
+        elif not lead_available:
             log(
                 "event=send_result status=skipped reason=lead_upsert_missing "
                 f"channel={channel_name} lead_id={lead_id} tenant={tenant_id}"
@@ -3812,21 +3823,21 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
             )
             return
 
-        sent_status = "sent"
-        try:
-            await insert_message_out(
-                lead_ref,
-                text,
-                None,
-                status=sent_status,
-                tenant_id=tenant_id,
-                channel=channel_name,
-                telegram_user_id=telegram_user_id,
-                telegram_username=username,
-            )
-        except Exception as exc:
-            log(f"[worker] insert_message_out err: {exc}")
-    sent_status = "sent"
+        if not stored_message_id:
+            try:
+                await insert_message_out(
+                    lead_ref,
+                    text,
+                    None,
+                    status=sent_status,
+                    tenant_id=tenant_id,
+                    channel=channel_name,
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=username,
+                    is_bot=not manager_message,
+                )
+            except Exception as exc:
+                log(f"[worker] insert_message_out err: {exc}")
 
     out = {
         "lead_id": lead_id,
