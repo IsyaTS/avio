@@ -1232,6 +1232,17 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
         ttl_value = 0
     behavior["photo_expected_ttl"] = ttl_value if ttl_value > 0 else 0
 
+    # Каталог первым сообщением в Telegram (по умолчанию включено для сохранения текущего поведения).
+    send_catalog_flag = behavior.get("send_catalog_on_first_message")
+    if send_catalog_flag is None:
+        behavior["send_catalog_on_first_message"] = True
+    else:
+        behavior["send_catalog_on_first_message"] = _coerce_bool(send_catalog_flag, True)
+
+    # Смарт-реплай для Avito (по умолчанию отключён как и раньше).
+    avito_ai_flag = behavior.get("avito_smart_reply_enabled")
+    behavior["avito_smart_reply_enabled"] = _coerce_bool(avito_ai_flag, False)
+
     whatsapp_cfg = normalized.get("whatsapp")
     whatsapp: dict[str, Any] = {}
     if isinstance(whatsapp_cfg, dict):

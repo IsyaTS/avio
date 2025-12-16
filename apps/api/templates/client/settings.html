@@ -116,6 +116,10 @@
             <input type="checkbox" id="behavior-auto-reply">
             <span class="label" style="margin:0;">Включить автоответ Avito</span>
         </label>
+        <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="behavior-avito-smart-reply">
+            <span class="label" style="margin:0;">Включить смарт-реплай в Avito</span>
+        </label>
         <label style="grid-column: 1 / -1;">
             <span class="label">Текст автоответа Avito</span>
             <textarea id="behavior-auto-reply-text" rows="3" class="textarea" placeholder="Например: Спасибо за обращение! Скоро ответим."></textarea>
@@ -123,6 +127,10 @@
         <label style="grid-column: 1 / -1;">
             <span class="label">Текст для Telegram, если нашли номер в Avito</span>
             <textarea id="behavior-avito-phone-template" rows="3" class="textarea" placeholder="Например: Наш менеджер напишет вам в Telegram."></textarea>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="behavior-send-catalog-telegram">
+            <span class="label" style="margin:0;">Отправлять PDF-каталог первым сообщением (Telegram)</span>
         </label>
     </div>
 
@@ -175,6 +183,8 @@
     const autoReplyToggle = document.getElementById('behavior-auto-reply');
     const autoReplyText = document.getElementById('behavior-auto-reply-text');
     const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
+    const avitoSmartReplyToggle = document.getElementById('behavior-avito-smart-reply');
+    const sendCatalogTgToggle = document.getElementById('behavior-send-catalog-telegram');
     const triggerRows = document.getElementById('trigger-rows');
     const addTriggerBtn = document.getElementById('add-trigger');
     const saveBehaviorBtn = document.getElementById('save-behavior');
@@ -321,6 +331,11 @@
 
     if (autoReplyToggle) autoReplyToggle.checked = !!behavior.auto_reply;
     if (autoReplyText) autoReplyText.value = behavior.auto_reply_text || '';
+    if (avitoSmartReplyToggle) avitoSmartReplyToggle.checked = !!behavior.avito_smart_reply_enabled;
+    if (sendCatalogTgToggle) {
+      const flag = behavior.send_catalog_on_first_message;
+      sendCatalogTgToggle.checked = flag === undefined ? true : !!flag;
+    }
     if (avitoPhoneTemplateNode) {
       avitoPhoneTemplateNode.value = behavior.avito_phone_tg_template || '';
     }
@@ -354,6 +369,8 @@
         auto_reply: autoReplyToggle ? !!autoReplyToggle.checked : false,
         auto_reply_text: autoReplyText ? autoReplyText.value : '',
         avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
+        avito_smart_reply_enabled: avitoSmartReplyToggle ? !!avitoSmartReplyToggle.checked : false,
+        send_catalog_on_first_message: sendCatalogTgToggle ? !!sendCatalogTgToggle.checked : true,
         triggers: collectTriggers(),
         photo_expected_markers: photoMarkersNode ? normalizePhrases(photoMarkersNode.value) : [],
         photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',

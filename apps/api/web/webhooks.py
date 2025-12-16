@@ -1099,6 +1099,15 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         if attachment:
             catalog_out["attachment"] = attachment
         if resolved_provider == "telegram":
+            send_catalog_first = True
+            raw_send_catalog_flag = behavior.get("send_catalog_on_first_message") if behavior else None
+            if raw_send_catalog_flag is not None:
+                try:
+                    send_catalog_first = bool(raw_send_catalog_flag)
+                except Exception:
+                    send_catalog_first = True
+            if not send_catalog_first:
+                should_send_catalog = False
             if telegram_user_id:
                 catalog_out["telegram_user_id"] = int(telegram_user_id)
             if peer_value:

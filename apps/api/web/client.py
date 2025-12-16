@@ -526,6 +526,8 @@ def client_settings(tenant: int, request: Request):
     behavior_state = {
         "auto_reply": bool(behavior_cfg.get("auto_reply")),
         "auto_reply_text": behavior_cfg.get("auto_reply_text") or "",
+        "avito_smart_reply_enabled": bool(behavior_cfg.get("avito_smart_reply_enabled")),
+        "send_catalog_on_first_message": behavior_cfg.get("send_catalog_on_first_message"),
         "triggers": triggers_raw,
         "photo_expected_markers": behavior_cfg.get("photo_expected_markers") or [],
         "photo_expected_reply": behavior_cfg.get("photo_expected_reply") or "",
@@ -706,6 +708,9 @@ async def save_behavior(tenant: int, request: Request):
     behavior["auto_reply_enabled"] = behavior["auto_reply"]
     behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
     behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
+    behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
+    if payload.get("send_catalog_on_first_message") is not None:
+        behavior["send_catalog_on_first_message"] = bool(payload.get("send_catalog_on_first_message"))
     behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
     markers_raw = payload.get("photo_expected_markers") or []
     markers: list[str] = []
