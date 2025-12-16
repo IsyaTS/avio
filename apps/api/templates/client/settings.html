@@ -17,7 +17,11 @@
         'csv_save': '/pub/catalog/csv',
         'training_upload': '/pub/training/upload',
         'training_status': '/pub/training/status',
-        'whatsapp_export': '/pub/wa/export'
+        'whatsapp_export': '/pub/wa/export',
+        'dialogs_list': '/api/dialogs',
+        'dialogs_detail': '/api/dialogs/{lead_id}',
+        'dialogs_send': '/api/dialogs/{lead_id}/send',
+        'feedback': '/api/feedback'
     }
 } %}
 {% set client_state_json = (client_state_source if client_state_source is defined else client_state_fallback) | tojson %}
@@ -612,10 +616,426 @@
 <section class="surface stack tab-panel hidden" data-tab-panel="dialogs" data-testid="client-dialogs">
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Диалоги</h2>
-        <p class="section-subtitle">Раздел в разработке. Здесь будут ленты диалогов и быстрые фильтры.</p>
+        <p class="section-subtitle">Единое окно переписок из Avito API и Telegram.</p>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+            <button class="btn btn--secondary" type="button" id="dialogs-refresh">Обновить</button>
+            <span id="dialogs-status" class="status-text"></span>
+        </div>
     </div>
-    <div class="placeholder">Диалоги появятся позже.</div>
+
+    <style>
+      .dialogs-shell { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 12px; align-items: stretch; min-height: 520px; }
+      .dialogs-list { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px solid var(--border-subtle); border-radius: 10px; background: #0f11161a; overflow: auto; }
+      .dialog-item { text-align: left; border: 1px solid transparent; background: #fff; color: inherit; border-radius: 10px; padding: 10px; display: grid; grid-template-columns: 1fr auto; gap: 6px; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+      .dialog-item:hover { border-color: var(--border-strong); }
+      .dialog-item.is-active { border-color: var(--accent, #4c6fff); box-shadow: 0 0 0 2px rgba(76,111,255,0.12); }
+      .dialog-meta { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+      .dialog-title { font-weight:600; }
+      .dialog-preview { color: var(--text-muted); font-size: 0.95rem; grid-column: 1 / -1; word-break: break-word; }
+      .dialog-time { color: var(--text-muted); font-size: 0.85rem; text-align: right; white-space: nowrap; }
+      .dialogs-chat { border: 1px solid var(--border-subtle); border-radius: 12px; padding: 12px; background: #fff; display:flex; flex-direction:column; min-height: 520px; }
+      .dialogs-thread { display:flex; flex-direction:column; gap:12px; height:100%; }
+      .dialogs-empty { padding: 24px; border:1px dashed var(--border-subtle); border-radius:10px; color: var(--text-muted); }
+      .dialogs-thread-header { display:flex; justify-content: space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+      .dialog-thread-title { font-size:1.1rem; font-weight:600; }
+      .dialogs-messages { flex:1; overflow:auto; display:flex; flex-direction:column; gap:12px; padding: 4px; background: linear-gradient(180deg, #f8f9fc 0%, #ffffff 100%); border-radius: 10px; }
+      .dialog-message { max-width: 85%; padding: 10px 12px; border-radius: 12px; position: relative; box-shadow: 0 1px 2px rgba(0,0,0,0.06); display: flex; flex-direction: column; gap:6px; }
+      .dialog-message .message-text { white-space: pre-wrap; word-break: break-word; }
+      .dialog-message .message-meta { font-size: 0.8rem; color: var(--text-muted); display:flex; gap:8px; align-items:center; }
+      .dialog-message.is-in { background: #ffffff; align-self: flex-start; border:1px solid var(--border-subtle); }
+      .dialog-message.is-out { background: #0f1116; color: #fff; align-self: flex-end; }
+      .dialog-message.is-out .message-meta { color: rgba(255,255,255,0.75); }
+      .message-status { font-size: 0.8rem; color: var(--text-muted); }
+      .dialogs-composer { display:flex; flex-direction:column; gap:8px; }
+      .composer-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+      .feedback-bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .feedback-comment { width: 100%; margin-top: 6px; }
+      .feedback-actions button { border:1px solid var(--border-subtle); background: #fff; padding:6px 10px; border-radius:8px; cursor:pointer; }
+      .feedback-actions button:hover { border-color: var(--border-strong); }
+      .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:16px; background:#f0f2ff; color:#1f2b5c; font-size:0.85rem; font-weight:600; text-transform: uppercase; letter-spacing: 0.04em; }
+      .badge[data-channel="telegram"] { background:#e8f2ff; color:#1b4c9a; }
+      .badge[data-channel="avito"] { background:#fef3e0; color:#a85b00; }
+      .badge[data-channel="unknown"] { background:#ececec; color:#333; }
+      @media (max-width: 960px) {
+        .dialogs-shell { grid-template-columns: 1fr; }
+        .dialogs-chat, .dialogs-list { min-height: auto; }
+        .dialog-message { max-width: 100%; }
+      }
+    </style>
+
+    <div class="dialogs-shell">
+        <div class="dialogs-list surface" id="dialogs-list"></div>
+        <div class="dialogs-chat surface" id="dialogs-chat">
+            <div class="dialogs-empty" id="dialogs-empty">Выберите диалог слева, чтобы увидеть историю и ответить.</div>
+            <div class="dialogs-thread hidden" id="dialogs-thread">
+                <div class="dialogs-thread-header">
+                    <div class="stack" style="gap:4px;">
+                        <div class="dialog-thread-title" id="dialogs-thread-title">Диалог</div>
+                        <div class="status-text" id="dialogs-thread-channel"></div>
+                    </div>
+                    <button class="btn btn--secondary" type="button" id="dialogs-reload-dialog">Обновить диалог</button>
+                </div>
+                <div class="dialogs-messages" id="dialogs-messages"></div>
+                <div class="dialogs-composer">
+                    <textarea id="dialogs-input" class="textarea" rows="3" placeholder="Введите сообщение"></textarea>
+                    <div class="composer-actions">
+                        <button class="btn" type="button" id="dialogs-send">Отправить</button>
+                        <span class="status-text" id="dialogs-send-status"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </section>
+
+<script>
+  (function () {
+    const stateNode = document.getElementById('client-settings-state');
+    let state = {};
+    try {
+      state = JSON.parse(stateNode.textContent || '{}');
+    } catch (err) {
+      console.warn('dialogs: state parse failed', err);
+    }
+    const tenant = state.tenant;
+    const key = state.key;
+    const urls = (state && state.urls) ? state.urls : {};
+
+    const listNode = document.getElementById('dialogs-list');
+    const statusNode = document.getElementById('dialogs-status');
+    const messagesNode = document.getElementById('dialogs-messages');
+    const emptyNode = document.getElementById('dialogs-empty');
+    const threadNode = document.getElementById('dialogs-thread');
+    const titleNode = document.getElementById('dialogs-thread-title');
+    const channelNode = document.getElementById('dialogs-thread-channel');
+    const inputNode = document.getElementById('dialogs-input');
+    const sendBtn = document.getElementById('dialogs-send');
+    const sendStatus = document.getElementById('dialogs-send-status');
+    const refreshBtn = document.getElementById('dialogs-refresh');
+    const reloadDialogBtn = document.getElementById('dialogs-reload-dialog');
+
+    let currentDialogId = null;
+    const feedbackSent = new Set();
+
+    function withAuth(url) {
+      if (!url) return '';
+      const params = [];
+      if (tenant) params.push(`tenant=${encodeURIComponent(tenant)}`);
+      if (key) params.push(`k=${encodeURIComponent(key)}`);
+      const separator = url.includes('?') ? '&' : '?';
+      return params.length ? `${url}${separator}${params.join('&')}` : url;
+    }
+
+    function dialogUrl(template, leadId) {
+      if (!template) return '';
+      return template.replace('{lead_id}', leadId).replace('{leadId}', leadId);
+    }
+
+    function setStatus(text, tone) {
+      if (!statusNode) return;
+      statusNode.textContent = text || '';
+      statusNode.className = tone ? `status-text ${tone}` : 'status-text muted';
+    }
+
+    function setSendStatus(text, tone) {
+      if (!sendStatus) return;
+      sendStatus.textContent = text || '';
+      sendStatus.className = tone ? `status-text ${tone}` : 'status-text muted';
+    }
+
+    function channelBadge(channel) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.dataset.channel = channel || 'unknown';
+      badge.textContent = channel || 'channel';
+      return badge;
+    }
+
+    function renderDialogs(list) {
+      if (!listNode) return;
+      listNode.innerHTML = '';
+      if (!Array.isArray(list) || !list.length) {
+        listNode.innerHTML = '<div class="hint">Нет диалогов. Подключите канал Avito или Telegram, чтобы видеть переписку.</div>';
+        return;
+      }
+      list.forEach((dialog) => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'dialog-item';
+        if (dialog.id === currentDialogId) {
+          item.classList.add('is-active');
+        }
+        const meta = document.createElement('div');
+        meta.className = 'dialog-meta';
+        meta.appendChild(channelBadge(dialog.channel));
+        const title = document.createElement('div');
+        title.className = 'dialog-title';
+        title.textContent = dialog.title || `Лид ${dialog.id}`;
+        meta.appendChild(title);
+
+        const preview = document.createElement('div');
+        preview.className = 'dialog-preview';
+        preview.textContent = dialog.last_message || 'Без сообщений';
+
+        const ts = document.createElement('div');
+        ts.className = 'dialog-time';
+        ts.textContent = dialog.last_ts ? new Date(dialog.last_ts).toLocaleString() : '';
+
+        item.appendChild(meta);
+        item.appendChild(ts);
+        item.appendChild(preview);
+
+        item.addEventListener('click', () => {
+          currentDialogId = dialog.id;
+          renderDialogs(list); // refresh active state
+          openDialog(dialog);
+        });
+
+        listNode.appendChild(item);
+      });
+    }
+
+    function scrollToBottom() {
+      if (!messagesNode) return;
+      messagesNode.scrollTop = messagesNode.scrollHeight + 100;
+    }
+
+    function buildFeedbackControls(messageId) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'feedback-bar';
+      const actions = document.createElement('div');
+      actions.className = 'feedback-actions';
+
+      const likeBtn = document.createElement('button');
+      likeBtn.type = 'button';
+      likeBtn.textContent = '👍 Нормально';
+      const dislikeBtn = document.createElement('button');
+      dislikeBtn.type = 'button';
+      dislikeBtn.textContent = '👎 Плохо';
+
+      const comment = document.createElement('textarea');
+      comment.className = 'textarea feedback-comment hidden';
+      comment.rows = 2;
+      comment.placeholder = 'Почему ответ не подошёл и как надо?';
+
+      function disableAll() {
+        likeBtn.disabled = true;
+        dislikeBtn.disabled = true;
+        comment.disabled = true;
+        feedbackSent.add(messageId);
+      }
+
+      async function sendFeedback(rating) {
+        const url = withAuth(urls.feedback);
+        if (!url) return;
+        const payload = { message_id: messageId, rating };
+        if (rating === 'dislike') {
+          const text = (comment.value || '').trim();
+          if (!text) {
+            comment.classList.remove('hidden');
+            comment.focus();
+            setSendStatus('Укажите, что не так в ответе', 'alert');
+            return;
+          }
+          payload.comment = text;
+        }
+        likeBtn.disabled = true;
+        dislikeBtn.disabled = true;
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!resp.ok) {
+            const detail = (await resp.json().catch(() => ({}))).detail || resp.statusText;
+            throw new Error(detail);
+          }
+          disableAll();
+        } catch (err) {
+          dislikeBtn.disabled = false;
+          likeBtn.disabled = false;
+          comment.disabled = false;
+          setSendStatus(err && err.message ? err.message : 'Ошибка отправки фидбэка', 'alert');
+        }
+      }
+
+      likeBtn.addEventListener('click', () => sendFeedback('like'));
+      dislikeBtn.addEventListener('click', () => {
+        comment.classList.remove('hidden');
+        comment.focus();
+        if ((comment.value || '').trim()) {
+          sendFeedback('dislike');
+        }
+      });
+
+      actions.appendChild(likeBtn);
+      actions.appendChild(dislikeBtn);
+      wrapper.appendChild(actions);
+      wrapper.appendChild(comment);
+      return wrapper;
+    }
+
+    function renderMessages(messages) {
+      if (!messagesNode) return;
+      messagesNode.innerHTML = '';
+      if (!Array.isArray(messages) || !messages.length) {
+        messagesNode.innerHTML = '<div class="hint" style="padding:8px;">Сообщений пока нет.</div>';
+        return;
+      }
+      messages.forEach((msg) => {
+        const bubble = document.createElement('div');
+        bubble.className = 'dialog-message';
+        if (msg.direction === 1) {
+          bubble.classList.add('is-out');
+        } else {
+          bubble.classList.add('is-in');
+        }
+        const textEl = document.createElement('div');
+        textEl.className = 'message-text';
+        textEl.textContent = msg.text || '';
+        const meta = document.createElement('div');
+        meta.className = 'message-meta';
+        if (msg.ts) {
+          meta.textContent = new Date(msg.ts).toLocaleString();
+        }
+        if (msg.status && msg.status !== 'sent') {
+          const statusTag = document.createElement('span');
+          statusTag.className = 'message-status';
+          statusTag.textContent = msg.status;
+          meta.appendChild(statusTag);
+        }
+        bubble.appendChild(textEl);
+        bubble.appendChild(meta);
+        if (msg.from_bot && msg.direction === 1 && msg.id && !feedbackSent.has(msg.id)) {
+          bubble.appendChild(buildFeedbackControls(msg.id));
+        }
+        messagesNode.appendChild(bubble);
+      });
+      scrollToBottom();
+    }
+
+    async function loadDialogs() {
+      if (!urls.dialogs_list) return;
+      setStatus('Загружаем...', 'muted');
+      try {
+        const resp = await fetch(withAuth(`${urls.dialogs_list}?limit=200`));
+        if (!resp.ok) {
+          const detail = (await resp.json().catch(() => ({}))).detail || resp.statusText;
+          throw new Error(detail);
+        }
+        const data = await resp.json();
+        renderDialogs(data.dialogs || []);
+        setStatus('', 'muted');
+      } catch (err) {
+        setStatus(err && err.message ? err.message : 'Ошибка загрузки диалогов', 'alert');
+      }
+    }
+
+    async function loadDialogMessages(dialogId) {
+      if (!dialogId || !urls.dialogs_detail) return;
+      if (emptyNode) emptyNode.classList.add('hidden');
+      if (threadNode) threadNode.classList.remove('hidden');
+      setSendStatus('', 'muted');
+      const template = dialogUrl(urls.dialogs_detail, dialogId);
+      try {
+        const resp = await fetch(withAuth(`${template}?limit=50`));
+        if (!resp.ok) {
+          const detail = (await resp.json().catch(() => ({}))).detail || resp.statusText;
+          throw new Error(detail);
+        }
+        const data = await resp.json();
+        const channel = (data.channel || 'channel').toString();
+        if (titleNode) titleNode.textContent = data.title || `Лид ${dialogId}`;
+        if (channelNode) {
+          channelNode.innerHTML = '';
+          channelNode.appendChild(channelBadge(channel));
+        }
+        renderMessages(data.messages || []);
+      } catch (err) {
+        renderMessages([]);
+        setSendStatus(err && err.message ? err.message : 'Ошибка загрузки диалога', 'alert');
+      }
+    }
+
+    async function openDialog(dialog) {
+      if (!dialog) return;
+      currentDialogId = dialog.id;
+      if (titleNode) titleNode.textContent = dialog.title || `Лид ${dialog.id}`;
+      if (channelNode) {
+        channelNode.innerHTML = '';
+        channelNode.appendChild(channelBadge(dialog.channel || 'channel'));
+      }
+      if (emptyNode) emptyNode.classList.add('hidden');
+      if (threadNode) threadNode.classList.remove('hidden');
+      await loadDialogMessages(dialog.id);
+    }
+
+    async function sendMessage() {
+      if (!currentDialogId || !urls.dialogs_send) {
+        setSendStatus('Диалог не выбран', 'alert');
+        return;
+      }
+      const text = (inputNode && inputNode.value || '').trim();
+      if (!text) {
+        setSendStatus('Введите текст', 'alert');
+        return;
+      }
+      const template = dialogUrl(urls.dialogs_send, currentDialogId);
+      if (sendBtn) sendBtn.disabled = true;
+      setSendStatus('Отправляем...', 'muted');
+      try {
+        const resp = await fetch(withAuth(template), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const detail = body.detail || resp.statusText;
+          throw new Error(detail);
+        }
+        if (inputNode) inputNode.value = '';
+        setSendStatus('Отправлено', 'muted');
+        await loadDialogMessages(currentDialogId);
+        await loadDialogs();
+      } catch (err) {
+        setSendStatus(err && err.message ? err.message : 'Ошибка отправки', 'alert');
+      } finally {
+        if (sendBtn) sendBtn.disabled = false;
+      }
+    }
+
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', () => {
+        loadDialogs();
+        if (currentDialogId) {
+          loadDialogMessages(currentDialogId);
+        }
+      });
+    }
+    if (reloadDialogBtn) {
+      reloadDialogBtn.addEventListener('click', () => {
+        if (currentDialogId) {
+          loadDialogMessages(currentDialogId);
+        }
+      });
+    }
+    if (sendBtn) {
+      sendBtn.addEventListener('click', sendMessage);
+    }
+    if (inputNode) {
+      inputNode.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+    }
+
+    loadDialogs();
+  })();
+</script>
 
 <script>
   (function () {
