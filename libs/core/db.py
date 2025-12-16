@@ -215,7 +215,14 @@ def _offline_trim() -> None:
         pass
 
 
-def _offline_append_message(lead_id: int, text: str, direction: int, tenant_id: Optional[int] = None) -> None:
+def _offline_append_message(
+    lead_id: int,
+    text: str,
+    direction: int,
+    tenant_id: Optional[int] = None,
+    *,
+    is_bot: bool = False,
+) -> None:
     if not text:
         return
     try:
@@ -236,6 +243,7 @@ def _offline_append_message(lead_id: int, text: str, direction: int, tenant_id: 
         "ts": time.time(),
         "from_me": bool(direction == 1),
         "tenant_id": tenant_val,
+        "is_bot": bool(is_bot),
     }
     try:
         with _OFFLINE_LOCK:
@@ -939,9 +947,11 @@ async def insert_message_in(
     tenant_id: Optional[int] = None,
     telegram_user_id: Optional[int] = None,
     provider_msg_id: Optional[str] = None,
+    *,
+    is_bot: bool = False,
 ) -> int:
     if _offline_enabled():
-        _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id)
+        _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id, is_bot=is_bot)
         return 0
     tenant_val = int(tenant_id or 0)
     telegram_val = 0
@@ -954,8 +964,8 @@ async def insert_message_in(
         telegram_val = 0
     row = await _fetchrow(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
-        VALUES($1::bigint, 0, $2, $3, $4, $5, $6::bigint)
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot)
+        VALUES($1::bigint, 0, $2, $3, $4, $5, $6::bigint, $7::boolean)
         RETURNING id;
     """,
         lead_id,
@@ -964,6 +974,7 @@ async def insert_message_in(
         status,
         tenant_val,
         telegram_val,
+        bool(is_bot),
     )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
@@ -1021,6 +1032,7 @@ async def insert_message_out(
     telegram_username: Optional[str] = None,
     *,
     title: Optional[str] = None,
+    is_bot: bool = False,
 ) -> int:
     upsert_kwargs = {
         "channel": channel or "whatsapp",
@@ -1040,7 +1052,7 @@ async def insert_message_out(
     )
     lead_ref = resolved_lead_id or lead_id
     if _offline_enabled():
-        _offline_append_message(lead_ref, text, direction=1, tenant_id=tenant_id)
+        _offline_append_message(lead_ref, text, direction=1, tenant_id=tenant_id, is_bot=is_bot)
         return 0
     tenant_val = int(tenant_id or 0)
     telegram_val = 0
@@ -1053,8 +1065,8 @@ async def insert_message_out(
         telegram_val = 0
     row = await _fetchrow(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id)
-        VALUES($1::bigint, 1, $2, $3, $4, $5, $6::bigint)
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot)
+        VALUES($1::bigint, 1, $2, $3, $4, $5, $6::bigint, $7::boolean)
         RETURNING id;
     """,
         lead_ref,
@@ -1063,6 +1075,7 @@ async def insert_message_out(
         status,
         tenant_val,
         telegram_val,
+        bool(is_bot),
     )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
@@ -1085,6 +1098,194 @@ async def update_message_status(
         provider_msg_id,
     )
 
+
+async def get_lead_dialog_metadata(lead_id: int) -> Optional[Mapping[str, Any]]:
+    try:
+        lead_ref = int(lead_id)
+    except Exception:
+        return None
+    if lead_ref <= 0:
+        return None
+
+    row = await _fetchrow(
+        """
+        SELECT id,
+               tenant_id,
+               channel,
+               peer,
+               contact,
+               title,
+               source_real_id,
+               telegram_user_id,
+               telegram_username
+        FROM leads
+        WHERE id = $1::bigint
+        LIMIT 1;
+        """,
+        lead_ref,
+    )
+    if not row:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        return row if isinstance(row, Mapping) else None
+
+
+async def fetch_dialogs_for_tenant(
+    tenant_id: int,
+    *,
+    channels: Optional[list[str]] = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    if tenant_val <= 0:
+        return []
+
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 200
+    channel_list: list[str] = []
+    if channels:
+        for ch in channels:
+            if isinstance(ch, str) and ch.strip():
+                channel_list.append(ch.strip().lower())
+
+    params: list[Any] = [tenant_val]
+    sql = """
+        SELECT l.id,
+               l.channel,
+               l.title,
+               l.contact,
+               l.peer,
+               last_msg.text AS last_message,
+               last_msg.created_at AS last_ts
+        FROM leads l
+        LEFT JOIN LATERAL (
+            SELECT m.text, m.created_at
+            FROM messages m
+            WHERE m.lead_id = l.id
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT 1
+        ) AS last_msg ON TRUE
+        WHERE l.tenant_id = $1
+    """
+    if channel_list:
+        params.append(channel_list)
+        sql += f" AND l.channel = ANY(${len(params)})"
+    params.append(limit_val)
+    sql += f" ORDER BY COALESCE(last_msg.created_at, l.updated_at) DESC NULLS LAST, l.id DESC LIMIT ${len(params)}"
+
+    rows = await _fetch(sql, *params)
+    results: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            results.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                results.append(dict(row.items()))
+    return results
+
+
+async def list_messages_for_lead(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    limit: int = 50,
+    before: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+        lead_ref = int(lead_id)
+    except Exception:
+        return []
+    if tenant_val <= 0 or lead_ref <= 0:
+        return []
+
+    params: list[Any] = [tenant_val, lead_ref]
+    sql_parts = [
+        "SELECT id, lead_id, direction, text, status, created_at, is_bot",
+        "FROM messages",
+        "WHERE tenant_id = $1 AND lead_id = $2",
+    ]
+    if before is not None:
+        params.append(before)
+        sql_parts.append(f"AND created_at < ${len(params)}")
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 50
+    params.append(limit_val)
+    sql_parts.append(f"ORDER BY created_at DESC, id DESC LIMIT ${len(params)}")
+    rows = await _fetch(" ".join(sql_parts), *params)
+    messages: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            messages.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                messages.append(dict(row.items()))
+    messages.reverse()  # chronological order
+    return messages
+
+
+async def create_message_feedback(
+    tenant_id: int,
+    message_id: int,
+    rating: str,
+    comment: Optional[str] = None,
+) -> int:
+    try:
+        tenant_val = int(tenant_id)
+        message_ref = int(message_id)
+    except Exception:
+        return 0
+    if tenant_val <= 0 or message_ref <= 0:
+        return 0
+    row = await _fetchrow(
+        """
+        INSERT INTO message_feedback(tenant_id, message_id, rating, comment)
+        VALUES($1, $2, $3, $4)
+        RETURNING id;
+        """,
+        tenant_val,
+        message_ref,
+        rating,
+        comment,
+    )
+    if not row:
+        return 0
+    try:
+        return int(row["id"])
+    except Exception:
+        return 0
+
+
+async def get_message_metadata(message_id: int) -> Optional[Mapping[str, Any]]:
+    try:
+        msg_ref = int(message_id)
+    except Exception:
+        return None
+    if msg_ref <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT id,
+               lead_id,
+               tenant_id,
+               direction,
+               is_bot,
+               created_at
+        FROM messages
+        WHERE id = $1
+        LIMIT 1;
+        """,
+        msg_ref,
+    )
+    if not row:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        return row if isinstance(row, Mapping) else None
 
 async def find_lead_by_telegram(
     tenant_id: int,
