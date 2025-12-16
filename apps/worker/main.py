@@ -3524,8 +3524,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             tenant,
             actual_lead_id,
             reason="manager_outgoing",
-            contact_hint=event.get("peer") or event.get("contact"),
-            username_hint=event.get("username"),
+            contact_hint=item.get("peer") or item.get("contact"),
+            username_hint=item.get("username"),
         )
 
     if channel == "whatsapp":
