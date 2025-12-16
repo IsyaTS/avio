@@ -1095,8 +1095,6 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
     expected_answer = str(expected_answer_raw).strip() if expected_answer_raw is not None else ""
     sanitized_expected = training_utils.sanitize_text(expected_answer) if expected_answer else ""
     if rating == "dislike":
-        if not comment:
-            return JSONResponse({"detail": "comment_required"}, status_code=400)
         if not expected_answer:
             return JSONResponse({"detail": "expected_answer_required"}, status_code=400)
         if not sanitized_expected:
@@ -1129,7 +1127,7 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
         tenant_id,
         message_ref,
         rating,
-        comment or None,
+        comment or sanitized_expected or None,
         lead_id=lead_id,
         expected_answer=sanitized_expected or expected_answer or None,
     )

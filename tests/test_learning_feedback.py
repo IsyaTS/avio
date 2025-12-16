@@ -33,9 +33,9 @@ def _stub_db(monkeypatch, *, tenant: int = 1):
 def test_feedback_dislike_requires_expected_answer(monkeypatch):
     _stub_db(monkeypatch)
     client = TestClient(app)
-    resp = client.post("/api/feedback", json={"message_id": 1, "rating": "dislike", "comment": "bad"})
+    resp = client.post("/api/feedback", json={"message_id": 1, "rating": "dislike"})
     assert resp.status_code == 400
-    assert resp.json().get("detail") in {"expected_answer_required", "comment_required"}
+    assert resp.json().get("detail") == "expected_answer_required"
 
 
 def test_feedback_rejects_foreign_tenant(monkeypatch):
