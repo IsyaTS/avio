@@ -56,6 +56,9 @@
 - Сбросить дедуп автоответа: `redis-cli DEL avito:auto_reply_sent:<tenant>:<lead_id>` (для dev `docker compose exec redis ...`).
 - Триггеры тишины: в UI «Поведение и триггеры» можно задать фразы + каналы (TG/Avito/WA). При совпадении воркер ставит тишину и (по желанию) уведомляет менеджера; автоответчик/LLM не отвечают.
 - Настройки поведения и триггеры лежат в `tenant.json` → `behavior` (`auto_reply`, `auto_reply_text`, `triggers`).
+- Переключатели per-tenant:
+  - `behavior.send_catalog_on_first_message` — отправлять ли PDF‑каталог первым сообщением в Telegram (по умолчанию `true`).
+  - `behavior.avito_smart_reply_enabled` — разрешить смарт‑реплай (LLM) для Avito (по умолчанию `false`).
 
 #### Авито → Telegram по номеру (подробно)
 - Где включается: в UI «Поведение» поле «Текст для Telegram, если нашли номер в Avito» → сохраняется в `behavior.avito_phone_tg_template`. Старый вариант через `persona.meta.avito_phone_tg_template` остаётся как fallback.
