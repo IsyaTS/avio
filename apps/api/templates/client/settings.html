@@ -650,8 +650,12 @@
       .composer-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
       .feedback-bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
       .feedback-comment { width: 100%; margin-top: 6px; }
-      .feedback-actions button { border:1px solid var(--border-subtle); background: #fff; padding:6px 10px; border-radius:8px; cursor:pointer; }
+      .feedback-actions button { border:1px solid var(--border-subtle); padding:6px 10px; border-radius:8px; cursor:pointer; font-weight:600; }
       .feedback-actions button:hover { border-color: var(--border-strong); }
+      .feedback-actions .btn-like { background:#e5f6ed; color:#0f5132; border-color:#b7e4c7; }
+      .feedback-actions .btn-dislike { background:#fdecec; color:#842029; border-color:#f5c2c7; }
+      .feedback-actions .btn-like:hover { border-color:#0f5132; }
+      .feedback-actions .btn-dislike:hover { border-color:#842029; }
       .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:16px; background:#f0f2ff; color:#1f2b5c; font-size:0.85rem; font-weight:600; text-transform: uppercase; letter-spacing: 0.04em; }
       .badge[data-channel="telegram"] { background:#e8f2ff; color:#1b4c9a; }
       .badge[data-channel="avito"] { background:#fef3e0; color:#a85b00; }
@@ -808,9 +812,11 @@
 
       const likeBtn = document.createElement('button');
       likeBtn.type = 'button';
+      likeBtn.className = 'btn-like';
       likeBtn.textContent = '👍 Нормально';
       const dislikeBtn = document.createElement('button');
       dislikeBtn.type = 'button';
+      dislikeBtn.className = 'btn-dislike';
       dislikeBtn.textContent = '👎 Плохо';
 
       const comment = document.createElement('textarea');
