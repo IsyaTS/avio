@@ -1,5 +1,6 @@
 import csv
 import io
+import asyncio
 import json
 import mimetypes
 import os
@@ -1031,7 +1032,22 @@ async def send_dialog_message_api(
         return JSONResponse({"detail": "queue_unavailable"}, status_code=503)
 
     try:
-        await redis_client.lpush(OUTBOX_QUEUE_KEY, json.dumps(queue_item, ensure_ascii=False))
+        payload = json.dumps(queue_item, ensure_ascii=False)
+    except Exception:
+        payload = None
+
+    if not payload:
+        return JSONResponse({"detail": "queue_error"}, status_code=502)
+
+    try:
+        lpush_fn = getattr(redis_client, "lpush", None)
+        if callable(lpush_fn):
+            if asyncio.iscoroutinefunction(lpush_fn):  # pragma: no cover - async redis client
+                await lpush_fn(OUTBOX_QUEUE_KEY, payload)
+            else:
+                lpush_fn(OUTBOX_QUEUE_KEY, payload)
+        else:
+            raise RuntimeError("redis_lpush_missing")
     except Exception:
         _dialogs_log.exception(
             "dialog_send_enqueue_failed tenant=%s lead=%s channel=%s", tenant_id, lead_id, channel
