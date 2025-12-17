@@ -19,6 +19,7 @@ from libs.core.db import (
     resolve_or_create_contact,
     link_lead_contact,
     insert_message_in,
+    insert_message_out,
     upsert_lead,
     insert_webhook_event,
 )
@@ -650,6 +651,71 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             )
         except Exception:
             logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
+        try:
+            upsert_kwargs = {
+                "channel": provider or "whatsapp",
+                "tenant_id": tenant,
+                "telegram_username": telegram_username,
+                "peer_id": peer_id,
+                "peer": peer_value,
+                "contact": contact_value,
+            }
+            if telegram_user_id is not None:
+                upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
+            if provider == "avito":
+                if avito_chat_id:
+                    upsert_kwargs["peer"] = avito_chat_id
+                if avito_account_id is not None:
+                    upsert_kwargs["source_real_id"] = avito_account_id
+                if avito_login and not upsert_kwargs.get("title"):
+                    upsert_kwargs["title"] = f"Avito · {avito_login}"
+            resolved_lead = await upsert_lead(
+                lead_id,
+                **upsert_kwargs,
+            )
+            if resolved_lead:
+                try:
+                    lead_id = int(resolved_lead)
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("lead_upsert_err:db_error tenant=%s lead_id=%s manager_message_upsert_fail", tenant, lead_id)
+
+        try:
+            contact_id = await resolve_or_create_contact(
+                whatsapp_phone=whatsapp_phone or None,
+                avito_user_id=avito_user_id,
+                avito_login=avito_login,
+                telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
+            )
+            if contact_id:
+                await link_lead_contact(
+                    lead_id,
+                    contact_id,
+                    channel=provider or "whatsapp",
+                    peer=peer_value or "",
+                )
+        except Exception:
+            logger.debug("manager_contact_link_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
+
+        if text:
+            try:
+                await insert_message_out(
+                    lead_id,
+                    text,
+                    provider_msg_id=message_id,
+                    status="sent",
+                    tenant_id=tenant,
+                    channel=provider,
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=telegram_username,
+                    title=contact_value,
+                    is_bot=False,
+                )
+            except Exception:
+                logger.exception("manager_message_store_failed tenant=%s lead_id=%s", tenant, lead_id)
+
         return _ok({"queued": False, "smartReply": False, "handoff": True})
 
     if not text and not has_photo and provider != "telegram":
