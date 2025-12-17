@@ -206,6 +206,7 @@ async def _resolve_target(job: Mapping[str, Any]) -> Tuple[Optional[dict], Optio
             "peer": chat_id,
             "peer_id": chat_id,
             "telegram_user_id": chat_id,
+            "origin": "followup",
         }
         return payload, None
     if channel == "avito":
@@ -222,6 +223,7 @@ async def _resolve_target(job: Mapping[str, Any]) -> Tuple[Optional[dict], Optio
             "peer": chat_id,
             "peer_id": chat_id,
             "chat_id": chat_id,
+            "origin": "followup",
         }
         return payload, None
     # Default to WhatsApp
@@ -236,6 +238,7 @@ async def _resolve_target(job: Mapping[str, Any]) -> Tuple[Optional[dict], Optio
         "ch": "whatsapp",
         "text": job.get("text") or "",
         "to": phone,
+        "origin": "followup",
     }
     return payload, None
 

@@ -1064,6 +1064,21 @@ def _is_manager_message(item: Mapping[str, Any]) -> bool:
     return False
 
 
+def _is_followup_message(item: Mapping[str, Any]) -> bool:
+    origin_raw = item.get("origin")
+    origin = origin_raw.strip().lower() if isinstance(origin_raw, str) else ""
+    if origin == "followup":
+        return True
+    meta = item.get("meta")
+    if isinstance(meta, Mapping):
+        meta_flag = meta.get("followup")
+        if isinstance(meta_flag, str):
+            meta_flag = meta_flag.strip().lower() in {"1", "true", "yes", "on"}
+        if meta_flag:
+            return True
+    return False
+
+
 def _normalize_url(url: str) -> str:
     cleaned = (url or "").strip()
     if not cleaned:
@@ -3534,7 +3549,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                     telegram_user_id=telegram_user_id,
                     telegram_username=username,
                     title=title_hint,
-                    is_bot=not _is_manager_message(item),
+                    is_bot=not (_is_manager_message(item) or _is_followup_message(item)),
                 )
             except Exception as exc:
                 DB_ERRORS_COUNTER.labels("insert_message_out").inc()
@@ -3863,7 +3878,7 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
                     channel=channel_name,
                     telegram_user_id=telegram_user_id,
                     telegram_username=username,
-                    is_bot=not manager_message,
+                    is_bot=not (manager_message or _is_followup_message(item)),
                 )
             except Exception as exc:
                 log(f"[worker] insert_message_out err: {exc}")
