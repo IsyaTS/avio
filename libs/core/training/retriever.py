@@ -165,6 +165,14 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
             await db.increment_training_examples_usage([int(ex.meta.get("id")) for ex in exact_matches if ex.meta.get("id")])
         except Exception:
             _log.debug(f"{_LOG_PREFIX} usage_increment_failed tenant=%s", tenant, exc_info=True)
+        try:
+            _log.info(
+                f"{_LOG_PREFIX} retrieve_exact tenant=%s ids=%s",
+                tenant,
+                [ex.meta.get("id") for ex in exact_matches if ex.meta.get("id")],
+            )
+        except Exception:
+            pass
         return exact_matches
 
     # Try embeddings first if present
@@ -261,6 +269,14 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
 
 async def retrieve_examples_async(tenant: int, query: str, k: int = 3) -> List[RetrievedExample]:
     # Prefer DB-backed examples; if none, fallback to legacy on-disk indexes.
+    try:
+        _log.info(
+            f"{_LOG_PREFIX} retrieve_start tenant=%s query=%s",
+            tenant,
+            training_utils.sanitize_text(query),
+        )
+    except Exception:
+        pass
     db_results = await _retrieve_examples_from_db(tenant, query, k=k)
     if db_results:
         return db_results

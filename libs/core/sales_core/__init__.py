@@ -4557,7 +4557,9 @@ async def build_llm_messages(
     if training_retriever and tenant is not None and (last_user_text or "").strip():
         try:
             block = await training_retriever.build_examples_block_async(int(tenant), last_user_text)
+            logger.info("training_block_used tenant=%s enabled=1 size=%s", tenant, len(block or ""))
         except Exception:
+            logger.exception("training_block_failed tenant=%s", tenant)
             block = ""
         if block.strip():
             system_blocks.append(block)
