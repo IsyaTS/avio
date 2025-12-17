@@ -125,10 +125,11 @@ const TrainingTab: React.FC = () => {
     if (!api.tenantId || !api.key) return;
     setLoadingDialogs(true);
     try {
-      const data = await requestJson<DialogItem[]>(buildUrl(dialogsListUrl, api));
-      setDialogs(data || []);
-      if (!activeDialog && data && data.length > 0) {
-        setActiveDialog(data[0]);
+      const data = await requestJson<any>(buildUrl(dialogsListUrl, api));
+      const list: DialogItem[] = Array.isArray(data) ? data : data.dialogs || [];
+      setDialogs(list);
+      if (!activeDialog && list.length > 0) {
+        setActiveDialog(list[0]);
       }
     } catch (error) {
       toast.error('Не удалось загрузить диалоги');
