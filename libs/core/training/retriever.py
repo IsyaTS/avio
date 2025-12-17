@@ -293,7 +293,9 @@ async def build_examples_block_async(tenant: int, query: str) -> str:
     results = await retrieve_examples_async(tenant, query, k=top_k)
     if not results:
         return ""
-    lines: List[str] = ["Примеры обучающих диалогов:"]
+    lines: List[str] = [
+        "Примеры обучающих диалогов (если вопрос похож — отвечай максимально близко к примеру):"
+    ]
     for ex in results[:top_k]:
         q = (ex.q or "").strip()
         a = (ex.a or "").strip()

@@ -10,6 +10,8 @@ import urllib.error
 import tempfile
 import subprocess
 import shutil
+import logging
+from logging import StreamHandler
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import (
     urljoin,
@@ -88,6 +90,22 @@ from apps.worker import followups
 _default_version = getattr(core_settings, "APP_VERSION", "v21.0")
 
 APP_VERSION = os.getenv("APP_VERSION", _default_version)
+
+# ==== Logging ====
+def _init_logging() -> None:
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    fmt = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+    logging.basicConfig(level=level, format=fmt)
+    for name in ("training", "libs.core.sales_core"):
+        lg = logging.getLogger(name)
+        lg.setLevel(level)
+        if not any(isinstance(h, StreamHandler) for h in lg.handlers):
+            h = StreamHandler()
+            h.setFormatter(logging.Formatter(fmt))
+            lg.addHandler(h)
+
+_init_logging()
 
 # ==== ENV ====
 REDIS_URL  = os.getenv("REDIS_URL", "redis://redis:6379/0")
