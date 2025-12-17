@@ -828,6 +828,7 @@
       submitBtn.type = 'button';
       submitBtn.className = 'btn btn--secondary hidden';
       submitBtn.textContent = 'Отправить';
+      submitBtn.style.display = 'none';
 
       function disableAll() {
         likeBtn.disabled = true;
@@ -878,6 +879,7 @@
       dislikeBtn.addEventListener('click', () => {
         expected.classList.remove('hidden');
         submitBtn.classList.remove('hidden');
+        submitBtn.style.display = 'inline-flex';
         expected.focus();
         feedbackOpen.add(messageId);
       });
@@ -891,6 +893,7 @@
       if (feedbackOpen.has(messageId)) {
         expected.classList.remove('hidden');
         submitBtn.classList.remove('hidden');
+        submitBtn.style.display = 'inline-flex';
       }
       wrapper.appendChild(expected);
       wrapper.appendChild(submitBtn);
