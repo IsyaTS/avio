@@ -4579,6 +4579,7 @@ async def build_llm_messages(
             system_blocks.append(block)
             training_block_added = True
 
+    history_tail: list[dict[str, str]] = []
     if not training_block_added:
         history_limit = 12
         history_tail = [
