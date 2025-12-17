@@ -1051,12 +1051,6 @@
     let pollTimer = null;
     function startPolling() {
       if (pollTimer) return;
-      pollTimer = window.setInterval(() => {
-        loadDialogs();
-        if (currentDialogId) {
-          loadDialogMessages(currentDialogId);
-        }
-      }, 5000);
     }
     function stopPolling() {
       if (pollTimer) {
