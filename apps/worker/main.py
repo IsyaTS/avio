@@ -1621,13 +1621,23 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     username = None
     if username_raw is not None:
         username = str(username_raw).strip() or None
+    display_name_raw = event.get("display_name")
+    if display_name_raw is None:
+        nested_message = event.get("message")
+        if isinstance(nested_message, Mapping):
+            display_name_raw = nested_message.get("display_name")
+    display_name = None
+    if isinstance(display_name_raw, str):
+        display_name = display_name_raw.strip() or None
 
     lead_candidate = _coerce_int(event.get("lead_id"))
     lead_id = lead_candidate if lead_candidate and lead_candidate > 0 else 0
 
     title_hint: Optional[str] = None
     normalized_username = normalize_username(username)
-    if normalized_username:
+    if display_name:
+        title_hint = display_name
+    elif normalized_username:
         title_hint = f"tg:{normalized_username}"
     elif telegram_user_id is not None:
         title_hint = f"tg:id {telegram_user_id}"
@@ -1648,7 +1658,7 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         if found_lead and found_lead > 0:
             resolved_lead_id = int(found_lead)
 
-    contact_hint = normalized_username or username
+    contact_hint = display_name or normalized_username or username
 
     upsert_kwargs: Dict[str, Any] = {
         "channel": "telegram",
@@ -3485,12 +3495,17 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             if found_lead and found_lead > 0:
                 resolved_lead_id = int(found_lead)
 
+        title_raw = item.get("title")
+        title_hint = None
+        if isinstance(title_raw, str):
+            title_hint = title_raw.strip() or None
+
         normalized_username = normalize_username(username)
-        title_hint: Optional[str] = None
-        if normalized_username:
-            title_hint = f"tg:{normalized_username}"
-        else:
-            title_hint = f"tg:id {telegram_user_id}"
+        if not title_hint:
+            if normalized_username:
+                title_hint = f"tg:{normalized_username}"
+            else:
+                title_hint = f"tg:id {telegram_user_id}"
 
         upsert_kwargs = {
             "channel": "telegram",

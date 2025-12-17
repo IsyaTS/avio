@@ -973,7 +973,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             avito_login=avito_login,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
-            title=telegram_display_name,
         )
         if contact_id:
             await link_lead_contact(
