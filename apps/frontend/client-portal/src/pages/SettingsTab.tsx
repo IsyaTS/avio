@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useClient } from '../context/ClientContext';
 import { buildUrl, postJson, requestJson } from '../lib/api';
@@ -72,13 +72,14 @@ const SettingsTab: React.FC = () => {
   const [photoTtl, setPhotoTtl] = useState(
     behaviorDefaults.photo_expected_ttl ? String(behaviorDefaults.photo_expected_ttl) : ''
   );
+  const initialTriggers = (behaviorDefaults.triggers || []).map((rule) => ({
+    phrases: rule.phrases || [],
+    channels: rule.channels || ['telegram', 'avito', 'whatsapp'],
+    silence: rule.silence !== false,
+    notify: Boolean(rule.notify),
+  }));
   const [triggers, setTriggers] = useState<TriggerRule[]>(
-    (behaviorDefaults.triggers || []).map((rule) => ({
-      phrases: rule.phrases || [],
-      channels: rule.channels || ['telegram', 'avito', 'whatsapp'],
-      silence: rule.silence !== false,
-      notify: Boolean(rule.notify),
-    }))
+    initialTriggers.length ? initialTriggers : [emptyTrigger()]
   );
 
   const [followups, setFollowups] = useState<FollowUpRule[]>([]);
@@ -241,8 +242,6 @@ const SettingsTab: React.FC = () => {
     }
   };
 
-  const formattedTriggers = useMemo(() => (triggers.length ? triggers : [emptyTrigger()]), [triggers]);
-
   return (
     <div className="space-y-8">
       <div className="grid gap-6 lg:grid-cols-[2fr,1fr]">
@@ -349,7 +348,7 @@ const SettingsTab: React.FC = () => {
           </div>
 
           <div className="space-y-4">
-            {formattedTriggers.map((trigger, index) => (
+            {triggers.map((trigger, index) => (
               <div key={index} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
                 <div className="grid gap-3 lg:grid-cols-[2fr,1fr]">
                   <label className="space-y-2">
