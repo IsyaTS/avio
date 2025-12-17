@@ -837,6 +837,7 @@
         submitBtn.disabled = true;
         feedbackSent.add(messageId);
         feedbackOpen.delete(messageId);
+        wrapper.style.display = 'none';
       }
 
       async function sendFeedback(rating) {
