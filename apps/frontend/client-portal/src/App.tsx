@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { ClientProvider } from './context/ClientContext';
 import SettingsTab from './pages/SettingsTab';
@@ -17,6 +17,14 @@ const navItems = [
 
 const AppLayout: React.FC = () => {
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  useEffect(() => {
+    const hash = window.location.hash || '';
+    if (hash && !hash.startsWith('#/')) {
+      const normalized = hash.replace(/^#/, '').replace(/^\//, '');
+      window.location.hash = `#/${normalized}`;
+    }
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -105,7 +113,9 @@ const AppLayout: React.FC = () => {
               <Route path="/channels/*" element={<ChannelsTab />} />
               <Route path="/catalog" element={<CatalogTab />} />
               <Route path="/training" element={<TrainingTab />} />
+              <Route path="/dialogs" element={<Navigate to="/training" replace />} />
               <Route path="/stats" element={<StatsTab />} />
+              <Route path="*" element={<Navigate to="/settings" replace />} />
             </Routes>
           </main>
         </div>
