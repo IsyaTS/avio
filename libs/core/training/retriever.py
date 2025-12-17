@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from libs.core import db
 from .indexer import TrainingIndex, TrainingExample
-from libs.core.sales_core import tenant_dir, read_tenant_config
 from libs.core.training import utils as training_utils
 
 
@@ -18,8 +17,23 @@ _log = logging.getLogger("training")
 _LOG_PREFIX = "[training]"
 
 
+def _tenant_dir(tenant: int) -> str:
+    # Lazy import to avoid circular dependency with sales_core.
+    from libs.core.sales_core import tenant_dir as _tenant_dir_fn
+
+    return _tenant_dir_fn(tenant)
+
+
+def _read_tenant_config(tenant: int) -> Dict[str, Any]:
+    # Lazy import to avoid circular dependency with sales_core.
+    from libs.core.sales_core import read_tenant_config as _read_tenant_config_fn
+
+    cfg = _read_tenant_config_fn(tenant)
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _latest_index_path(tenant: int) -> Optional[pathlib.Path]:
-    base = pathlib.Path(tenant_dir(tenant))
+    base = pathlib.Path(_tenant_dir(tenant))
     idx_dir = base / "indexes"
     if not idx_dir.exists():
         return None
@@ -58,7 +72,7 @@ class RetrievedExample:
 
 def retrieve_examples(tenant: int, query: str, k: int = 3) -> List[RetrievedExample]:
     """Legacy TF-IDF retrieval from on-disk index (uploads)."""
-    cfg = read_tenant_config(tenant)
+    cfg = _read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
     try:
         min_chars = max(0, int((learn or {}).get("min_chars", 15)))
@@ -99,7 +113,7 @@ def retrieve_examples(tenant: int, query: str, k: int = 3) -> List[RetrievedExam
 
 def build_examples_block(tenant: int, query: str) -> str:
     """Return a formatted block for the system prompt with 1–2 best examples."""
-    cfg = read_tenant_config(tenant)
+    cfg = _read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
     try:
         top_k = max(1, min(2, int((learn or {}).get("top_k", 2))))
@@ -123,7 +137,7 @@ def build_examples_block(tenant: int, query: str) -> str:
 
 
 async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> List[RetrievedExample]:
-    cfg = read_tenant_config(tenant)
+    cfg = _read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
     try:
         min_chars = max(0, int((learn or {}).get("min_chars", 15)))

@@ -37,6 +37,9 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+if training_retriever is None:
+    logger.warning("training_retriever_import_failed")
+
 try:
     from openpyxl import load_workbook  # type: ignore
 except Exception:  # опциональная зависимость для Excel
