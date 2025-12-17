@@ -47,7 +47,7 @@ async def embed_texts(texts: List[str]) -> List[List[float]]:
             embeddings.append(list(vec))
     if not embeddings:
         raise RuntimeError("embedding_empty_result")
-    _log.debug(f\"{_LOG_PREFIX} embeddings generated count=%s model=%s\", len(embeddings), model)
+    _log.debug(f"{_LOG_PREFIX} embeddings generated count=%s model=%s", len(embeddings), model)
     return embeddings
 
 
