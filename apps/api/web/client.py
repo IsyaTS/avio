@@ -624,6 +624,7 @@ def client_settings(tenant: int, request: Request):
     state_payload = dict(state)
     state_payload["form"] = form_payload
     state_payload["behavior"] = behavior_state
+    client_state_json = json.dumps(state_payload)
 
     asset_version_value = C.asset_version()
 
@@ -640,6 +641,7 @@ def client_settings(tenant: int, request: Request):
         "urls": urls,
         "state": state,
         "state_payload": state_payload,
+        "client_state_json": client_state_json,
         "primary_key": tenant_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": C.client_settings_version(),
@@ -647,7 +649,9 @@ def client_settings(tenant: int, request: Request):
         "asset_version": asset_version_value,
         "behavior": behavior_state,
     }
-    response = render_template("client/settings.html", context)
+    legacy_flag = str(request.query_params.get("legacy") or "").strip().lower() in {"1", "true", "yes", "on"}
+    template_name = "client/settings.html" if legacy_flag else "client/spa.html"
+    response = render_template(template_name, context)
     response.headers["Cache-Control"] = "no-store"
     if key:
         try:

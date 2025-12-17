@@ -490,6 +490,12 @@ def connect_avito(tenant: int, request: Request, k: str | None = None, key: str 
     if not common.valid_key(tenant_id, access_key):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
+    legacy_flag = str(request.query_params.get("legacy") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not legacy_flag and access_key:
+        redirect_url = str(request.url_for("client_settings", tenant=str(tenant_id)))
+        redirect_url = f"{redirect_url}?k={quote_plus(access_key)}#/channels/avito"
+        return RedirectResponse(url=redirect_url, status_code=302)
+
     common.ensure_tenant_files(tenant_id)
     cfg = common.read_tenant_config(tenant_id) or {}
     passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
@@ -1189,6 +1195,12 @@ def connect_wa(tenant: int, request: Request, k: str | None = None):
         if items:
             resolved_key = items[0].get("key", "")
 
+    legacy_flag = str(request.query_params.get("legacy") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not legacy_flag and resolved_key:
+        redirect_url = str(request.url_for("client_settings", tenant=str(tenant_id)))
+        redirect_url = f"{redirect_url}?k={quote_plus(resolved_key)}#/channels/whatsapp"
+        return RedirectResponse(url=redirect_url, status_code=302)
+
     common.ensure_tenant_files(tenant_id)
     cfg = common.read_tenant_config(tenant_id)
     persona = common.read_persona(tenant_id)
@@ -1223,6 +1235,12 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
     access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
     if not common.valid_key(tenant, access_key):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
+
+    legacy_flag = str(request.query_params.get("legacy") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not legacy_flag and access_key:
+        redirect_url = str(request.url_for("client_settings", tenant=str(tenant)))
+        redirect_url = f"{redirect_url}?k={quote_plus(access_key)}#/channels/telegram"
+        return RedirectResponse(url=redirect_url, status_code=302)
 
     common.ensure_tenant_files(tenant)
     cfg = common.read_tenant_config(tenant)
