@@ -824,11 +824,16 @@
       expected.className = 'textarea feedback-comment hidden';
       expected.rows = 2;
       expected.placeholder = 'Как надо было ответить (обязательно для 👎)';
+      const submitBtn = document.createElement('button');
+      submitBtn.type = 'button';
+      submitBtn.className = 'btn btn--secondary hidden';
+      submitBtn.textContent = 'Отправить';
 
       function disableAll() {
         likeBtn.disabled = true;
         dislikeBtn.disabled = true;
         expected.disabled = true;
+        submitBtn.disabled = true;
         feedbackSent.add(messageId);
         feedbackOpen.delete(messageId);
       }
@@ -872,11 +877,12 @@
       likeBtn.addEventListener('click', () => sendFeedback('like'));
       dislikeBtn.addEventListener('click', () => {
         expected.classList.remove('hidden');
+        submitBtn.classList.remove('hidden');
         expected.focus();
         feedbackOpen.add(messageId);
-        if ((expected.value || '').trim()) {
-          sendFeedback('dislike');
-        }
+      });
+      submitBtn.addEventListener('click', () => {
+        sendFeedback('dislike');
       });
 
       actions.appendChild(likeBtn);
@@ -884,8 +890,10 @@
       wrapper.appendChild(actions);
       if (feedbackOpen.has(messageId)) {
         expected.classList.remove('hidden');
+        submitBtn.classList.remove('hidden');
       }
       wrapper.appendChild(expected);
+      wrapper.appendChild(submitBtn);
       return wrapper;
     }
 
