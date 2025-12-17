@@ -4566,7 +4566,8 @@ async def build_llm_messages(
     except Exception:
         logger.debug("training_block_check_failed", exc_info=True)
 
-    # Добавим обучающие примеры диалогов (1–2) из базы арендатора
+    training_block_added = False
+    # Добавим обучающие примеры диалогов (1) из базы арендатора
     if training_retriever and tenant is not None and (last_user_text or "").strip():
         try:
             block = await training_retriever.build_examples_block_async(int(tenant), last_user_text)
@@ -4576,21 +4577,23 @@ async def build_llm_messages(
             block = ""
         if block.strip():
             system_blocks.append(block)
+            training_block_added = True
 
-    history_limit = 12
-    history_tail = [
-        item
-        for item in (
-            state.history[-history_limit:] if state.history else []
-        )
-        if item.get("role") in {"user", "assistant"}
-    ]
-    if history_tail:
-        trimmed = history_tail[:-1] if history_tail and history_tail[-1].get("role") == "user" else history_tail
-        if trimmed:
-            transcript = "\n".join(f"{msg['role']}: {msg['content']}" for msg in trimmed)
-            if transcript.strip():
-                system_blocks.append(f"Недавний диалог:\n{transcript}")
+    if not training_block_added:
+        history_limit = 12
+        history_tail = [
+            item
+            for item in (
+                state.history[-history_limit:] if state.history else []
+            )
+            if item.get("role") in {"user", "assistant"}
+        ]
+        if history_tail:
+            trimmed = history_tail[:-1] if history_tail and history_tail[-1].get("role") == "user" else history_tail
+            if trimmed:
+                transcript = "\n".join(f"{msg['role']}: {msg['content']}" for msg in trimmed)
+                if transcript.strip():
+                    system_blocks.append(f"Недавний диалог:\n{transcript}")
 
     reply_rules: list[str] = []
     if channel_name.lower() in {"whatsapp", "telegram"}:

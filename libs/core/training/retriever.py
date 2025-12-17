@@ -301,14 +301,14 @@ async def build_examples_block_async(tenant: int, query: str) -> str:
     cfg = _read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
     try:
-        top_k = max(1, min(2, int((learn or {}).get("top_k", 2))))
+        top_k = max(1, min(1, int((learn or {}).get("top_k", 1))))
     except Exception:
-        top_k = 2
+        top_k = 1
     results = await retrieve_examples_async(tenant, query, k=top_k)
     if not results:
         return ""
     lines: List[str] = [
-        "Примеры обучающих диалогов (если вопрос похож — отвечай максимально близко к примеру):"
+        "Примеры обучающих диалогов (если вопрос похож — отвечай максимально близко к примеру, без добавления новых фактов):"
     ]
     for ex in results[:top_k]:
         q = (ex.q or "").strip()
