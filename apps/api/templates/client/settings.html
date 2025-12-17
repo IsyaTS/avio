@@ -720,6 +720,7 @@
 
     let currentDialogId = null;
     const feedbackSent = new Set();
+    const feedbackOpen = new Set();
 
     function withAuth(url) {
       if (!url) return '';
@@ -829,6 +830,7 @@
         dislikeBtn.disabled = true;
         expected.disabled = true;
         feedbackSent.add(messageId);
+        feedbackOpen.delete(messageId);
       }
 
       async function sendFeedback(rating) {
@@ -871,6 +873,7 @@
       dislikeBtn.addEventListener('click', () => {
         expected.classList.remove('hidden');
         expected.focus();
+        feedbackOpen.add(messageId);
         if ((expected.value || '').trim()) {
           sendFeedback('dislike');
         }
@@ -879,6 +882,9 @@
       actions.appendChild(likeBtn);
       actions.appendChild(dislikeBtn);
       wrapper.appendChild(actions);
+      if (feedbackOpen.has(messageId)) {
+        expected.classList.remove('hidden');
+      }
       wrapper.appendChild(expected);
       return wrapper;
     }
