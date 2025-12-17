@@ -596,6 +596,7 @@ def client_settings(tenant: int, request: Request):
         "dialogs_list": "/api/dialogs",
         "dialogs_detail": "/api/dialogs/{lead_id}",
         "dialogs_send": "/api/dialogs/{lead_id}/send",
+        "feedback_stats": "/api/feedback/stats",
         "feedback": "/api/feedback",
     }
 
@@ -1173,6 +1174,17 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
             _dialogs_log.exception("mark_bad_bot_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
 
     return {"ok": True, "feedback_id": feedback_id}
+
+
+@router.get("/api/feedback/stats")
+async def feedback_stats_api(request: Request, tenant: int | str | None = None):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    counts = await db.get_feedback_counts(tenant_id)
+    return {"ok": True, "likes": counts.get("like", 0), "dislikes": counts.get("dislike", 0)}
 
 
 @router.post("/client/{tenant}/settings/json")

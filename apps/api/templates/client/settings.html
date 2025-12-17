@@ -619,6 +619,7 @@
         <p class="section-subtitle">Единое окно переписок из Avito API и Telegram.</p>
         <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
             <button class="btn btn--secondary" type="button" id="dialogs-refresh">Обновить</button>
+            <span id="dialogs-feedback-counts" class="status-text muted"></span>
             <span id="dialogs-status" class="status-text"></span>
         </div>
     </div>
@@ -716,6 +717,7 @@
     const sendBtn = document.getElementById('dialogs-send');
     const sendStatus = document.getElementById('dialogs-send-status');
     const refreshBtn = document.getElementById('dialogs-refresh');
+    const feedbackCountsNode = document.getElementById('dialogs-feedback-counts');
     const reloadDialogBtn = document.getElementById('dialogs-reload-dialog');
 
     let currentDialogId = null;
@@ -746,6 +748,13 @@
       if (!sendStatus) return;
       sendStatus.textContent = text || '';
       sendStatus.className = tone ? `status-text ${tone}` : 'status-text muted';
+    }
+
+    function setFeedbackCounts(likes, dislikes) {
+      if (!feedbackCountsNode) return;
+      const likeVal = Number.isFinite(likes) ? likes : 0;
+      const dislikeVal = Number.isFinite(dislikes) ? dislikes : 0;
+      feedbackCountsNode.textContent = `Лайки: ${likeVal} · Дизлайки: ${dislikeVal}`;
     }
 
     function channelBadge(channel) {
@@ -870,6 +879,7 @@
           }
           disableAll();
           setSendStatus('Фидбэк сохранён', 'ok');
+          await loadFeedbackCounts();
         } catch (err) {
           dislikeBtn.disabled = false;
           likeBtn.disabled = false;
@@ -902,6 +912,18 @@
       wrapper.appendChild(expected);
       wrapper.appendChild(submitBtn);
       return wrapper;
+    }
+
+    async function loadFeedbackCounts() {
+      if (!urls.feedback_stats) return;
+      try {
+        const resp = await fetch(withAuth(urls.feedback_stats));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setFeedbackCounts(data.likes, data.dislikes);
+      } catch (_) {
+        // Ignore counter errors to avoid breaking dialogs.
+      }
     }
 
     function renderMessages(messages) {
@@ -961,6 +983,7 @@
         const data = await resp.json();
         renderDialogs(data.dialogs || []);
         setStatus('', 'muted');
+        await loadFeedbackCounts();
       } catch (err) {
         setStatus(err && err.message ? err.message : 'Ошибка загрузки диалогов', 'alert');
       }

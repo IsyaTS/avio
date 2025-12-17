@@ -1552,6 +1552,38 @@ async def get_tenant_model(tenant_id: int) -> Optional[Mapping[str, Any]]:
         return row if isinstance(row, Mapping) else None
 
 
+async def get_feedback_counts(tenant_id: int) -> dict[str, int]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return {"like": 0, "dislike": 0}
+    if tenant_val <= 0:
+        return {"like": 0, "dislike": 0}
+    rows = await _fetch(
+        """
+        SELECT rating, COUNT(*) AS total
+        FROM message_feedback
+        WHERE tenant_id = $1
+        GROUP BY rating;
+        """,
+        tenant_val,
+    )
+    result = {"like": 0, "dislike": 0}
+    for row in rows or []:
+        try:
+            rating = str(row.get("rating") or "").strip().lower()
+            total = int(row.get("total") or 0)
+        except Exception:
+            try:
+                rating = str(row["rating"]).strip().lower()
+                total = int(row["total"])
+            except Exception:
+                continue
+        if rating in result:
+            result[rating] = total
+    return result
+
+
 async def increment_training_examples_usage(example_ids: list[int]) -> None:
     if not example_ids:
         return
