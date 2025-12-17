@@ -298,7 +298,7 @@ async def retrieve_examples_async(tenant: int, query: str, k: int = 3) -> List[R
 
 
 async def build_examples_block_async(tenant: int, query: str) -> str:
-    cfg = read_tenant_config(tenant)
+    cfg = _read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
     try:
         top_k = max(1, min(2, int((learn or {}).get("top_k", 2))))
