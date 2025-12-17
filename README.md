@@ -36,6 +36,14 @@
   - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
 - База данных: в `messages` добавлен флаг `is_bot` (по умолчанию `false`), создана таблица `message_feedback` (tenant_id, message_id, rating, comment, handled, created_at).
 
+## Client SPA (redesign)
+- Исходники: `apps/frontend/client-portal/` (Vite + React + TS + Tailwind).
+- Сборка: `cd apps/frontend/client-portal && npm ci && npm run build`.
+- Статика: `apps/api/static/spa/client/`, отдаётся по `/static/spa/client/`.
+- Кабинет: `/client/{tenant}/settings` (legacy-страница доступна по `?legacy=1`).
+- /connect/* редиректят на вкладку «Каналы» в SPA.
+- Dev (опционально): поднять Vite и задать `VITE_DEV_SERVER_URL=http://localhost:5173`.
+
 ## Avito вебхуки и multi-tenant
 - Маршрутизация Avito-событий выполняется по `account_id`. В вебхуках v3, где `account_id` отсутствует, используется fallback на `payload.value.user_id`, после чего вызывается `find_tenant_by_account`.
 - Если `account_id` не определён или не найден в конфиге арендатора, событие пропускается (нет дефолта на `TENANT/TENANT_ID`), чтобы не уезжать в чужой тенант.
