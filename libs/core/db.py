@@ -1309,7 +1309,7 @@ async def get_previous_incoming_message(
         return None
     if tenant_val <= 0 or lead_ref <= 0:
         return None
-    row = await _fetchrow(
+    rows = await _fetch(
         """
         SELECT id, text, created_at
         FROM messages
@@ -1318,18 +1318,48 @@ async def get_previous_incoming_message(
           AND direction = 0
           AND created_at <= $3
         ORDER BY created_at DESC, id DESC
-        LIMIT 1;
+        LIMIT 5;
         """,
         tenant_val,
         lead_ref,
         before,
     )
-    if not row:
+    if not rows:
         return None
-    try:
-        return dict(row)
-    except Exception:
-        return row if isinstance(row, Mapping) else None
+
+    def _clean_text(value: Any) -> str:
+        if not value:
+            return ""
+        text = str(value).strip()
+        # Ignore very short or non-informative fragments.
+        if len(text) < 4:
+            return ""
+        if all(ch in ".-_,!? " for ch in text):
+            return ""
+        return text
+
+    selected: list[Mapping[str, Any]] = []
+    for row in rows:
+        candidate = dict(row) if not isinstance(row, dict) and isinstance(row, Mapping) else row
+        if not isinstance(candidate, Mapping):
+            continue
+        text = _clean_text(candidate.get("text"))
+        if text:
+            selected.append({**candidate, "text": text})
+        if len(selected) >= 3:
+            break
+
+    if not selected:
+        return None
+
+    selected_reversed = list(reversed(selected))
+    combined_text = " ".join(item.get("text", "").strip() for item in selected_reversed if item.get("text"))
+    latest = selected[0]
+    return {
+        "id": latest.get("id"),
+        "text": combined_text,
+        "created_at": latest.get("created_at"),
+    }
 
 
 async def record_training_example(
