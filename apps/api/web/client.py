@@ -926,16 +926,20 @@ async def get_dialog_messages_api(
                 before_dt = None
 
     messages = await db.list_messages_for_lead(tenant_id, lead_id, limit=limit_val, before=before_dt)
+    message_ids = [msg.get("id") for msg in messages if msg.get("id")]
+    feedback_ids = await db.list_feedback_message_ids(tenant_id, message_ids)
     formatted = []
     for msg in messages:
+        msg_id = msg.get("id")
         formatted.append(
             {
-                "id": msg.get("id"),
+                "id": msg_id,
                 "direction": msg.get("direction") or 0,
                 "text": msg.get("text") or "",
                 "ts": _isoformat(msg.get("created_at")),
                 "status": msg.get("status") or "",
                 "from_bot": bool(msg.get("is_bot")),
+                "feedbacked": bool(msg_id and msg_id in feedback_ids),
             }
         )
 
@@ -1122,6 +1126,9 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
             q_text = training_utils.sanitize_text(str(previous.get("text") or ""))
     except Exception:
         q_text = ""
+
+    if await db.feedback_exists(tenant_id, message_ref):
+        return {"ok": True, "feedback_id": None, "already_exists": True}
 
     feedback_id = await db.create_message_feedback(
         tenant_id,

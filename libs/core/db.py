@@ -1596,6 +1596,67 @@ async def set_training_embedding(
         error,
     )
 
+
+async def feedback_exists(tenant_id: int, message_id: int) -> bool:
+    try:
+        tenant_val = int(tenant_id)
+        message_ref = int(message_id)
+    except Exception:
+        return False
+    if tenant_val <= 0 or message_ref <= 0:
+        return False
+    row = await _fetchrow(
+        """
+        SELECT 1
+        FROM message_feedback
+        WHERE tenant_id = $1
+          AND message_id = $2
+        LIMIT 1;
+        """,
+        tenant_val,
+        message_ref,
+    )
+    return bool(row)
+
+
+async def list_feedback_message_ids(tenant_id: int, message_ids: list[int]) -> set[int]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return set()
+    if tenant_val <= 0 or not message_ids:
+        return set()
+    ids: list[int] = []
+    for val in message_ids:
+        try:
+            coerced = int(val)
+        except Exception:
+            continue
+        if coerced > 0:
+            ids.append(coerced)
+    if not ids:
+        return set()
+    rows = await _fetch(
+        """
+        SELECT message_id
+        FROM message_feedback
+        WHERE tenant_id = $1
+          AND message_id = ANY($2::bigint[])
+        """,
+        tenant_val,
+        ids,
+    )
+    found: set[int] = set()
+    for row in rows or []:
+        try:
+            found.add(int(row.get("message_id") if isinstance(row, dict) else row["message_id"]))
+        except Exception:
+            try:
+                found.add(int(row["message_id"]))
+            except Exception:
+                continue
+    return found
+
 async def find_lead_by_telegram(
     tenant_id: int,
     telegram_user_id: int,

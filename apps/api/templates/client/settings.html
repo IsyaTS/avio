@@ -908,6 +908,11 @@
       if (!messagesNode) return;
       messagesNode.innerHTML = '';
       const toRender = Array.isArray(messages) ? messages.slice(-200) : [];
+      toRender.forEach((msg) => {
+        if (msg && msg.feedbacked && msg.id) {
+          feedbackSent.add(msg.id);
+        }
+      });
       if (!toRender.length) {
         messagesNode.innerHTML = '<div class="hint" style="padding:8px;">Сообщений пока нет.</div>';
         return;
