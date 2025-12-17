@@ -856,6 +856,7 @@
         }
         likeBtn.disabled = true;
         dislikeBtn.disabled = true;
+        submitBtn.disabled = true;
         try {
           const resp = await fetch(url, {
             method: 'POST',
@@ -870,7 +871,8 @@
         } catch (err) {
           dislikeBtn.disabled = false;
           likeBtn.disabled = false;
-          comment.disabled = false;
+          expected.disabled = false;
+          submitBtn.disabled = false;
           setSendStatus(err && err.message ? err.message : 'Ошибка отправки фидбэка', 'alert');
         }
       }
