@@ -4091,11 +4091,11 @@ async def process_queue():
 
         except Exception as e:
             try:
-            await r.lpush(OUTBOX_DLQ_KEY, json.dumps(item or {}, ensure_ascii=False))
-        except Exception:
-            pass
-        log(f"[worker] err: {e}")
-        await asyncio.sleep(0.5)
+                await r.lpush(OUTBOX_DLQ_KEY, json.dumps(item or {}, ensure_ascii=False))
+            except Exception:
+                pass
+            log(f"[worker] err: {e}")
+            await asyncio.sleep(0.5)
 
 
 async def process_training_embeddings() -> None:
