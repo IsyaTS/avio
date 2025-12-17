@@ -29,6 +29,7 @@ from prometheus_client import Counter, Gauge
 from libs.core.lib.transport_utils import message_in_asdict
 from libs.core.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
 from libs.core.schemas import Attachment, MessageIn
+from libs.constants import ADMIN_TENANT_ID
 from .metrics import TG_LOGIN_SUCCESS_TOTAL
 import telethon
 from telethon import TelegramClient, events, functions
@@ -1434,6 +1435,13 @@ class TelegramSessionManager:
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):
             return
+        if tenant == ADMIN_TENANT_ID:
+            LOGGER.info(
+                "stage=handlers_skip tenant_id=%s reason=admin_tenant_no_autoreply",
+                tenant,
+            )
+            client._avio_handlers_registered = True  # type: ignore[attr-defined]
+            return
 
         # Log identity and versions once per tenant at handler registration.
         try:
@@ -1645,6 +1653,12 @@ class TelegramSessionManager:
                 peer_id = getattr(message, "chat_id", None)
             sender = await event.get_sender()
             username = getattr(sender, "username", None) or getattr(event.chat, "username", None)
+            first_name = getattr(sender, "first_name", None)
+            last_name = getattr(sender, "last_name", None)
+            if isinstance(first_name, str) or isinstance(last_name, str):
+                display_name = " ".join(part for part in [first_name, last_name] if isinstance(part, str) and part.strip())
+            else:
+                display_name = None
 
             sender_id = getattr(message, "sender_id", None)
             if sender_id is None:
@@ -1872,6 +1886,7 @@ class TelegramSessionManager:
                 message_id=message_id_value,
                 telegram_user_id=sender_id_value,
                 username=telegram_username,
+                display_name=display_name,
                 peer=peer_value,
                 peer_id=peer_id_value,
             )

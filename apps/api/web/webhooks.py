@@ -419,6 +419,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     whatsapp_phone = ""
     telegram_user_id: int | None = None
     telegram_username: str | None = None
+    telegram_display_name: str | None = None
     peer_id: int | None = None
     peer_value: str | None = None
     contact_value: str | None = None
@@ -539,7 +540,12 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             telegram_username = raw_username.strip() or None
         else:
             telegram_username = None
-        contact_value = telegram_username
+        raw_display_name = msg.get("display_name") or body.get("display_name")
+        if isinstance(raw_display_name, str):
+            telegram_display_name = raw_display_name.strip() or None
+        else:
+            telegram_display_name = None
+        contact_value = telegram_display_name or telegram_username
         if is_manager_telegram(telegram_user_id):
             manager_flag = True
         # If Telegram did not send sender_id but we have a peer_id, use it for manager detection.
@@ -662,6 +668,10 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             }
             if telegram_user_id is not None:
                 upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
+            if telegram_display_name and not upsert_kwargs.get("title"):
+                upsert_kwargs["title"] = telegram_display_name
+            if telegram_display_name:
+                upsert_kwargs["title"] = telegram_display_name
             if provider == "avito":
                 if avito_chat_id:
                     upsert_kwargs["peer"] = avito_chat_id
@@ -785,6 +795,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         normalized_event["telegram_user_id"] = telegram_user_id
     if telegram_username:
         normalized_event["username"] = telegram_username
+    if telegram_display_name:
+        normalized_event["display_name"] = telegram_display_name
     if peer_id is not None:
         normalized_event["peer_id"] = peer_id
     if provider == "telegram":
@@ -902,6 +914,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "channel": provider or "whatsapp",
             "tenant_id": tenant,
             "telegram_username": telegram_username,
+            "title": telegram_display_name,
             "peer_id": peer_id,
             "peer": peer_value,
             "contact": contact_value,
@@ -960,6 +973,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             avito_login=avito_login,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
+            title=telegram_display_name,
         )
         if contact_id:
             await link_lead_contact(
