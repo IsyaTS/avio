@@ -120,7 +120,11 @@ _CLIENT_SPA_MANIFEST_MTIME: float | None = None
 
 
 def _client_spa_manifest_path() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parents[1] / "static" / "spa" / "client" / "manifest.json"
+    root = pathlib.Path(__file__).resolve().parents[1] / "static" / "spa" / "client"
+    primary = root / "manifest.json"
+    if primary.exists():
+        return primary
+    return root / ".vite" / "manifest.json"
 
 
 def _read_client_spa_manifest() -> dict[str, Any]:
