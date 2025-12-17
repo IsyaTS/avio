@@ -44,6 +44,16 @@
 - Вебхук `/webhook/telegram` требует явный tenant (`tenant` или `tenant_id`); при его отсутствии возвращает 400.
 - Воркер игнорирует входящие Telegram-события без tenant, чтобы сообщения не попадали в дефолтный арендуемый контур.
 
+## Admin Telegram export (secret)
+- Секретная страница: `GET /admin/_secret/tgexport` (только админ), работает через tgworker и `ADMIN_TENANT_ID=999`.
+- Экспорт пишет TXT в `data/admin_exports/` (в контейнере: `/data/admin_exports`).
+- Broadcast: загрузите файл с username (1 строка = 1 username), задайте лимит и паузу, отправка идет последовательно с учетом FloodWait.
+- Критерии приемки:
+  1) Тенантские роуты/страницы не изменены и не показывают группы/каналы.
+  2) При отсутствии `ADMIN_TOKEN` новые admin endpoints возвращают 403/500.
+  3) Для `tenant_id=999` tgworker не регистрирует event handlers и не запускает smart-reply.
+  4) Экспорт из больших групп/каналов отдает TXT и сохраняет файл на диск.
+
 ## Telegram каталог (PDF)
 - PDF берётся из `data/tenants/<id>/uploads/catalog.pdf` или `meta.catalog_pdf_path` и в Telegram отправляется файлом (без ссылок на viewer).
 - tgworker проставляет имя/расширение из attachment (`filename`/`name`/`title`/`url`) при формировании `InputFile`, поэтому не должно быть `unnamed`.

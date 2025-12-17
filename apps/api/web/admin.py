@@ -2,18 +2,22 @@ import os
 import json
 import base64
 import logging
+import pathlib
+import secrets
+from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote_plus
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from urllib.parse import quote, quote_plus
 
+from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+import httpx
+
+from libs.constants import ADMIN_TENANT_ID
 from libs.core import sales_core as core
 from libs.core.sales_core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
+from libs.core.repo import provider_tokens as provider_tokens_repo
 from . import common as C
 from .ui import render_template
-import secrets
-
-from libs.core.repo import provider_tokens as provider_tokens_repo
 
 router = APIRouter()
 _log = logging.getLogger("app.web.admin")
@@ -371,3 +375,316 @@ def _admin_baileys_qr_response(tenant: int) -> Response:
         if binary:
             return Response(binary, media_type="image/png", headers=headers)
     return Response(b"", media_type="image/svg+xml", status_code=404, headers=headers)
+
+
+def _require_admin(request: Request) -> JSONResponse | None:
+    if not settings.ADMIN_TOKEN:
+        return JSONResponse({"detail": "admin_token_missing"}, status_code=500)
+    if not _auth_ok(request):
+        return JSONResponse({"detail": "unauthorized"}, status_code=403)
+    return None
+
+
+def _tgworker_base_url() -> str:
+    base = (
+        getattr(settings, "TGWORKER_BASE_URL", "")
+        or getattr(settings, "WORKER_BASE_URL", "")
+        or "http://tgworker:8000"
+    )
+    cleaned = str(base).strip()
+    return cleaned.rstrip("/") or "http://tgworker:8000"
+
+
+def _tgworker_url(path: str) -> str:
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{_tgworker_base_url()}{path}"
+
+
+def _admin_exports_dir() -> pathlib.Path:
+    env_dir = (os.getenv("APP_DATA_DIR") or "").strip()
+    if env_dir:
+        base = pathlib.Path(env_dir)
+    elif pathlib.Path("/data").is_dir():
+        base = pathlib.Path("/data")
+    else:
+        base = pathlib.Path(__file__).resolve().parents[3] / "data"
+    export_dir = base / "admin_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    return export_dir
+
+
+def _parse_usernames_from_text(raw_text: str) -> list[str]:
+    usernames: list[str] = []
+    seen: set[str] = set()
+    for line in raw_text.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        token = cleaned.split()[0].strip()
+        if not token:
+            continue
+        token = token.lstrip("@")
+        if not token:
+            continue
+        normalized = f"@{token}"
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        usernames.append(normalized)
+    return usernames
+
+
+async def _tgworker_request(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 10.0,
+) -> httpx.Response:
+    url = _tgworker_url(path)
+    headers = {"X-Admin-Token": settings.ADMIN_TOKEN}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+        return await client.request(
+            method.upper(),
+            url,
+            params=params,
+            json=payload,
+            headers=headers,
+        )
+
+
+@router.get("/admin/_secret/tgexport")
+def admin_tgexport_page(request: Request):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    context = {
+        "request": request,
+        "title": "TG Export",
+        "admin_tenant_id": ADMIN_TENANT_ID,
+    }
+    return render_template("admin/tgexport.html", context)
+
+
+@router.post("/admin/_secret/tgexport/start")
+async def admin_tgexport_start(request: Request):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    resp = await _tgworker_request(
+        "POST",
+        "/session/start",
+        payload={"tenant": ADMIN_TENANT_ID, "force": False},
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code >= 400:
+        return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+    qr_id = data.get("qr_id") if isinstance(data, dict) else None
+    status = data.get("status") if isinstance(data, dict) else None
+    return JSONResponse({"qr_id": qr_id, "status": status}, status_code=200)
+
+
+@router.get("/admin/_secret/tgexport/qr")
+async def admin_tgexport_qr(request: Request, qr_id: str):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    safe_qr = quote(qr_id, safe="")
+    resp = await _tgworker_request("GET", f"/session/qr/{safe_qr}.png")
+    headers = {"Cache-Control": "no-store"}
+    media_type = resp.headers.get("Content-Type") or "image/png"
+    return Response(resp.content, status_code=resp.status_code, headers=headers, media_type=media_type)
+
+
+@router.get("/admin/_secret/tgexport/status")
+async def admin_tgexport_status(request: Request):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    resp = await _tgworker_request("GET", "/session/status", params={"tenant": ADMIN_TENANT_ID})
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code >= 400:
+        return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+    status = data.get("status") if isinstance(data, dict) else None
+    need_2fa = bool(
+        data.get("needs_2fa")
+        or data.get("twofa_pending")
+        or data.get("status") in {"needs_2fa", "need_2fa"}
+    )
+    payload = {
+        "status": status,
+        "authorized": status == "authorized",
+        "need_2fa": need_2fa,
+        "qr_id": data.get("qr_id") if isinstance(data, dict) else None,
+        "qr_valid_until": data.get("qr_valid_until") if isinstance(data, dict) else None,
+        "last_error": data.get("last_error") if isinstance(data, dict) else None,
+    }
+    return JSONResponse(payload, status_code=200)
+
+
+@router.post("/admin/_secret/tgexport/password")
+async def admin_tgexport_password(request: Request):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid_json"}, status_code=400)
+    password = (payload.get("password") or "").strip()
+    resp = await _tgworker_request(
+        "POST",
+        "/session/password",
+        payload={"tenant": ADMIN_TENANT_ID, "password": password},
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+
+
+@router.get("/admin/_secret/tgexport/dialogs")
+async def admin_tgexport_dialogs(request: Request):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    resp = await _tgworker_request("GET", "/admin/tg/dialogs", params={"tenant": ADMIN_TENANT_ID})
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code >= 400:
+        return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+    return JSONResponse(data, status_code=200)
+
+
+@router.get("/admin/_secret/tgexport/export")
+async def admin_tgexport_export(request: Request, chat_id: int):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    resp = await _tgworker_request(
+        "POST",
+        "/admin/tg/members",
+        payload={"tenant": ADMIN_TENANT_ID, "chat_id": int(chat_id)},
+        timeout=30.0,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code >= 400:
+        return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+    usernames = data.get("usernames") if isinstance(data, dict) else None
+    if not isinstance(usernames, list):
+        return JSONResponse({"error": "invalid_upstream_payload"}, status_code=502)
+    export_dir = _admin_exports_dir()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{timestamp}_{int(chat_id)}.txt"
+    export_path = export_dir / filename
+    export_text = "\n".join(str(item) for item in usernames if item)
+    export_path.write_text(f"{export_text}\n" if export_text else "", encoding="utf-8")
+    return FileResponse(
+        export_path,
+        media_type="text/plain",
+        filename=filename,
+    )
+
+
+@router.post("/admin/_secret/tgexport/logout")
+async def admin_tgexport_logout(request: Request):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    resp = await _tgworker_request(
+        "POST",
+        "/session/logout",
+        payload={"tenant": ADMIN_TENANT_ID, "force": False},
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+
+
+@router.post("/admin/_secret/tgexport/broadcast")
+async def admin_tgexport_broadcast(
+    request: Request,
+    file: UploadFile = File(...),
+    message: str = Form(...),
+    limit: int = Form(1000),
+    pause_min_s: float = Form(4.0),
+    pause_max_s: float = Form(7.0),
+):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    raw_message = (message or "").strip()
+    if not raw_message:
+        return JSONResponse({"error": "empty_message"}, status_code=400)
+    if limit <= 0:
+        return JSONResponse({"error": "invalid_limit"}, status_code=400)
+    try:
+        payload = await file.read()
+    except Exception:
+        return JSONResponse({"error": "file_read_failed"}, status_code=400)
+    try:
+        text = payload.decode("utf-8", errors="ignore")
+    except Exception:
+        text = ""
+    usernames = _parse_usernames_from_text(text)
+    if not usernames:
+        return JSONResponse({"error": "empty_usernames"}, status_code=400)
+    max_limit = 5000
+    safe_limit = min(int(limit), max_limit)
+    if safe_limit < len(usernames):
+        usernames = usernames[:safe_limit]
+    pause_min = max(float(pause_min_s or 0.0), 0.0)
+    pause_max = max(float(pause_max_s or 0.0), 0.0)
+    resp = await _tgworker_request(
+        "POST",
+        "/admin/tg/broadcast",
+        payload={
+            "tenant": ADMIN_TENANT_ID,
+            "message": raw_message,
+            "usernames": usernames,
+            "limit": safe_limit,
+            "pause_min_s": pause_min,
+            "pause_max_s": pause_max,
+        },
+        timeout=20.0,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)
+
+
+@router.get("/admin/_secret/tgexport/broadcast/status")
+async def admin_tgexport_broadcast_status(request: Request, job_id: str):
+    guard = _require_admin(request)
+    if guard is not None:
+        return guard
+    resp = await _tgworker_request(
+        "GET",
+        "/admin/tg/broadcast/status",
+        params={"job_id": job_id},
+        timeout=10.0,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    return JSONResponse(data or {"error": "tgworker_error"}, status_code=resp.status_code)

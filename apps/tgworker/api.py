@@ -6,6 +6,8 @@ import logging
 import os
 import time
 import re
+import random
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -13,7 +15,12 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Respo
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from telethon.errors import RPCError
-from telethon.errors.rpcerrorlist import ChatAdminRequiredError
+from telethon.errors.rpcerrorlist import (
+    ChatAdminRequiredError,
+    ChatWriteForbiddenError,
+    ChannelPrivateError,
+    FloodWaitError,
+)
 try:  # pragma: no cover - pydantic v1/v2 compatibility
     from pydantic import ConfigDict
 except ImportError:  # pragma: no cover - pydantic v1
@@ -38,6 +45,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from libs.config import telegram_config
 from libs.core.schemas import Attachment
+from libs.constants import ADMIN_TENANT_ID
 
 from .session_manager import (
     QRExpiredError,
@@ -229,6 +237,18 @@ class TwoFARequest(TenantBody):
     password: SecretStr
 
 
+class AdminMembersRequest(TenantBody):
+    chat_id: int
+
+
+class AdminBroadcastRequest(TenantBody):
+    message: str = Field(..., min_length=1)
+    usernames: list[str] = Field(default_factory=list, min_length=1)
+    limit: int = Field(1000, ge=1, le=5000)
+    pause_min_s: float = Field(4.0, ge=0.0, le=30.0)
+    pause_max_s: float = Field(7.0, ge=0.0, le=30.0)
+
+
 def _resolve_webhook_url() -> tuple[str, Optional[str]]:
     explicit = (os.getenv("TG_WEBHOOK_URL") or "").strip()
     if explicit:
@@ -278,6 +298,10 @@ def create_app() -> FastAPI:
     tenant_locks: dict[int, asyncio.Lock] = {}
     app.state.pending_registry = pending_registry
     app.state.pending_locks = tenant_locks
+    broadcast_registry: dict[str, dict[str, Any]] = {}
+    app.state.broadcast_registry = broadcast_registry
+    broadcast_tasks: dict[str, asyncio.Task[Any]] = {}
+    app.state.broadcast_tasks = broadcast_tasks
 
     NO_STORE_HEADERS = {
         "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -293,6 +317,19 @@ def create_app() -> FastAPI:
             headers=dict(NO_STORE_HEADERS),
         )
 
+    def _forbidden_response(
+        route: str,
+        tenant: int | None = None,
+        *,
+        error: str = "forbidden",
+    ) -> JSONResponse:
+        logger.warning("event=admin_token_forbidden route=%s tenant=%s", route, tenant)
+        return JSONResponse(
+            {"error": error},
+            status_code=403,
+            headers=dict(NO_STORE_HEADERS),
+        )
+
     def _enforce_admin(
         request: Request,
         route: str,
@@ -305,6 +342,103 @@ def create_app() -> FastAPI:
         if not header or header != ADMIN_TOKEN:
             return _unauthorized_response(route, tenant)
         return None
+
+    def _enforce_admin_strict(
+        request: Request,
+        route: str,
+        *,
+        tenant: int | None = None,
+    ) -> JSONResponse | None:
+        if not ADMIN_TOKEN:
+            logger.error("event=admin_token_missing route=%s tenant=%s", route, tenant)
+            return JSONResponse(
+                {"error": "admin_token_missing"},
+                status_code=500,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        header = request.headers.get("X-Admin-Token", "").strip()
+        if not header or header != ADMIN_TOKEN:
+            return _forbidden_response(route, tenant=tenant, error="not_authorized")
+        return None
+
+    def _enforce_admin_tenant(tenant: int, route: str) -> JSONResponse | None:
+        if tenant != ADMIN_TENANT_ID:
+            return _forbidden_response(route, tenant=tenant, error="admin_tenant_only")
+        return None
+
+    def _normalize_username(value: str) -> str | None:
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        token = raw.split()[0].strip()
+        if not token:
+            return None
+        token = token.lstrip("@")
+        if not token:
+            return None
+        return f"@{token}"
+
+    async def _run_broadcast_job(
+        job_id: str,
+        tenant: int,
+        usernames: list[str],
+        message: str,
+        pause_min_s: float,
+        pause_max_s: float,
+    ) -> None:
+        record = broadcast_registry.get(job_id)
+        if record is None:
+            return
+        client = await manager.get_client(tenant)
+        if client is None:
+            record["status"] = "error"
+            record["error"] = "not_authorized"
+            record["finished_at"] = int(time.time())
+            broadcast_tasks.pop(job_id, None)
+            return
+
+        total = len(usernames)
+        record["total"] = total
+        for idx, username in enumerate(usernames, start=1):
+            record["last_username"] = username
+            try:
+                await client.send_message(username, message)
+                record["sent"] += 1
+            except FloodWaitError as exc:
+                wait_seconds = int(getattr(exc, "seconds", 0) or 0)
+                record["flood_wait_seconds"] = wait_seconds
+                if wait_seconds > 1200:
+                    record["status"] = "error"
+                    record["error"] = "flood_wait_too_long"
+                    record["finished_at"] = int(time.time())
+                    broadcast_tasks.pop(job_id, None)
+                    return
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+                continue
+            except RPCError as exc:
+                record["failed"] += 1
+                errors = record.setdefault("errors", [])
+                if isinstance(errors, list) and len(errors) < 20:
+                    errors.append(
+                        {"username": username, "error": str(exc) or "telegram_error"}
+                    )
+            except Exception as exc:
+                record["failed"] += 1
+                errors = record.setdefault("errors", [])
+                if isinstance(errors, list) and len(errors) < 20:
+                    errors.append({"username": username, "error": str(exc) or "send_error"})
+            finally:
+                record["processed"] = idx
+                record["updated_at"] = int(time.time())
+            if idx < total:
+                pause = random.uniform(pause_min_s, pause_max_s)
+                if pause > 0:
+                    await asyncio.sleep(pause)
+
+        record["status"] = "done"
+        record["finished_at"] = int(time.time())
+        broadcast_tasks.pop(job_id, None)
 
     def _tenant_lock(tenant: int) -> asyncio.Lock:
         lock = tenant_locks.get(tenant)
@@ -930,6 +1064,200 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": error}, status_code=500, headers=headers)
 
         return JSONResponse(body or {"error": "password_exception"}, status_code=500, headers=headers)
+
+    @app.get("/admin/tg/dialogs")
+    async def admin_tg_dialogs(request: Request, tenant_params: TenantQuery = Depends()):
+        tenant = tenant_params.tenant
+        unauthorized = _enforce_admin_strict(request, "/admin/tg/dialogs", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
+        tenant_guard = _enforce_admin_tenant(tenant, "/admin/tg/dialogs")
+        if tenant_guard is not None:
+            return tenant_guard
+        client = await manager.get_client(tenant)
+        if client is None:
+            return JSONResponse(
+                {"error": "not_authorized"},
+                status_code=409,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        items: list[dict[str, Any]] = []
+        try:
+            async for dialog in client.iter_dialogs():
+                if not (getattr(dialog, "is_group", False) or getattr(dialog, "is_channel", False)):
+                    continue
+                entity = getattr(dialog, "entity", None)
+                chat_id = getattr(entity, "id", None) or getattr(dialog, "id", None)
+                if chat_id is None:
+                    continue
+                kind = "group" if getattr(dialog, "is_group", False) else "channel"
+                title = dialog.name or getattr(entity, "title", None) or str(chat_id)
+                item: dict[str, Any] = {
+                    "chat_id": int(chat_id),
+                    "title": str(title),
+                    "kind": kind,
+                }
+                username = getattr(entity, "username", None)
+                if username:
+                    item["username"] = str(username)
+                items.append(item)
+        except RPCError as exc:
+            return JSONResponse(
+                {"error": {"code": "rpc_error", "message": str(exc) or "telegram_error"}},
+                status_code=500,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        return JSONResponse(items, headers=dict(NO_STORE_HEADERS))
+
+    @app.post("/admin/tg/members")
+    async def admin_tg_members(request: Request, payload: AdminMembersRequest):
+        tenant = payload.tenant
+        unauthorized = _enforce_admin_strict(request, "/admin/tg/members", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
+        tenant_guard = _enforce_admin_tenant(tenant, "/admin/tg/members")
+        if tenant_guard is not None:
+            return tenant_guard
+        client = await manager.get_client(tenant)
+        if client is None:
+            return JSONResponse(
+                {"error": "not_authorized"},
+                status_code=409,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        total_seen = 0
+        without_username_count = 0
+        usernames: list[str] = []
+        try:
+            async for user in client.iter_participants(payload.chat_id):
+                total_seen += 1
+                username = getattr(user, "username", None)
+                if username:
+                    usernames.append(f"@{username}")
+                else:
+                    without_username_count += 1
+        except FloodWaitError as exc:
+            retry_after = getattr(exc, "seconds", None)
+            error_body = {
+                "code": "flood_wait",
+                "message": "flood_wait",
+            }
+            if retry_after is not None:
+                error_body["retry_after"] = int(retry_after)
+                error_body["message"] = f"flood_wait_{int(retry_after)}s"
+            return JSONResponse(
+                {"error": error_body},
+                status_code=429,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        except (ChatAdminRequiredError, ChatWriteForbiddenError, ChannelPrivateError) as exc:
+            return JSONResponse(
+                {"error": {"code": "chat_admin_required", "message": str(exc) or "chat_admin_required"}},
+                status_code=403,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        except RPCError as exc:
+            return JSONResponse(
+                {"error": {"code": "rpc_error", "message": str(exc) or "telegram_error"}},
+                status_code=500,
+                headers=dict(NO_STORE_HEADERS),
+            )
+
+        return JSONResponse(
+            {
+                "chat_id": payload.chat_id,
+                "total_seen": total_seen,
+                "without_username_count": without_username_count,
+                "usernames": usernames,
+            },
+            headers=dict(NO_STORE_HEADERS),
+        )
+
+    @app.post("/admin/tg/broadcast")
+    async def admin_tg_broadcast(request: Request, payload: AdminBroadcastRequest):
+        tenant = payload.tenant
+        unauthorized = _enforce_admin_strict(request, "/admin/tg/broadcast", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
+        tenant_guard = _enforce_admin_tenant(tenant, "/admin/tg/broadcast")
+        if tenant_guard is not None:
+            return tenant_guard
+        message = (payload.message or "").strip()
+        if not message:
+            return JSONResponse(
+                {"error": "empty_message"},
+                status_code=400,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        pause_min = float(payload.pause_min_s or 0.0)
+        pause_max = float(payload.pause_max_s or 0.0)
+        if pause_max < pause_min:
+            pause_min, pause_max = pause_max, pause_min
+        raw_names = payload.usernames or []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for entry in raw_names:
+            normalized_name = _normalize_username(str(entry))
+            if not normalized_name:
+                continue
+            key = normalized_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(normalized_name)
+            if len(normalized) >= payload.limit:
+                break
+        if not normalized:
+            return JSONResponse(
+                {"error": "empty_usernames"},
+                status_code=400,
+                headers=dict(NO_STORE_HEADERS),
+            )
+
+        job_id = uuid.uuid4().hex
+        broadcast_registry[job_id] = {
+            "job_id": job_id,
+            "tenant": tenant,
+            "status": "running",
+            "total": len(normalized),
+            "processed": 0,
+            "sent": 0,
+            "failed": 0,
+            "pause_min_s": pause_min,
+            "pause_max_s": pause_max,
+            "started_at": int(time.time()),
+        }
+        task = asyncio.create_task(
+            _run_broadcast_job(
+                job_id,
+                tenant,
+                normalized,
+                message,
+                pause_min,
+                pause_max,
+            )
+        )
+        broadcast_tasks[job_id] = task
+        return JSONResponse(
+            {"job_id": job_id, "total": len(normalized)},
+            headers=dict(NO_STORE_HEADERS),
+        )
+
+    @app.get("/admin/tg/broadcast/status")
+    async def admin_tg_broadcast_status(
+        request: Request, job_id: str = Query(..., min_length=8)
+    ):
+        unauthorized = _enforce_admin_strict(request, "/admin/tg/broadcast/status")
+        if unauthorized is not None:
+            return unauthorized
+        record = broadcast_registry.get(job_id)
+        if record is None:
+            return JSONResponse(
+                {"error": "job_not_found"},
+                status_code=404,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        return JSONResponse(record, headers=dict(NO_STORE_HEADERS))
 
     @app.post("/send")
     async def send_message(

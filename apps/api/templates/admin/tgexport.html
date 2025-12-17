@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin - Telegram Export</title>
+    <style>
+      :root {
+        --bg: #f3efe6;
+        --bg-deep: #ece4d6;
+        --card: #ffffff;
+        --ink: #1b1a17;
+        --muted: #6b6258;
+        --accent: #0b6f6f;
+        --accent-strong: #0a5858;
+        --warn: #b75b00;
+        --ok: #2b7a3d;
+        --border: #d8cdbb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(1200px 600px at 10% -20%, rgba(11, 111, 111, 0.15), transparent 60%),
+          radial-gradient(900px 400px at 90% 0%, rgba(183, 91, 0, 0.18), transparent 55%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+        min-height: 100vh;
+        padding: 32px 20px 48px;
+      }
+
+      .wrap {
+        max-width: 880px;
+        margin: 0 auto;
+      }
+
+      header h1 {
+        margin: 0 0 6px;
+        font-size: 28px;
+        letter-spacing: 0.5px;
+      }
+
+      header p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        margin-top: 24px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 18px;
+        box-shadow: 0 10px 30px rgba(27, 26, 23, 0.08);
+      }
+
+      .card h2 {
+        margin: 0 0 12px;
+        font-size: 16px;
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+        color: var(--muted);
+      }
+
+      button,
+      select,
+      input {
+        font: inherit;
+      }
+
+      button {
+        background: var(--accent);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 10px 16px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: transform 0.15s ease, background 0.15s ease;
+      }
+
+      button:hover {
+        background: var(--accent-strong);
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        background: #9aa2a2;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .status {
+        margin-top: 14px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .status[data-kind="ok"] {
+        color: var(--ok);
+      }
+
+      .status[data-kind="warn"] {
+        color: var(--warn);
+      }
+
+      .qr-box {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 220px;
+        border: 1px dashed var(--border);
+        border-radius: 14px;
+        background: #faf7f1;
+      }
+
+      .qr-box img {
+        max-width: 100%;
+        height: auto;
+      }
+
+      .field {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      textarea {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        min-height: 120px;
+        resize: vertical;
+        background: #fff;
+      }
+
+      input[type="password"],
+      select {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #fff;
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .muted {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>Telegram Export</h1>
+        <p>Admin-only flow - tenant {{ admin_tenant_id }}</p>
+      </header>
+
+      <div class="grid">
+        <section class="card">
+          <h2>QR Session</h2>
+          <div class="row">
+            <button id="startBtn">Start QR</button>
+            <button id="logoutBtn" class="muted">Logout</button>
+          </div>
+          <div class="status" id="statusText" data-kind="">Idle</div>
+          <div class="field hidden" id="twofaBlock">
+            <label for="twofaPassword" class="muted">2FA password</label>
+            <div class="row">
+              <input id="twofaPassword" type="password" placeholder="Enter 2FA password" />
+              <button id="twofaSubmitBtn">Submit</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>QR Code</h2>
+          <div class="qr-box">
+            <img id="qrImage" alt="QR will appear here" />
+          </div>
+          <div class="muted">Scan in Telegram to authorize.</div>
+        </section>
+
+        <section class="card">
+          <h2>Export</h2>
+          <div class="field">
+            <label for="dialogSelect" class="muted">Dialog (groups / channels)</label>
+            <select id="dialogSelect" disabled>
+              <option value="">Authorize first...</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button id="exportBtn" disabled>Export TXT</button>
+          </div>
+          <div class="muted">Exports usernames only. Users without usernames are skipped.</div>
+        </section>
+
+        <section class="card">
+          <h2>Broadcast</h2>
+          <div class="field">
+            <label class="muted" for="broadcastFile">Usernames file (one per line)</label>
+            <input id="broadcastFile" type="file" accept=".txt,text/plain" />
+          </div>
+          <div class="field">
+            <label class="muted" for="broadcastMessage">Message</label>
+            <textarea id="broadcastMessage" placeholder="Type message to send"></textarea>
+          </div>
+          <div class="field">
+            <label class="muted" for="broadcastLimit">Limit</label>
+            <input id="broadcastLimit" type="number" min="1" max="5000" value="1000" />
+          </div>
+          <div class="field">
+            <label class="muted">Pause range (seconds)</label>
+            <div class="row">
+              <input id="pauseMin" type="number" min="0" max="30" step="0.5" value="4" />
+              <input id="pauseMax" type="number" min="0" max="30" step="0.5" value="7" />
+            </div>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button id="broadcastBtn">Send</button>
+          </div>
+          <div class="status" id="broadcastStatus" data-kind="">Idle</div>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      const startBtn = document.getElementById("startBtn");
+      const logoutBtn = document.getElementById("logoutBtn");
+      const statusText = document.getElementById("statusText");
+      const qrImage = document.getElementById("qrImage");
+      const dialogSelect = document.getElementById("dialogSelect");
+      const exportBtn = document.getElementById("exportBtn");
+      const twofaBlock = document.getElementById("twofaBlock");
+      const twofaPassword = document.getElementById("twofaPassword");
+      const twofaSubmitBtn = document.getElementById("twofaSubmitBtn");
+      const broadcastBtn = document.getElementById("broadcastBtn");
+      const broadcastFile = document.getElementById("broadcastFile");
+      const broadcastMessage = document.getElementById("broadcastMessage");
+      const broadcastLimit = document.getElementById("broadcastLimit");
+      const pauseMin = document.getElementById("pauseMin");
+      const pauseMax = document.getElementById("pauseMax");
+      const broadcastStatus = document.getElementById("broadcastStatus");
+
+      let pollTimer = null;
+      let currentQrId = null;
+      let broadcastTimer = null;
+      let broadcastJobId = null;
+
+      function setStatus(text, kind = "") {
+        statusText.textContent = text;
+        statusText.dataset.kind = kind;
+      }
+
+      function setBroadcastStatus(text, kind = "") {
+        broadcastStatus.textContent = text;
+        broadcastStatus.dataset.kind = kind;
+      }
+
+      function setQr(qrId) {
+        if (!qrId) {
+          return;
+        }
+        currentQrId = qrId;
+        qrImage.src = `/admin/_secret/tgexport/qr?qr_id=${encodeURIComponent(qrId)}`;
+      }
+
+      async function startQr() {
+        setStatus("Starting QR...");
+        const resp = await fetch("/admin/_secret/tgexport/start", { method: "POST" });
+        if (!resp.ok) {
+          setStatus("Failed to start QR", "warn");
+          return;
+        }
+        const data = await resp.json();
+        if (data.qr_id) {
+          setQr(data.qr_id);
+        }
+        startPolling();
+      }
+
+      async function fetchStatus() {
+        const resp = await fetch("/admin/_secret/tgexport/status");
+        if (!resp.ok) {
+          setStatus("Status check failed", "warn");
+          return;
+        }
+        const data = await resp.json();
+        if (data.qr_id && data.qr_id !== currentQrId) {
+          setQr(data.qr_id);
+        }
+        if (data.need_2fa) {
+          twofaBlock.classList.remove("hidden");
+          setStatus("2FA required", "warn");
+        } else {
+          twofaBlock.classList.add("hidden");
+        }
+        if (data.authorized) {
+          setStatus("Authorized", "ok");
+          stopPolling();
+          await loadDialogs();
+          return;
+        }
+        const stateLabel = data.status ? `Status: ${data.status}` : "Waiting...";
+        setStatus(stateLabel);
+      }
+
+      function startPolling() {
+        stopPolling();
+        fetchStatus();
+        pollTimer = setInterval(fetchStatus, 2000);
+      }
+
+      function stopPolling() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      async function submitTwofa() {
+        const password = twofaPassword.value.trim();
+        if (!password) {
+          setStatus("Enter 2FA password", "warn");
+          return;
+        }
+        const resp = await fetch("/admin/_secret/tgexport/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        twofaPassword.value = "";
+        if (!resp.ok) {
+          setStatus("2FA failed", "warn");
+          return;
+        }
+        setStatus("2FA submitted");
+        startPolling();
+      }
+
+      async function loadDialogs() {
+        dialogSelect.innerHTML = "";
+        dialogSelect.disabled = true;
+        exportBtn.disabled = true;
+        const resp = await fetch("/admin/_secret/tgexport/dialogs");
+        if (!resp.ok) {
+          setStatus("Dialogs load failed", "warn");
+          return;
+        }
+        const data = await resp.json();
+        if (!Array.isArray(data) || data.length === 0) {
+          dialogSelect.innerHTML = "<option value=\"\">No groups or channels</option>";
+          dialogSelect.disabled = true;
+          return;
+        }
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Select a dialog";
+        dialogSelect.appendChild(placeholder);
+        data.forEach((item) => {
+          const option = document.createElement("option");
+          option.value = item.chat_id;
+          const username = item.username ? ` (@${item.username})` : "";
+          option.textContent = `${item.title}${username} - ${item.kind}`;
+          dialogSelect.appendChild(option);
+        });
+        dialogSelect.disabled = false;
+      }
+
+      function exportTxt() {
+        const chatId = dialogSelect.value;
+        if (!chatId) {
+          setStatus("Pick a dialog first", "warn");
+          return;
+        }
+        window.location = `/admin/_secret/tgexport/export?chat_id=${encodeURIComponent(chatId)}`;
+      }
+
+      async function logoutSession() {
+        await fetch("/admin/_secret/tgexport/logout", { method: "POST" });
+        setStatus("Logged out");
+        dialogSelect.innerHTML = "<option value=\"\">Authorize first...</option>";
+        dialogSelect.disabled = true;
+        exportBtn.disabled = true;
+        qrImage.removeAttribute("src");
+        currentQrId = null;
+        startPolling();
+      }
+
+      async function startBroadcast() {
+        const file = broadcastFile.files[0];
+        const message = broadcastMessage.value.trim();
+        if (!file) {
+          setBroadcastStatus("Select a file", "warn");
+          return;
+        }
+        if (!message) {
+          setBroadcastStatus("Message is empty", "warn");
+          return;
+        }
+        const limit = broadcastLimit.value || "1000";
+        const minPause = pauseMin.value || "0";
+        const maxPause = pauseMax.value || "0";
+        const form = new FormData();
+        form.append("file", file);
+        form.append("message", message);
+        form.append("limit", limit);
+        form.append("pause_min_s", minPause);
+        form.append("pause_max_s", maxPause);
+        setBroadcastStatus("Starting...", "");
+        broadcastBtn.disabled = true;
+        const resp = await fetch("/admin/_secret/tgexport/broadcast", {
+          method: "POST",
+          body: form,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          setBroadcastStatus("Broadcast failed", "warn");
+          broadcastBtn.disabled = false;
+          return;
+        }
+        broadcastJobId = data.job_id;
+        if (!broadcastJobId) {
+          setBroadcastStatus("Broadcast error", "warn");
+          broadcastBtn.disabled = false;
+          return;
+        }
+        setBroadcastStatus(`Started: total ${data.total || 0}`, "");
+        startBroadcastPolling();
+      }
+
+      function startBroadcastPolling() {
+        stopBroadcastPolling();
+        pollBroadcast();
+        broadcastTimer = setInterval(pollBroadcast, 5000);
+      }
+
+      function stopBroadcastPolling() {
+        if (broadcastTimer) {
+          clearInterval(broadcastTimer);
+          broadcastTimer = null;
+        }
+      }
+
+      async function pollBroadcast() {
+        if (!broadcastJobId) {
+          return;
+        }
+        const resp = await fetch(`/admin/_secret/tgexport/broadcast/status?job_id=${encodeURIComponent(broadcastJobId)}`);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          setBroadcastStatus("Status error", "warn");
+          broadcastBtn.disabled = false;
+          stopBroadcastPolling();
+          return;
+        }
+        const processed = data.processed || 0;
+        const total = data.total || 0;
+        const sent = data.sent || 0;
+        const failed = data.failed || 0;
+        const status = data.status || "running";
+        if (status === "done") {
+          setBroadcastStatus(`Done: sent ${sent}, failed ${failed}`, "ok");
+          broadcastBtn.disabled = false;
+          stopBroadcastPolling();
+          return;
+        }
+        if (status === "error") {
+          setBroadcastStatus(`Error: ${data.error || "broadcast_failed"}`, "warn");
+          broadcastBtn.disabled = false;
+          stopBroadcastPolling();
+          return;
+        }
+        setBroadcastStatus(`Sending ${processed}/${total} (sent ${sent}, failed ${failed})`);
+      }
+
+      startBtn.addEventListener("click", startQr);
+      twofaSubmitBtn.addEventListener("click", submitTwofa);
+      exportBtn.addEventListener("click", exportTxt);
+      logoutBtn.addEventListener("click", logoutSession);
+      broadcastBtn.addEventListener("click", startBroadcast);
+      dialogSelect.addEventListener("change", () => {
+        exportBtn.disabled = !dialogSelect.value;
+      });
+    </script>
+  </body>
+</html>

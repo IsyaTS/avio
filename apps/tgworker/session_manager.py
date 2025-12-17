@@ -150,6 +150,9 @@ class SessionManager:
         state = await self._manager.get_status(tenant_id)
         return SessionSnapshot.from_state(state)
 
+    async def get_client(self, tenant_id: int):
+        return await self._manager.get_client(tenant_id)
+
     async def hard_reset(self, tenant_id: int) -> SessionSnapshot:
         state = await self._manager.hard_reset(tenant_id)
         return SessionSnapshot.from_state(state)
