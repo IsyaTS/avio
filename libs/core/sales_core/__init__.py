@@ -4556,6 +4556,16 @@ async def build_llm_messages(
             "Не придумывай новых позиций и не меняй стоимость."
         )
 
+    try:
+        logger.info(
+            "training_block_check tenant=%s has_retriever=%s text_len=%s",
+            tenant,
+            bool(training_retriever),
+            len((last_user_text or "").strip()),
+        )
+    except Exception:
+        logger.debug("training_block_check_failed", exc_info=True)
+
     # Добавим обучающие примеры диалогов (1–2) из базы арендатора
     if training_retriever and tenant is not None and (last_user_text or "").strip():
         try:
