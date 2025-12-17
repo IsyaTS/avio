@@ -126,6 +126,9 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
     username_value = message.username if message.username is not None else data.get("username")
     if isinstance(username_value, str):
         username_value = username_value.strip() or None
+    display_name_value = message.display_name if message.display_name is not None else data.get("display_name")
+    if isinstance(display_name_value, str):
+        display_name_value = display_name_value.strip() or None
 
     peer_id_value = message.peer_id
     if peer_id_value is None:
@@ -160,6 +163,7 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
         "attachments": attachments_value or [],
         "telegram_user_id": telegram_user_id,
         "telegram_username": username_value,
+        "display_name": display_name_value,
         "peer": peer_value,
         "peer_id": peer_id_value,
     }
@@ -174,6 +178,7 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
         "text": text_value,
         "telegram_user_id": telegram_user_id,
         "username": username_value,
+        "display_name": display_name_value,
         "peer": peer_value,
         "peer_id": peer_id_value,
         "message": nested,
