@@ -868,6 +868,7 @@
             throw new Error(detail);
           }
           disableAll();
+          setSendStatus('Фидбэк сохранён', 'ok');
         } catch (err) {
           dislikeBtn.disabled = false;
           likeBtn.disabled = false;
