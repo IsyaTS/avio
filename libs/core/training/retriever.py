@@ -108,7 +108,9 @@ def build_examples_block(tenant: int, query: str) -> str:
     results = retrieve_examples(tenant, query, k=top_k)
     if not results:
         return ""
-    lines: List[str] = ["Примеры обучающих диалогов:"]
+    lines: List[str] = [
+        "Примеры обучающих диалогов (если вопрос похож — отвечай максимально близко к примеру):"
+    ]
     for ex in results[:top_k]:
         q = (ex.q or "").strip()
         a = (ex.a or "").strip()
@@ -139,6 +141,31 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
 
     sanitized_query = training_utils.sanitize_text(query)
     texts = [training_utils.sanitize_text(ex.get("q_text")) for ex in examples]
+
+    exact_matches: List[RetrievedExample] = []
+    if sanitized_query:
+        for idx, ex in enumerate(examples):
+            q_text = texts[idx] if idx < len(texts) else training_utils.sanitize_text(ex.get("q_text"))
+            if q_text and q_text.lower() == sanitized_query.lower():
+                a_text = training_utils.sanitize_text(ex.get("a_text"))
+                if len(q_text.strip()) < min_chars or len(a_text.strip()) < min_chars:
+                    continue
+                exact_matches.append(
+                    RetrievedExample(
+                        q=q_text,
+                        a=a_text,
+                        score=1.0,
+                        meta={"id": ex.get("id"), "source": ex.get("source")},
+                    )
+                )
+                if len(exact_matches) >= top_k:
+                    break
+    if exact_matches:
+        try:
+            await db.increment_training_examples_usage([int(ex.meta.get("id")) for ex in exact_matches if ex.meta.get("id")])
+        except Exception:
+            _log.debug(f"{_LOG_PREFIX} usage_increment_failed tenant=%s", tenant, exc_info=True)
+        return exact_matches
 
     # Try embeddings first if present
     use_embeddings = any(ex.get("embedding") for ex in examples)
