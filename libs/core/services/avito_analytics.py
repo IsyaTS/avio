@@ -231,14 +231,54 @@ async def build_report(account_id: int, period_days: int = 30, *, force_refresh:
         nonlocal token_entry
         token_entry = new_entry
 
-    user_info, items_payload, stats_payload, calls_payload, balance_payload, operations_payload, chats_payload = await asyncio.gather(
-        _call(avito_api.get_user_me, token_holder["token"], warnings=warnings, label="user"),
-        _call(avito_api.list_items, token_holder["token"], warnings=warnings, label="items"),
+    async def _fetch_all_items() -> tuple[list[Mapping[str, Any]], Any]:
+        items_all: list[Mapping[str, Any]] = []
+        raw_pages: list[Any] = []
+        page = 1
+        per_page = 100
+        max_pages = 20  # safety cap (~2000 объявлений)
+        while page <= max_pages:
+            payload = await _call(
+                avito_api.list_items,
+                token_holder["token"],
+                page=page,
+                limit=per_page,
+                warnings=warnings,
+                label=f"items_p{page}",
+            )
+            raw_pages.append(payload)
+            page_items = _extract_items(payload)
+            if page_items:
+                items_all.extend(page_items)
+            meta = payload.get("meta") if isinstance(payload, Mapping) else {}
+            per_page = meta.get("per_page") or per_page
+            if not page_items or len(page_items) < (per_page or len(page_items)):
+                break
+            page += 1
+        return items_all, {"pages": raw_pages}
+
+    user_info = await _call(avito_api.get_user_me, token_holder["token"], warnings=warnings, label="user")
+    items, items_payload = await _fetch_all_items()
+
+    item_ids: list[int | str] = []
+    for it in items:
+        it_id = it.get("id")
+        if it_id is None:
+            continue
+        try:
+            item_ids.append(int(it_id))
+        except Exception:
+            item_ids.append(str(it_id))
+    if len(item_ids) > 200:
+        warnings.append("stats_items_truncated_200")
+        item_ids = item_ids[:200]
+
+    stats_payload, calls_payload, balance_payload, operations_payload, chats_payload = await asyncio.gather(
         _call(
             avito_api.get_items_stats,
             token_holder["token"],
             user_id_hint,
-            None,
+            item_ids or None,
             date_from,
             date_to,
             fields=["uniqViews", "uniqContacts", "calls", "favorites"],
@@ -251,7 +291,6 @@ async def build_report(account_id: int, period_days: int = 30, *, force_refresh:
         _call(avito_api.messenger_list_chats, token_holder["token"], user_id_hint, warnings=warnings, label="chats"),
     )
 
-    items = _extract_items(items_payload)
     stats_items = _extract_stats(stats_payload)
     operations = _extract_operations(operations_payload)
     chats = _extract_items(chats_payload)
