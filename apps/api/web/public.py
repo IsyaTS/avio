@@ -18,6 +18,7 @@ import base64
 import random
 import secrets
 import html
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import qrcode
@@ -55,7 +56,8 @@ from . import client as C
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from libs.core.db import insert_message_in, upsert_lead
 from libs.core.integrations import avito
-from libs.core.repo import avito_job_applications
+from libs.core.integrations import avito_analytics as avito_analytics_client
+from libs.core.repo import avito_job_applications, avito_analytics_tokens as tokens_repo
 from libs.core.common import HANDOFF_SILENCE_TTL_SECONDS, handoff_silence_key
 from . import common as common
 from .client import read_csv_table, write_csv_table
@@ -3318,8 +3320,10 @@ async def avito_oauth_callback(
         return HTMLResponse(_avito_callback_html(False, "state_unavailable", {}))
 
     state_key = _avito_state_key(state)
+    analytics_state_key = "oauth:avito:analytics:state:" + state
     try:
         raw_value = client.get(state_key)
+        analytics_raw = client.get(analytics_state_key) if not raw_value else None
     except redis_ex.RedisError:
         logger.exception("avito_oauth_state_fetch_failed state=%s", state)
         return HTMLResponse(_avito_callback_html(False, "state_unavailable", {}))
@@ -3328,6 +3332,81 @@ async def avito_oauth_callback(
             client.delete(state_key)
         except Exception:
             pass
+        try:
+            client.delete(analytics_state_key)
+        except Exception:
+            pass
+
+    if raw_value is None and analytics_raw is not None:
+        # Analytics flow using shared redirect.
+        if not code:
+            return HTMLResponse(_avito_callback_html(False, "missing_code", {}))
+        try:
+            token_payload = await avito_analytics_client.exchange_code_for_token(
+                code, redirect_uri=avito_analytics_client.ANALYTICS_REDIRECT or None
+            )
+        except Exception as exc:
+            logger.exception("avito_analytics_token_exchange_failed")
+            return HTMLResponse(_avito_callback_html(False, "analytics_token_failed", {}))
+
+        access_token = str(token_payload.get("access_token") or "").strip()
+        refresh_token = str(token_payload.get("refresh_token") or "").strip()
+        token_type = token_payload.get("token_type")
+        scopes = token_payload.get("scope") or avito_analytics_client.DEFAULT_SCOPES
+        expires_in = token_payload.get("expires_in")
+        obtained_at = datetime.now(tz=timezone.utc)
+        expires_at = None
+        if expires_in:
+            try:
+                expires_at = obtained_at + timedelta(seconds=int(expires_in))
+            except Exception:
+                expires_at = None
+        try:
+            user_info = await avito_analytics_client.get_user_me(access_token)
+        except Exception:
+            user_info = {}
+        account_candidate = None
+        display_name = None
+        if isinstance(user_info, Mapping):
+            account_candidate = (
+                user_info.get("id")
+                or user_info.get("account_id")
+                or user_info.get("accountId")
+                or user_info.get("account")
+            )
+            display_name = (
+                user_info.get("login")
+                or user_info.get("name")
+                or user_info.get("title")
+                or user_info.get("username")
+            )
+        try:
+            account_id = int(account_candidate) if account_candidate is not None else None
+        except Exception:
+            account_id = None
+        if account_id is None or not refresh_token:
+            return HTMLResponse(_avito_callback_html(False, "account_unknown", {}))
+        sanitized_payload = dict(token_payload)
+        sanitized_payload.pop("access_token", None)
+        sanitized_payload.pop("refresh_token", None)
+        sanitized_payload["user"] = user_info
+        try:
+            await tokens_repo.upsert(
+                int(account_id),
+                display_name=display_name,
+                scopes=scopes,
+                token_type=token_type,
+                access_token=access_token or None,
+                refresh_token=refresh_token,
+                expires_at=expires_at,
+                obtained_at=obtained_at,
+                raw_payload=sanitized_payload,
+            )
+        except Exception:
+            logger.exception("avito_analytics_token_store_failed account_id=%s", account_id)
+            return HTMLResponse(_avito_callback_html(False, "token_store_failed", {}))
+        redirect_url = f"/admin/avito-analytics?account_id={account_id}&auth=ok"
+        return RedirectResponse(url=redirect_url, status_code=303)
 
     tenant_id = None
     if isinstance(raw_value, bytes):
