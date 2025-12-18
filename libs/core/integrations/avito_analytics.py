@@ -210,25 +210,26 @@ async def avito_request(
             await asyncio.sleep(0.2)
             continue
 
+        error_payload = {"url": target, "params": params, "json": json}
         if response.status_code == 401:
-            raise AvitoAPIError("Unauthorized", status=response.status_code, payload=response.text)
+            raise AvitoAPIError("Unauthorized", status=response.status_code, payload=error_payload)
         if response.status_code == 403:
-            raise AvitoAPIError("Forbidden or scope missing", status=response.status_code, payload=response.text)
+            raise AvitoAPIError("Forbidden or scope missing", status=response.status_code, payload=error_payload)
         if response.status_code == 429:
             if attempt >= 3:
-                raise AvitoAPIError("Rate limited", status=response.status_code, payload=response.text, retryable=True)
+                raise AvitoAPIError("Rate limited", status=response.status_code, payload=error_payload, retryable=True)
             await asyncio.sleep(0.5 * attempt)
             continue
         if response.status_code >= 500:
             if attempt >= 3:
-                raise AvitoAPIError("Avito server error", status=response.status_code, payload=response.text, retryable=True)
+                raise AvitoAPIError("Avito server error", status=response.status_code, payload=error_payload, retryable=True)
             await asyncio.sleep(0.4 * attempt)
             continue
         if response.status_code >= 400:
             raise AvitoAPIError(
                 f"HTTP {response.status_code}",
                 status=response.status_code,
-                payload=response.text,
+                payload=error_payload,
             )
         try:
             return response.json()

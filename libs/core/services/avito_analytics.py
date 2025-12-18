@@ -135,7 +135,8 @@ async def _call(func, *args, warnings: list[str], label: str, **kwargs) -> Any:
     try:
         return await func(*args, **kwargs)
     except avito_api.AvitoAPIError as exc:
-        warn = f"{label}: {exc} ({exc.status or 'n/a'})"
+        warn_detail = exc.payload if isinstance(exc.payload, Mapping) else {"detail": exc.payload}
+        warn = f"{label}: {exc} ({exc.status or 'n/a'}) url={warn_detail.get('url')}"
         warnings.append(warn)
         logger.info("avito_analytics_call_failed label=%s status=%s", label, exc.status, exc_info=True)
         return None
