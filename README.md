@@ -62,6 +62,13 @@
   3) Для `tenant_id=999` tgworker не регистрирует event handlers и не запускает smart-reply.
   4) Экспорт из больших групп/каналов отдает TXT и сохраняет файл на диск.
 
+## Admin Avito Analytics (OAuth)
+- Страница: `/admin/avito-analytics` (только `ADMIN_TOKEN`).
+- OAuth поток отделён от tenant-подключений: `/admin/avito-analytics/oauth/start` → callback `/admin/avito-analytics/oauth/callback`.
+- Таблица `avito_analytics_tokens` хранит зашифрованные access/refresh токены (Fernet, ключ `AVITO_TOKEN_ENCRYPTION_KEY`).
+- UI: выбор аккаунта, период 7/30/90, карточки метрик, таблица объявлений, операции, RAW JSON, экспорт JSON/CSV, ручное обновление кеша.
+- ENV: `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET`, `AVITO_ANALYTICS_REDIRECT_URI`, `AVITO_ANALYTICS_SCOPES` (опционально), `AVITO_TOKEN_ENCRYPTION_KEY`, `AVITO_ANALYTICS_CACHE_TTL`.
+
 ## Telegram каталог (PDF)
 - PDF берётся из `data/tenants/<id>/uploads/catalog.pdf` или `meta.catalog_pdf_path` и в Telegram отправляется файлом (без ссылок на viewer).
 - tgworker проставляет имя/расширение из attachment (`filename`/`name`/`title`/`url`) при формировании `InputFile`, поэтому не должно быть `unnamed`.

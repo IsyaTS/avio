@@ -26,3 +26,4 @@ telethon==1.36.*  # pinned for consistent FloodWaitError import
 qrcode==7.4.2
 pillow==10.4.0
 prometheus-client==0.20.0
+cryptography>=42.0.0

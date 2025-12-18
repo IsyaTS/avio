@@ -38,6 +38,7 @@ sys.modules.setdefault("core", core)
 _EXPECTED_WEB_ATTRS: dict[str, tuple[str, ...]] = {
     "common": ("router",),
     "admin": ("router",),
+    "admin_avito_analytics": ("router",),
     "public": ("router", "templates"),
     "client": ("router",),
     "webhooks": ("router", "process_incoming"),
@@ -84,6 +85,7 @@ def _import_web_module(module_name: str) -> ModuleType:
 
 _common_mod = _import_web_module("common")
 _admin_mod = _import_web_module("admin")
+_admin_avito_analytics_mod = _import_web_module("admin_avito_analytics")
 _public_mod = _import_web_module("public")
 _client_mod = _import_web_module("client")
 _webhooks_mod = _import_web_module("webhooks")
@@ -100,6 +102,7 @@ tenant_whatsapp_provider = getattr(core, "tenant_whatsapp_provider", lambda tena
 
 C = _common_mod  # type: ignore[assignment]
 admin_router = _admin_mod.router  # type: ignore[attr-defined]
+admin_avito_analytics_router = _admin_avito_analytics_mod.router  # type: ignore[attr-defined]
 public_router = _public_mod.router  # type: ignore[attr-defined]
 client_router = _client_mod.router  # type: ignore[attr-defined]
 webhooks_router = _webhooks_mod.router  # type: ignore[attr-defined]
@@ -1017,6 +1020,7 @@ async def internal_catalog_file(
 
 # монтирование роутеров
 app.include_router(admin_router)
+app.include_router(admin_avito_analytics_router)
 app.include_router(public_router)
 app.include_router(client_router)
 app.include_router(internal_tenant_router)
