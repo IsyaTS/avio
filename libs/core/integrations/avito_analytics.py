@@ -24,7 +24,10 @@ TOKEN_URL = getattr(settings, "AVITO_TOKEN_URL", "https://api.avito.ru/token/")
 API_BASE = getattr(settings, "AVITO_API_BASE", "https://api.avito.ru").rstrip("/")
 DEFAULT_TIMEOUT = getattr(settings, "AVITO_TIMEOUT", 10.0) or 10.0
 
-ANALYTICS_REDIRECT = (os.getenv("AVITO_ANALYTICS_REDIRECT_URI") or "").strip()
+ANALYTICS_REDIRECT = (
+    os.getenv("AVITO_ANALYTICS_REDIRECT_URI")
+    or getattr(settings, "AVITO_REDIRECT_URL", "")
+).strip()
 DEFAULT_SCOPES = (
     os.getenv(
         "AVITO_ANALYTICS_SCOPES",

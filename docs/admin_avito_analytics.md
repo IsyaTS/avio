@@ -11,7 +11,7 @@
 ## Требуемые переменные окружения
 - `ADMIN_TOKEN` — уже используется в админке, обязателен.
 - `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET` — креды приложения Avito.
-- `AVITO_ANALYTICS_REDIRECT_URI` — тот же URL, что и callback выше.
+- `AVITO_ANALYTICS_REDIRECT_URI` — тот же URL, что и callback выше. Если переменная не задана, используется основной redirect из `AVITO_REDIRECT_URL` (общий callback `/v1/oauth/avito/callback`), чтобы можно было работать на одном зарегистрированном redirect.
 - `AVITO_ANALYTICS_SCOPES` — опционально, по умолчанию запрашивается максимум:
   ```
   user:read items:info stats:read user_balance:read user_operations:read messenger:read
