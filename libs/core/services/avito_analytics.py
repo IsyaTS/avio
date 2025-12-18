@@ -79,7 +79,7 @@ def _extract_items(payload: Any) -> list[Mapping[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, Mapping)]
     if isinstance(payload, Mapping):
-        for key in ("items", "result", "data"):
+        for key in ("items", "result", "data", "resources"):
             arr = payload.get(key)
             if isinstance(arr, list):
                 return [item for item in arr if isinstance(item, Mapping)]
