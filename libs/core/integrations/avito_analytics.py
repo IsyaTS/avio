@@ -31,8 +31,9 @@ ANALYTICS_REDIRECT = (
 DEFAULT_SCOPES = (
     os.getenv(
         "AVITO_ANALYTICS_SCOPES",
-        "user:read items:info stats:read user_balance:read user_operations:read messenger:read "
-        "autoload:reports autoteka:previews autoteka:reports job:write job:negotiations job:cv short_term_rent:read",
+        "autoload:reports items:apply_vas items:info job:applications job:cv "
+        "messenger:read messenger:write short_term_rent:read stats:read "
+        "user:read user_balance:read user_operations:read",
     )
     .strip()
 )
