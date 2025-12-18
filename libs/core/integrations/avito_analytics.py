@@ -282,13 +282,28 @@ async def get_items_stats(
         payload["itemIds"] = list(item_ids)
     if fields:
         payload["fields"] = list(fields)
-    target = f"/stats/v1/accounts/{user_id}/items" if user_id else "/stats/v1/items"
-    try:
-        return await avito_request("POST", target, access_token, json=payload)
-    except AvitoAPIError:
-        # Try GET fallback
-        params = dict(payload)
-        return await avito_request("GET", target, access_token, params=params)
+    targets = []
+    if user_id:
+        targets.append(f"/stats/v1/accounts/{user_id}/items")
+        targets.append("/stats/v1/accounts/self/items")
+    targets.append("/stats/v1/items")
+    last_exc: AvitoAPIError | None = None
+    for target in targets:
+        try:
+            return await avito_request("POST", target, access_token, json=payload)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            try:
+                params = dict(payload)
+                return await avito_request("GET", target, access_token, params=params)
+            except AvitoAPIError as exc_get:
+                last_exc = exc_get
+                if exc_get.status not in (401, 403, 404):
+                    raise
+                continue
+    if last_exc:
+        raise last_exc
+    raise AvitoAPIError("Avito stats endpoints unavailable")
 
 
 async def get_calls_stats(
@@ -297,14 +312,43 @@ async def get_calls_stats(
     date_from: str,
     date_to: str,
 ) -> Mapping[str, Any] | list[Any]:
-    target = f"/stats/v1/accounts/{user_id}/calls" if user_id else "/stats/v1/calls"
     params = {"dateFrom": date_from, "dateTo": date_to}
-    return await avito_request("GET", target, access_token, params=params)
+    targets = []
+    if user_id:
+        targets.append(f"/stats/v1/accounts/{user_id}/calls")
+        targets.append("/stats/v1/accounts/self/calls")
+    targets.append("/stats/v1/calls")
+    last_exc: AvitoAPIError | None = None
+    for target in targets:
+        try:
+            return await avito_request("GET", target, access_token, params=params)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status not in (401, 403, 404):
+                raise
+            continue
+    if last_exc:
+        raise last_exc
+    raise AvitoAPIError("Avito calls stats endpoints unavailable")
 
 
 async def get_balance(access_token: str, user_id: int | None) -> Mapping[str, Any] | list[Any]:
-    target = f"/core/v1/accounts/{user_id}/balance" if user_id else "/core/v1/accounts/self/balance"
-    return await avito_request("GET", target, access_token)
+    targets = []
+    if user_id:
+        targets.append(f"/core/v1/accounts/{user_id}/balance")
+    targets.append("/core/v1/accounts/self/balance")
+    last_exc: AvitoAPIError | None = None
+    for target in targets:
+        try:
+            return await avito_request("GET", target, access_token)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status not in (401, 403, 404, 500):
+                raise
+            continue
+    if last_exc:
+        raise last_exc
+    raise AvitoAPIError("Avito balance endpoint unavailable")
 
 
 async def get_operations(
@@ -316,9 +360,23 @@ async def get_operations(
     limit: int = 200,
     offset: int = 0,
 ) -> Mapping[str, Any] | list[Any]:
-    target = f"/core/v1/accounts/{user_id}/operations" if user_id else "/core/v1/accounts/self/operations"
     params = {"dateFrom": date_from, "dateTo": date_to, "limit": limit, "offset": offset}
-    return await avito_request("GET", target, access_token, params=params)
+    targets = []
+    if user_id:
+        targets.append(f"/core/v1/accounts/{user_id}/operations")
+    targets.append("/core/v1/accounts/self/operations")
+    last_exc: AvitoAPIError | None = None
+    for target in targets:
+        try:
+            return await avito_request("GET", target, access_token, params=params)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status not in (401, 403, 404):
+                raise
+            continue
+    if last_exc:
+        raise last_exc
+    raise AvitoAPIError("Avito operations endpoint unavailable")
 
 
 async def messenger_list_chats(
@@ -328,9 +386,23 @@ async def messenger_list_chats(
     limit: int = 50,
     offset: int = 0,
 ) -> Mapping[str, Any] | list[Any]:
-    target = f"/messenger/v3/accounts/{user_id}/chats" if user_id else "/messenger/v3/chats"
     params = {"limit": limit, "offset": offset}
-    return await avito_request("GET", target, access_token, params=params)
+    targets = []
+    if user_id:
+        targets.append(f"/messenger/v3/accounts/{user_id}/chats")
+    targets.append("/messenger/v3/chats")
+    last_exc: AvitoAPIError | None = None
+    for target in targets:
+        try:
+            return await avito_request("GET", target, access_token, params=params)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status not in (401, 403, 404):
+                raise
+            continue
+    if last_exc:
+        raise last_exc
+    raise AvitoAPIError("Avito chats endpoint unavailable")
 
 
 async def messenger_get_messages(
