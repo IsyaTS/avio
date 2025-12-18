@@ -236,7 +236,7 @@ async def build_report(account_id: int, period_days: int = 30, *, force_refresh:
         raw_pages: list[Any] = []
         page = 1
         per_page = 100
-        max_pages = 20  # safety cap (~2000 объявлений)
+        max_pages = 200  # safety cap (~5000 объявлений при per_page=25)
         while page <= max_pages:
             payload = await _call(
                 avito_api.list_items,
