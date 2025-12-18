@@ -23,11 +23,26 @@
 ## Что делает страница
 1) Админ нажимает «Авторизоваться в Avito» → OAuth → callback сохраняет токены в Postgres (таблица `avito_analytics_tokens`) в зашифрованном виде.
 2) Поддерживается несколько аккаунтов, переключение в выпадающем списке.
-3) Отчёт: карточки метрик, таблица объявлений, операции/списания, raw JSON со всеми ответами Avito.
-4) Экспорты: JSON и CSV (отдельные эндпоинты).
+3) Отчёт: карточки метрик, таблица объявлений, операции/списания, блок “Работа: отклики” (job:applications) и “VAS/продвижение” (items:apply_vas), raw JSON со всеми ответами Avito.
+4) Экспорты: JSON и CSV (items / operations / job_applications / vas_prices / vas_packages).
 5) Кэш отчёта в Redis на 5–15 минут, ручное обновление кнопкой «Обновить».
 
 ## Ограничения и совместимость
 - Не трогаются существующие Avito маршруты для тенантов (`/v1/oauth/avito/*`).
 - Вся авторизация — только через `ADMIN_TOKEN`.
 - При отсутствии Redis или ключа шифрования страница вернёт понятную ошибку.
+
+## Job applications (job:applications)
+- Основной путь: `job/v1|v2 applications` (pull). Если Avito не даёт list — используем хранилище IDs.
+- Таблица `avito_job_application_events` собирает application_id из webhooks (если в payload есть application_id/applyId) или через admin API `POST /admin/avito-analytics/api/job/application/add` (ручной ввод).
+- Обогащение: `job/v1/applications/get_by_ids` (батчи до 200), + best-effort `job/v2/resumes/{id}` и `job/v2/vacancies/{id}` для топ-резюме/вакансий.
+- KPI: total, unique_applicants, разбивка по статусам, raw блок с list/by_ids/resumes/vacancies.
+
+## VAS (items:apply_vas)
+- Прайсы: `POST /core/v1/accounts/{id}/price/vas` (services) и `.../price/vas_packages` (packages). При валидационной ошибке сохраняется raw error и выдаётся предупреждение, отчёт не падает.
+- Derived: top-10 самых дешёвых услуг; операции можно сверять через экспорт operations.csv.
+
+## Лимиты/батчи
+- job get_by_ids: до 200 ID за запрос, берём не более 200 за отчёт (период 7/30/90).
+- enrich resume/vacancy: до 10 уникальных ID каждого типа.
+- vas: один запрос на цены и один на пакеты (payload пустой, только диагностируем доступность).

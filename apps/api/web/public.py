@@ -55,6 +55,7 @@ from . import client as C
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from libs.core.db import insert_message_in, upsert_lead
 from libs.core.integrations import avito
+from libs.core.repo import avito_job_applications
 from libs.core.common import HANDOFF_SILENCE_TTL_SECONDS, handoff_silence_key
 from . import common as common
 from .client import read_csv_table, write_csv_table
@@ -344,6 +345,21 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
     if not value:
         logger.warning("avito_webhook_skip reason=no_value tenant=%s account_id=%s raw_event=%s", tenant, account_id, json.dumps(event, ensure_ascii=False))
         return False
+
+    application_id = (
+        value.get("application_id")
+        or value.get("applyId")
+        or value.get("applicationId")
+        or payload.get("application_id")
+        or payload.get("applyId")
+    )
+    if application_id and account_id is not None:
+        try:
+            await avito_job_applications.store_event(int(account_id), str(application_id), source="webhook", payload=event)
+        except Exception:
+            logger.debug("avito_job_application_store_failed account_id=%s application_id=%s", account_id, application_id, exc_info=True)
+        # Job webhook: do not pass to chat/AI chain.
+        return True
 
     content_raw = value.get("content") if isinstance(value.get("content"), Mapping) else {}
 

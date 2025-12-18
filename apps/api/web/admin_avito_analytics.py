@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from libs.core.crypto import EncryptionError
 from libs.core.integrations import avito_analytics as avito_api
 from libs.core.repo import avito_analytics_tokens as tokens_repo
+from libs.core.repo import avito_job_applications as job_repo
 from libs.core.services import avito_analytics as analytics_service
 from libs.core.sales_core import settings, ADMIN_COOKIE
 
@@ -69,6 +70,7 @@ def _redirect_login() -> RedirectResponse:
 async def _ensure_schema() -> None:
     try:
         await tokens_repo.ensure_schema()
+        await job_repo.ensure_schema()
     except Exception:
         logger.exception("avito_analytics_schema_failed")
         raise
@@ -251,20 +253,116 @@ async def avito_analytics_export_json(request: Request, account_id: int | None =
 
 
 @router.get("/admin/avito-analytics/api/export.csv")
-async def avito_analytics_export_csv(request: Request, account_id: int | None = None, period: int = 30):
+async def avito_analytics_export_csv(request: Request, account_id: int | None = None, period: int = 30, kind: str | None = None):
     resp = await avito_analytics_report(request, account_id=account_id, period=period)
     if isinstance(resp, Response) and resp.status_code != 200:
         return resp
     report = resp["report"] if isinstance(resp, dict) else {}
-    items = report.get("items_table") or []
+    data_kind = (kind or "items").strip().lower()
     import io
     import csv
 
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["id", "title", "status", "price", "views", "contacts", "calls", "url"])
+    def _build_rows(header: list[str], rows: list[list[Any]], filename: str) -> Response:
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow(row)
+        content = buffer.getvalue()
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return Response(content, media_type="text/csv", headers=headers)
+
+    if data_kind == "operations":
+        operations = report.get("operations") or []
+        rows = []
+        for op in operations:
+            rows.append(
+                [
+                    op.get("id") or "",
+                    op.get("date") or op.get("created_at") or "",
+                    op.get("type") or "",
+                    op.get("description") or op.get("title") or "",
+                    op.get("amount") or op.get("sum") or "",
+                ]
+            )
+        return _build_rows(
+            ["id", "date", "type", "description", "amount"],
+            rows,
+            f"avito-operations-{account_id or 'account'}.csv",
+        )
+    if data_kind == "job_applications":
+        jobs = (report.get("job_applications") or {}).get("table") or []
+        rows = []
+        for row in jobs:
+            rows.append(
+                [
+                    row.get("id") or "",
+                    row.get("status") or "",
+                    row.get("created_at") or "",
+                    row.get("vacancy_id") or "",
+                    row.get("resume_id") or "",
+                    row.get("applicant") or "",
+                ]
+            )
+        return _build_rows(
+            ["id", "status", "created_at", "vacancy_id", "resume_id", "applicant"],
+            rows,
+            f"avito-job-applications-{account_id or 'account'}.csv",
+        )
+    if data_kind == "vas_prices":
+        services = []
+        prices_raw = (report.get("vas") or {}).get("raw", {}).get("prices")
+        if isinstance(prices_raw, list):
+            services = prices_raw
+        elif isinstance(prices_raw, Mapping):
+            services = prices_raw.get("services") or prices_raw.get("result") or []
+        rows = []
+        if isinstance(services, list):
+            for svc in services:
+                if not isinstance(svc, Mapping):
+                    continue
+                rows.append(
+                    [
+                        svc.get("name") or svc.get("service") or "",
+                        svc.get("price") or svc.get("amount") or "",
+                        svc.get("duration") or svc.get("period") or "",
+                    ]
+                )
+        return _build_rows(
+            ["name", "price", "duration"],
+            rows,
+            f"avito-vas-prices-{account_id or 'account'}.csv",
+        )
+    if data_kind == "vas_packages":
+        packages = []
+        packages_raw = (report.get("vas") or {}).get("raw", {}).get("packages")
+        if isinstance(packages_raw, list):
+            packages = packages_raw
+        elif isinstance(packages_raw, Mapping):
+            packages = packages_raw.get("packages") or packages_raw.get("result") or []
+        rows = []
+        if isinstance(packages, list):
+            for pkg in packages:
+                if not isinstance(pkg, Mapping):
+                    continue
+                rows.append(
+                    [
+                        pkg.get("name") or "",
+                        pkg.get("price") or pkg.get("amount") or "",
+                        pkg.get("duration") or pkg.get("period") or "",
+                    ]
+                )
+        return _build_rows(
+            ["name", "price", "duration"],
+            rows,
+            f"avito-vas-packages-{account_id or 'account'}.csv",
+        )
+
+    # default: items
+    items = report.get("items_table") or []
+    rows = []
     for row in items:
-        writer.writerow(
+        rows.append(
             [
                 row.get("id") or "",
                 row.get("title") or "",
@@ -276,9 +374,11 @@ async def avito_analytics_export_csv(request: Request, account_id: int | None = 
                 row.get("url") or "",
             ]
         )
-    content = buffer.getvalue()
-    headers = {"Content-Disposition": f'attachment; filename="avito-analytics-{account_id or "account"}.csv"'}
-    return Response(content, media_type="text/csv", headers=headers)
+    return _build_rows(
+        ["id", "title", "status", "price", "views", "contacts", "calls", "url"],
+        rows,
+        f"avito-items-{account_id or 'account'}.csv",
+    )
 
 
 @router.post("/admin/avito-analytics/api/refresh")
@@ -298,6 +398,24 @@ async def avito_analytics_refresh(request: Request, account_id: int | None = Non
         logger.exception("avito_analytics_refresh_failed account_id=%s", target_account)
         return JSONResponse({"detail": "refresh_failed", "error": str(exc)}, status_code=500)
     return {"ok": True, "report": report}
+
+
+@router.post("/admin/avito-analytics/api/job/application/add")
+async def avito_analytics_job_app_add(request: Request):
+    guard = _require_admin(request)
+    if guard:
+        return guard
+    payload = await request.json()
+    account_id = payload.get("account_id")
+    application_id = payload.get("application_id")
+    if not account_id or not application_id:
+        return JSONResponse({"detail": "missing_account_or_id"}, status_code=400)
+    try:
+        await job_repo.store_event(int(account_id), str(application_id), source="manual", payload=payload)
+    except Exception:
+        logger.exception("avito_job_app_manual_add_failed account_id=%s", account_id)
+        return JSONResponse({"detail": "store_failed"}, status_code=500)
+    return {"ok": True}
 
 
 @router.post("/admin/avito-analytics/api/disconnect")

@@ -66,7 +66,7 @@
 - Страница: `/admin/avito-analytics` (только `ADMIN_TOKEN`).
 - OAuth поток отделён от tenant-подключений: `/admin/avito-analytics/oauth/start` → callback `/admin/avito-analytics/oauth/callback`.
 - Таблица `avito_analytics_tokens` хранит зашифрованные access/refresh токены (Fernet, ключ `AVITO_TOKEN_ENCRYPTION_KEY`).
-- UI: выбор аккаунта, период 7/30/90, карточки метрик, таблица объявлений, операции, RAW JSON, экспорт JSON/CSV, ручное обновление кеша.
+- UI: выбор аккаунта, период 7/30/90, карточки метрик, таблица объявлений, операции, блоки job:applications и VAS/продвижение, RAW JSON, экспорт JSON/CSV (items/operations/job/vas), ручное обновление кеша.
 - ENV: `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET`, `AVITO_ANALYTICS_REDIRECT_URI`, `AVITO_ANALYTICS_SCOPES` (опционально), `AVITO_TOKEN_ENCRYPTION_KEY`, `AVITO_ANALYTICS_CACHE_TTL`.
 
 ## Telegram каталог (PDF)

@@ -342,6 +342,66 @@ async def messenger_get_messages(
     return await avito_request("GET", target, access_token, params=params)
 
 
+# Job applications
+async def job_get_applications_by_ids(access_token: str, ids: Sequence[str]) -> Mapping[str, Any] | list[Any]:
+    payload = {"ids": list(ids)}
+    return await avito_request("POST", "/job/v1/applications/get_by_ids", access_token, json=payload)
+
+
+async def job_try_list_applications(access_token: str, params: Mapping[str, Any] | None = None) -> Mapping[str, Any] | list[Any] | None:
+    params = params or {}
+    candidates = [
+        ("GET", "/job/v1/applications"),
+        ("POST", "/job/v1/applications/search"),
+        ("GET", "/job/v2/applications"),
+        ("POST", "/job/v2/applications/search"),
+    ]
+    for method, path in candidates:
+        try:
+            return await avito_request(method, path, access_token, params=params if method == "GET" else None, json=params if method == "POST" else None)
+        except AvitoAPIError as exc:
+            if exc.status == 401:
+                raise
+            if exc.status in {403, 404}:
+                return None
+            if exc.status == 429 and exc.retryable:
+                await asyncio.sleep(0.4)
+                continue
+            continue
+        except Exception:
+            continue
+    return None
+
+
+async def job_get_resume_v2(access_token: str, resume_id: str) -> Mapping[str, Any] | list[Any] | None:
+    try:
+        return await avito_request("GET", f"/job/v2/resumes/{resume_id}", access_token)
+    except AvitoAPIError as exc:
+        if exc.status in {401, 403, 404}:
+            return None
+        raise
+
+
+async def job_get_vacancy_v2(access_token: str, vacancy_id: str) -> Mapping[str, Any] | list[Any] | None:
+    try:
+        return await avito_request("GET", f"/job/v2/vacancies/{vacancy_id}", access_token)
+    except AvitoAPIError as exc:
+        if exc.status in {401, 403, 404}:
+            return None
+        raise
+
+
+# VAS pricing
+async def get_vas_prices(access_token: str, user_id: int | None, payload: Mapping[str, Any] | None = None) -> Mapping[str, Any] | list[Any]:
+    target = f"/core/v1/accounts/{user_id}/price/vas" if user_id else "/core/v1/accounts/self/price/vas"
+    return await avito_request("POST", target, access_token, json=payload or {})
+
+
+async def get_vas_packages_prices(access_token: str, user_id: int | None, payload: Mapping[str, Any] | None = None) -> Mapping[str, Any] | list[Any]:
+    target = f"/core/v1/accounts/{user_id}/price/vas_packages" if user_id else "/core/v1/accounts/self/price/vas_packages"
+    return await avito_request("POST", target, access_token, json=payload or {})
+
+
 __all__ = [
     "AvitoOAuthError",
     "AvitoAPIError",
@@ -358,6 +418,12 @@ __all__ = [
     "get_operations",
     "messenger_list_chats",
     "messenger_get_messages",
+    "job_get_applications_by_ids",
+    "job_try_list_applications",
+    "job_get_resume_v2",
+    "job_get_vacancy_v2",
+    "get_vas_prices",
+    "get_vas_packages_prices",
     "DEFAULT_SCOPES",
     "ANALYTICS_REDIRECT",
 ]

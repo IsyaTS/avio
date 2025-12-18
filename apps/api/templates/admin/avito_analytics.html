@@ -11,7 +11,16 @@
       <button id="connect-avito" class="btn">Авторизоваться в Avito</button>
       <button id="refresh-report" class="btn btn--secondary">Обновить отчёт</button>
       <a id="export-json" class="btn btn--secondary" href="#">Экспорт JSON</a>
-      <a id="export-csv" class="btn btn--secondary" href="#">Экспорт CSV</a>
+      <div class="stack" style="gap:4px;">
+        <span class="label">CSV</span>
+        <div style="display:flex; flex-wrap: wrap; gap:6px;">
+          <a id="export-csv-items" class="btn btn--secondary" href="#">Items</a>
+          <a id="export-csv-ops" class="btn btn--secondary" href="#">Operations</a>
+          <a id="export-csv-jobs" class="btn btn--secondary" href="#">Job</a>
+          <a id="export-csv-vas" class="btn btn--secondary" href="#">VAS</a>
+          <a id="export-csv-vas-pack" class="btn btn--secondary" href="#">VAS packages</a>
+        </div>
+      </div>
     </div>
   </div>
   <div class="surface surface--muted" style="padding: 12px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;">
@@ -80,6 +89,71 @@
     <div class="surface surface--muted" style="max-height: 360px; overflow: auto;">
       <pre id="raw-json" style="white-space: pre; font-size: 13px; line-height: 1.4; margin: 0; padding: 12px;"></pre>
     </div>
+  </div>
+</section>
+
+<section class="surface stack" style="margin-top: 16px; gap:10px;">
+  <div class="toolbar">
+    <div>
+      <h2 class="section-title" style="font-size:1.2rem;">Работа: отклики (job:applications)</h2>
+      <p class="section-subtitle">Сводка по откликам, если доступен scope job:applications.</p>
+    </div>
+  </div>
+  <div id="job-kpi" class="grid grid--two"></div>
+  <div class="surface surface--muted" style="padding:0; overflow-x:auto;">
+    <table id="job-table" class="table" style="min-width:680px;">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Статус</th>
+          <th>Создано</th>
+          <th>Вакансия</th>
+          <th>Резюме</th>
+          <th>Кандидат</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="surface surface--muted" style="max-height: 260px; overflow:auto;">
+    <pre id="job-raw" style="white-space: pre; margin:0; padding:10px;"></pre>
+  </div>
+</section>
+
+<section class="surface stack" style="margin-top: 16px; gap:10px;">
+  <div class="toolbar">
+    <div>
+      <h2 class="section-title" style="font-size:1.2rem;">Продвижение / VAS</h2>
+      <p class="section-subtitle">Цены и пакеты, если доступен scope items:apply_vas.</p>
+    </div>
+  </div>
+  <div id="vas-cheapest" class="grid grid--two"></div>
+  <div class="surface surface--muted" style="padding:0; overflow-x:auto;">
+    <table id="vas-table" class="table" style="min-width:620px;">
+      <thead>
+        <tr>
+          <th>Услуга</th>
+          <th>Цена</th>
+          <th>Длительность</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="surface surface--muted" style="padding:0; overflow-x:auto;">
+    <table id="vas-packages-table" class="table" style="min-width:620px;">
+      <thead>
+        <tr>
+          <th>Пакет</th>
+          <th>Цена</th>
+          <th>Длительность</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="surface surface--muted" style="max-height: 260px; overflow:auto;">
+    <pre id="vas-raw" style="white-space: pre; margin:0; padding:10px;"></pre>
   </div>
 </section>
 

@@ -18,8 +18,19 @@
   const connectBtn = document.getElementById('connect-avito');
   const refreshBtn = document.getElementById('refresh-report');
   const exportJson = document.getElementById('export-json');
-  const exportCsv = document.getElementById('export-csv');
+  const exportCsvItems = document.getElementById('export-csv-items');
+  const exportCsvOps = document.getElementById('export-csv-ops');
+  const exportCsvJobs = document.getElementById('export-csv-jobs');
+  const exportCsvVas = document.getElementById('export-csv-vas');
+  const exportCsvVasPack = document.getElementById('export-csv-vas-pack');
   const copyRaw = document.getElementById('copy-raw');
+  const jobTableBody = document.querySelector('#job-table tbody');
+  const jobRaw = document.getElementById('job-raw');
+  const jobKpi = document.getElementById('job-kpi');
+  const vasTableBody = document.querySelector('#vas-table tbody');
+  const vasPackagesBody = document.querySelector('#vas-packages-table tbody');
+  const vasRaw = document.getElementById('vas-raw');
+  const vasCheapest = document.getElementById('vas-cheapest');
 
   let accounts = Array.isArray(pageState.accounts) ? pageState.accounts : [];
   let currentAccount = pageState.default_account || (accounts[0] && accounts[0].account_id);
@@ -148,12 +159,145 @@
     rawPre.textContent = raw ? JSON.stringify(raw, null, 2) : '';
   }
 
+  function renderJob(report) {
+    if (jobTableBody) jobTableBody.innerHTML = '';
+    if (jobRaw) jobRaw.textContent = '';
+    if (jobKpi) jobKpi.innerHTML = '';
+    const job = report?.job_applications;
+    if (!job) {
+      if (jobRaw) jobRaw.textContent = 'Нет данных';
+      return;
+    }
+    const rows = Array.isArray(job.table) ? job.table : [];
+    if (jobKpi) {
+      const kpi = job.kpi || {};
+      const cards = [
+        { label: 'Отклики', value: kpi.total_applications },
+        { label: 'Уникальные кандидаты', value: kpi.unique_applicants },
+      ];
+      const byStatus = kpi.by_status || {};
+      Object.keys(byStatus).forEach((status) => {
+        cards.push({ label: `Статус: ${status || '—'}`, value: byStatus[status] });
+      });
+      cards.forEach((card) => {
+        const el = document.createElement('div');
+        el.className = 'surface surface--muted';
+        el.style.padding = '10px';
+        el.innerHTML = `<div class="section-subtitle">${card.label}</div><div class="section-title">${card.value ?? '—'}</div>`;
+        jobKpi.appendChild(el);
+      });
+    }
+    if (jobTableBody) {
+      if (!rows.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6;
+        td.textContent = 'Нет откликов или нет доступа';
+        tr.appendChild(td);
+        jobTableBody.appendChild(tr);
+      } else {
+        rows.forEach((row) => {
+          const tr = document.createElement('tr');
+          ['id', 'status', 'created_at', 'vacancy_id', 'resume_id', 'applicant'].forEach((key) => {
+            const td = document.createElement('td');
+            td.textContent = row[key] || '';
+            tr.appendChild(td);
+          });
+          jobTableBody.appendChild(tr);
+        });
+      }
+    }
+    if (jobRaw) jobRaw.textContent = JSON.stringify(job.raw || {}, null, 2);
+  }
+
+  function renderVas(report) {
+    if (vasTableBody) vasTableBody.innerHTML = '';
+    if (vasPackagesBody) vasPackagesBody.innerHTML = '';
+    if (vasRaw) vasRaw.textContent = '';
+    if (vasCheapest) vasCheapest.innerHTML = '';
+    const vas = report?.vas;
+    if (!vas) return;
+    const promos = Array.isArray(vas.cheapest_promos) ? vas.cheapest_promos : [];
+    promos.forEach((promo) => {
+      const el = document.createElement('div');
+      el.className = 'surface surface--muted';
+      el.style.padding = '10px';
+      el.innerHTML = `<div class="section-subtitle">${promo.name || 'Услуга'}</div><div class="section-title">${promo.price ?? '—'}</div><div class="section-subtitle">${promo.duration || ''}</div>`;
+      vasCheapest?.appendChild(el);
+    });
+    const vasRows = (() => {
+      const raw = vas.raw?.prices;
+      if (Array.isArray(raw)) return raw;
+      if (raw && typeof raw === 'object') return raw.services || raw.result || [];
+      return [];
+    })();
+    if (vasTableBody) {
+      if (vasRows.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 3;
+        td.textContent = 'Нет данных по услугам';
+        tr.appendChild(td);
+        vasTableBody.appendChild(tr);
+      } else {
+        vasRows.forEach((svc) => {
+          if (!svc || typeof svc !== 'object') return;
+          const tr = document.createElement('tr');
+          const name = svc.name || svc.service || '';
+          const price = svc.price ?? svc.amount ?? '';
+          const duration = svc.duration || svc.period || '';
+          [name, price, duration].forEach((v) => {
+            const td = document.createElement('td');
+            td.textContent = v;
+            tr.appendChild(td);
+          });
+          vasTableBody.appendChild(tr);
+        });
+      }
+    }
+    const pkgRows = (() => {
+      const raw = vas.raw?.packages;
+      if (Array.isArray(raw)) return raw;
+      if (raw && typeof raw === 'object') return raw.packages || raw.result || [];
+      return [];
+    })();
+    if (vasPackagesBody) {
+      if (pkgRows.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 3;
+        td.textContent = 'Нет данных по пакетам';
+        tr.appendChild(td);
+        vasPackagesBody.appendChild(tr);
+      } else {
+        pkgRows.forEach((pkg) => {
+          if (!pkg || typeof pkg !== 'object') return;
+          const tr = document.createElement('tr');
+          const name = pkg.name || '';
+          const price = pkg.price ?? pkg.amount ?? '';
+          const duration = pkg.duration || pkg.period || '';
+          [name, price, duration].forEach((v) => {
+            const td = document.createElement('td');
+            td.textContent = v;
+            tr.appendChild(td);
+          });
+          vasPackagesBody.appendChild(tr);
+        });
+      }
+    }
+    if (vasRaw) vasRaw.textContent = JSON.stringify(vas.raw || {}, null, 2);
+  }
+
   function updateExportLinks() {
     const params = new URLSearchParams();
     if (currentAccount) params.set('account_id', currentAccount);
     params.set('period', periodSelect?.value || '30');
     exportJson.href = `/admin/avito-analytics/api/export.json?${params.toString()}`;
-    exportCsv.href = `/admin/avito-analytics/api/export.csv?${params.toString()}`;
+    if (exportCsvItems) exportCsvItems.href = `/admin/avito-analytics/api/export.csv?${params.toString()}&kind=items`;
+    if (exportCsvOps) exportCsvOps.href = `/admin/avito-analytics/api/export.csv?${params.toString()}&kind=operations`;
+    if (exportCsvJobs) exportCsvJobs.href = `/admin/avito-analytics/api/export.csv?${params.toString()}&kind=job_applications`;
+    if (exportCsvVas) exportCsvVas.href = `/admin/avito-analytics/api/export.csv?${params.toString()}&kind=vas_prices`;
+    if (exportCsvVasPack) exportCsvVasPack.href = `/admin/avito-analytics/api/export.csv?${params.toString()}&kind=vas_packages`;
   }
 
   async function loadAccounts() {
@@ -191,6 +335,8 @@
       renderItems(report);
       renderOperations(report);
       renderRaw(report.raw || {});
+      renderJob(report);
+      renderVas(report);
       updateExportLinks();
       const warnings = Array.isArray(report.meta?.warnings) ? report.meta.warnings.filter(Boolean) : [];
       if (warnings.length) {
