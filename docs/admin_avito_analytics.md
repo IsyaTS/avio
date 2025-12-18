@@ -12,10 +12,11 @@
 - `ADMIN_TOKEN` — уже используется в админке, обязателен.
 - `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET` — креды приложения Avito.
 - `AVITO_ANALYTICS_REDIRECT_URI` — тот же URL, что и callback выше. Если переменная не задана, используется основной redirect из `AVITO_REDIRECT_URL` (общий callback `/v1/oauth/avito/callback`), чтобы можно было работать на одном зарегистрированном redirect.
-- `AVITO_ANALYTICS_SCOPES` — опционально. По умолчанию запрашивается набор доступных скопов под аналитику:
+- `AVITO_ANALYTICS_SCOPES` — опционально. По умолчанию запрашивается набор доступных скопов под аналитику (ограничен тем, что разрешено приложению):
   ```
   autoload:reports items:apply_vas items:info job:applications job:cv messenger:read messenger:write
-  short_term_rent:read stats:read user:read user_balance:read user_operations:read
+  ratings:read short_term_rent:read stats:read trx:commission user:read user_balance:read
+  user_operations:read cpxpromo:read
   ```
 - `AVITO_TOKEN_ENCRYPTION_KEY` — ключ Fernet (base64). Без него токены не сохраняются.
 - `AVITO_ANALYTICS_CACHE_TTL` — TTL кеша отчётов в Redis (секунды, по умолчанию 900).

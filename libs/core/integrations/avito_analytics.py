@@ -32,8 +32,8 @@ DEFAULT_SCOPES = (
     os.getenv(
         "AVITO_ANALYTICS_SCOPES",
         "autoload:reports items:apply_vas items:info job:applications job:cv "
-        "messenger:read messenger:write short_term_rent:read stats:read "
-        "user:read user_balance:read user_operations:read",
+        "messenger:read messenger:write ratings:read short_term_rent:read stats:read "
+        "trx:commission user:read user_balance:read user_operations:read cpxpromo:read",
     )
     .strip()
 )
