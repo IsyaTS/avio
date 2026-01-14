@@ -115,6 +115,77 @@ def static_url(request: Any | None, path: str) -> str:
     return f"{base}/{cleaned}"
 
 
+_CLIENT_SPA_MANIFEST: dict[str, Any] | None = None
+_CLIENT_SPA_MANIFEST_MTIME: float | None = None
+
+
+def _client_spa_manifest_path() -> pathlib.Path:
+    root = pathlib.Path(__file__).resolve().parents[1] / "static" / "spa" / "client"
+    primary = root / "manifest.json"
+    if primary.exists():
+        return primary
+    return root / ".vite" / "manifest.json"
+
+
+def _read_client_spa_manifest() -> dict[str, Any]:
+    global _CLIENT_SPA_MANIFEST, _CLIENT_SPA_MANIFEST_MTIME
+    manifest_path = _client_spa_manifest_path()
+    try:
+        mtime = manifest_path.stat().st_mtime
+    except OSError:
+        _CLIENT_SPA_MANIFEST = None
+        _CLIENT_SPA_MANIFEST_MTIME = None
+        return {}
+
+    if _CLIENT_SPA_MANIFEST is not None and _CLIENT_SPA_MANIFEST_MTIME == mtime:
+        return _CLIENT_SPA_MANIFEST
+
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    _CLIENT_SPA_MANIFEST = data if isinstance(data, dict) else {}
+    _CLIENT_SPA_MANIFEST_MTIME = mtime
+    return _CLIENT_SPA_MANIFEST
+
+
+def client_spa_assets(request: Any | None, entry: str = "index.html") -> dict[str, Any]:
+    dev_url = (os.getenv("VITE_DEV_SERVER_URL") or "").strip()
+    if dev_url:
+        dev_url = dev_url.rstrip("/")
+        return {
+            "dev_server": dev_url,
+            "js": [f"{dev_url}/src/main.tsx"],
+            "css": [],
+        }
+
+    manifest = _read_client_spa_manifest()
+    entry_info = (
+        manifest.get(entry)
+        or manifest.get("index.html")
+        or manifest.get("src/main.tsx")
+        or {}
+    )
+    js_files: list[str] = []
+    css_files: list[str] = []
+    if isinstance(entry_info, dict):
+        file_name = entry_info.get("file")
+        if file_name:
+            js_files.append(static_url(request, f"spa/client/{file_name}"))
+        for css in entry_info.get("css", []) or []:
+            css_files.append(static_url(request, f"spa/client/{css}"))
+        for imported in entry_info.get("imports", []) or []:
+            imported_info = manifest.get(imported) or {}
+            for css in imported_info.get("css", []) or []:
+                css_files.append(static_url(request, f"spa/client/{css}"))
+
+    return {
+        "dev_server": "",
+        "js": js_files,
+        "css": css_files,
+    }
+
+
 def _client_settings_bundle_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1] / "static" / "js"
 

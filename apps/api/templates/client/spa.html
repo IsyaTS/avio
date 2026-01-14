@@ -1,22 +1,26 @@
-{% extends "layouts/base.html" %}
-{% set page_title = title or 'Клиентский кабинет' %}
-{% set tenant_id = tenant_id if tenant_id is defined else tenant %}
-{% set redirect_url = '/client/' ~ tenant_id ~ '/settings?legacy=1' %}
-{% if key %}{% set redirect_url = redirect_url ~ '&k=' ~ key %}{% endif %}
-
-{% block content %}
-<section class="surface stack" style="gap: 8px;">
-    <h2 class="section-title" style="font-size:1.35rem;">Клиентский кабинет</h2>
-    <p class="section-subtitle">Загружаем настройки…</p>
-    <p class="status-text muted">Если страница не открылась автоматически, используйте ссылку ниже.</p>
-    <a class="btn btn--secondary" href="{{ redirect_url }}">Открыть настройки</a>
-</section>
-<script>
-  (function () {
-    const target = {{ redirect_url | tojson }};
-    if (target) {
-      window.location.replace(target);
-    }
-  })();
-</script>
-{% endblock %}
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or 'Клиентский кабинет' }}</title>
+    {% set spa_assets = client_spa_assets(request) %}
+    {% if spa_assets.css %}
+      {% for css in spa_assets.css %}
+        <link rel="stylesheet" href="{{ css }}" />
+      {% endfor %}
+    {% endif %}
+    {% if spa_assets.dev_server %}
+      <script type="module" src="{{ spa_assets.dev_server }}/@vite/client"></script>
+    {% endif %}
+  </head>
+  <body>
+    <script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
+    <div id="root"></div>
+    {% if spa_assets.js %}
+      {% for js in spa_assets.js %}
+        <script type="module" src="{{ js }}"></script>
+      {% endfor %}
+    {% endif %}
+  </body>
+</html>

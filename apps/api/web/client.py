@@ -516,6 +516,10 @@ def client_settings(tenant: int, request: Request):
         cfg = {}
 
     persona = C.read_persona(tenant)
+    personas = {
+        "telegram": C.read_persona(tenant, "telegram"),
+        "avito": C.read_persona(tenant, "avito"),
+    }
 
     passport_raw = cfg.get("passport", {})
     passport = passport_raw if isinstance(passport_raw, dict) else {}
@@ -559,6 +563,11 @@ def client_settings(tenant: int, request: Request):
         "training_upload": "/pub/training/upload",
         "training_status": "/pub/training/status",
         "whatsapp_export": "/pub/wa/export",
+        "dialogs_list": "/api/dialogs",
+        "dialogs_detail": "/api/dialogs/{lead_id}",
+        "dialogs_send": "/api/dialogs/{lead_id}/send",
+        "feedback_stats": "/api/feedback/stats",
+        "feedback": "/api/feedback",
     }
 
     webhook_secret = getattr(C.settings, "WEBHOOK_SECRET", "") if hasattr(C, "settings") else ""
@@ -585,6 +594,8 @@ def client_settings(tenant: int, request: Request):
     state_payload = dict(state)
     state_payload["form"] = form_payload
     state_payload["behavior"] = behavior_state
+    state_payload["personas"] = personas
+    client_state_json = json.dumps(state_payload)
 
     asset_version_value = C.asset_version()
 
@@ -595,12 +606,14 @@ def client_settings(tenant: int, request: Request):
         "key": key,
         "public_key": tenant_key,
         "persona": persona,
+        "personas": personas,
         "form": form_payload,
         "title": f"Настройки клиента · Tenant {tenant}",
         "subtitle": passport.get("brand") or "Личный кабинет клиента",
         "urls": urls,
         "state": state,
         "state_payload": state_payload,
+        "client_state_json": client_state_json,
         "primary_key": tenant_key,
         "max_days": EXPORT_MAX_DAYS,
         "client_settings_version": C.client_settings_version(),
@@ -608,7 +621,7 @@ def client_settings(tenant: int, request: Request):
         "asset_version": asset_version_value,
         "behavior": behavior_state,
     }
-    response = render_template("client/settings.html", context)
+    response = render_template("client/spa.html", context)
     response.headers["Cache-Control"] = "no-store"
     if key:
         try:

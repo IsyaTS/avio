@@ -13,7 +13,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.auto_reload = True
 templates.env.cache = {}
 
-from .common import asset_version, static_url
+from .common import asset_version, static_url, client_spa_assets
 
 
 def _datetimeformat(value):
@@ -27,6 +27,7 @@ def _datetimeformat(value):
 
 templates.env.filters["datetimeformat"] = _datetimeformat
 templates.env.globals["static_url"] = static_url
+templates.env.globals["client_spa_assets"] = client_spa_assets
 templates.env.globals.setdefault("client_settings_version", asset_version())
 templates.env.globals.setdefault("ASSET_VERSION", asset_version())
 
