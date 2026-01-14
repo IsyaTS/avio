@@ -1806,7 +1806,10 @@ class TelegramSessionManager:
                 mime = getattr(file_obj, "mime_type", None)
                 size = getattr(file_obj, "size", None)
                 fallback_id = getattr(message, "id", None)
-                url = f"telegram://{tenant}/{fallback_id or 0}"
+                if peer_id is not None:
+                    url = f"telegram://{tenant}/{peer_id}/{fallback_id or 0}"
+                else:
+                    url = f"telegram://{tenant}/{fallback_id or 0}"
                 try:
                     attachments.append(
                         Attachment(type=att_type, url=url, name=name, mime=mime, size=size)
@@ -2065,6 +2068,8 @@ class TelegramSessionManager:
     async def get_status(self, tenant: int) -> SessionState:
         await self.wait_until_ready()
         client_to_disconnect: Optional[TelegramClient] = None
+        check_client: Optional[TelegramClient] = None
+        needs_reconnect = False
         async with self._lock:
             state = self._states.get(tenant)
             if not state:
@@ -2117,10 +2122,73 @@ class TelegramSessionManager:
                         max(state.qr_expires_at - now, 0.0),
                     )
             result = state
+            if state.status == "authorized":
+                check_client = self._clients.get(tenant)
+                if check_client is None:
+                    needs_reconnect = True
 
         if client_to_disconnect:
             with contextlib.suppress(Exception):
                 await client_to_disconnect.disconnect()
+
+        if needs_reconnect and check_client is None:
+            try:
+                check_client = await self._ensure_authorized_client(tenant)
+            except Exception:
+                check_client = None
+        if check_client is not None:
+            try:
+                if not await check_client.is_user_authorized():
+                    await self._handle_authkey_unregistered(
+                        tenant,
+                        check_client,
+                        source="status_poll",
+                        remove_session=True,
+                    )
+                    async with self._lock:
+                        result = self._states.get(tenant, result)
+                else:
+                    try:
+                        await check_client.get_me()
+                    except AuthKeyUnregisteredError:
+                        await self._handle_authkey_unregistered(
+                            tenant,
+                            check_client,
+                            source="status_poll",
+                            remove_session=True,
+                        )
+                        async with self._lock:
+                            result = self._states.get(tenant, result)
+                    except Exception as exc:
+                        msg = str(exc).lower()
+                        if "auth_key_unregistered" in msg or "unauthorized" in msg:
+                            await self._handle_authkey_unregistered(
+                                tenant,
+                                check_client,
+                                source="status_poll",
+                                remove_session=True,
+                            )
+                            async with self._lock:
+                                result = self._states.get(tenant, result)
+                        else:
+                            LOGGER.exception("stage=status_get_me_failed tenant_id=%s", tenant)
+            except AuthKeyUnregisteredError:
+                await self._handle_authkey_unregistered(
+                    tenant,
+                    check_client,
+                    source="status_poll",
+                    remove_session=True,
+                )
+                async with self._lock:
+                    result = self._states.get(tenant, result)
+            except Exception:
+                LOGGER.exception("stage=status_check_failed tenant_id=%s", tenant)
+        elif needs_reconnect:
+            async with self._lock:
+                state = self._states.get(tenant, result)
+                if state.status == "authorized":
+                    self._set_status(tenant, state, "disconnected", reason="status_poll")
+                result = state
 
         return result
 
@@ -2180,13 +2248,22 @@ class TelegramSessionManager:
             if instance is None:
                 continue
             with contextlib.suppress(Exception):
+                if remove_session:
+                    await instance.log_out()
                 await instance.disconnect()
 
         removed_file = False
         if session_path is not None:
-            with contextlib.suppress(FileNotFoundError):
-                session_path.unlink()
-                removed_file = True
+            candidates = [
+                session_path,
+                session_path.with_suffix(".session-journal"),
+                session_path.with_suffix(".session-shm"),
+                session_path.with_suffix(".session-wal"),
+            ]
+            for path in candidates:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                    removed_file = True
 
         return removed_file
 

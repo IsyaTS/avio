@@ -27,6 +27,7 @@ from libs.core.db import (
 from . import common as C  # type: ignore
 
 from libs.core.integrations import avito
+from libs.core.services import amocrm as amocrm_service
 
 from .ui import templates  # noqa: F401 - ensure templates loaded for compatibility
 from libs.core.common import (
@@ -725,6 +726,21 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 )
             except Exception:
                 logger.exception("manager_message_store_failed tenant=%s lead_id=%s", tenant, lead_id)
+        try:
+            await amocrm_service.amocrm_on_outbound_message(
+                int(tenant),
+                int(lead_id),
+                text=text or "",
+                channel=provider or "whatsapp",
+                attachments=attachments,
+            )
+        except Exception as exc:
+            logger.warning(
+                "amocrm_outbound_failed tenant=%s lead_id=%s error=%s",
+                tenant,
+                lead_id,
+                exc,
+            )
 
         return _ok({"queued": False, "smartReply": False, "handoff": True})
 
@@ -748,6 +764,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     )
 
     stored_incoming = False
+    message_db_id = 0
     ts_ms = int(time.time() * 1000)
     from_addr = ""
     to_addr = ""
@@ -982,7 +999,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 peer=peer_value if provider in {"telegram", "avito"} else None,
             )
             if text:
-                await insert_message_in(
+                message_db_id = await insert_message_in(
                     lead_id,
                     text,
                     status="received",
@@ -990,6 +1007,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     telegram_user_id=telegram_user_id,
                 )
                 stored_incoming = True
+                if message_db_id:
+                    normalized_event["_message_db_id"] = message_db_id
+                    normalized_event["_incoming_stored"] = True
         logger.info(
             "stage=contact_resolved tenant=%s lead_id=%s contact_id=%s has_photo=%s text_len=%s attachments=%s",
             tenant,
@@ -1004,13 +1024,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     if text and not stored_incoming:
         try:
-            await insert_message_in(
+            message_db_id = await insert_message_in(
                 lead_id,
                 text,
                 status="received",
                 tenant_id=tenant,
                 telegram_user_id=telegram_user_id,
             )
+            if message_db_id:
+                normalized_event["_message_db_id"] = message_db_id
+                normalized_event["_incoming_stored"] = True
         except Exception:
             pass
 
@@ -1083,6 +1106,19 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         cfg = None
         behavior = {}
         attachment, caption = None, ""
+
+    try:
+        if await _redis_queue.exists(handoff_silence_key(int(tenant), int(lead_id))):
+            logger.info(
+                "event=smart_reply_silenced tenant=%s channel=%s lead_id=%s",
+                tenant,
+                provider,
+                lead_id,
+            )
+            await _enqueue_incoming_event()
+            return _ok({"queued": False, "leadId": lead_id, "smartReply": False, "handoff": True})
+    except Exception:
+        logger.debug("handoff_check_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
 
     attachment_path: pathlib.Path | None = None
     attachment_size = 0
@@ -1790,7 +1826,14 @@ async def telegram_webhook(request: Request):
             photo_id = photo_obj.get("id") if isinstance(photo_obj, Mapping) else None
             if photo_id:
                 attachment["photo_id"] = photo_id
-                attachment["url"] = f"telegram://{tenant}/{photo_id}"
+                message_id_value = (
+                    message.get("message_id")
+                    or message.get("id")
+                    or payload.get("message_id")
+                    or payload.get("id")
+                )
+                if peer_value and message_id_value:
+                    attachment["url"] = f"telegram://{tenant}/{peer_value}/{message_id_value}"
             if attachment not in attachments:
                 attachments = list(attachments)
                 attachments.append(attachment)

@@ -102,12 +102,21 @@
         <h2 class="section-title" style="font-size:1.35rem;">Персона</h2>
         <p class="section-subtitle">Полноценное описание ассистента. Лучше дать 1–2 абзаца.</p>
     </div>
+    <label class="label" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <span>Канал персоны</span>
+        <select id="persona-channel" class="input" style="min-width: 200px;">
+            <option value="base">Основная (общая)</option>
+            <option value="telegram">Telegram</option>
+            <option value="avito">Avito</option>
+        </select>
+    </label>
     <textarea id="persona-text" rows="10" class="textarea" placeholder="Опишите голос, цели и стиль общения ассистента">{{ persona }}</textarea>
     <div style="display:flex; flex-wrap:wrap; gap:12px;">
         <button id="save-persona" type="button" class="btn">Сохранить</button>
         <button id="download-config" type="button" class="btn btn--secondary">Скачать JSON конфиг</button>
         <span id="persona-message" class="status-text"></span>
       </div>
+    <script id="persona-data" type="application/json">{{ personas | tojson }}</script>
     </section>
 
 <section class="surface stack tab-panel hidden" data-tab-panel="behavior" data-testid="client-behavior">
@@ -596,6 +605,7 @@
     <div class="stack" style="gap: 6px;">
         <h2 class="section-title" style="font-size:1.35rem;">Фоллоу-апы</h2>
         <p class="section-subtitle">Автоматические сообщения клиентам через заданное время после последнего контакта.</p>
+        <p class="section-subtitle">Подсказка: сохраните ответ клиента в одном фоллоу-апе, чтобы использовать этот факт как условие в других.</p>
     </div>
     <div class="stack" id="followup-rules" style="gap: 12px;"></div>
     <div style="display:flex; flex-wrap:wrap; gap:12px;">
@@ -626,7 +636,7 @@
 
     <style>
       .dialogs-shell { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 12px; align-items: stretch; min-height: 520px; }
-      .dialogs-list { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px solid var(--border-subtle); border-radius: 10px; background: #0f11161a; overflow: auto; }
+      .dialogs-list { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px solid var(--border-subtle); border-radius: 10px; background: #0f11161a; overflow: auto; min-height: 520px; height: 70vh; max-height: 78vh; }
       .dialog-item { text-align: left; border: 1px solid transparent; background: #fff; color: inherit; border-radius: 10px; padding: 10px; display: grid; grid-template-columns: 1fr auto; gap: 6px; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
       .dialog-item:hover { border-color: var(--border-strong); }
       .dialog-item.is-active { border-color: var(--accent, #4c6fff); box-shadow: 0 0 0 2px rgba(76,111,255,0.12); }
@@ -663,7 +673,7 @@
       .badge[data-channel="unknown"] { background:#ececec; color:#333; }
       @media (max-width: 960px) {
         .dialogs-shell { grid-template-columns: 1fr; }
-        .dialogs-chat, .dialogs-list { min-height: auto; height: auto; max-height: none; }
+        .dialogs-chat, .dialogs-list { min-height: 320px; height: 60vh; max-height: 70vh; }
         .dialog-message { max-width: 100%; }
       }
     </style>

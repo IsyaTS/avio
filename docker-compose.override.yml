@@ -1,0 +1,10 @@
+services:
+  app:
+    volumes:
+      - ./:/app:rw
+  worker:
+    volumes:
+      - ./:/app:rw
+  tgworker:
+    volumes:
+      - ./:/app:rw

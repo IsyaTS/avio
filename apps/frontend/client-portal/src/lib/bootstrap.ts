@@ -24,6 +24,7 @@ export type BootstrapBehavior = {
   auto_reply_text?: string;
   avito_phone_tg_template?: string;
   avito_smart_reply_enabled?: boolean;
+  telegram_reply_enabled?: boolean;
   send_catalog_on_first_message?: boolean;
   triggers?: Array<{
     phrases?: string[];

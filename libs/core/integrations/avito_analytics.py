@@ -23,6 +23,7 @@ AUTH_URL = getattr(settings, "AVITO_AUTH_URL", "https://www.avito.ru/oauth")
 TOKEN_URL = getattr(settings, "AVITO_TOKEN_URL", "https://api.avito.ru/token/")
 API_BASE = getattr(settings, "AVITO_API_BASE", "https://api.avito.ru").rstrip("/")
 DEFAULT_TIMEOUT = getattr(settings, "AVITO_TIMEOUT", 10.0) or 10.0
+ALL_ITEM_STATUSES = "active,old,removed,blocked,rejected"
 
 ANALYTICS_REDIRECT = (
     os.getenv("AVITO_ANALYTICS_REDIRECT_URI")
@@ -262,49 +263,75 @@ async def get_user_me(access_token: str) -> Mapping[str, Any] | list[Any]:
     return {}
 
 
-async def list_items(access_token: str, *, page: int = 1, limit: int = 100) -> Mapping[str, Any] | list[Any]:
-    params = {"page": page, "limit": limit}
+async def list_items(
+    access_token: str,
+    *,
+    page: int = 1,
+    per_page: int = 100,
+    statuses: str | None = ALL_ITEM_STATUSES,
+) -> Mapping[str, Any] | list[Any]:
+    params: dict[str, Any] = {"page": page, "per_page": per_page}
+    if statuses:
+        params["status"] = statuses
     return await avito_request("GET", "/core/v1/items", access_token, params=params)
 
 
 async def get_items_stats(
     access_token: str,
     user_id: int | None,
-    item_ids: Sequence[int] | Sequence[str] | None,
     date_from: str,
     date_to: str,
-    fields: Sequence[str] | None = None,
+    *,
+    metrics: Sequence[str] | None = None,
+    grouping: str = "item",
+    limit: int = 1000,
+    offset: int = 0,
+    filters: Mapping[str, Any] | None = None,
+    item_ids: Sequence[int] | Sequence[str] | None = None,
+) -> Mapping[str, Any] | list[Any]:
+    if not user_id:
+        raise AvitoAPIError("User id required for stats request", status=400)
+    payload: dict[str, Any] = {
+        "dateFrom": date_from,
+        "dateTo": date_to,
+        "metrics": list(metrics) if metrics else ["views", "contacts", "favorites"],
+        "grouping": grouping,
+        "limit": limit,
+        "offset": offset,
+    }
+    if filters:
+        payload["filter"] = dict(filters)
+    target = f"/stats/v2/accounts/{user_id}/items"
+    try:
+        return await avito_request("POST", target, access_token, json=payload)
+    except AvitoAPIError as exc:
+        # fallback to v1 shallow stats for partial coverage
+        if exc.status not in (400, 401, 403, 404):
+            raise
+        if not item_ids:
+            raise
+        fallback_payload = {
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "itemIds": list(item_ids)[:200],
+        }
+        return await avito_request("POST", f"/stats/v1/accounts/{user_id}/items", access_token, json=fallback_payload)
+
+
+async def get_items_stats_v1(
+    access_token: str,
+    user_id: int,
+    item_ids: Sequence[int] | Sequence[str],
+    date_from: str,
+    date_to: str,
 ) -> Mapping[str, Any] | list[Any]:
     payload: dict[str, Any] = {
         "dateFrom": date_from,
         "dateTo": date_to,
+        "itemIds": list(item_ids),
     }
-    if item_ids:
-        payload["itemIds"] = list(item_ids)
-    if fields:
-        payload["fields"] = list(fields)
-    targets = []
-    if user_id:
-        targets.append(f"/stats/v1/accounts/{user_id}/items")
-        targets.append("/stats/v1/accounts/self/items")
-    targets.append("/stats/v1/items")
-    last_exc: AvitoAPIError | None = None
-    for target in targets:
-        try:
-            return await avito_request("POST", target, access_token, json=payload)
-        except AvitoAPIError as exc:
-            last_exc = exc
-            try:
-                params = dict(payload)
-                return await avito_request("GET", target, access_token, params=params)
-            except AvitoAPIError as exc_get:
-                last_exc = exc_get
-                if exc_get.status not in (401, 403, 404):
-                    raise
-                continue
-    if last_exc:
-        raise last_exc
-    raise AvitoAPIError("Avito stats endpoints unavailable")
+    target = f"/stats/v1/accounts/{user_id}/items"
+    return await avito_request("POST", target, access_token, json=payload)
 
 
 async def get_calls_stats(
@@ -312,72 +339,34 @@ async def get_calls_stats(
     user_id: int | None,
     date_from: str,
     date_to: str,
+    item_ids: Sequence[int] | Sequence[str] | None = None,
 ) -> Mapping[str, Any] | list[Any]:
-    params = {"dateFrom": date_from, "dateTo": date_to}
-    targets = []
-    if user_id:
-        targets.append(f"/stats/v1/accounts/{user_id}/calls")
-        targets.append("/stats/v1/accounts/self/calls")
-    targets.append("/stats/v1/calls")
-    last_exc: AvitoAPIError | None = None
-    for target in targets:
-        try:
-            return await avito_request("GET", target, access_token, params=params)
-        except AvitoAPIError as exc:
-            last_exc = exc
-            if exc.status not in (401, 403, 404):
-                raise
-            continue
-    if last_exc:
-        raise last_exc
-    raise AvitoAPIError("Avito calls stats endpoints unavailable")
+    if not user_id:
+        raise AvitoAPIError("User id required for calls stats", status=400)
+    payload: dict[str, Any] = {"dateFrom": date_from, "dateTo": date_to}
+    if item_ids:
+        payload["itemIds"] = list(item_ids)
+    target = f"/core/v1/accounts/{user_id}/calls/stats/"
+    return await avito_request("POST", target, access_token, json=payload)
 
 
 async def get_balance(access_token: str, user_id: int | None) -> Mapping[str, Any] | list[Any]:
-    targets = []
-    if user_id:
-        targets.append(f"/core/v1/accounts/{user_id}/balance")
-    targets.append("/core/v1/accounts/self/balance")
-    last_exc: AvitoAPIError | None = None
-    for target in targets:
-        try:
-            return await avito_request("GET", target, access_token)
-        except AvitoAPIError as exc:
-            last_exc = exc
-            if exc.status not in (401, 403, 404, 500):
-                raise
-            continue
-    if last_exc:
-        raise last_exc
-    raise AvitoAPIError("Avito balance endpoint unavailable")
+    if not user_id:
+        raise AvitoAPIError("User id required for balance", status=400)
+    target = f"/core/v1/accounts/{user_id}/balance/"
+    return await avito_request("GET", target, access_token)
 
 
 async def get_operations(
     access_token: str,
-    user_id: int | None,
     date_from: str,
     date_to: str,
-    *,
-    limit: int = 200,
-    offset: int = 0,
 ) -> Mapping[str, Any] | list[Any]:
-    params = {"dateFrom": date_from, "dateTo": date_to, "limit": limit, "offset": offset}
-    targets = []
-    if user_id:
-        targets.append(f"/core/v1/accounts/{user_id}/operations")
-    targets.append("/core/v1/accounts/self/operations")
-    last_exc: AvitoAPIError | None = None
-    for target in targets:
-        try:
-            return await avito_request("GET", target, access_token, params=params)
-        except AvitoAPIError as exc:
-            last_exc = exc
-            if exc.status not in (401, 403, 404):
-                raise
-            continue
-    if last_exc:
-        raise last_exc
-    raise AvitoAPIError("Avito operations endpoint unavailable")
+    payload = {
+        "dateTimeFrom": f"{date_from}T00:00:00",
+        "dateTimeTo": f"{date_to}T23:59:59",
+    }
+    return await avito_request("POST", "/core/v1/accounts/operations_history/", access_token, json=payload)
 
 
 async def messenger_list_chats(
@@ -390,6 +379,7 @@ async def messenger_list_chats(
     params = {"limit": limit, "offset": offset}
     targets = []
     if user_id:
+        targets.append(f"/messenger/v2/accounts/{user_id}/chats")
         targets.append(f"/messenger/v3/accounts/{user_id}/chats")
     targets.append("/messenger/v3/chats")
     last_exc: AvitoAPIError | None = None
@@ -398,10 +388,17 @@ async def messenger_list_chats(
             return await avito_request("GET", target, access_token, params=params)
         except AvitoAPIError as exc:
             last_exc = exc
-            if exc.status not in (401, 403, 404):
+            if exc.status == 404:
+                continue
+            if exc.status not in (401, 403, 404, 429):
                 raise
+            if exc.status == 429:
+                await asyncio.sleep(5.0)
+                continue
             continue
     if last_exc:
+        if last_exc.status in (404, 429):
+            return []
         raise last_exc
     raise AvitoAPIError("Avito chats endpoint unavailable")
 
@@ -414,9 +411,27 @@ async def messenger_get_messages(
     limit: int = 50,
     offset: int = 0,
 ) -> Mapping[str, Any] | list[Any]:
-    target = f"/messenger/v3/accounts/{user_id}/chats/{chat_id}/messages" if user_id else f"/messenger/v3/chats/{chat_id}/messages"
     params = {"limit": limit, "offset": offset}
-    return await avito_request("GET", target, access_token, params=params)
+    targets: list[str] = []
+    if user_id:
+        targets.append(f"/messenger/v1/accounts/{user_id}/chats/{chat_id}/messages")
+        targets.append(f"/messenger/v3/accounts/{user_id}/chats/{chat_id}/messages/")
+        targets.append(f"/messenger/v3/accounts/{user_id}/chats/{chat_id}/messages")
+    else:
+        targets.append(f"/messenger/v3/chats/{chat_id}/messages/")
+        targets.append(f"/messenger/v3/chats/{chat_id}/messages")
+    last_exc: AvitoAPIError | None = None
+    for target in targets:
+        try:
+            return await avito_request("GET", target, access_token, params=params)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status in {403, 404, 405}:
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise AvitoAPIError("Avito messages endpoint unavailable")
 
 
 # Job applications
@@ -470,13 +485,83 @@ async def job_get_vacancy_v2(access_token: str, vacancy_id: str) -> Mapping[str,
 
 # VAS pricing
 async def get_vas_prices(access_token: str, user_id: int | None, payload: Mapping[str, Any] | None = None) -> Mapping[str, Any] | list[Any]:
-    target = f"/core/v1/accounts/{user_id}/price/vas" if user_id else "/core/v1/accounts/self/price/vas"
+    if not user_id:
+        raise AvitoAPIError("User id required for VAS prices", status=400)
+    target = f"/core/v1/accounts/{user_id}/vas/prices"
     return await avito_request("POST", target, access_token, json=payload or {})
 
 
 async def get_vas_packages_prices(access_token: str, user_id: int | None, payload: Mapping[str, Any] | None = None) -> Mapping[str, Any] | list[Any]:
-    target = f"/core/v1/accounts/{user_id}/price/vas_packages" if user_id else "/core/v1/accounts/self/price/vas_packages"
+    if not user_id:
+        raise AvitoAPIError("User id required for VAS packages", status=400)
+    # API does not expose dedicated pricing endpoint for packages; reuse common prices catalog.
+    target = f"/core/v1/accounts/{user_id}/vas/prices"
     return await avito_request("POST", target, access_token, json=payload or {})
+
+
+# Optional/feature-detection endpoints
+async def try_get_ratings(access_token: str, user_id: int | None) -> Mapping[str, Any] | list[Any] | None:
+    candidates = []
+    if user_id:
+        candidates.append(f"/ratings/v1/accounts/{user_id}")
+        candidates.append(f"/core/v1/accounts/{user_id}/ratings")
+    candidates.append("/ratings/v1/accounts/self")
+    last_exc: AvitoAPIError | None = None
+    for path in candidates:
+        try:
+            return await avito_request("GET", path, access_token)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status in {403, 404}:
+                return None
+            if exc.status == 429 and exc.retryable:
+                await asyncio.sleep(0.5)
+                continue
+            continue
+    if last_exc and last_exc.status in {403, 404}:
+        return None
+    return None
+
+
+async def try_get_autoload_reports(access_token: str) -> Mapping[str, Any] | list[Any] | None:
+    candidates = ["/autoload/v1/reports", "/autoload/v2/reports", "/core/v1/autoload/reports"]
+    last_exc: AvitoAPIError | None = None
+    for path in candidates:
+        try:
+            return await avito_request("GET", path, access_token)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status in {403, 404}:
+                return None
+            if exc.status == 429 and exc.retryable:
+                await asyncio.sleep(0.5)
+                continue
+            continue
+    if last_exc and last_exc.status in {403, 404}:
+        return None
+    return None
+
+
+async def try_get_cpx_campaigns(access_token: str, user_id: int | None) -> Mapping[str, Any] | list[Any] | None:
+    candidates = []
+    if user_id:
+        candidates.append(f"/cpxpromo/v1/accounts/{user_id}/campaigns")
+    candidates.append("/cpxpromo/v1/campaigns")
+    last_exc: AvitoAPIError | None = None
+    for path in candidates:
+        try:
+            return await avito_request("GET", path, access_token)
+        except AvitoAPIError as exc:
+            last_exc = exc
+            if exc.status in {403, 404}:
+                return None
+            if exc.status == 429 and exc.retryable:
+                await asyncio.sleep(0.5)
+                continue
+            continue
+    if last_exc and last_exc.status in {403, 404}:
+        return None
+    return None
 
 
 __all__ = [
@@ -490,6 +575,7 @@ __all__ = [
     "get_user_me",
     "list_items",
     "get_items_stats",
+    "get_items_stats_v1",
     "get_calls_stats",
     "get_balance",
     "get_operations",
@@ -501,6 +587,9 @@ __all__ = [
     "job_get_vacancy_v2",
     "get_vas_prices",
     "get_vas_packages_prices",
+    "try_get_ratings",
+    "try_get_autoload_reports",
+    "try_get_cpx_campaigns",
     "DEFAULT_SCOPES",
     "ANALYTICS_REDIRECT",
 ]

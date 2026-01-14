@@ -4,7 +4,7 @@ import { useClient } from '../context/ClientContext';
 import { buildUrl, postJson, requestJson } from '../lib/api';
 
 type DialogItem = {
-  id: number;
+  id: string;
   channel: string;
   title: string;
   contact?: string | null;
@@ -68,6 +68,17 @@ const TrainingTab: React.FC = () => {
   const feedbackUrl = useMemo(() => bootstrap.urls?.feedback || '/api/feedback', [bootstrap.urls]);
   const feedbackStatsUrl = useMemo(() => bootstrap.urls?.feedback_stats || '/api/feedback/stats', [bootstrap.urls]);
 
+  const channelBadge = (channel?: string) => {
+    const value = (channel || '').toLowerCase();
+    if (value === 'avito') {
+      return { label: 'Avito', className: 'bg-orange-100 text-orange-700' };
+    }
+    if (value === 'telegram') {
+      return { label: 'telegram', className: 'bg-sky-100 text-sky-700' };
+    }
+    return { label: channel || 'channel', className: 'bg-slate-100 text-slate-500' };
+  };
+
   const refreshTrainingStatus = async () => {
     try {
       const data = await requestJson<Record<string, any>>(buildUrl(trainingStatusUrl, api));
@@ -126,7 +137,14 @@ const TrainingTab: React.FC = () => {
     setLoadingDialogs(true);
     try {
       const data = await requestJson<any>(buildUrl(dialogsListUrl, api));
-      const list: DialogItem[] = Array.isArray(data) ? data : data.dialogs || [];
+      const listRaw: any[] = Array.isArray(data) ? data : data.dialogs || [];
+      const list: DialogItem[] = listRaw.map((entry) => {
+        const idStr = entry?.id_str ?? entry?.id ?? '';
+        return {
+          ...entry,
+          id: typeof idStr === 'string' ? idStr : String(idStr),
+        };
+      });
       setDialogs(list);
       if (!activeDialog && list.length > 0) {
         setActiveDialog(list[0]);
@@ -316,10 +334,17 @@ const TrainingTab: React.FC = () => {
                 }`}
                 onClick={() => setActiveDialog(dialog)}
               >
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold text-slate-900">{dialog.title || dialog.contact || dialog.id}</div>
-                  <span className="text-xs uppercase text-slate-400">{dialog.channel}</span>
-                </div>
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold text-slate-900">{dialog.title || dialog.contact || dialog.id}</div>
+                    {(() => {
+                      const badge = channelBadge(dialog.channel);
+                      return (
+                        <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${badge.className}`}>
+                          {badge.label}
+                        </span>
+                      );
+                    })()}
+                  </div>
                 <div className="text-sm text-slate-500 line-clamp-2">{dialog.last_message || '—'}</div>
                 <div className="text-xs text-slate-400 mt-1">{dialog.last_ts || ''}</div>
               </button>
@@ -334,7 +359,14 @@ const TrainingTab: React.FC = () => {
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                   <div>
                     <div className="text-lg font-semibold text-slate-900">{activeDialog.title || activeDialog.id}</div>
-                    <div className="text-xs text-slate-400">{activeDialog.channel}</div>
+                    {(() => {
+                      const badge = channelBadge(activeDialog.channel);
+                      return (
+                        <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${badge.className}`}>
+                          {badge.label}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <button className="btn-secondary" onClick={() => fetchMessages(activeDialog)}>Обновить диалог</button>
                 </div>

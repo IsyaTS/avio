@@ -25,7 +25,7 @@ def _base_app(monkeypatch, public_key: str = "public-key") -> FastAPI:
         "read_tenant_config",
         lambda tenant: {"passport": {"brand": "Test Brand"}, "integrations": {}},
     )
-    monkeypatch.setattr(public_module.common, "read_persona", lambda tenant: "Persona\nLine2")
+    monkeypatch.setattr(public_module.common, "read_persona", lambda tenant, channel=None: "Persona\nLine2")
     monkeypatch.setattr(public_module.common, "public_base_url", lambda request=None: "https://example.test")
     monkeypatch.setattr(public_module.common, "public_url", lambda request, url: str(url))
     monkeypatch.setattr(public_module.common, "valid_key", lambda tenant, key: key == public_key)

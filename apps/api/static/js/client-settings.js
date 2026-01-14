@@ -1103,6 +1103,7 @@ function getLocation() {
     saveSettings: document.getElementById('save-settings'),
     settingsMessage: document.getElementById('settings-message'),
     personaTextarea: document.getElementById('persona-text'),
+    personaChannel: document.getElementById('persona-channel'),
     savePersona: document.getElementById('save-persona'),
     personaMessage: document.getElementById('persona-message'),
     downloadConfig: document.getElementById('download-config'),
@@ -1517,6 +1518,45 @@ function getLocation() {
     element.textContent = message || '';
   }
 
+  function normalizeFactKey(raw, fallback) {
+    const cleaned = String(raw || '')
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '_')
+      .replace(/[^\w\u0400-\u04ff_]+/g, '');
+    return cleaned || fallback;
+  }
+
+  function buildFactOptions(rules) {
+    const seen = new Map();
+    (Array.isArray(rules) ? rules : []).forEach((rule, idx) => {
+      const capture = rule && rule.capture;
+      if (!capture || !capture.key) return;
+      const label = String(capture.label || rule.text || capture.key || `Факт ${idx + 1}`).trim();
+      if (!seen.has(capture.key)) {
+        seen.set(capture.key, label);
+      }
+    });
+    return Array.from(seen.entries()).map(([key, label]) => ({ key, label }));
+  }
+
+  function conditionPresetFrom(condition) {
+    if (!condition) return 'custom';
+    const op = String(condition.op || 'eq');
+    const value = typeof condition.value === 'string'
+      ? condition.value
+      : Array.isArray(condition.value)
+      ? condition.value.join(', ')
+      : '';
+    if (op === 'eq' && value === 'yes') return 'yes';
+    if (op === 'eq' && value === 'no') return 'no';
+    if (op === 'neq' && value === 'yes') return 'not_yes';
+    if (op === 'neq' && value === 'no') return 'not_no';
+    if (op === 'exists') return 'exists';
+    if (op === 'not_exists') return 'not_exists';
+    return 'custom';
+  }
+
   async function postJSON(targetUrl, payload) {
     const resolvedUrl = typeof targetUrl === 'string' ? targetUrl.trim() : '';
     if (!resolvedUrl) {
@@ -1551,7 +1591,8 @@ function getLocation() {
       container.appendChild(empty);
       return;
     }
-    rules.forEach((rule) => {
+    const factOptions = buildFactOptions(rules);
+    rules.forEach((rule, index) => {
       const card = document.createElement('div');
       card.className = 'surface stack';
       card.style.gap = '10px';
@@ -1641,6 +1682,336 @@ function getLocation() {
       textLabel.appendChild(textArea);
       card.appendChild(textLabel);
 
+      const conditionRaw = Array.isArray(rule.condition) ? rule.condition[0] : rule.condition;
+      const condition = conditionRaw && typeof conditionRaw === 'object' ? conditionRaw : null;
+      const conditionKey = condition && condition.key ? String(condition.key) : '';
+      const conditionOp = condition && condition.op ? String(condition.op) : 'eq';
+      const conditionValueRaw = condition && condition.value != null
+        ? Array.isArray(condition.value) ? condition.value.join(', ') : String(condition.value)
+        : '';
+      const conditionMode = condition && condition.key ? 'conditional' : 'always';
+      const preset = conditionPresetFrom(condition);
+      const matchedFact = factOptions.find((opt) => opt.key === conditionKey);
+      const factSelectValue = matchedFact
+        ? matchedFact.key
+        : conditionKey
+        ? '__custom__'
+        : factOptions.length
+        ? factOptions[0].key
+        : '__custom__';
+
+      const conditionBlock = document.createElement('div');
+      conditionBlock.className = 'stack';
+      conditionBlock.style.gap = '10px';
+      const conditionTitle = document.createElement('span');
+      conditionTitle.className = 'label';
+      conditionTitle.textContent = 'Условие отправки';
+      conditionBlock.appendChild(conditionTitle);
+
+      const conditionModeLabel = document.createElement('label');
+      conditionModeLabel.className = 'stack';
+      conditionModeLabel.style.gap = '4px';
+      const conditionModeSpan = document.createElement('span');
+      conditionModeSpan.className = 'label';
+      conditionModeSpan.textContent = 'Режим';
+      const conditionModeSelect = document.createElement('select');
+      conditionModeSelect.className = 'followup-condition-mode';
+      [
+        { value: 'always', label: 'Всегда' },
+        { value: 'conditional', label: 'По условию' },
+      ].forEach((optData) => {
+        const opt = document.createElement('option');
+        opt.value = optData.value;
+        opt.textContent = optData.label;
+        if (conditionMode === optData.value) {
+          opt.selected = true;
+        }
+        conditionModeSelect.appendChild(opt);
+      });
+      conditionModeLabel.appendChild(conditionModeSpan);
+      conditionModeLabel.appendChild(conditionModeSelect);
+      conditionBlock.appendChild(conditionModeLabel);
+
+      const conditionFields = document.createElement('div');
+      conditionFields.style.display = conditionMode === 'conditional' ? 'grid' : 'none';
+      conditionFields.style.gridTemplateColumns = 'repeat(auto-fit, minmax(160px, 1fr))';
+      conditionFields.style.gap = '10px';
+
+      const conditionFactLabel = document.createElement('label');
+      conditionFactLabel.className = 'stack';
+      conditionFactLabel.style.gap = '4px';
+      const conditionFactSpan = document.createElement('span');
+      conditionFactSpan.className = 'label';
+      conditionFactSpan.textContent = 'Факт';
+      const conditionFactSelect = document.createElement('select');
+      conditionFactSelect.className = 'followup-condition-fact';
+      factOptions.forEach((optData) => {
+        const opt = document.createElement('option');
+        opt.value = optData.key;
+        opt.textContent = optData.label;
+        if (factSelectValue === optData.key) {
+          opt.selected = true;
+        }
+        conditionFactSelect.appendChild(opt);
+      });
+      const customFactOption = document.createElement('option');
+      customFactOption.value = '__custom__';
+      customFactOption.textContent = 'Свой факт...';
+      if (factSelectValue === '__custom__') {
+        customFactOption.selected = true;
+      }
+      conditionFactSelect.appendChild(customFactOption);
+      conditionFactLabel.appendChild(conditionFactSpan);
+      conditionFactLabel.appendChild(conditionFactSelect);
+      conditionFields.appendChild(conditionFactLabel);
+
+      const conditionKeyLabel = document.createElement('label');
+      conditionKeyLabel.className = 'stack';
+      conditionKeyLabel.style.gap = '4px';
+      const conditionKeySpan = document.createElement('span');
+      conditionKeySpan.className = 'label';
+      conditionKeySpan.textContent = 'Название факта';
+      const conditionKeyInput = document.createElement('input');
+      conditionKeyInput.type = 'text';
+      conditionKeyInput.className = 'followup-condition-custom-key';
+      conditionKeyInput.value = conditionKey;
+      conditionKeyLabel.appendChild(conditionKeySpan);
+      conditionKeyLabel.appendChild(conditionKeyInput);
+      conditionKeyLabel.style.display = factSelectValue === '__custom__' ? 'block' : 'none';
+      conditionFields.appendChild(conditionKeyLabel);
+
+      const conditionPresetLabel = document.createElement('label');
+      conditionPresetLabel.className = 'stack';
+      conditionPresetLabel.style.gap = '4px';
+      const conditionPresetSpan = document.createElement('span');
+      conditionPresetSpan.className = 'label';
+      conditionPresetSpan.textContent = 'Что должно быть';
+      const conditionPresetSelect = document.createElement('select');
+      conditionPresetSelect.className = 'followup-condition-preset';
+      [
+        { value: 'yes', label: 'Ответ "Да"' },
+        { value: 'no', label: 'Ответ "Нет"' },
+        { value: 'not_yes', label: 'Не "Да" (или нет ответа)' },
+        { value: 'not_no', label: 'Не "Нет" (или нет ответа)' },
+        { value: 'exists', label: 'Есть ответ/значение' },
+        { value: 'not_exists', label: 'Нет ответа/значения' },
+        { value: 'custom', label: 'Другое условие' },
+      ].forEach((optData) => {
+        const opt = document.createElement('option');
+        opt.value = optData.value;
+        opt.textContent = optData.label;
+        if (preset === optData.value) {
+          opt.selected = true;
+        }
+        conditionPresetSelect.appendChild(opt);
+      });
+      conditionPresetLabel.appendChild(conditionPresetSpan);
+      conditionPresetLabel.appendChild(conditionPresetSelect);
+      conditionFields.appendChild(conditionPresetLabel);
+
+      const conditionCustomRow = document.createElement('div');
+      conditionCustomRow.style.display = preset === 'custom' ? 'grid' : 'none';
+      conditionCustomRow.style.gridTemplateColumns = 'repeat(auto-fit, minmax(160px, 1fr))';
+      conditionCustomRow.style.gap = '10px';
+
+      const conditionOpLabel = document.createElement('label');
+      conditionOpLabel.className = 'stack';
+      conditionOpLabel.style.gap = '4px';
+      const conditionOpSpan = document.createElement('span');
+      conditionOpSpan.className = 'label';
+      conditionOpSpan.textContent = 'Оператор';
+      const conditionOpSelect = document.createElement('select');
+      conditionOpSelect.className = 'followup-condition-op';
+      [
+        { value: 'eq', label: '=' },
+        { value: 'neq', label: '≠' },
+        { value: 'exists', label: 'есть' },
+        { value: 'not_exists', label: 'нет' },
+        { value: 'in', label: 'в списке' },
+        { value: 'not_in', label: 'не в списке' },
+      ].forEach((optData) => {
+        const opt = document.createElement('option');
+        opt.value = optData.value;
+        opt.textContent = optData.label;
+        if (conditionOp === optData.value) {
+          opt.selected = true;
+        }
+        conditionOpSelect.appendChild(opt);
+      });
+      conditionOpLabel.appendChild(conditionOpSpan);
+      conditionOpLabel.appendChild(conditionOpSelect);
+      conditionCustomRow.appendChild(conditionOpLabel);
+
+      const conditionValueLabel = document.createElement('label');
+      conditionValueLabel.className = 'stack';
+      conditionValueLabel.style.gap = '4px';
+      const conditionValueSpan = document.createElement('span');
+      conditionValueSpan.className = 'label';
+      conditionValueSpan.textContent = 'Значение';
+      const conditionValueInput = document.createElement('input');
+      conditionValueInput.type = 'text';
+      conditionValueInput.className = 'followup-condition-value';
+      conditionValueInput.placeholder = 'значения через запятую';
+      conditionValueInput.value = conditionValueRaw || '';
+      conditionValueLabel.appendChild(conditionValueSpan);
+      conditionValueLabel.appendChild(conditionValueInput);
+      conditionCustomRow.appendChild(conditionValueLabel);
+
+      const updateConditionValueVisibility = () => {
+        const op = conditionOpSelect.value;
+        conditionValueLabel.style.display = ['exists', 'not_exists'].includes(op) ? 'none' : 'block';
+      };
+      updateConditionValueVisibility();
+
+      const updateConditionVisibility = () => {
+        const enabled = conditionModeSelect.value === 'conditional';
+        conditionFields.style.display = enabled ? 'grid' : 'none';
+        conditionCustomRow.style.display = enabled && conditionPresetSelect.value === 'custom' ? 'grid' : 'none';
+      };
+      updateConditionVisibility();
+
+      conditionModeSelect.addEventListener('change', updateConditionVisibility);
+
+      conditionFactSelect.addEventListener('change', () => {
+        conditionKeyLabel.style.display = conditionFactSelect.value === '__custom__' ? 'block' : 'none';
+      });
+
+      conditionPresetSelect.addEventListener('change', () => {
+        updateConditionVisibility();
+        updateConditionValueVisibility();
+      });
+
+      conditionOpSelect.addEventListener('change', updateConditionValueVisibility);
+
+      conditionBlock.appendChild(conditionFields);
+      conditionBlock.appendChild(conditionCustomRow);
+      card.appendChild(conditionBlock);
+
+      const capture = rule.capture && typeof rule.capture === 'object' ? rule.capture : null;
+      const captureBlock = document.createElement('div');
+      captureBlock.className = 'stack';
+      captureBlock.style.gap = '10px';
+      const captureToggleLabel = document.createElement('label');
+      captureToggleLabel.style.display = 'flex';
+      captureToggleLabel.style.alignItems = 'center';
+      captureToggleLabel.style.gap = '8px';
+      const captureToggle = document.createElement('input');
+      captureToggle.type = 'checkbox';
+      captureToggle.className = 'followup-capture-enabled';
+      captureToggle.checked = !!capture;
+      captureToggleLabel.appendChild(captureToggle);
+      captureToggleLabel.appendChild(document.createTextNode('Сохранять ответ клиента'));
+      captureBlock.appendChild(captureToggleLabel);
+
+      const captureFields = document.createElement('div');
+      captureFields.style.display = captureToggle.checked ? 'block' : 'none';
+      captureFields.className = 'stack';
+      captureFields.style.gap = '10px';
+
+      const captureLabel = document.createElement('label');
+      captureLabel.className = 'stack';
+      captureLabel.style.gap = '4px';
+      const captureLabelSpan = document.createElement('span');
+      captureLabelSpan.className = 'label';
+      captureLabelSpan.textContent = 'Название факта';
+      const captureLabelInput = document.createElement('input');
+      captureLabelInput.type = 'text';
+      captureLabelInput.className = 'followup-capture-label';
+      captureLabelInput.placeholder = 'Например: Заказ оформлен';
+      captureLabelInput.value = capture && capture.label ? String(capture.label) : '';
+      captureLabel.appendChild(captureLabelSpan);
+      captureLabel.appendChild(captureLabelInput);
+      captureFields.appendChild(captureLabel);
+
+      const captureKeyDetails = document.createElement('details');
+      captureKeyDetails.className = 'surface';
+      captureKeyDetails.style.padding = '10px';
+      const captureKeySummary = document.createElement('summary');
+      captureKeySummary.textContent = 'Технический ключ';
+      captureKeySummary.style.cursor = 'pointer';
+      captureKeyDetails.appendChild(captureKeySummary);
+
+      const captureKeyBody = document.createElement('div');
+      captureKeyBody.className = 'stack';
+      captureKeyBody.style.gap = '6px';
+      captureKeyBody.style.marginTop = '10px';
+
+      const captureKeyLabel = document.createElement('label');
+      captureKeyLabel.className = 'stack';
+      captureKeyLabel.style.gap = '4px';
+      const captureKeySpan = document.createElement('span');
+      captureKeySpan.className = 'label';
+      captureKeySpan.textContent = 'Технический ключ';
+      const captureKeyInput = document.createElement('input');
+      captureKeyInput.type = 'text';
+      captureKeyInput.className = 'followup-capture-key';
+      const fallbackLabel = String(rule.text || `Факт ${index + 1}`);
+      const fallbackKey = normalizeFactKey(captureLabelInput.value || fallbackLabel, `fact_${index + 1}`);
+      captureKeyInput.value = capture && capture.key ? String(capture.key) : fallbackKey;
+      captureKeyLabel.appendChild(captureKeySpan);
+      captureKeyLabel.appendChild(captureKeyInput);
+      captureKeyBody.appendChild(captureKeyLabel);
+
+      const captureKeyHint = document.createElement('div');
+      captureKeyHint.className = 'status-text muted';
+      captureKeyHint.textContent = 'Используется в условиях. Меняйте только если понимаете последствия.';
+      captureKeyBody.appendChild(captureKeyHint);
+
+      captureKeyDetails.appendChild(captureKeyBody);
+      captureFields.appendChild(captureKeyDetails);
+
+      const captureDetails = document.createElement('details');
+      captureDetails.className = 'surface';
+      captureDetails.style.padding = '10px';
+      const captureSummary = document.createElement('summary');
+      captureSummary.textContent = 'Синонимы ответов';
+      captureSummary.style.cursor = 'pointer';
+      captureDetails.appendChild(captureSummary);
+
+      const captureSynonyms = document.createElement('div');
+      captureSynonyms.style.display = 'grid';
+      captureSynonyms.style.gridTemplateColumns = 'repeat(auto-fit, minmax(160px, 1fr))';
+      captureSynonyms.style.gap = '10px';
+      captureSynonyms.style.marginTop = '10px';
+
+      const captureYesLabel = document.createElement('label');
+      captureYesLabel.className = 'stack';
+      captureYesLabel.style.gap = '4px';
+      const captureYesSpan = document.createElement('span');
+      captureYesSpan.className = 'label';
+      captureYesSpan.textContent = 'Ответы "Да"';
+      const captureYesInput = document.createElement('textarea');
+      captureYesInput.className = 'textarea followup-capture-yes';
+      captureYesInput.rows = 2;
+      captureYesInput.value = Array.isArray(capture && capture.yes) ? capture.yes.join('\n') : '';
+      captureYesLabel.appendChild(captureYesSpan);
+      captureYesLabel.appendChild(captureYesInput);
+      captureSynonyms.appendChild(captureYesLabel);
+
+      const captureNoLabel = document.createElement('label');
+      captureNoLabel.className = 'stack';
+      captureNoLabel.style.gap = '4px';
+      const captureNoSpan = document.createElement('span');
+      captureNoSpan.className = 'label';
+      captureNoSpan.textContent = 'Ответы "Нет"';
+      const captureNoInput = document.createElement('textarea');
+      captureNoInput.className = 'textarea followup-capture-no';
+      captureNoInput.rows = 2;
+      captureNoInput.value = Array.isArray(capture && capture.no) ? capture.no.join('\n') : '';
+      captureNoLabel.appendChild(captureNoSpan);
+      captureNoLabel.appendChild(captureNoInput);
+      captureSynonyms.appendChild(captureNoLabel);
+
+      captureDetails.appendChild(captureSynonyms);
+      captureFields.appendChild(captureDetails);
+
+      captureToggle.addEventListener('change', () => {
+        captureFields.style.display = captureToggle.checked ? 'block' : 'none';
+      });
+
+      captureBlock.appendChild(captureFields);
+      card.appendChild(captureBlock);
+
       const actions = document.createElement('div');
       actions.style.display = 'flex';
       actions.style.gap = '10px';
@@ -1677,24 +2048,107 @@ function getLocation() {
   function collectFollowUpRules() {
     if (!dom.followupRules) return [];
     const cards = Array.from(dom.followupRules.querySelectorAll('[data-type="followup-card"]'));
-    return cards.map((card) => {
+    return cards.map((card, index) => {
       const channelNode = card.querySelector('.followup-channel');
       const delayNode = card.querySelector('.followup-delay');
       const attemptsNode = card.querySelector('.followup-attempts');
       const activeNode = card.querySelector('.followup-active');
       const textNode = card.querySelector('.followup-text');
+      const conditionModeNode = card.querySelector('.followup-condition-mode');
+      const conditionFactNode = card.querySelector('.followup-condition-fact');
+      const conditionCustomKeyNode = card.querySelector('.followup-condition-custom-key');
+      const conditionPresetNode = card.querySelector('.followup-condition-preset');
+      const conditionOpNode = card.querySelector('.followup-condition-op');
+      const conditionValueNode = card.querySelector('.followup-condition-value');
+      const captureToggleNode = card.querySelector('.followup-capture-enabled');
+      const captureLabelNode = card.querySelector('.followup-capture-label');
+      const captureKeyNode = card.querySelector('.followup-capture-key');
+      const captureYesNode = card.querySelector('.followup-capture-yes');
+      const captureNoNode = card.querySelector('.followup-capture-no');
       const channel = channelNode && channelNode.value ? channelNode.value : 'any';
       const delayRaw = delayNode && delayNode.value ? delayNode.value : '0';
       const attemptsRaw = attemptsNode && attemptsNode.value ? attemptsNode.value : '1';
       const active = activeNode ? !!activeNode.checked : true;
       const text = textNode && textNode.value ? textNode.value : '';
-      return {
+      const parseTokens = (value) => {
+        if (!value) return [];
+        return String(value)
+          .split(/\n|,/)
+          .map((token) => token.trim())
+          .filter(Boolean);
+      };
+      const conditionMode = conditionModeNode && conditionModeNode.value ? conditionModeNode.value : 'always';
+      let condition = null;
+      if (conditionMode === 'conditional') {
+        const factValue = conditionFactNode && conditionFactNode.value ? conditionFactNode.value : '__custom__';
+        const customKey = conditionCustomKeyNode && conditionCustomKeyNode.value
+          ? conditionCustomKeyNode.value.trim()
+          : '';
+        const resolvedKey = factValue === '__custom__' ? customKey : factValue;
+        const preset = conditionPresetNode && conditionPresetNode.value ? conditionPresetNode.value : 'custom';
+        if (resolvedKey) {
+          if (preset === 'yes') {
+            condition = { key: resolvedKey, op: 'eq', value: 'yes' };
+          } else if (preset === 'no') {
+            condition = { key: resolvedKey, op: 'eq', value: 'no' };
+          } else if (preset === 'not_yes') {
+            condition = { key: resolvedKey, op: 'neq', value: 'yes' };
+          } else if (preset === 'not_no') {
+            condition = { key: resolvedKey, op: 'neq', value: 'no' };
+          } else if (preset === 'exists') {
+            condition = { key: resolvedKey, op: 'exists' };
+          } else if (preset === 'not_exists') {
+            condition = { key: resolvedKey, op: 'not_exists' };
+          } else {
+            const condOp = conditionOpNode && conditionOpNode.value ? conditionOpNode.value : 'eq';
+            if (['exists', 'not_exists'].includes(condOp)) {
+              condition = { key: resolvedKey, op: condOp };
+            } else {
+              const condValue = conditionValueNode && conditionValueNode.value
+                ? conditionValueNode.value.trim()
+                : '';
+              if (condValue) {
+                condition = { key: resolvedKey, op: condOp, value: condValue };
+              }
+            }
+          }
+        }
+      }
+      let capture = null;
+      const captureEnabled = captureToggleNode ? !!captureToggleNode.checked : false;
+      if (captureEnabled) {
+        const captureLabel = captureLabelNode && captureLabelNode.value ? captureLabelNode.value.trim() : '';
+        const fallbackLabel = text || `Факт ${index + 1}`;
+        const resolvedLabel = captureLabel || fallbackLabel;
+        let captureKey = captureKeyNode && captureKeyNode.value ? captureKeyNode.value.trim() : '';
+        if (!captureKey) {
+          captureKey = normalizeFactKey(resolvedLabel, `fact_${index + 1}`);
+        }
+        if (captureKey) {
+          capture = {
+            key: captureKey,
+            yes: parseTokens(captureYesNode && captureYesNode.value ? captureYesNode.value : ''),
+            no: parseTokens(captureNoNode && captureNoNode.value ? captureNoNode.value : ''),
+          };
+          if (resolvedLabel) {
+            capture.label = resolvedLabel;
+          }
+        }
+      }
+      const payload = {
         channel,
         delay_minutes: Number.parseInt(delayRaw, 10) || 0,
         max_attempts: Number.parseInt(attemptsRaw, 10) || 0,
         active,
         text,
       };
+      if (condition) {
+        payload.condition = condition;
+      }
+      if (capture) {
+        payload.capture = capture;
+      }
+      return payload;
     }).filter((rule) => rule.delay_minutes > 0 && rule.text.trim());
   }
 
@@ -1783,11 +2237,60 @@ function getLocation() {
     });
   }
 
+  const personaDataEl = document.getElementById('persona-data');
+  let personaSnapshot = { base: dom.personaTextarea ? dom.personaTextarea.value : '', telegram: '', avito: '' };
+  if (personaDataEl && personaDataEl.textContent) {
+    try {
+      const payload = JSON.parse(personaDataEl.textContent);
+      if (payload && typeof payload === 'object') {
+        personaSnapshot = {
+          base: dom.personaTextarea ? dom.personaTextarea.value : '',
+          telegram: typeof payload.telegram === 'string' ? payload.telegram : '',
+          avito: typeof payload.avito === 'string' ? payload.avito : '',
+        };
+      }
+    } catch (_) {}
+  }
+
+  const getPersonaChannel = () => {
+    if (!dom.personaChannel) return 'base';
+    const value = String(dom.personaChannel.value || '').toLowerCase();
+    return ['telegram', 'avito'].includes(value) ? value : 'base';
+  };
+
+  const syncPersonaTextarea = () => {
+    if (!dom.personaTextarea) return;
+    const channel = getPersonaChannel();
+    if (channel === 'telegram') {
+      dom.personaTextarea.value = personaSnapshot.telegram || '';
+    } else if (channel === 'avito') {
+      dom.personaTextarea.value = personaSnapshot.avito || '';
+    } else {
+      dom.personaTextarea.value = personaSnapshot.base || '';
+    }
+  };
+
+  if (dom.personaChannel && dom.personaTextarea) {
+    dom.personaChannel.addEventListener('change', syncPersonaTextarea);
+  }
+
   if (dom.savePersona && dom.personaTextarea) {
     dom.savePersona.addEventListener('click', async () => {
       try {
         const targetUrl = resolveEndpointUrl(endpoints.savePersona, withTenant());
-        await postJSON(targetUrl, { text: dom.personaTextarea.value });
+        const channel = getPersonaChannel();
+        const payload = { text: dom.personaTextarea.value };
+        if (channel !== 'base') {
+          payload.channel = channel;
+        }
+        await postJSON(targetUrl, payload);
+        if (channel === 'telegram') {
+          personaSnapshot.telegram = dom.personaTextarea.value || '';
+        } else if (channel === 'avito') {
+          personaSnapshot.avito = dom.personaTextarea.value || '';
+        } else {
+          personaSnapshot.base = dom.personaTextarea.value || '';
+        }
         setStatus(dom.personaMessage, 'Персона обновлена', 'muted');
       } catch (error) {
         setStatus(dom.personaMessage, `Не удалось обновить: ${error.message}`, 'alert');

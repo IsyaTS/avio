@@ -227,18 +227,40 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
             scores = []
 
     if not scores:
-        # TF-IDF fallback in-memory
+        # TF-IDF fallback in-memory (works with lightweight shim).
         try:
             from libs.core.sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
 
             vectorizer = TfidfVectorizer(analyzer="word", ngram_range=(1, 2), min_df=1)
             matrix = vectorizer.fit_transform(texts)
             q_vec = vectorizer.transform([sanitized_query])
-            import numpy as np  # type: ignore
 
-            tfidf_scores = (q_vec @ matrix.T).toarray().ravel()
-            order = np.argsort(-tfidf_scores)
-            scores = [(int(i), float(tfidf_scores[int(i)])) for i in order if tfidf_scores[int(i)] > 0]
+            if hasattr(matrix, "vectors") and hasattr(q_vec, "vectors"):
+                doc_vectors = getattr(matrix, "vectors", []) or []
+                query_vectors = getattr(q_vec, "vectors", []) or []
+                q_dict = query_vectors[0] if query_vectors else {}
+                tfidf_scores: list[tuple[int, float]] = []
+                if q_dict:
+                    for idx, doc in enumerate(doc_vectors):
+                        if not doc:
+                            continue
+                        score = 0.0
+                        if len(q_dict) <= len(doc):
+                            for term, weight in q_dict.items():
+                                score += weight * float(doc.get(term, 0.0))
+                        else:
+                            for term, weight in doc.items():
+                                score += float(weight) * float(q_dict.get(term, 0.0))
+                        if score > 0:
+                            tfidf_scores.append((idx, float(score)))
+                tfidf_scores.sort(key=lambda item: item[1], reverse=True)
+                scores = tfidf_scores
+            else:
+                import numpy as np  # type: ignore
+
+                tfidf_scores = (q_vec @ matrix.T).toarray().ravel()
+                order = np.argsort(-tfidf_scores)
+                scores = [(int(i), float(tfidf_scores[int(i)])) for i in order if tfidf_scores[int(i)] > 0]
         except Exception:
             _log.exception(f"{_LOG_PREFIX} tfidf_retrieve_failed tenant=%s", tenant)
             return []

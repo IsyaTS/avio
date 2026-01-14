@@ -550,6 +550,10 @@ def client_settings(tenant: int, request: Request):
         cfg = {}
 
     persona = C.read_persona(tenant)
+    personas = {
+        "telegram": C.read_persona(tenant, "telegram"),
+        "avito": C.read_persona(tenant, "avito"),
+    }
 
     passport_raw = cfg.get("passport", {})
     passport = passport_raw if isinstance(passport_raw, dict) else {}
@@ -624,6 +628,7 @@ def client_settings(tenant: int, request: Request):
     state_payload = dict(state)
     state_payload["form"] = form_payload
     state_payload["behavior"] = behavior_state
+    state_payload["personas"] = personas
     client_state_json = json.dumps(state_payload)
 
     asset_version_value = C.asset_version()
@@ -635,6 +640,7 @@ def client_settings(tenant: int, request: Request):
         "key": key,
         "public_key": tenant_key,
         "persona": persona,
+        "personas": personas,
         "form": form_payload,
         "title": f"Настройки клиента · Tenant {tenant}",
         "subtitle": passport.get("brand") or "Личный кабинет клиента",
@@ -752,6 +758,8 @@ async def save_behavior(tenant: int, request: Request):
     behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
     behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
     behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
+    if payload.get("telegram_reply_enabled") is not None:
+        behavior["telegram_reply_enabled"] = bool(payload.get("telegram_reply_enabled"))
     if payload.get("send_catalog_on_first_message") is not None:
         behavior["send_catalog_on_first_message"] = bool(payload.get("send_catalog_on_first_message"))
     behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
@@ -807,6 +815,106 @@ async def save_follow_ups(tenant: int, request: Request):
 
     validated: list[dict[str, object]] = []
     allowed_channels = {"telegram", "avito", "whatsapp", "any", "*"}
+    fact_key_max_len = 64
+
+    def _normalize_fact_key(raw: Any) -> str:
+        key = str(raw or "").strip().lower()
+        if not key:
+            return ""
+        key = re.sub(r"\s+", "_", key)
+        if fact_key_max_len and len(key) > fact_key_max_len:
+            key = key[:fact_key_max_len]
+        return key
+
+    def _normalize_phrase_list(raw_value: Any) -> list[str]:
+        if raw_value is None:
+            return []
+        items: list[str] = []
+        if isinstance(raw_value, str):
+            items = re.split(r"[\n,]+", raw_value)
+        elif isinstance(raw_value, (list, tuple, set)):
+            for entry in raw_value:
+                if entry is None:
+                    continue
+                items.append(str(entry))
+        else:
+            items = [str(raw_value)]
+        cleaned: list[str] = []
+        for item in items:
+            token = str(item or "").strip().lower()
+            if token:
+                cleaned.append(token)
+        return cleaned
+
+    def _normalize_condition(raw_value: Any) -> dict | list | None:
+        if not raw_value:
+            return None
+        if isinstance(raw_value, dict):
+            raw_list = [raw_value]
+        elif isinstance(raw_value, list):
+            raw_list = raw_value
+        else:
+            return None
+        normalized: list[dict] = []
+        op_aliases = {"=": "eq", "==": "eq", "!=": "neq", "<>": "neq"}
+        allowed_ops = {"eq", "neq", "exists", "not_exists", "in", "not_in"}
+        for cond in raw_list:
+            if not isinstance(cond, dict):
+                continue
+            key = _normalize_fact_key(cond.get("key") or cond.get("fact"))
+            if not key:
+                continue
+            op_raw = str(cond.get("op") or cond.get("operator") or "eq").strip().lower()
+            op = op_aliases.get(op_raw, op_raw)
+            if op not in allowed_ops:
+                op = "eq"
+            if op in {"exists", "not_exists"}:
+                normalized.append({"key": key, "op": op})
+                continue
+            value = cond.get("value")
+            if op in {"in", "not_in"}:
+                values = _normalize_phrase_list(value)
+                if not values:
+                    continue
+                normalized.append({"key": key, "op": op, "value": values})
+                continue
+            if value is None:
+                continue
+            value_str = str(value).strip().lower()
+            if not value_str:
+                continue
+            normalized.append({"key": key, "op": op, "value": value_str})
+        if not normalized:
+            return None
+        if len(normalized) == 1:
+            return normalized[0]
+        return normalized
+
+    def _normalize_capture(raw_value: Any) -> dict | None:
+        if not isinstance(raw_value, dict):
+            return None
+        key = _normalize_fact_key(raw_value.get("key") or raw_value.get("fact"))
+        if not key:
+            return None
+        label_raw = raw_value.get("label") or raw_value.get("title")
+        label = str(label_raw).strip() if label_raw is not None else ""
+        yes_tokens = _normalize_phrase_list(raw_value.get("yes") or raw_value.get("yes_tokens"))
+        no_tokens = _normalize_phrase_list(raw_value.get("no") or raw_value.get("no_tokens"))
+        if not yes_tokens and not no_tokens:
+            yes_tokens = ["да"]
+            no_tokens = ["нет"]
+        value_yes = str(raw_value.get("value_yes") or raw_value.get("valueYes") or "yes").strip().lower()
+        value_no = str(raw_value.get("value_no") or raw_value.get("valueNo") or "no").strip().lower()
+        payload = {
+            "key": key,
+            "yes": yes_tokens,
+            "no": no_tokens,
+            "value_yes": value_yes,
+            "value_no": value_no,
+        }
+        if label:
+            payload["label"] = label
+        return payload
 
     for rule in rules_raw:
         if not isinstance(rule, dict):
@@ -818,8 +926,6 @@ async def save_follow_ups(tenant: int, request: Request):
             delay_minutes = int(rule.get("delay_minutes") or 0)
         except Exception:
             delay_minutes = 0
-        if delay_minutes <= 0:
-            continue
         text_value = str(rule.get("text") or "").strip()
         if not text_value:
             continue
@@ -830,15 +936,25 @@ async def save_follow_ups(tenant: int, request: Request):
         if max_attempts < 0:
             max_attempts = 0
         active = bool(rule.get("active", True))
-        validated.append(
-            {
-                "channel": channel,
-                "delay_minutes": delay_minutes,
-                "text": text_value,
-                "max_attempts": max_attempts,
-                "active": active,
-            }
-        )
+        condition = _normalize_condition(rule.get("condition"))
+        capture = _normalize_capture(rule.get("capture"))
+        trigger_on_answer = bool(rule.get("trigger_on_answer"))
+        if delay_minutes <= 0 and not trigger_on_answer:
+            continue
+        payload_rule: dict[str, object] = {
+            "channel": channel,
+            "delay_minutes": delay_minutes if delay_minutes > 0 else 0,
+            "text": text_value,
+            "max_attempts": max_attempts,
+            "active": active,
+        }
+        if trigger_on_answer:
+            payload_rule["trigger_on_answer"] = True
+        if condition:
+            payload_rule["condition"] = condition
+        if capture:
+            payload_rule["capture"] = capture
+        validated.append(payload_rule)
 
     cfg = C.read_tenant_config(tenant)
     if not isinstance(cfg, dict):
@@ -865,6 +981,10 @@ async def list_dialogs_api(request: Request, tenant: int | str | None = None, li
 
     dialogs_raw = await db.fetch_dialogs_for_tenant(tenant_id, limit=limit_val)
     dialogs: list[dict[str, Any]] = []
+
+    def _title_is_numeric(value: str) -> bool:
+        return value.strip().isdigit() if isinstance(value, str) else False
+
     for entry in dialogs_raw:
         channel_name = (entry.get("channel") or "").strip().lower() or "unknown"
         if channel_name not in {"telegram", "avito", "whatsapp", "unknown"}:
@@ -874,15 +994,33 @@ async def list_dialogs_api(request: Request, tenant: int | str | None = None, li
             lead_ref = int(lead_id)
         except Exception:
             lead_ref = 0
-        title = (
-            entry.get("title")
-            or entry.get("contact")
-            or entry.get("peer")
-            or (f"Лид {lead_ref}" if lead_ref else "Лид")
-        )
+        raw_title = entry.get("title")
+        raw_contact = entry.get("contact")
+        raw_peer = entry.get("peer")
+        avito_login = entry.get("avito_login")
+        telegram_username = entry.get("telegram_username")
+        if channel_name == "avito":
+            title = avito_login or raw_title or raw_contact
+            if title and _title_is_numeric(str(title)):
+                title = avito_login
+            if not title:
+                title = "Avito · клиент"
+        elif channel_name == "telegram":
+            title = raw_title or telegram_username or raw_contact
+            if title and _title_is_numeric(str(title)):
+                title = telegram_username
+            if not title:
+                title = "Telegram · клиент"
+        else:
+            title = raw_title or raw_contact or raw_peer
+        if not title:
+            title = f"Лид {lead_ref}" if lead_ref else "Лид"
+        lead_ref_str = str(lead_ref)
         dialogs.append(
             {
-                "id": lead_ref,
+                "id": lead_ref_str,
+                "id_num": lead_ref,
+                "id_str": lead_ref_str,
                 "channel": channel_name,
                 "title": title,
                 "contact": entry.get("contact"),
@@ -1211,7 +1349,9 @@ async def save_persona(tenant: int, request: Request):
     if not _auth(tenant, key):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     payload = await request.json()
-    C.write_persona(tenant, payload.get("text") or "")
+    channel = (payload.get("channel") or "").strip().lower()
+    channel = channel if channel in {"telegram", "avito"} else None
+    C.write_persona(tenant, payload.get("text") or "", channel=channel)
     return {"ok": True}
 
 

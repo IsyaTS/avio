@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -18,7 +19,7 @@ from libs.core.db import (
     get_lead_peer,
     get_telegram_user_id_by_lead,
 )
-from libs.core.common import OUTBOX_QUEUE_KEY
+from libs.core.common import HANDOFF_SILENCE_TTL_SECONDS, OUTBOX_QUEUE_KEY, handoff_silence_key
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
@@ -26,6 +27,8 @@ FOLLOWUP_ZSET = "followup:schedule"
 FOLLOWUP_JOB_PREFIX = "followup:job"
 FOLLOWUP_SENT_PREFIX = "followup:sent"
 FOLLOWUP_SCHEDULED_PREFIX = "followup:scheduled"
+FOLLOWUP_FACT_PREFIX = "followup:fact"
+FOLLOWUP_PENDING_PREFIX = "followup:pending"
 
 # Loop tuning
 POLL_INTERVAL = max(0.5, float(os.getenv("FOLLOWUP_POLL_INTERVAL", "2.0")))
@@ -33,6 +36,10 @@ BATCH_LIMIT = max(1, int(os.getenv("FOLLOWUP_BATCH_LIMIT", "20")))
 SCHEDULE_DEDUP_TTL = max(300, int(os.getenv("FOLLOWUP_SCHEDULE_DEDUP_TTL", "86400")))
 SENT_DEDUP_TTL = max(900, int(os.getenv("FOLLOWUP_SENT_DEDUP_TTL", "86400")))
 RETRY_DELAY_SECONDS = max(60, int(os.getenv("FOLLOWUP_RETRY_DELAY", "300")))
+FACT_TTL_SECONDS = max(3600, int(os.getenv("FOLLOWUP_FACT_TTL_SECONDS", str(90 * 86400))))
+CAPTURE_TTL_SECONDS = max(300, int(os.getenv("FOLLOWUP_CAPTURE_TTL_SECONDS", str(14 * 86400))))
+FUZZY_MAX_DISTANCE = max(0, int(os.getenv("FOLLOWUP_FUZZY_MAX_DISTANCE", "1")))
+FACT_KEY_MAX_LEN = 64
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
 log = logging.getLogger("followups")
@@ -45,6 +52,270 @@ def _now() -> float:
     return time.time()
 
 
+def _normalize_fact_key(raw: Any) -> str:
+    key = str(raw or "").strip().lower()
+    if not key:
+        return ""
+    key = re.sub(r"\s+", "_", key)
+    if FACT_KEY_MAX_LEN and len(key) > FACT_KEY_MAX_LEN:
+        key = key[:FACT_KEY_MAX_LEN]
+    return key
+
+
+def _normalize_phrase_list(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    items: List[str] = []
+    if isinstance(raw, str):
+        items = re.split(r"[\n,]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        for entry in raw:
+            if entry is None:
+                continue
+            items.append(str(entry))
+    else:
+        items = [str(raw)]
+    cleaned: List[str] = []
+    for item in items:
+        token = str(item or "").strip().lower()
+        if token:
+            cleaned.append(token)
+    return cleaned
+
+
+def _normalize_condition(raw: Any) -> List[dict]:
+    if not raw:
+        return []
+    if isinstance(raw, Mapping):
+        raw_list = [raw]
+    elif isinstance(raw, list):
+        raw_list = raw
+    else:
+        return []
+    normalized: List[dict] = []
+    op_aliases = {"=": "eq", "==": "eq", "!=": "neq", "<>": "neq"}
+    allowed_ops = {"eq", "neq", "exists", "not_exists", "in", "not_in"}
+    for cond in raw_list:
+        if not isinstance(cond, Mapping):
+            continue
+        key = _normalize_fact_key(cond.get("key") or cond.get("fact"))
+        if not key:
+            continue
+        op_raw = str(cond.get("op") or cond.get("operator") or "eq").strip().lower()
+        op = op_aliases.get(op_raw, op_raw)
+        if op not in allowed_ops:
+            op = "eq"
+        if op in {"exists", "not_exists"}:
+            normalized.append({"key": key, "op": op})
+            continue
+        value = cond.get("value")
+        if op in {"in", "not_in"}:
+            values = _normalize_phrase_list(value)
+            if not values:
+                continue
+            normalized.append({"key": key, "op": op, "value": values})
+            continue
+        if value is None:
+            continue
+        value_str = str(value).strip().lower()
+        if not value_str:
+            continue
+        normalized.append({"key": key, "op": op, "value": value_str})
+    return normalized
+
+
+def _normalize_capture(raw: Any) -> Optional[dict]:
+    if not isinstance(raw, Mapping):
+        return None
+    key = _normalize_fact_key(raw.get("key") or raw.get("fact"))
+    if not key:
+        return None
+    yes_tokens = _normalize_phrase_list(raw.get("yes") or raw.get("yes_tokens"))
+    no_tokens = _normalize_phrase_list(raw.get("no") or raw.get("no_tokens"))
+    if not yes_tokens and not no_tokens:
+        yes_tokens = ["да"]
+        no_tokens = ["нет"]
+    value_yes = str(raw.get("value_yes") or raw.get("valueYes") or "yes").strip().lower()
+    value_no = str(raw.get("value_no") or raw.get("valueNo") or "no").strip().lower()
+    return {
+        "key": key,
+        "yes": yes_tokens,
+        "no": no_tokens,
+        "value_yes": value_yes,
+        "value_no": value_no,
+    }
+
+
+def _normalize_match_text(text: str) -> str:
+    cleaned = re.sub(r"[^\w\s]+", " ", text.lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return f" {cleaned} "
+
+
+def _normalize_match_token(token: str) -> str:
+    cleaned = re.sub(r"[^\w\s]+", " ", token.lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _levenshtein_limit(a: str, b: str, max_dist: int) -> int:
+    if a == b:
+        return 0
+    if max_dist <= 0:
+        return max_dist + 1
+    if abs(len(a) - len(b)) > max_dist:
+        return max_dist + 1
+    if len(a) > len(b):
+        a, b = b, a
+    previous = list(range(len(a) + 1))
+    for i, ch_b in enumerate(b, 1):
+        current = [i]
+        min_row = current[0]
+        for j, ch_a in enumerate(a, 1):
+            insert_cost = current[j - 1] + 1
+            delete_cost = previous[j] + 1
+            replace_cost = previous[j - 1] + (ch_a != ch_b)
+            cost = insert_cost
+            if delete_cost < cost:
+                cost = delete_cost
+            if replace_cost < cost:
+                cost = replace_cost
+            current.append(cost)
+            if cost < min_row:
+                min_row = cost
+        if min_row > max_dist:
+            return max_dist + 1
+        previous = current
+    return previous[-1]
+
+
+def _token_matches(text: str, token: str) -> bool:
+    cleaned = _normalize_match_token(token)
+    if not cleaned:
+        return False
+    if " " in cleaned:
+        return cleaned in text
+    if len(cleaned) <= 3:
+        return f" {cleaned} " in text
+    if cleaned in text:
+        return True
+    if FUZZY_MAX_DISTANCE <= 0:
+        return False
+    words = text.strip().split()
+    for word in words:
+        if abs(len(word) - len(cleaned)) > FUZZY_MAX_DISTANCE:
+            continue
+        if _levenshtein_limit(word, cleaned, FUZZY_MAX_DISTANCE) <= FUZZY_MAX_DISTANCE:
+            return True
+    return False
+
+
+def _fact_key(tenant_id: int, lead_id: int, fact_key: str) -> str:
+    return f"{FOLLOWUP_FACT_PREFIX}:{tenant_id}:{lead_id}:{fact_key}"
+
+
+def _pending_key(tenant_id: int, lead_id: int) -> str:
+    return f"{FOLLOWUP_PENDING_PREFIX}:{tenant_id}:{lead_id}"
+
+
+async def _get_fact(tenant_id: int, lead_id: int, fact_key: str) -> Optional[str]:
+    try:
+        raw = await r.get(_fact_key(tenant_id, lead_id, fact_key))
+    except Exception:
+        raw = None
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    return text if text else None
+
+
+async def _set_fact(tenant_id: int, lead_id: int, fact_key: str, value: str) -> None:
+    if tenant_id <= 0 or lead_id <= 0 or not fact_key:
+        return
+    try:
+        await r.set(_fact_key(tenant_id, lead_id, fact_key), value, ex=FACT_TTL_SECONDS)
+    except Exception:
+        pass
+
+
+async def _set_pending_capture(
+    tenant_id: int,
+    lead_id: int,
+    capture: Mapping[str, Any],
+    *,
+    capture_id: Optional[str] = None,
+) -> None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    key = _pending_key(tenant_id, lead_id)
+    field = capture_id or uuid.uuid4().hex
+    payload = json.dumps(dict(capture), ensure_ascii=False)
+    try:
+        pipe = r.pipeline()
+        pipe.hset(key, mapping={field: payload})
+        pipe.expire(key, CAPTURE_TTL_SECONDS)
+        await pipe.execute()
+    except Exception:
+        pass
+
+
+async def capture_followup_answer(tenant_id: int, lead_id: int, text: str, channel: str) -> bool:
+    if tenant_id <= 0 or lead_id <= 0 or not text:
+        return False
+    pending_key = _pending_key(tenant_id, lead_id)
+    try:
+        pending = await r.hgetall(pending_key)
+    except Exception:
+        pending = {}
+    if not pending:
+        return False
+    normalized_text = _normalize_match_text(text)
+    for capture_id, payload in pending.items():
+        try:
+            raw_spec = json.loads(payload) if payload else {}
+        except Exception:
+            raw_spec = {}
+        capture = _normalize_capture(raw_spec)
+        if not capture:
+            continue
+        yes_tokens = capture.get("yes") or []
+        no_tokens = capture.get("no") or []
+        yes_match = any(_token_matches(normalized_text, token) for token in yes_tokens)
+        no_match = any(_token_matches(normalized_text, token) for token in no_tokens)
+        if yes_match and not no_match:
+            value = str(capture.get("value_yes") or "yes").strip().lower()
+        elif no_match and not yes_match:
+            value = str(capture.get("value_no") or "no").strip().lower()
+        else:
+            continue
+        fact_key = capture.get("key") or ""
+        await _set_fact(tenant_id, lead_id, str(fact_key), value)
+        try:
+            await r.hdel(pending_key, capture_id)
+            remaining = await r.hlen(pending_key)
+            if remaining <= 0:
+                await r.delete(pending_key)
+        except Exception:
+            pass
+        log.info(
+            "event=followup_fact_set tenant=%s lead_id=%s key=%s value=%s",
+            tenant_id,
+            lead_id,
+            fact_key,
+            value,
+        )
+        try:
+            await _trigger_followups_on_answer(
+                tenant_id,
+                lead_id,
+                channel=channel,
+                fact_key=str(fact_key),
+            )
+        except Exception:
+            pass
+        return True
+    return False
+
 def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
     if not isinstance(rule, Mapping):
         return None
@@ -55,8 +326,6 @@ def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
         delay_minutes = int(rule.get("delay_minutes") or 0)
     except Exception:
         delay_minutes = 0
-    if delay_minutes <= 0:
-        return None
     text_value = str(rule.get("text") or "").strip()
     if not text_value:
         return None
@@ -69,12 +338,27 @@ def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
     active = bool(rule.get("active", True))
     if not active:
         return None
-    return {
+    trigger_on_answer = bool(rule.get("trigger_on_answer"))
+    if delay_minutes <= 0 and not trigger_on_answer:
+        return None
+    condition_list = _normalize_condition(rule.get("condition"))
+    condition: Optional[dict | list] = None
+    if condition_list:
+        condition = condition_list[0] if len(condition_list) == 1 else condition_list
+    capture = _normalize_capture(rule.get("capture"))
+    normalized = {
         "channel": channel,
-        "delay_minutes": delay_minutes,
+        "delay_minutes": delay_minutes if delay_minutes > 0 else 0,
         "text": text_value,
         "max_attempts": max_attempts,
     }
+    if trigger_on_answer:
+        normalized["trigger_on_answer"] = True
+    if condition:
+        normalized["condition"] = condition
+    if capture:
+        normalized["capture"] = capture
+    return normalized
 
 
 def _load_rules(tenant_id: int) -> List[dict]:
@@ -104,6 +388,8 @@ async def schedule_followups(tenant_id: int, lead_id: int, incoming_channel: str
     pipe = r.pipeline()
     now_ts = _now()
     for idx, rule in enumerate(rules):
+        if rule.get("trigger_on_answer"):
+            continue
         rule_channel = rule.get("channel") or "any"
         if rule_channel not in {channel_norm, "any", "*"}:
             continue
@@ -126,6 +412,12 @@ async def schedule_followups(tenant_id: int, lead_id: int, incoming_channel: str
             "max_attempts": str(int(rule["max_attempts"])),
             "source_channel": channel_norm or "",
         }
+        condition = rule.get("condition")
+        if condition:
+            job_payload["condition"] = json.dumps(condition, ensure_ascii=False)
+        capture = rule.get("capture")
+        if capture:
+            job_payload["capture"] = json.dumps(capture, ensure_ascii=False)
         pipe.hset(job_key, mapping=job_payload)
         pipe.zadd(FOLLOWUP_ZSET, {job_id: schedule_at})
         ttl_seconds = int(rule["delay_minutes"] * 60 + SCHEDULE_DEDUP_TTL)
@@ -185,6 +477,13 @@ async def _fetch_job(job_id: str) -> Optional[Dict[str, Any]]:
         data["rule_id"] = int(data.get("rule_id") or 0)
     except Exception:
         data["rule_id"] = 0
+    for field in ("condition", "capture"):
+        raw = data.get(field)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                data[field] = json.loads(raw)
+            except Exception:
+                data[field] = None
     return data
 
 
@@ -258,6 +557,19 @@ async def _mark_sent(job: Mapping[str, Any]) -> None:
         pass
 
 
+async def _mute_smart_reply(tenant_id: int, lead_id: int) -> None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    try:
+        await r.set(
+            handoff_silence_key(int(tenant_id), int(lead_id)),
+            str(int(time.time())),
+            ex=HANDOFF_SILENCE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
 async def _retry_later(job: Mapping[str, Any], reason: str) -> None:
     job_id = job.get("id")
     if not job_id:
@@ -269,6 +581,137 @@ async def _retry_later(job: Mapping[str, Any], reason: str) -> None:
         await r.zadd(FOLLOWUP_ZSET, {job_id: _now() + RETRY_DELAY_SECONDS})
     except Exception as exc:
         log.warning("event=followup_retry_failed job_id=%s error=%s", job_id, exc)
+
+
+async def _condition_allows(job: Mapping[str, Any]) -> bool:
+    condition = job.get("condition")
+    conditions = _normalize_condition(condition)
+    if not conditions:
+        return True
+    tenant_id = int(job.get("tenant_id") or 0)
+    lead_id = int(job.get("lead_id") or 0)
+    for cond in conditions:
+        key = str(cond.get("key") or "").strip()
+        if not key:
+            continue
+        fact_value = await _get_fact(tenant_id, lead_id, key)
+        fact_norm = (fact_value or "").strip().lower()
+        op = str(cond.get("op") or "eq").strip().lower()
+        if op == "exists":
+            if not fact_norm:
+                return False
+            continue
+        if op == "not_exists":
+            if fact_norm:
+                return False
+            continue
+        if op == "eq":
+            expected = str(cond.get("value") or "").strip().lower()
+            if not expected or not fact_norm or fact_norm != expected:
+                return False
+            continue
+        if op == "neq":
+            expected = str(cond.get("value") or "").strip().lower()
+            if expected and fact_norm == expected:
+                return False
+            continue
+        if op == "in":
+            raw_values = cond.get("value") or []
+            values = {str(v).strip().lower() for v in raw_values if str(v).strip()}
+            if not values or not fact_norm or fact_norm not in values:
+                return False
+            continue
+        if op == "not_in":
+            raw_values = cond.get("value") or []
+            values = {str(v).strip().lower() for v in raw_values if str(v).strip()}
+            if not values:
+                return False
+            if fact_norm and fact_norm in values:
+                return False
+            continue
+    return True
+
+
+async def _trigger_followups_on_answer(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    channel: str,
+    fact_key: str,
+) -> None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    rules = _load_rules(tenant_id)
+    if not rules:
+        return
+    channel_norm = (channel or "").strip().lower()
+    candidates: list[tuple[int, dict]] = []
+    fact_key_norm = str(fact_key or "").strip().lower()
+    for idx, rule in enumerate(rules):
+        if not rule.get("trigger_on_answer"):
+            continue
+        condition = rule.get("condition")
+        conditions = _normalize_condition(condition)
+        if not conditions:
+            continue
+        if not any(str(cond.get("key") or "").strip().lower() == fact_key_norm for cond in conditions):
+            continue
+        rule_channel = (rule.get("channel") or "any").strip().lower()
+        if rule_channel not in {channel_norm, "any", "*"}:
+            continue
+        candidates.append((idx, rule))
+    if not candidates:
+        return
+    candidates.sort(key=lambda item: item[0])
+    for idx, rule in candidates:
+        rule_channel = (rule.get("channel") or "any").strip().lower()
+        condition = rule.get("condition")
+        job_payload = {
+            "tenant_id": tenant_id,
+            "lead_id": lead_id,
+            "channel": rule_channel if rule_channel not in {"any", "*"} else channel_norm,
+            "text": rule.get("text") or "",
+            "rule_id": idx,
+            "max_attempts": int(rule.get("max_attempts") or 1),
+            "attempts": 0,
+            "condition": condition,
+        }
+        allowed = await _condition_allows(job_payload)
+        if not allowed:
+            continue
+        sent_key = f"{FOLLOWUP_SENT_PREFIX}:{tenant_id}:{lead_id}:{idx}"
+        try:
+            if await r.get(sent_key):
+                continue
+        except Exception:
+            pass
+        payload, err = await _resolve_target(job_payload)
+        if err or not payload:
+            continue
+        try:
+            await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            continue
+        await _mute_smart_reply(tenant_id, lead_id)
+        capture = rule.get("capture")
+        if isinstance(capture, Mapping):
+            try:
+                await _set_pending_capture(tenant_id, lead_id, capture)
+            except Exception:
+                pass
+        try:
+            await r.set(sent_key, "1", ex=SENT_DEDUP_TTL)
+        except Exception:
+            pass
+        log.info(
+            "event=followup_triggered tenant=%s lead_id=%s channel=%s rule_id=%s fact=%s",
+            tenant_id,
+            lead_id,
+            payload.get("channel"),
+            idx,
+            fact_key,
+        )
+        return
 
 
 async def _process_job(job_id: str) -> None:
@@ -287,6 +730,19 @@ async def _process_job(job_id: str) -> None:
         except Exception:
             pass
         return
+    allowed = await _condition_allows(job)
+    if not allowed:
+        log.info(
+            "event=followup_skip_condition tenant=%s lead_id=%s rule_id=%s",
+            job.get("tenant_id"),
+            job.get("lead_id"),
+            job.get("rule_id"),
+        )
+        try:
+            await r.delete(f"{FOLLOWUP_JOB_PREFIX}:{job_id}")
+        except Exception:
+            pass
+        return
     payload, err = await _resolve_target(job)
     if err or not payload:
         await _retry_later(job, err or "resolve_failed")
@@ -296,6 +752,18 @@ async def _process_job(job_id: str) -> None:
     except Exception as exc:
         await _retry_later(job, f"enqueue_error:{exc}")
         return
+    await _mute_smart_reply(int(job.get("tenant_id") or 0), int(job.get("lead_id") or 0))
+    capture = job.get("capture")
+    if isinstance(capture, Mapping):
+        try:
+            await _set_pending_capture(
+                int(job.get("tenant_id") or 0),
+                int(job.get("lead_id") or 0),
+                capture,
+                capture_id=str(job.get("id") or ""),
+            )
+        except Exception:
+            pass
     await _mark_sent(job)
     log.info(
         "event=followup_enqueued tenant=%s lead_id=%s channel=%s rule_id=%s",

@@ -48,6 +48,10 @@
     return absoluteUrl(`/client/${dashboardState.currentTenant}/settings?k=${encodeURIComponent(key || '')}`);
   }
 
+  function buildAnalyticsLink(key) {
+    return absoluteUrl(`/pub/analytics/avito?tenant=${dashboardState.currentTenant}&k=${encodeURIComponent(key || '')}`);
+  }
+
   function setMessage(text, variant = 'muted', allowHTML = false) {
     if (!messageBox) return;
     messageBox.className = `status-text ${variant}`.trim();
@@ -82,6 +86,7 @@
       const linkTd = document.createElement('td');
       const connectLink = absoluteUrl(item.link) || buildConnectLink(item.key);
       const settingsLink = absoluteUrl(item.settings_link) || buildSettingsLink(item.key);
+      const analyticsLink = buildAnalyticsLink(item.key);
 
       const anchor = document.createElement('a');
       anchor.href = connectLink;
@@ -131,6 +136,14 @@
       openSettingsBtn.className = 'btn btn--secondary';
       openSettingsBtn.textContent = 'Настройки';
       actionsTd.appendChild(openSettingsBtn);
+
+      const openAnalyticsBtn = document.createElement('a');
+      openAnalyticsBtn.href = analyticsLink;
+      openAnalyticsBtn.target = '_blank';
+      openAnalyticsBtn.rel = 'noopener';
+      openAnalyticsBtn.className = 'btn btn--secondary';
+      openAnalyticsBtn.textContent = 'Аналитика Avito';
+      actionsTd.appendChild(openAnalyticsBtn);
 
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';

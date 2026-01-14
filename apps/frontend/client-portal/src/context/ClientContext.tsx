@@ -6,6 +6,7 @@ export type SettingsPayload = {
   ok?: boolean;
   cfg?: Record<string, unknown>;
   persona?: string;
+  personas?: Record<string, string>;
 };
 
 export type ClientContextValue = {

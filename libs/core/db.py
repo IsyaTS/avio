@@ -1,6 +1,7 @@
 import os, hashlib, json, time, logging, pathlib, threading, re
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple, AsyncIterator, Mapping
+from typing import Optional, List, Dict, Any, Tuple, AsyncIterator
+from collections.abc import Mapping
 
 try:
     import asyncpg  # type: ignore
@@ -1159,9 +1160,13 @@ async def fetch_dialogs_for_tenant(
                l.title,
                l.contact,
                l.peer,
+               c.avito_login,
+               c.telegram_username,
                last_msg.text AS last_message,
                last_msg.created_at AS last_ts
         FROM leads l
+        LEFT JOIN lead_contacts lc ON lc.lead_id = l.id
+        LEFT JOIN contacts c ON c.id = lc.contact_id
         LEFT JOIN LATERAL (
             SELECT m.text, m.created_at
             FROM messages m
@@ -1225,6 +1230,51 @@ async def list_messages_for_lead(
                 messages.append(dict(row.items()))
     messages.reverse()  # chronological order
     return messages
+
+
+async def list_recent_inbound_texts(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    limit: int = 5,
+) -> list[str]:
+    try:
+        tenant_val = int(tenant_id)
+        lead_val = int(lead_id)
+    except Exception:
+        return []
+    if tenant_val <= 0 or lead_val <= 0:
+        return []
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 5
+    rows = await _fetch(
+        """
+        SELECT text
+        FROM messages
+        WHERE tenant_id = $1
+          AND lead_id = $2
+          AND direction = 0
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3
+        """,
+        tenant_val,
+        lead_val,
+        limit_val,
+    )
+    texts: list[str] = []
+    for row in rows or []:
+        if not row:
+            continue
+        value = row.get("text") if isinstance(row, Mapping) else None
+        if value is None:
+            try:
+                value = row[0]
+            except Exception:
+                value = None
+        if value is None:
+            continue
+        texts.append(str(value))
+    texts.reverse()
+    return texts
 
 
 async def create_message_feedback(
@@ -1340,7 +1390,13 @@ async def get_previous_incoming_message(
 
     selected: list[Mapping[str, Any]] = []
     for row in rows:
-        candidate = dict(row) if not isinstance(row, dict) and isinstance(row, Mapping) else row
+        try:
+            candidate = row if isinstance(row, dict) else dict(row)
+        except Exception:
+            if isinstance(row, Mapping):
+                candidate = dict(row)
+            else:
+                continue
         if not isinstance(candidate, Mapping):
             continue
         text = _clean_text(candidate.get("text"))
@@ -2592,4 +2648,23 @@ async def update_contact_telegram(contact_id: int, telegram_user_id: int | None,
         contact_id,
         telegram_user_id,
         telegram_username,
+    )
+
+
+async def update_contact_avito_login(contact_id: int, avito_login: str | None) -> None:
+    """Update contact with Avito login if provided."""
+    if not contact_id:
+        return
+    login = (avito_login or "").strip()
+    if not login:
+        return
+    await _exec(
+        """
+        UPDATE contacts
+        SET avito_login = COALESCE(NULLIF($2, ''), avito_login),
+            updated_at = now()
+        WHERE id = $1;
+        """,
+        contact_id,
+        login,
     )

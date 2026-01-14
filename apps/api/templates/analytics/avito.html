@@ -1,0 +1,163 @@
+{% extends "layouts/base.html" %}
+{% set title = title or 'Avito Analytics' %}
+{% block content %}
+<section class="surface stack" style="gap: 14px;">
+  <div class="toolbar">
+    <div class="stack" style="gap: 6px;">
+      <h1 class="section-title">Avito Analytics</h1>
+      <p class="section-subtitle">Точные показатели + оценка потерь (опционально). Автообновление каждые 5 минут.</p>
+    </div>
+    <div class="actions" style="display:flex; flex-wrap:wrap; gap:10px;">
+      <button id="connect-btn" class="btn btn--secondary">Подключить Avito</button>
+      <span id="oauth-status" class="status-text">Статус: —</span>
+      <button id="refresh-btn" class="btn">Обновить</button>
+      <span id="last-updated" class="status-text">—</span>
+    </div>
+  </div>
+
+  <div class="surface surface--muted" style="padding:12px; display:flex; flex-wrap:wrap; gap:12px;">
+    <label style="display:flex; flex-direction: column; gap: 6px;">
+      <span class="label">Период</span>
+      <select id="period-select">
+        <option value="7" selected>7 дней</option>
+        <option value="30">30 дней</option>
+        <option value="90">90 дней</option>
+      </select>
+    </label>
+    <label style="display:flex; flex-direction: column; gap: 6px;">
+      <span class="label">SLA (мин)</span>
+      <select id="sla-select">
+        <option value="5">5</option>
+        <option value="15" selected>15</option>
+        <option value="60">60</option>
+      </select>
+    </label>
+    <label style="display:flex; flex-direction: column; gap: 6px;">
+      <span class="label">Режим</span>
+      <select id="mode-select">
+        <option value="fast" selected>Быстрый</option>
+        <option value="full">Полный</option>
+      </select>
+    </label>
+    <div class="stack" style="gap:4px;">
+      <span class="label">Параметры потерь (опционально)</span>
+      <div class="grid grid--two" style="gap:6px;">
+        <input id="avg-check" class="input" type="number" placeholder="avg_check (₽)" />
+        <input id="close-rate" class="input" type="number" step="0.01" placeholder="close_rate_chat" />
+      </div>
+      <div class="grid grid--two" style="gap:6px;">
+        <input id="margin" class="input" type="number" step="1" placeholder="gross_margin %" />
+        <input id="loss-factor" class="input" type="number" step="0.01" placeholder="loss_factor_slow_response" />
+      </div>
+    </div>
+    <div class="stack" style="gap:4px;">
+      <span class="label">Рабочее время (МСК)</span>
+      <div class="grid grid--two" style="gap:6px;">
+        <input id="workday-start" class="input" type="time" step="60" placeholder="с 09:00" />
+        <input id="workday-end" class="input" type="time" step="60" placeholder="до 21:00" />
+      </div>
+    </div>
+    <div class="stack" style="gap:4px;">
+      <span class="label">Выходные дни</span>
+      <div class="grid grid--two" style="gap:6px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="0" /> Пн
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="1" /> Вт
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="2" /> Ср
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="3" /> Чт
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="4" /> Пт
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="5" checked /> Сб
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <input type="checkbox" data-weekend-day value="6" checked /> Вс
+        </label>
+      </div>
+    </div>
+    <div id="status-text" class="status-text" style="margin-left:auto;"></div>
+  </div>
+</section>
+
+<section class="grid grid--three" id="kpi-cards" style="margin-top:16px;"></section>
+
+<section class="grid grid--two" style="margin-top:16px;">
+  <div class="surface surface--muted">
+    <h3 class="section-title" style="font-size:1.1rem;">Тренды</h3>
+    <canvas id="trend-chart" height="140"></canvas>
+  </div>
+  <div class="surface surface--muted">
+    <h3 class="section-title" style="font-size:1.1rem;">Воронка</h3>
+    <div id="funnel-block" class="stack" style="gap:8px;"></div>
+    <div class="section-subtitle">Конверсия: просмотры → диалоги → звонки</div>
+  </div>
+</section>
+
+<section class="surface stack" style="margin-top:16px;">
+  <h3 class="section-title" style="font-size:1.1rem;">Анти‑метрики (потери)</h3>
+  <div id="losses-block" class="grid grid--two"></div>
+</section>
+
+<section class="surface stack" style="margin-top:16px;">
+  <div class="toolbar">
+    <div>
+      <h3 class="section-title" style="font-size:1.1rem;">Объявления</h3>
+      <p class="section-subtitle">Сортировка и поиск по названию.</p>
+    </div>
+    <input id="items-search" class="input" placeholder="Поиск по названию" style="max-width:240px;" />
+  </div>
+  <div class="surface surface--muted" style="padding:0; max-height:520px; overflow:auto;">
+    <table id="items-table" class="table" style="min-width:780px;">
+      <thead>
+        <tr>
+          <th data-sort="title">Название</th>
+          <th data-sort="status">Статус</th>
+          <th data-sort="views">Просмотры</th>
+          <th data-sort="contacts">Диалоги</th>
+          <th data-sort="calls">Звонки</th>
+          <th data-sort="created_at">Дата</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="surface stack" style="margin-top:16px;">
+  <h3 class="section-title" style="font-size:1.1rem;">Коммуникации</h3>
+  <div id="messaging-metrics" class="grid grid--three" style="margin-top:8px;"></div>
+  <div class="surface surface--muted" style="margin-top:12px;">
+    <h4 class="section-title" style="font-size:1rem; margin-bottom:8px;">Сообщения по часам (входящие)</h4>
+    <canvas id="hourly-chart" height="120"></canvas>
+  </div>
+</section>
+
+<section class="surface stack" style="margin-top:16px;">
+  <h3 class="section-title" style="font-size:1.1rem;">Активность по времени</h3>
+  <div class="surface surface--muted" style="overflow:auto;">
+    <table id="heatmap-table" class="table" style="min-width:720px;"></table>
+  </div>
+</section>
+
+<section class="surface stack" style="margin-top:16px;">
+  <h3 class="section-title" style="font-size:1.1rem;">Raw JSON</h3>
+  <div class="surface surface--muted" style="max-height: 320px; overflow:auto;">
+    <pre id="raw-json" style="white-space:pre; margin:0; padding:10px;"></pre>
+  </div>
+</section>
+
+<script id="avito-analytics-state" type="application/json">{{ {
+  "tenant": tenant,
+  "k": k
+} | tojson }}</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ static_url(request, 'js/avito-analytics-public.js') }}" defer></script>
+{% endblock %}

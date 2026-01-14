@@ -5,11 +5,15 @@ import re
 import json
 import time
 import asyncio
+import cgi
+import mimetypes
+from datetime import datetime, timedelta, timezone
 import urllib.request
 import urllib.error
 import tempfile
 import subprocess
 import shutil
+import urllib.parse
 import logging
 from logging import StreamHandler
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
@@ -57,6 +61,7 @@ from libs.core.db import (
     resolve_or_create_contact,
     link_lead_contact,
     update_contact_phone,
+    update_contact_avito_login,
     update_contact_telegram,
     fetch_pending_training_examples,
     set_training_embedding,
@@ -68,6 +73,7 @@ from libs.core.common import (
     OUTBOX_DLQ_KEY,
     get_outbox_whitelist,
     normalize_username,
+    normalize_echo_text,
     smart_reply_enabled,
     notification_chat_ids,
     notification_event_enabled,
@@ -75,8 +81,13 @@ from libs.core.common import (
     default_fallback_reply,
     HANDOFF_SILENCE_TTL_SECONDS,
     handoff_silence_key,
+    AVITO_BOT_ECHO_TTL_SECONDS,
+    avito_bot_echo_key,
 )
 from libs.core.integrations import avito as avito_integration
+from libs.core.integrations import amocrm as amocrm_integration
+from libs.core.services import amocrm as amocrm_service
+from libs.core.repo import crm_links, crm_outbox
 from libs.core.transport import (
     WhatsAppAddressError,
     normalize_e164_digits,
@@ -118,6 +129,9 @@ AVITO_AUTO_REPLY_TTL_SECONDS = int(os.getenv("AVITO_AUTO_REPLY_TTL", "86400"))
 # Match waweb INTERNAL_SYNC_TOKEN resolution (shared with the web layer)
 WA_INTERNAL_TOKEN = COMMON_WA_INTERNAL_TOKEN
 _DEFAULT_WORKER_BASE = getattr(core_settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+AMOCRM_OUTBOX_ENABLED = (os.getenv("AMOCRM_OUTBOX_ENABLED") or "").strip().lower() not in {"0", "false", "no"}
+AMOCRM_OUTBOX_LIMIT = int(os.getenv("AMOCRM_OUTBOX_LIMIT", "10") or 10)
+AMOCRM_OUTBOX_MAX_ATTEMPTS = int(os.getenv("AMOCRM_OUTBOX_MAX_ATTEMPTS", "6") or 6)
 _WORKER_BASE_RAW = (
     os.getenv("WORKER_BASE_URL")
     or os.getenv("TGWORKER_URL")
@@ -478,6 +492,39 @@ def log(*parts: object):
         print(" ".join(str(p) for p in parts), flush=True)
 
 
+async def _maybe_amocrm_inbound(
+    tenant_id: int,
+    lead_id: int,
+    text: str,
+    channel: str,
+    attachments: Iterable[Mapping[str, Any]] | None = None,
+    message_id: int | None = None,
+) -> None:
+    if not text and not attachments:
+        return
+    if message_id is not None:
+        try:
+            dedup_key = f"amocrm:inbound:{tenant_id}:{lead_id}:{channel}:{int(message_id)}"
+            deduped = await _redis_queue.set(dedup_key, "1", ex=86400, nx=True)
+            if not deduped:
+                return
+        except Exception:
+            pass
+    try:
+        await amocrm_service.amocrm_on_inbound_message(
+            int(tenant_id),
+            int(lead_id),
+            text=text,
+            channel=channel,
+            attachments=list(attachments) if attachments else None,
+        )
+    except Exception as exc:
+        log(
+            f"event=amocrm_inbound_failed channel={channel} tenant={tenant_id} "
+            f"lead_id={lead_id} error={exc}"
+        )
+
+
 def _log_smart_reply_diag(channel: str, tenant_id: int, lead_id: int | None, reply: Any) -> None:
     """Emit debug info about planner output for downstream analysis."""
 
@@ -606,6 +653,154 @@ def _avito_smart_reply_enabled(tenant_id: int) -> bool:
                 if flag is not None:
                     return bool(flag)
     return False
+
+
+def _extract_avito_user_name(payload: Mapping[str, Any], *, author_id: int | None, account_id: int | None) -> str:
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return ""
+
+    def user_id_value(user: Mapping[str, Any]) -> int | None:
+        return _coerce_int(
+            user.get("id")
+            or user.get("user_id")
+            or (user.get("public_user_profile") or {}).get("user_id")
+        )
+
+    def user_name_value(user: Mapping[str, Any]) -> str:
+        name = user.get("name") or user.get("username") or user.get("login")
+        return str(name).strip() if name else ""
+
+    if author_id is not None:
+        for user in users:
+            if not isinstance(user, Mapping):
+                continue
+            if user_id_value(user) == author_id:
+                name = user_name_value(user)
+                if name:
+                    return name
+
+    for user in users:
+        if not isinstance(user, Mapping):
+            continue
+        uid = user_id_value(user)
+        if account_id is not None and uid == account_id:
+            continue
+        name = user_name_value(user)
+        if name:
+            return name
+
+    for user in users:
+        if not isinstance(user, Mapping):
+            continue
+        name = user_name_value(user)
+        if name:
+            return name
+
+    return ""
+
+
+async def _resolve_avito_user_name(
+    tenant_id: int,
+    *,
+    account_id: int | None,
+    chat_id: str,
+    author_id: int | None,
+) -> str:
+    if not chat_id:
+        return ""
+
+    cache_key = None
+    if author_id is not None:
+        cache_key = f"cache:avito_user_name:{tenant_id}:{author_id}"
+        try:
+            cached = await r.get(cache_key)
+        except Exception:
+            cached = None
+        if isinstance(cached, str) and cached.strip():
+            return cached.strip()
+
+    try:
+        token, integration = await avito_integration.ensure_access_token(int(tenant_id))
+    except Exception as exc:
+        log(
+            "event=avito_user_name_skip tenant=%s reason=token_unavailable error=%s"
+            % (tenant_id, exc)
+        )
+        return ""
+
+    account_val = account_id or _coerce_int(integration.get("account_id"))
+    if account_val is None:
+        return ""
+
+    url = f"https://api.avito.ru/messenger/v2/accounts/{account_val}/chats/{chat_id}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        log(
+            "event=avito_user_name_request_failed tenant=%s chat_id=%s error=%s"
+            % (tenant_id, chat_id, exc)
+        )
+        return ""
+
+    if response.status_code != 200:
+        log(
+            "event=avito_user_name_unexpected tenant=%s chat_id=%s status=%s"
+            % (tenant_id, chat_id, response.status_code)
+        )
+        return ""
+
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+
+    name = _extract_avito_user_name(payload, author_id=author_id, account_id=account_val)
+    if name and cache_key:
+        try:
+            await r.set(cache_key, name, ex=3600 * 24 * 7)
+        except Exception:
+            pass
+    return name
+
+
+def _coerce_bool_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "y", "on"}:
+            return True
+        if token in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _telegram_reply_enabled(tenant_id: int) -> bool:
+    """Per-tenant gate for Telegram auto replies; default enabled."""
+
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = None
+
+    if isinstance(cfg, Mapping):
+        behavior = cfg.get("behavior")
+        if isinstance(behavior, Mapping):
+            for key in ("telegram_reply_enabled", "telegram_smart_reply_enabled", "telegram_ai_enabled"):
+                flag = _coerce_bool_value(behavior.get(key))
+                if flag is not None:
+                    return bool(flag)
+        root_flag = _coerce_bool_value(cfg.get("telegram_reply_enabled"))
+        if root_flag is not None:
+            return bool(root_flag)
+    return True
 
 
 def _behavior_triggers(tenant_id: int) -> list[dict[str, Any]]:
@@ -1714,6 +1909,33 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
+    manager_outgoing = _looks_like_manager_outgoing(event) or _is_manager_message(event)
+
+    if text and not manager_outgoing:
+        try:
+            await followups.capture_followup_answer(tenant_id, lead_id, text, "telegram")
+        except Exception as exc:
+            log(
+                "event=followup_capture_warn channel=telegram tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    if not manager_outgoing:
+        try:
+            await _maybe_amocrm_inbound(
+                tenant_id,
+                lead_id,
+                text,
+                "telegram",
+                attachments=attachments,
+                message_id=message_id if isinstance(message_id, int) else None,
+            )
+        except Exception as exc:
+            log(
+                "event=amocrm_inbound_failed channel=telegram tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
     try:
         await followups.schedule_followups(tenant_id, lead_id, "telegram")
     except Exception as exc:
@@ -1891,12 +2113,13 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
             contact_hint=peer_log_hint or peer_value or contact_hint,
             username_hint=username,
         )
+        if attachments:
+            await _maybe_amocrm_inbound(tenant_id, lead_id, text, "telegram", attachments=attachments)
         log(
             f"event=handoff_marked channel=telegram tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
         return
 
-    manager_outgoing = _looks_like_manager_outgoing(event) or _is_manager_message(event)
     if manager_outgoing:
         await _mark_handoff_silence(
             tenant_id,
@@ -1976,6 +2199,11 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
+    if not _telegram_reply_enabled(tenant_id):
+        log(
+            f"event=telegram_reply_disabled channel=telegram tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
     if not smart_reply_enabled(tenant_id):
         log(
             f"event=smart_reply_disabled channel=telegram tenant={tenant_id} lead_id={lead_id}"
@@ -2179,6 +2407,15 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         f"event=inbox_lead_resolved channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
     )
 
+    if text:
+        try:
+            await followups.capture_followup_answer(tenant_id, lead_id, text, "whatsapp")
+        except Exception as exc:
+            log(
+                "event=followup_capture_warn channel=whatsapp tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
     try:
         await followups.schedule_followups(tenant_id, lead_id, "whatsapp")
     except Exception as exc:
@@ -2220,6 +2457,9 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
                     tenant_id=tenant_id,
                 )
                 stored_incoming = True
+                await _maybe_amocrm_inbound(
+                    tenant_id, lead_id, text, "whatsapp", attachments=attachments
+                )
             except Exception as exc:
                 DB_ERRORS_COUNTER.labels("insert_message_in").inc()
                 log(
@@ -2227,13 +2467,17 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
                     % (tenant_id, lead_id, exc)
                 )
 
-    if text and not stored_incoming and db_available:
+    if (text or attachments) and not stored_incoming and db_available:
         try:
-            await insert_message_in(
-                lead_id,
-                text,
-                status="received",
-                tenant_id=tenant_id,
+            if text:
+                await insert_message_in(
+                    lead_id,
+                    text,
+                    status="received",
+                    tenant_id=tenant_id,
+                )
+            await _maybe_amocrm_inbound(
+                tenant_id, lead_id, text, "whatsapp", attachments=attachments
             )
         except Exception as exc:
             DB_ERRORS_COUNTER.labels("insert_message_in").inc()
@@ -2275,6 +2519,8 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
             contact_hint=event.get("peer") or event.get("contact"),
             username_hint=event.get("username"),
         )
+        if attachments:
+            await _maybe_amocrm_inbound(tenant_id, lead_id, text, "whatsapp", attachments=attachments)
         log(
             f"event=handoff_marked channel=whatsapp tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
@@ -2434,6 +2680,19 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     user_id = _coerce_int(event.get("avito_user_id") or (event.get("avito") or {}).get("user_id"))
     login_value = event.get("avito_login") or (event.get("avito") or {}).get("login")
     login = login_value.strip() if isinstance(login_value, str) else None
+    if not login:
+        try:
+            login = await _resolve_avito_user_name(
+                int(tenant_id),
+                account_id=account_id,
+                chat_id=chat_id,
+                author_id=user_id,
+            )
+        except Exception as exc:
+            log(
+                "event=avito_user_name_failed tenant=%s chat_id=%s error=%s"
+                % (tenant_id, chat_id, exc)
+            )
 
     if account_id is not None:
         try:
@@ -2509,6 +2768,15 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
+    if text:
+        try:
+            await followups.capture_followup_answer(tenant_id, lead_id, text, "avito")
+        except Exception as exc:
+            log(
+                "event=followup_capture_warn channel=avito tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
     try:
         await followups.schedule_followups(tenant_id, lead_id, "avito")
     except Exception as exc:
@@ -2548,6 +2816,11 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 )
             except Exception:
                 pass
+        if contact_id and login:
+            try:
+                await update_contact_avito_login(contact_id, login)
+            except Exception:
+                pass
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("resolve_contact").inc()
         log(
@@ -2570,13 +2843,20 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 % (tenant_id, lead_id, exc)
             )
 
+    incoming_stored = bool(event.get("_incoming_stored"))
+    stored_message_id = _coerce_int(event.get("_message_db_id"))
+    if stored_message_id:
+        incoming_stored = True
+
     try:
-        await insert_message_in(
-            lead_id,
-            text,
-            status="received",
-            tenant_id=tenant_id,
-        )
+        if not incoming_stored:
+            await insert_message_in(
+                lead_id,
+                text,
+                status="received",
+                tenant_id=tenant_id,
+            )
+        await _maybe_amocrm_inbound(tenant_id, lead_id, text, "avito", attachments=attachments)
     except Exception as exc:
         DB_ERRORS_COUNTER.labels("insert_message_in").inc()
         log(
@@ -2644,6 +2924,8 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
 
     if has_photo:
         await _mark_handoff_silence(tenant_id, lead_id, reason="photo_received")
+        if attachments:
+            await _maybe_amocrm_inbound(tenant_id, lead_id, text, "avito", attachments=attachments)
         log(
             f"event=handoff_marked channel=avito tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
@@ -2679,6 +2961,12 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 return
 
     if not text:
+        return
+
+    if await _is_handoff_silenced(tenant_id, lead_id):
+        log(
+            f"event=smart_reply_silenced channel=avito tenant={tenant_id} lead_id={lead_id}"
+        )
         return
 
     if not _avito_smart_reply_enabled(tenant_id):
@@ -2811,6 +3099,65 @@ def _http_json(
     except Exception as e:
         return 0, str(e)
 
+
+def _download_file(
+    url: str,
+    *,
+    timeout: float = 15.0,
+    max_size: int = 20 * 1024 * 1024,
+) -> tuple[bytes | None, str | None, str | None]:
+    if not url:
+        return None, None, None
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "telegram":
+        tenant = parsed.netloc
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) >= 2:
+            peer_id = parts[0]
+            message_id = parts[1]
+            base = os.getenv("TGWORKER_URL", "http://tgworker:8000").rstrip("/")
+            req_url = f"{base}/media/{tenant}/{peer_id}/{message_id}"
+            headers = {}
+            admin_token = getattr(core_settings, "ADMIN_TOKEN", "") or os.getenv("ADMIN_TOKEN", "")
+            if admin_token:
+                headers["X-Admin-Token"] = str(admin_token)
+            try:
+                req = urllib.request.Request(req_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = resp.read(max_size + 1)
+                    if len(data) > max_size:
+                        return None, None, None
+                    filename = None
+                    disposition = resp.headers.get("Content-Disposition") if resp.headers else None
+                    if disposition:
+                        _, params = cgi.parse_header(disposition)
+                        filename = params.get("filename")
+                    content_type = None
+                    if resp.headers:
+                        content_type = resp.headers.get("Content-Type")
+                    if not filename:
+                        filename = os.path.basename(parsed.path) or "attachment"
+                    if filename and "." not in filename and content_type:
+                        ext = mimetypes.guess_extension(content_type.split(";")[0].strip())
+                        if ext:
+                            filename = f"{filename}{ext}"
+                    return data, filename, content_type
+            except Exception:
+                return None, None, None
+    name = os.path.basename(parsed.path or "") or "attachment"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = resp.read(max_size + 1)
+            if len(data) > max_size:
+                return None, name, None
+            content_type = resp.headers.get("Content-Type") if resp.headers else None
+            if name and "." not in name and content_type:
+                ext = mimetypes.guess_extension(content_type.split(";")[0].strip())
+                if ext:
+                    name = f"{name}{ext}"
+            return data, name, content_type
+    except Exception:
+        return None, name, None
 async def send_whatsapp(
     tenant_id: int,
     phone: str,
@@ -3714,6 +4061,23 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             chat_id=chat_hint,
             account_id=avito_account_id,
         )
+        if 200 <= st < 300 and not manager_message:
+            echo_text = normalize_echo_text(text or "")
+            if echo_text:
+                chat_key = chat_hint or (str(avito_chat_id_hint).strip() if avito_chat_id_hint else "")
+                if chat_key:
+                    try:
+                        payload = {"text": echo_text, "ts": int(time.time())}
+                        await r.set(
+                            avito_bot_echo_key(tenant, chat_key),
+                            json.dumps(payload, ensure_ascii=False),
+                            ex=AVITO_BOT_ECHO_TTL_SECONDS,
+                        )
+                    except Exception as exc:
+                        log(
+                            "event=avito_echo_cache_failed tenant=%s lead_id=%s error=%s"
+                            % (tenant, lead_id, exc)
+                        )
     elif channel == "telegram":
         peer_id = None
         if peer_value:
@@ -3771,6 +4135,28 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             log(
                 "event=send_result status=warning reason=update_message_status_failed "
                 f"channel={channel} message_id={message_db_id} error={exc}"
+            )
+
+    if 200 <= st < 300 and actual_lead_id and actual_lead_id > 0:
+        outbound_attachments: list[dict[str, Any]] = []
+        if isinstance(attachments, list):
+            for att in attachments:
+                if isinstance(att, Mapping):
+                    outbound_attachments.append(dict(att))
+        if isinstance(attachment, Mapping):
+            outbound_attachments.append(dict(attachment))
+        try:
+            await amocrm_service.amocrm_on_outbound_message(
+                int(tenant),
+                int(actual_lead_id),
+                text=text or "",
+                channel=str(channel),
+                attachments=outbound_attachments or None,
+            )
+        except Exception as exc:
+            log(
+                "event=amocrm_outbound_note_failed "
+                f"channel={channel} tenant={tenant} lead_id={actual_lead_id} error={exc}"
             )
 
     status_str = str(status)
@@ -4146,6 +4532,234 @@ async def process_queue():
             await asyncio.sleep(0.5)
 
 
+def _amocrm_backoff_seconds(attempts: int) -> int:
+    if attempts <= 1:
+        return 5
+    delay = 5 * (2 ** min(attempts - 1, 6))
+    return int(min(delay, 300))
+
+
+def _parse_amocrm_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except Exception:
+            raw = ""
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+        if isinstance(data, dict):
+            return dict(data)
+    return {}
+
+
+async def _handle_amocrm_event(event: Mapping[str, Any]) -> None:
+    tenant_id = int(event.get("tenant_id") or 0)
+    lead_id = int(event.get("lead_id") or 0)
+    payload = _parse_amocrm_payload(event.get("payload"))
+    event_type = str(event.get("event_type") or payload.get("event_type") or "")
+    cfg = read_tenant_config(int(tenant_id))
+    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
+    if not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
+        return
+    base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id))
+    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+    client = amocrm_integration.AmoCRMClient(
+        tenant_id=int(tenant_id),
+        base_url=base_url,
+        client_id=str(oauth_cfg.get("client_id") or ""),
+        client_secret=str(oauth_cfg.get("client_secret") or ""),
+        redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+    )
+    if event_type == "create_lead":
+        link = await crm_links.get_link(int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER)
+        if link and link.get("provider_lead_id"):
+            return
+        stage_id = payload.get("stage_id")
+        pipeline_id = payload.get("pipeline_id") or amocrm_cfg.get("pipeline_id")
+        lead_name = str(payload.get("lead_name") or f"Avio lead {lead_id}")
+        contact_phone = payload.get("contact_phone")
+        contact_name = payload.get("contact_name")
+        custom_fields = payload.get("custom_fields")
+        if not stage_id or not pipeline_id:
+            raise amocrm_integration.AmoCRMError("amocrm_stage_missing")
+        contact_id = await client.upsert_contact(
+            phone=str(contact_phone or "").strip() or None,
+            name=str(contact_name or "").strip() or None,
+        )
+        if contact_id:
+            await crm_links.update_provider_contact_id(
+                int(tenant_id),
+                int(lead_id),
+                amocrm_service.AMOCRM_PROVIDER,
+                int(contact_id),
+            )
+        amo_lead_id = await client.create_lead(
+            pipeline_id=int(pipeline_id),
+            status_id=int(stage_id),
+            name=lead_name,
+            contact_id=contact_id,
+            custom_fields=custom_fields if isinstance(custom_fields, list) else None,
+        )
+        if amo_lead_id:
+            await crm_links.update_provider_lead_id(
+                int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER, int(amo_lead_id)
+            )
+            stage_index = payload.get("stage_index")
+            if stage_index is not None:
+                try:
+                    stage_index_val = int(stage_index)
+                except Exception:
+                    stage_index_val = None
+                if stage_index_val is not None:
+                    await crm_links.update_stage_index(
+                        int(tenant_id),
+                        int(lead_id),
+                        amocrm_service.AMOCRM_PROVIDER,
+                        stage_index_val,
+                        pipeline_id=int(pipeline_id) if pipeline_id else None,
+                    )
+        return
+    link = await crm_links.get_link(int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER)
+    provider_lead_id = link.get("provider_lead_id") if isinstance(link, Mapping) else None
+    if not provider_lead_id:
+        raise amocrm_integration.AmoCRMError("amocrm_lead_missing")
+    if event_type == "update_fields":
+        custom_fields = payload.get("custom_fields")
+        if isinstance(custom_fields, list) and custom_fields:
+            await client.update_lead_fields(int(provider_lead_id), custom_fields=custom_fields)
+        return
+    if event_type == "update_contact_fields":
+        custom_fields = payload.get("custom_fields")
+        provider_contact_id = link.get("provider_contact_id") if isinstance(link, Mapping) else None
+        if not provider_contact_id and provider_lead_id:
+            provider_contact_id = await client.get_lead_contact_id(int(provider_lead_id))
+            if provider_contact_id:
+                await crm_links.update_provider_contact_id(
+                    int(tenant_id),
+                    int(lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    int(provider_contact_id),
+                )
+        if provider_contact_id and isinstance(custom_fields, list) and custom_fields:
+            await client.update_contact_fields(int(provider_contact_id), custom_fields=custom_fields)
+        return
+    if event_type == "add_files":
+        attachments = payload.get("attachments")
+        if not provider_lead_id or not isinstance(attachments, list):
+            return
+        for item in attachments:
+            if not isinstance(item, Mapping):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            content, name, detected_mime = _download_file(url)
+            if not content:
+                log(
+                    f"amocrm_file_skip tenant={tenant_id} lead_id={lead_id} "
+                    f"reason=download_failed url={url}"
+                )
+                continue
+            filename = str(item.get("filename") or name or "attachment")
+            content_type = (
+                str(item.get("mime") or item.get("mime_type") or "").strip()
+                or (detected_mime.strip() if detected_mime else "")
+                or None
+            )
+            file_uuid = await client.upload_file(
+                filename=filename,
+                content=content,
+                content_type=content_type,
+            )
+            if file_uuid:
+                await client.attach_file_to_lead(int(provider_lead_id), file_uuid)
+            else:
+                log(
+                    f"amocrm_file_skip tenant={tenant_id} lead_id={lead_id} "
+                    f"reason=upload_failed url={url}"
+                )
+        return
+    if event_type == "move_stage":
+        stage_id = payload.get("stage_id")
+        pipeline_id = payload.get("pipeline_id") or amocrm_cfg.get("pipeline_id")
+        if not stage_id:
+            return
+        await client.move_lead_stage(
+            int(provider_lead_id),
+            status_id=int(stage_id),
+            pipeline_id=int(pipeline_id) if pipeline_id else None,
+        )
+        stage_index = payload.get("stage_index")
+        if stage_index is not None:
+            try:
+                stage_index_val = int(stage_index)
+            except Exception:
+                stage_index_val = None
+            if stage_index_val is not None:
+                await crm_links.update_stage_index(
+                    int(tenant_id),
+                    int(lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    stage_index_val,
+                    pipeline_id=int(pipeline_id) if pipeline_id else None,
+                )
+        return
+    if event_type == "add_note":
+        text = str(payload.get("text") or "").strip()
+        if text:
+            await client.add_lead_note(int(provider_lead_id), text)
+        return
+
+
+async def process_amocrm_outbox() -> None:
+    if not AMOCRM_OUTBOX_ENABLED:
+        log("event=amocrm_outbox_disabled")
+        return
+    log("event=amocrm_outbox_loop_start")
+    while True:
+        try:
+            events = await crm_outbox.take_pending(limit=AMOCRM_OUTBOX_LIMIT)
+            if not events:
+                await asyncio.sleep(2.0)
+                continue
+            for event in events:
+                event_id = event.get("id")
+                if not event_id:
+                    continue
+                try:
+                    await _handle_amocrm_event(event)
+                    await crm_outbox.mark_done(int(event_id))
+                    log(
+                        f"amocrm_event_done tenant={event.get('tenant_id')} "
+                        f"lead_id={event.get('lead_id')} event={event.get('event_type')}"
+                    )
+                except Exception as exc:
+                    attempts = int(event.get("attempts") or 0) + 1
+                    if attempts >= AMOCRM_OUTBOX_MAX_ATTEMPTS:
+                        await crm_outbox.mark_dead(int(event_id), str(exc))
+                        log(
+                            f"amocrm_event_dead tenant={event.get('tenant_id')} "
+                            f"lead_id={event.get('lead_id')} event={event.get('event_type')} error={exc}"
+                        )
+                    else:
+                        delay = _amocrm_backoff_seconds(attempts)
+                        next_retry = datetime.now(tz=timezone.utc) + timedelta(seconds=delay)
+                        await crm_outbox.mark_retry(int(event_id), attempts, next_retry, str(exc))
+                        log(
+                            f"amocrm_event_retry tenant={event.get('tenant_id')} "
+                            f"lead_id={event.get('lead_id')} event={event.get('event_type')} attempts={attempts}"
+                        )
+            await asyncio.sleep(0)
+        except Exception as exc:
+            log(f"event=amocrm_outbox_loop_error err={exc}")
+            await asyncio.sleep(2.0)
+
+
 async def process_training_embeddings() -> None:
     if not LEARNING_EMBEDDINGS_ENABLED:
         log("event=training_embeddings_disabled")
@@ -4204,6 +4818,7 @@ async def main():
     tasks = [
         asyncio.create_task(process_queue(), name="outbox-loop"),
     ]
+    tasks.append(asyncio.create_task(process_amocrm_outbox(), name="amocrm-outbox-loop"))
     if FOLLOWUPS_ENABLED:
         tasks.append(asyncio.create_task(followups.run_loop(), name="followups-loop"))
     if INBOX_ENABLED:

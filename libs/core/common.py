@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import csv
 import io
 import os
+import re
 from typing import Any, FrozenSet, Mapping, MutableMapping
 
 from libs.core.transport import WhatsAppAddressError, normalize_e164_digits
@@ -63,6 +64,28 @@ def handoff_silence_key(tenant: int, lead_id: int) -> str:
     """Redis key that mutes smart replies after a manual takeover."""
 
     return f"handoff:silence:{int(tenant)}:{int(lead_id)}"
+
+try:
+    _AVITO_BOT_ECHO_TTL = int(os.getenv("AVITO_BOT_ECHO_TTL_SECONDS", "120"))
+except Exception:
+    _AVITO_BOT_ECHO_TTL = 120
+if _AVITO_BOT_ECHO_TTL <= 0:
+    _AVITO_BOT_ECHO_TTL = 120
+AVITO_BOT_ECHO_TTL_SECONDS = _AVITO_BOT_ECHO_TTL
+
+
+def avito_bot_echo_key(tenant: int, chat_id: str) -> str:
+    """Redis key storing last bot message to detect Avito self-echo."""
+
+    return f"avito:bot_echo:{int(tenant)}:{chat_id}"
+
+
+def normalize_echo_text(text: str) -> str:
+    """Normalize outgoing text for echo matching (lower + collapse whitespace)."""
+
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 _FALLBACK_REPLY_DEFAULT = (
     os.getenv("SMART_REPLY_FALLBACK_TEXT")
@@ -361,6 +384,9 @@ __all__ = [
     "AI_ENABLED_DEFAULT",
     "HANDOFF_SILENCE_TTL_SECONDS",
     "handoff_silence_key",
+    "AVITO_BOT_ECHO_TTL_SECONDS",
+    "avito_bot_echo_key",
+    "normalize_echo_text",
     "is_manager_telegram",
     "is_manager_whatsapp",
 ]

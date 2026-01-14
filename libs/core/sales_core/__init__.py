@@ -99,7 +99,7 @@ TENANT_CONFIG_DIR = ROOT_DIR / "config" / "tenants"
 
 # Lightweight in-memory caches (mtime-based invalidation)
 _TENANT_CONFIG_CACHE: Dict[int, Tuple[float, float, dict]] = {}
-_TENANT_PERSONA_CACHE: Dict[int, Tuple[float, str]] = {}
+_TENANT_PERSONA_CACHE: Dict[Tuple[int, str], Tuple[float, str]] = {}
 # Key: (tenant or None, tuple of (path, mtime, size)) -> parsed, normalized items
 _CATALOG_CACHE: Dict[Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]], List[Dict[str, Any]]] = {}
 _TENANTS_CONFIG_CACHE: Dict[int, Dict[str, Any]] = {}
@@ -759,22 +759,23 @@ def extract_persona_hints(persona: str) -> PersonaHints:
     return hints
 
 
-_PERSONA_HINTS_CACHE: Dict[int | None, Tuple[str, PersonaHints]] = {}
+_PERSONA_HINTS_CACHE: Dict[Tuple[int | None, str], Tuple[str, PersonaHints]] = {}
 
 
-def load_persona_hints(tenant: int | None = None) -> PersonaHints:
-    persona_text = load_persona(tenant)
+def load_persona_hints(tenant: int | None = None, channel: str | None = None) -> PersonaHints:
+    persona_text = load_persona(tenant, channel)
     fingerprint = hashlib.sha1(persona_text.encode("utf-8")).hexdigest() if persona_text else ""
-    key: int | None
     try:
-        key = int(tenant) if tenant is not None else None
+        tenant_key: int | None = int(tenant) if tenant is not None else None
     except Exception:
-        key = None
-    cached = _PERSONA_HINTS_CACHE.get(key)
+        tenant_key = None
+    channel_key = _normalize_persona_channel(channel) or "base"
+    cache_key = (tenant_key, channel_key)
+    cached = _PERSONA_HINTS_CACHE.get(cache_key)
     if cached and cached[0] == fingerprint:
         return cached[1]
     hints = extract_persona_hints(persona_text)
-    _PERSONA_HINTS_CACHE[key] = (fingerprint, hints)
+    _PERSONA_HINTS_CACHE[cache_key] = (fingerprint, hints)
     return hints
 
 
@@ -866,6 +867,7 @@ DEFAULT_TENANT_JSON = {
         "pdf_one_item_per_page": False,
         "explain": False,
         "use_universal_pdf_pipeline": False,
+        "telegram_reply_enabled": True,
     },
     "cta": {
         "primary": "Оставьте контакт или удобный канал связи — подготовлю точный расчёт сегодня.",
@@ -1246,6 +1248,10 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
     avito_ai_flag = behavior.get("avito_smart_reply_enabled")
     behavior["avito_smart_reply_enabled"] = _coerce_bool(avito_ai_flag, False)
 
+    # Автоответ для Telegram (по умолчанию включён).
+    telegram_reply_flag = behavior.get("telegram_reply_enabled")
+    behavior["telegram_reply_enabled"] = _coerce_bool(telegram_reply_flag, True)
+
     whatsapp_cfg = normalized.get("whatsapp")
     whatsapp: dict[str, Any] = {}
     if isinstance(whatsapp_cfg, dict):
@@ -1372,40 +1378,91 @@ def _persist_pdf_index_metadata(
         pass
 
 
-def read_persona(tenant: int) -> str:
+def _normalize_persona_channel(channel: str | None) -> str | None:
+    if channel is None:
+        return None
+    raw = str(channel or "").strip().lower()
+    if not raw:
+        return None
+    if raw in {"tg", "telegram"}:
+        return "telegram"
+    if raw in {"avito"}:
+        return "avito"
+    if raw in {"wa", "whatsapp"}:
+        return "whatsapp"
+    return None
+
+
+def _persona_cache_key(tenant: int, channel: str | None) -> Tuple[int, str]:
+    normalized = _normalize_persona_channel(channel) or "base"
+    return int(tenant), normalized
+
+
+def _persona_path(tenant: int, channel: str | None) -> pathlib.Path:
+    normalized = _normalize_persona_channel(channel)
+    if normalized and normalized not in {"whatsapp"}:
+        return tenant_dir(tenant) / f"persona_{normalized}.md"
+    return tenant_dir(tenant) / "persona.md"
+
+
+def read_persona(tenant: int, channel: str | None = None) -> str:
     ensure_tenant_files(tenant)
-    path = tenant_dir(tenant) / "persona.md"
+    cache_key = _persona_cache_key(tenant, channel)
+    path = _persona_path(tenant, channel)
+
+    if path.name != "persona.md" and not path.exists():
+        return read_persona(tenant, None)
+
     try:
         mtime = path.stat().st_mtime
-        cached = _TENANT_PERSONA_CACHE.get(int(tenant))
+        cached = _TENANT_PERSONA_CACHE.get(cache_key)
         if cached and cached[0] == mtime:
             return cached[1]
     except Exception:
         mtime = 0.0
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
+
     try:
-        _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text)
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except Exception:
+        text = ""
+
+    if path.name != "persona.md" and not text.strip():
+        return read_persona(tenant, None)
+
+    try:
+        _TENANT_PERSONA_CACHE[cache_key] = (mtime, text)
     except Exception:
         pass
     try:
-        _PERSONA_HINTS_CACHE.pop(int(tenant), None)
+        _PERSONA_HINTS_CACHE.pop(cache_key, None)
     except Exception:
         _PERSONA_HINTS_CACHE.clear()
     return text
 
 
-def write_persona(tenant: int, text: str) -> None:
+def write_persona(tenant: int, text: str, channel: str | None = None) -> None:
     ensure_tenant_files(tenant)
-    path = tenant_dir(tenant) / "persona.md"
+    path = _persona_path(tenant, channel)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text or "")
+    cache_key = _persona_cache_key(tenant, channel)
     try:
         mtime = path.stat().st_mtime
-        _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text or "")
+        _TENANT_PERSONA_CACHE[cache_key] = (mtime, text or "")
     except Exception:
-        _TENANT_PERSONA_CACHE.pop(int(tenant), None)
-    _PERSONA_HINTS_CACHE.pop(int(tenant), None)
+        _TENANT_PERSONA_CACHE.pop(cache_key, None)
+    _PERSONA_HINTS_CACHE.pop(cache_key, None)
+    if cache_key[1] == "base":
+        try:
+            for key in list(_TENANT_PERSONA_CACHE.keys()):
+                if key[0] == int(tenant) and key[1] != "base":
+                    _TENANT_PERSONA_CACHE.pop(key, None)
+            for key in list(_PERSONA_HINTS_CACHE.keys()):
+                if key[0] == int(tenant) and key[1] != "base":
+                    _PERSONA_HINTS_CACHE.pop(key, None)
+        except Exception:
+            pass
 
 
 def load_tenant(tenant: int) -> dict:
@@ -1502,7 +1559,7 @@ def load_persona(tenant: int | None = None, channel: str | None = None) -> str:
     """Возвращает persona.md с подстановкой брендинга."""
     if tenant is not None:
         try:
-            persona = read_persona(tenant)
+            persona = read_persona(tenant, channel)
             if not persona.strip():
                 persona = DEFAULT_PERSONA_MD
         except Exception:
@@ -4378,7 +4435,7 @@ def observe_user_message(
         cfg = load_tenant(tenant or 0)
     brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
-    hints = persona_hints or load_persona_hints(tenant)
+    hints = persona_hints or load_persona_hints(tenant, channel)
     engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
     engine.observe_user(text or "")
     _apply_persona_need_mappings(state, tenant, text or "")
@@ -4396,7 +4453,7 @@ def summarize_sales_state(
     cfg = tenant_cfg if tenant_cfg is not None else load_tenant(tenant or 0)
     brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
-    hints = load_persona_hints(tenant)
+    hints = load_persona_hints(tenant, channel)
     engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
     return engine.summary_for_llm()
 
@@ -4412,7 +4469,7 @@ def record_bot_reply(
     cfg = tenant_cfg if tenant_cfg is not None else load_tenant(tenant or 0)
     brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
-    hints = load_persona_hints(tenant)
+    hints = load_persona_hints(tenant, channel)
     engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
     if reply:
         state.last_bot_reply = reply.strip()
@@ -4438,7 +4495,7 @@ def make_rule_based_reply(
         except Exception:
             cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
 
-    persona_hints = load_persona_hints(tenant)
+    persona_hints = load_persona_hints(tenant, channel_name)
     state = load_sales_state(tenant, contact_id)
     engine = SalesConversationEngine(state, branding, cfg, channel_name, persona_hints=persona_hints)
     engine.observe_user(last_user_text or "")
@@ -4466,11 +4523,11 @@ async def build_llm_messages(
     """Собираем системный промпт с учётом брендинга арендатора."""
     persona = load_persona(tenant, channel)
     persona_hints = extract_persona_hints(persona)
-    cache_key: int | None
     try:
-        cache_key = int(tenant) if tenant is not None else None
+        tenant_key: int | None = int(tenant) if tenant is not None else None
     except Exception:
-        cache_key = None
+        tenant_key = None
+    cache_key = (tenant_key, _normalize_persona_channel(channel) or "base")
     fingerprint = hashlib.sha1(persona.encode("utf-8")).hexdigest() if persona else ""
     _PERSONA_HINTS_CACHE[cache_key] = (fingerprint, persona_hints)
     branding = _branding_for_tenant(tenant, channel)
@@ -4730,6 +4787,101 @@ async def ask_llm(
     channel_name = (channel or "whatsapp")
     contact_ref = int(contact_id or 0)
 
+    # If feedback-driven examples match strongly, answer with the corrected reply.
+    if tenant is not None and training_retriever and (last or "").strip():
+        try:
+            cfg = read_tenant_config(int(tenant))
+        except Exception:
+            cfg = None
+        learn_cfg = cfg.get("learning") if isinstance(cfg, Mapping) else {}
+        learn_enabled = learn_cfg.get("enabled")
+        if learn_enabled is None:
+            learn_enabled = True
+        force_match = learn_cfg.get("force_match")
+        if force_match is None:
+            force_match = True
+        try:
+            threshold = float(learn_cfg.get("force_match_score", 0.8))
+        except Exception:
+            threshold = 0.8
+        short_enabled = learn_cfg.get("force_match_short")
+        if short_enabled is None:
+            short_enabled = True
+        try:
+            short_token_max = int(learn_cfg.get("force_match_short_tokens", 2))
+        except Exception:
+            short_token_max = 2
+        try:
+            short_token_min_len = int(learn_cfg.get("force_match_short_min_len", 3))
+        except Exception:
+            short_token_min_len = 3
+        if learn_enabled and force_match and threshold > 0:
+            try:
+                examples = await training_retriever.retrieve_examples_async(int(tenant), last, k=3)
+            except Exception:
+                logger.debug("training_force_match_failed", exc_info=True)
+                examples = []
+            if examples:
+                top = examples[0]
+                source = top.meta.get("source") if isinstance(top.meta, Mapping) else None
+                if source == "correction" and float(top.score or 0) >= threshold:
+                    direct_answer = (top.a or "").strip()
+                    if direct_answer:
+                        logger.info(
+                            "training_force_reply tenant=%s score=%.3f source=%s",
+                            tenant,
+                            float(top.score or 0),
+                            source,
+                        )
+                        record_bot_reply(contact_ref, tenant, channel_name, direct_answer)
+                        return _wrap_llm_reply(direct_answer, plan=None, raw_answer=direct_answer)
+                if short_enabled:
+                    try:
+                        from libs.core.training import utils as training_utils
+                    except Exception:
+                        training_utils = None  # type: ignore[assignment]
+                    if training_utils is not None:
+                        sanitized_query = training_utils.sanitize_text(last).lower()
+                        query_tokens = [
+                            token
+                            for token in sanitized_query.split()
+                            if len(token) >= short_token_min_len
+                        ]
+                        if 0 < len(query_tokens) <= short_token_max:
+                            def _token_hit(token: str, candidate: str) -> bool:
+                                if token in candidate or candidate in token:
+                                    return True
+                                if len(token) >= 4 and len(candidate) >= 4:
+                                    return token[:4] == candidate[:4]
+                                return False
+
+                            best = None
+                            best_score = -1.0
+                            for ex in examples:
+                                ex_source = ex.meta.get("source") if isinstance(ex.meta, Mapping) else None
+                                if ex_source != "correction":
+                                    continue
+                                q_text = training_utils.sanitize_text(ex.q or "").lower()
+                                q_tokens = q_text.split()
+                                if not q_tokens:
+                                    continue
+                                if all(any(_token_hit(token, qt) for qt in q_tokens) for token in query_tokens):
+                                    score_val = float(ex.score or 0)
+                                    if score_val > best_score:
+                                        best_score = score_val
+                                        best = ex
+                            if best:
+                                direct_answer = (best.a or "").strip()
+                                if direct_answer:
+                                    logger.info(
+                                        "training_force_reply_short tenant=%s score=%.3f tokens=%s",
+                                        tenant,
+                                        best_score,
+                                        query_tokens,
+                                    )
+                                    record_bot_reply(contact_ref, tenant, channel_name, direct_answer)
+                                    return _wrap_llm_reply(direct_answer, plan=None, raw_answer=direct_answer)
+
     # Без ключа — быстрый локальный ответ
     client = _get_openai_client()
     if client is None:
@@ -4752,7 +4904,7 @@ async def ask_llm(
     try:
         openai.api_key = settings.OPENAI_API_KEY  # type: ignore
 
-        persona_hints = load_persona_hints(tenant)
+        persona_hints = load_persona_hints(tenant, channel_name)
         state = load_sales_state(tenant, contact_ref)
 
         # 1. План + ответ через двухшаговый пайплайн

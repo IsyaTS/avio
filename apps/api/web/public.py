@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import hashlib
+import hmac
 import time
 import uuid
 import asyncio
@@ -55,10 +56,18 @@ from redis import exceptions as redis_ex
 from . import client as C
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from libs.core.db import insert_message_in, upsert_lead
+from libs.core.integrations import amocrm as amocrm_integration
 from libs.core.integrations import avito
 from libs.core.integrations import avito_analytics as avito_analytics_client
+from libs.core.repo import amocrm_tokens
 from libs.core.repo import avito_job_applications, avito_analytics_tokens as tokens_repo
-from libs.core.common import HANDOFF_SILENCE_TTL_SECONDS, handoff_silence_key
+from libs.core.services import amocrm as amocrm_service
+from libs.core.common import (
+    HANDOFF_SILENCE_TTL_SECONDS,
+    handoff_silence_key,
+    avito_bot_echo_key,
+    normalize_echo_text,
+)
 from . import common as common
 from .client import read_csv_table, write_csv_table
 from . import webhooks as webhook_module  # type: ignore
@@ -114,6 +123,13 @@ def _qr_cache_ttl() -> int:
     return random.randint(WA_QR_CACHE_TTL_MIN, WA_QR_CACHE_TTL_MAX)
 
 
+def _parse_bool_param(value: str | None) -> bool:
+    if value is None:
+        return False
+    token = value.strip().lower()
+    return token in {"1", "true", "yes", "y", "on"}
+
+
 INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
 
 
@@ -158,6 +174,79 @@ def _resolve_client_key(request: Request | None) -> str:
 
 def _avito_state_key(state: str) -> str:
     return f"{AVITO_STATE_PREFIX}{state}"
+
+
+def _analytics_state_secret() -> str:
+    return (
+        (settings.WEBHOOK_SECRET or "").strip()
+        or (settings.ADMIN_TOKEN or "").strip()
+        or (settings.AVITO_CLIENT_SECRET or "").strip()
+    )
+
+
+def _decode_analytics_state(state: str) -> Mapping[str, Any] | None:
+    if not isinstance(state, str) or not state.startswith("a1."):
+        return None
+    parts = state.split(".")
+    if len(parts) != 3:
+        return None
+    body_b64 = parts[1]
+    sig = parts[2]
+    pad = "=" * (-len(body_b64) % 4)
+    try:
+        body = base64.urlsafe_b64decode(body_b64 + pad)
+    except Exception:
+        return None
+    secret = _analytics_state_secret().encode("utf-8")
+    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
+    ts = payload.get("ts")
+    if isinstance(ts, (int, float)) and ts > 0:
+        if int(time.time()) - int(ts) > AVITO_STATE_TTL:
+            return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _amocrm_state_secret() -> str:
+    return (
+        (settings.WEBHOOK_SECRET or "").strip()
+        or (settings.ADMIN_TOKEN or "").strip()
+    )
+
+
+async def _read_amocrm_webhook_payload(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        payload = {}
+    try:
+        form = await request.form()
+        if form:
+            return dict(form)
+    except Exception:
+        pass
+    return {}
+
+
+def _extract_amocrm_uninstall_info(payload: Mapping[str, Any]) -> tuple[int | None, str | None]:
+    account_id = payload.get("account_id")
+    subdomain = payload.get("subdomain") or payload.get("domain") or payload.get("base_domain")
+    if isinstance(payload.get("account"), Mapping):
+        account_id = payload["account"].get("id") or account_id
+        subdomain = payload["account"].get("subdomain") or subdomain
+    try:
+        account_id_val = int(account_id) if account_id is not None else None
+    except Exception:
+        account_id_val = None
+    subdomain_val = str(subdomain or "").strip() or None
+    return account_id_val, subdomain_val
 
 
 def _avito_public_payload(raw: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -304,6 +393,29 @@ async def avito_webhook(request: Request) -> JSONResponse:
 
     return JSONResponse({"ok": True, "processed": processed})
 
+async def _is_avito_bot_echo(tenant: int, chat_id: str, text: str) -> bool:
+    if not _redis_queue or not chat_id or not text:
+        return False
+    key = avito_bot_echo_key(int(tenant), chat_id)
+    try:
+        raw = await _redis_queue.get(key)
+    except Exception:
+        return False
+    if not raw:
+        return False
+    cached_text = ""
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        payload = raw
+    if isinstance(payload, Mapping):
+        cached_text = normalize_echo_text(str(payload.get("text") or ""))
+    elif isinstance(payload, str):
+        cached_text = normalize_echo_text(payload)
+    if not cached_text:
+        return False
+    incoming_text = normalize_echo_text(text)
+    return bool(incoming_text and incoming_text == cached_text)
 
 
 async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request) -> bool:
@@ -419,18 +531,31 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
         or payload.get("user_id")
     )
     if account_id is not None and avito_user_id is not None and avito_user_id == account_id:
-        lead_id = avito.stable_lead_id(account_id, chat_id)
+        if await _is_avito_bot_echo(tenant, chat_id, text):
+            logger.info(
+                "avito_webhook_skip reason=bot_echo tenant=%s account_id=%s chat_id=%s",
+                tenant,
+                account_id,
+                chat_id,
+            )
+            return True
         if _redis_queue is not None:
             try:
                 await _redis_queue.set(
-                    handoff_silence_key(int(tenant), int(lead_id)),
+                    handoff_silence_key(int(tenant), int(avito.stable_lead_id(account_id, chat_id))),
                     str(int(time.time())),
                     ex=HANDOFF_SILENCE_TTL_SECONDS,
                 )
             except Exception:
-                logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
-        else:
-            logger.debug("handoff_flag_set_skipped_no_redis tenant=%s lead_id=%s", tenant, lead_id)
+                logger.debug(
+                    "handoff_flag_set_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
+                )
+        logger.info(
+            "avito_webhook_manager_outgoing tenant=%s account_id=%s chat_id=%s",
+            tenant,
+            account_id,
+            chat_id,
+        )
         return True
 
     avito_login = None
@@ -1267,7 +1392,7 @@ def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | N
     if isinstance(passport, dict):
         brand = str(passport.get("brand") or "").strip()
 
-    persona_text = common.read_persona(tenant)
+    persona_text = common.read_persona(tenant, "telegram")
     persona_preview = ""
     if persona_text:
         lines = str(persona_text).splitlines()
@@ -2246,6 +2371,28 @@ def _has_public_tg_access(
     return (resolved is not None, resolved)
 
 
+def _has_tg_access(
+    request: Request,
+    tenant_id: int,
+    key_candidate: str | None,
+    *,
+    allow_admin: bool = True,
+    query_param_only: bool = False,
+) -> tuple[bool, str | None]:
+    allowed, key = _has_public_tg_access(
+        request,
+        key_candidate,
+        allow_admin=allow_admin,
+        query_param_only=query_param_only,
+    )
+    if allowed:
+        return True, key
+    auth = _authorize_public_settings_request(request, tenant_id, key_candidate)
+    if isinstance(auth, Response):
+        return False, None
+    return True, "tenant"
+
+
 def _invalid_tenant_response(
     route: str,
     tenant_candidate: int | str | None,
@@ -2522,8 +2669,9 @@ async def tg_start(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access(
         request,
+        tenant_id,
         key_candidate,
         allow_admin=False,
         query_param_only=True,
@@ -2534,7 +2682,10 @@ async def tg_start(
     _log_public_tg_request(route, tenant_id, validated_key)
 
     fallback_paths = ["/qr/start", "/rpc/start", "/session/start"]
+    force_login = _parse_bool_param(request.query_params.get("force"))
     payload = {"tenant": tenant_id}
+    if force_login:
+        payload["force"] = True
     last_error: str | None = None
     upstream: httpx.Response | None = None
     last_status: int | None = None
@@ -2594,8 +2745,9 @@ async def _handle_tg_twofa(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access(
         request,
+        tenant_id,
         key_candidate,
         allow_admin=False,
     )
@@ -2759,7 +2911,7 @@ async def tg_restart(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate, force=True)
 
-    allowed, _ = _has_public_tg_access(request, key_candidate)
+    allowed, _ = _has_tg_access(request, tenant_id, key_candidate)
     if not allowed:
         return _unauthorized_response(route, tenant_id, force=True)
 
@@ -2791,8 +2943,9 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access(
         request,
+        tenant_id,
         key_candidate,
         allow_admin=False,
         query_param_only=True,
@@ -2858,8 +3011,9 @@ async def tg_qr_png(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access(
         request,
+        tenant_id,
         key_candidate,
         allow_admin=False,
         query_param_only=True,
@@ -2916,7 +3070,7 @@ async def tg_qr_png(
 @router.get("/pub/tg/qr.txt")
 def tg_qr_txt(request: Request, qr_id: str | None = None, k: str | None = None, key: str | None = None):
     key_candidate = k or key or request.query_params.get("k") or request.query_params.get("key")
-    allowed, _ = _has_public_tg_access(request, key_candidate)
+    allowed, _ = _has_tg_access(request, tenant_id, key_candidate)
     if not allowed:
         return _unauthorized_response("/pub/tg/qr.txt", None)
     qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
@@ -2991,14 +3145,14 @@ async def tg_logout(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, _ = _has_public_tg_access(request, key_candidate)
+    allowed, _ = _has_tg_access(request, tenant_id, key_candidate)
     if not allowed:
         return _unauthorized_response(route, tenant_id)
 
     try:
-        upstream = await C.tg_post(
+        upstream = await common.tg_post(
             "/session/logout",
-            {"tenant_id": tenant_id},
+            {"tenant_id": tenant_id, "force": True},
             timeout=5.0,
         )
     except httpx.HTTPError as exc:
@@ -3337,15 +3491,31 @@ async def avito_oauth_callback(
         except Exception:
             pass
 
-    if raw_value is None and analytics_raw is not None:
-        # Analytics flow using shared redirect.
+    analytics_payload = None
+    if raw_value is None:
+        if analytics_raw is not None:
+            try:
+                if isinstance(analytics_raw, (bytes, bytearray)):
+                    analytics_raw = analytics_raw.decode("utf-8")
+                analytics_payload = json.loads(analytics_raw) if analytics_raw else None
+            except Exception:
+                analytics_payload = None
+        if analytics_payload is None:
+            analytics_payload = _decode_analytics_state(state)
+
+    if raw_value is None and analytics_payload is not None:
+        # Analytics flow using shared redirect (stateless token or redis).
         if not code:
             return HTMLResponse(_avito_callback_html(False, "missing_code", {}))
+        tenant_id = _coerce_int(analytics_payload.get("tenant"))
+        if tenant_id is None:
+            return HTMLResponse(_avito_callback_html(False, "invalid_state", {}))
         try:
+            redirect_uri = (settings.AVITO_REDIRECT_URL or "").strip() or avito_analytics_client.ANALYTICS_REDIRECT or None
             token_payload = await avito_analytics_client.exchange_code_for_token(
-                code, redirect_uri=avito_analytics_client.ANALYTICS_REDIRECT or None
+                code, redirect_uri=redirect_uri
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("avito_analytics_token_exchange_failed")
             return HTMLResponse(_avito_callback_html(False, "analytics_token_failed", {}))
 
@@ -3405,7 +3575,22 @@ async def avito_oauth_callback(
         except Exception:
             logger.exception("avito_analytics_token_store_failed account_id=%s", account_id)
             return HTMLResponse(_avito_callback_html(False, "token_store_failed", {}))
-        redirect_url = f"/admin/avito-analytics?account_id={account_id}&auth=ok"
+        try:
+            common.ensure_tenant_files(int(tenant_id))
+            cfg = core_module.read_tenant_config(int(tenant_id))
+            if not isinstance(cfg, dict):
+                cfg = {}
+            integrations = cfg.setdefault("integrations", {})
+            integrations["avito_analytics"] = {
+                "account_id": int(account_id),
+                "display_name": display_name,
+                "connected_at": int(time.time()),
+            }
+            core_module.write_tenant_config(int(tenant_id), cfg)
+        except Exception:
+            logger.exception("avito_analytics_integration_store_failed tenant=%s", tenant_id)
+        redirect_key = analytics_payload.get("k") or ""
+        redirect_url = f"/pub/analytics/avito?tenant={tenant_id}&k={redirect_key}"
         return RedirectResponse(url=redirect_url, status_code=303)
 
     tenant_id = None
@@ -3569,6 +3754,395 @@ async def avito_oauth_webhook(request: Request, tenant: int, k: str):
     return JSONResponse({"ok": True})
 
 
+@router.get("/pub/integrations/amocrm/oauth/start")
+def amocrm_oauth_start(
+    request: Request,
+    tenant_id: int | None = None,
+    tenant: int | None = None,
+    k: str | None = None,
+):
+    tenant_val = tenant_id or tenant
+    auth = _authorize_public_settings_request(request, tenant_val, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, key = auth
+    cfg = common.read_tenant_config(tenant_id)
+    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg) or {}
+    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+    client_id = str(oauth_cfg.get("client_id") or "").strip()
+    client_secret = str(oauth_cfg.get("client_secret") or "").strip()
+    if not client_id or not client_secret:
+        return JSONResponse({"detail": "oauth_not_configured"}, status_code=400)
+    base_url = amocrm_service.resolve_base_url(amocrm_cfg, int(tenant_id))
+    auth_base_url = amocrm_service.resolve_auth_url(amocrm_cfg, int(tenant_id))
+    redirect_url = str(oauth_cfg.get("redirect_url") or "").strip()
+    if not redirect_url:
+        redirect_url = str(request.url_for("amocrm_oauth_callback"))
+    state_payload = {
+        "tenant_id": int(tenant_id),
+        "k": key,
+        "nonce": uuid.uuid4().hex,
+        "ts": int(time.time()),
+    }
+    state = amocrm_integration.build_oauth_state(state_payload, _amocrm_state_secret())
+    params = {"client_id": client_id, "state": state, "mode": "post_message"}
+    if redirect_url:
+        params["redirect_uri"] = redirect_url
+    authorize_url = f"{auth_base_url}/oauth?{urlencode(params)}"
+    return RedirectResponse(authorize_url)
+
+
+@router.get("/pub/integrations/amocrm/oauth/callback", name="amocrm_oauth_callback")
+async def amocrm_oauth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+):
+    if not code:
+        return HTMLResponse("AmoCRM OAuth error: missing_code")
+    payload = amocrm_integration.verify_oauth_state(state or "", _amocrm_state_secret())
+    if not payload:
+        return HTMLResponse("AmoCRM OAuth error: invalid_state")
+    tenant_id = payload.get("tenant_id")
+    key = payload.get("k")
+    auth = _authorize_public_settings_request(request, tenant_id, key)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, key = auth
+    cfg = common.read_tenant_config(tenant_id)
+    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg) or {}
+    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+    client_id = str(oauth_cfg.get("client_id") or "").strip()
+    client_secret = str(oauth_cfg.get("client_secret") or "").strip()
+    if not client_id or not client_secret:
+        return HTMLResponse("AmoCRM OAuth error: oauth_not_configured")
+    base_url = amocrm_service.resolve_base_url(amocrm_cfg, int(tenant_id))
+    auth_base_url = amocrm_service.resolve_auth_url(amocrm_cfg, int(tenant_id))
+    subdomain_hint = (
+        request.query_params.get("referer")
+        or request.query_params.get("account")
+        or request.query_params.get("subdomain")
+        or request.headers.get("referer")
+        or request.headers.get("origin")
+        or ""
+    )
+    subdomain_hint = amocrm_service._extract_subdomain(str(subdomain_hint))
+    if subdomain_hint:
+        auth_base_url = f"https://{subdomain_hint}.amocrm.ru"
+    redirect_url = str(oauth_cfg.get("redirect_url") or "").strip()
+    payload_data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "authorization_code",
+        "code": code,
+    }
+    if redirect_url:
+        payload_data["redirect_uri"] = redirect_url
+    token_url = f"{auth_base_url}/oauth2/access_token"
+    fallback_url = f"{base_url}/oauth2/access_token" if base_url else ""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(token_url, json=payload_data)
+        if (
+            response.status_code >= 400
+            and fallback_url
+            and auth_base_url.rstrip("/") != base_url.rstrip("/")
+        ):
+            response = await client.post(fallback_url, json=payload_data)
+    if response.status_code >= 400:
+        detail = ""
+        try:
+            data = response.json()
+            if isinstance(data, Mapping):
+                detail = str(
+                    data.get("hint")
+                    or data.get("detail")
+                    or data.get("title")
+                    or data.get("error")
+                    or ""
+                ).strip()
+        except Exception:
+            detail = (response.text or "").strip()
+        detail = detail[:200]
+        suffix = f": {detail}" if detail else ""
+        return HTMLResponse(f"AmoCRM OAuth error: token_exchange_failed{suffix}")
+    try:
+        token_payload = response.json()
+    except json.JSONDecodeError:
+        return HTMLResponse("AmoCRM OAuth error: token_invalid_json")
+    access_token = str(token_payload.get("access_token") or "").strip()
+    refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    expires_in = token_payload.get("expires_in")
+    expires_at = None
+    if isinstance(expires_in, (int, float)):
+        expires_at = datetime.now(tz=timezone.utc) + timedelta(seconds=int(expires_in))
+    obtained_at = datetime.now(tz=timezone.utc)
+    try:
+        await amocrm_tokens.ensure_schema()
+        await amocrm_tokens.upsert(
+            int(tenant_id),
+            access_token=access_token,
+            refresh_token=refresh_token or None,
+            expires_at=expires_at,
+            obtained_at=obtained_at,
+            raw_payload=token_payload if isinstance(token_payload, Mapping) else None,
+        )
+    except Exception:
+        return HTMLResponse("AmoCRM OAuth error: token_store_failed")
+    if isinstance(cfg, dict):
+        integrations = cfg.get("integrations")
+        if not isinstance(integrations, dict):
+            integrations = {}
+        amocrm_cfg = integrations.get("amocrm")
+        if not isinstance(amocrm_cfg, dict):
+            amocrm_cfg = {}
+        amocrm_cfg["enabled"] = True
+        amocrm_cfg["mode"] = "oauth"
+        if isinstance(token_payload, Mapping):
+            api_domain = token_payload.get("api_domain")
+            if api_domain:
+                amocrm_cfg["api_domain"] = api_domain
+        if subdomain_hint:
+            amocrm_cfg["subdomain"] = amocrm_cfg.get("subdomain") or subdomain_hint
+        integrations["amocrm"] = amocrm_cfg
+        cfg["integrations"] = integrations
+        common.write_tenant_config(tenant_id, cfg)
+    try:
+        oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+        api_domain = str(token_payload.get("api_domain") or "").strip()
+        api_base = base_url or (f"https://{api_domain}" if api_domain else "")
+        if api_base:
+            client = amocrm_integration.AmoCRMClient(
+                tenant_id=int(tenant_id),
+                base_url=api_base,
+                client_id=str(oauth_cfg.get("client_id") or ""),
+                client_secret=str(oauth_cfg.get("client_secret") or ""),
+                redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+            )
+            account_payload = await client.get_account()
+            if isinstance(account_payload, Mapping):
+                account_id = account_payload.get("id")
+                subdomain = account_payload.get("subdomain")
+                if isinstance(cfg, dict):
+                    integrations = cfg.get("integrations")
+                    if not isinstance(integrations, dict):
+                        integrations = {}
+                    amocrm_cfg = integrations.get("amocrm")
+                    if not isinstance(amocrm_cfg, dict):
+                        amocrm_cfg = {}
+                    amocrm_cfg["enabled"] = True
+                    amocrm_cfg["mode"] = "oauth"
+                    if account_id is not None:
+                        amocrm_cfg["account_id"] = account_id
+                    if subdomain:
+                        amocrm_cfg["subdomain"] = amocrm_cfg.get("subdomain") or subdomain
+                    integrations["amocrm"] = amocrm_cfg
+                    cfg["integrations"] = integrations
+                    common.write_tenant_config(tenant_id, cfg)
+                    await amocrm_service.ensure_pipeline_config(int(tenant_id), cfg, client)
+                    await amocrm_service.ensure_lead_phone_field_id(int(tenant_id), cfg, client)
+    except Exception:
+        logger.exception("amocrm_account_fetch_failed tenant=%s", tenant_id)
+    redirect_url = request.url_for("client_settings", tenant=str(tenant_id))
+    redirect = common.public_url(request, f"{redirect_url}?k={quote_plus(str(key))}#/channels?amocrm=1")
+    return RedirectResponse(redirect)
+
+
+@router.get("/pub/integrations/amocrm/status")
+async def amocrm_status(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    entry = await amocrm_tokens.get(int(tenant_id))
+    connected = bool(entry and entry.access_token)
+    expires_at_ts = None
+    if entry and entry.expires_at:
+        expires_at_ts = int(entry.expires_at.timestamp())
+        if entry.expires_at <= datetime.now(tz=timezone.utc):
+            cfg = common.read_tenant_config(tenant_id)
+            amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
+            base_url = None
+            if amocrm_cfg:
+                base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id), entry)
+            if base_url and entry.refresh_token:
+                oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg or {}, tenant_id)
+                client = amocrm_service.amocrm_core.AmoCRMClient(
+                    tenant_id=int(tenant_id),
+                    base_url=base_url,
+                    client_id=str(oauth_cfg.get("client_id") or ""),
+                    client_secret=str(oauth_cfg.get("client_secret") or ""),
+                    redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+                )
+                try:
+                    refreshed = await client.refresh_tokens()
+                    if refreshed and refreshed.expires_at:
+                        expires_at_ts = int(refreshed.expires_at.timestamp())
+                    connected = bool(refreshed and refreshed.access_token)
+                except Exception:
+                    connected = False
+            else:
+                connected = False
+    payload = {
+        "connected": connected,
+        "expires_at": expires_at_ts,
+        "last_error": entry.last_error if entry else None,
+    }
+    return JSONResponse(payload, headers=_no_store_headers())
+
+
+@router.get("/pub/integrations/amocrm/pipeline")
+async def amocrm_pipeline(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    apply: int | None = None,
+    pipeline_id: int | None = None,
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    cfg = common.read_tenant_config(tenant_id)
+    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
+    if not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
+        return JSONResponse({"ok": False, "detail": "amocrm_not_enabled"}, status_code=400)
+    token_entry = await amocrm_tokens.get(int(tenant_id))
+    if not token_entry or not token_entry.access_token:
+        return JSONResponse({"ok": False, "detail": "amocrm_token_missing"}, status_code=400)
+    base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id), token_entry)
+    if not base_url:
+        return JSONResponse({"ok": False, "detail": "base_url_missing"}, status_code=400)
+    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+    client = amocrm_integration.AmoCRMClient(
+        tenant_id=int(tenant_id),
+        base_url=base_url,
+        client_id=str(oauth_cfg.get("client_id") or ""),
+        client_secret=str(oauth_cfg.get("client_secret") or ""),
+        redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+    )
+    resolved_pipeline_id = 0
+    try:
+        resolved_pipeline_id = int(pipeline_id or amocrm_cfg.get("pipeline_id") or 0)
+    except Exception:
+        resolved_pipeline_id = 0
+    statuses: list[Mapping[str, Any]] = []
+    if resolved_pipeline_id > 0:
+        payload = await client.get_pipeline_stages(resolved_pipeline_id)
+        statuses = amocrm_service._extract_embedded_list(payload, "statuses")
+    if not statuses:
+        payload = await client.get_pipelines()
+        pipelines = amocrm_service._extract_embedded_list(payload, "pipelines")
+        if not pipelines:
+            return JSONResponse({"ok": False, "detail": "amocrm_pipeline_empty"}, status_code=400)
+        pipeline = pipelines[0]
+        try:
+            resolved_pipeline_id = int(pipeline.get("id") or 0)
+        except Exception:
+            resolved_pipeline_id = 0
+        statuses = amocrm_service._extract_embedded_list(pipeline, "statuses")
+        if not statuses and resolved_pipeline_id > 0:
+            payload = await client.get_pipeline_stages(resolved_pipeline_id)
+            statuses = amocrm_service._extract_embedded_list(payload, "statuses")
+    if not statuses:
+        return JSONResponse({"ok": False, "detail": "amocrm_statuses_empty"}, status_code=400)
+    stages = amocrm_service.build_stages_from_statuses(statuses)
+    if not stages:
+        return JSONResponse({"ok": False, "detail": "amocrm_stage_build_failed"}, status_code=400)
+    if apply:
+        updated_cfg = dict(cfg) if isinstance(cfg, Mapping) else {}
+        integrations = updated_cfg.get("integrations")
+        if not isinstance(integrations, dict):
+            integrations = {}
+        amocrm_cfg_copy = dict(amocrm_cfg)
+        amocrm_cfg_copy["pipeline_id"] = resolved_pipeline_id
+        amocrm_cfg_copy["stages"] = stages
+        integrations["amocrm"] = amocrm_cfg_copy
+        updated_cfg["integrations"] = integrations
+        common.write_tenant_config(tenant_id, updated_cfg)
+    return JSONResponse(
+        {"ok": True, "pipeline_id": resolved_pipeline_id, "stages": stages},
+        headers=_no_store_headers(),
+    )
+
+
+@router.post("/pub/integrations/amocrm/test")
+async def amocrm_test(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    cfg = common.read_tenant_config(tenant_id)
+    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
+    if not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
+        return JSONResponse({"ok": False, "detail": "amocrm_not_enabled"}, status_code=400)
+    base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id))
+    if not base_url:
+        return JSONResponse({"ok": False, "detail": "base_url_missing"}, status_code=400)
+    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+    client = amocrm_integration.AmoCRMClient(
+        tenant_id=int(tenant_id),
+        base_url=base_url,
+        client_id=str(oauth_cfg.get("client_id") or ""),
+        client_secret=str(oauth_cfg.get("client_secret") or ""),
+        redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+    )
+    try:
+        await client.get_pipelines()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "detail": str(exc) or "amocrm_unreachable"}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/pub/integrations/amocrm/disconnect")
+@router.post("/pub/integrations/amocrm/uninstall")
+async def amocrm_disconnect(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    tenant_id = None
+    if tenant is not None or k is not None:
+        auth = _authorize_public_settings_request(request, tenant, k)
+        if isinstance(auth, Response):
+            return auth
+        tenant_id, _ = auth
+    else:
+        payload = await _read_amocrm_webhook_payload(request)
+        account_id, subdomain = _extract_amocrm_uninstall_info(payload)
+        tenant_id = amocrm_service.find_tenant_by_account(account_id, subdomain)
+        if tenant_id is None:
+            return JSONResponse({"ok": False, "detail": "tenant_not_found"}, status_code=404)
+    cfg = common.read_tenant_config(tenant_id)
+    if isinstance(cfg, dict):
+        integrations = cfg.get("integrations")
+        if not isinstance(integrations, dict):
+            integrations = {}
+        amocrm_cfg = integrations.get("amocrm")
+        if isinstance(amocrm_cfg, dict):
+            amocrm_cfg["enabled"] = False
+            manual_cfg = amocrm_cfg.get("manual")
+            if isinstance(manual_cfg, dict):
+                manual_cfg.pop("access_token", None)
+            amocrm_cfg.pop("tokens", None)
+            integrations["amocrm"] = amocrm_cfg
+            cfg["integrations"] = integrations
+            common.write_tenant_config(tenant_id, cfg)
+    try:
+        await amocrm_tokens.delete(int(tenant_id))
+    except Exception:
+        logger.exception("amocrm_disconnect_failed tenant=%s", tenant_id)
+        return JSONResponse({"ok": False, "detail": "amocrm_disconnect_failed"}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
 @router.get("/pub/settings/get")
 def settings_get(request: Request, tenant: int | str | None = None, k: str | None = None):
     auth = _authorize_public_settings_request(request, tenant, k)
@@ -3579,7 +4153,24 @@ def settings_get(request: Request, tenant: int | str | None = None, k: str | Non
     common.ensure_tenant_files(tenant_id)
     cfg = common.read_tenant_config(tenant_id)
     persona = common.read_persona(tenant_id)
-    payload = {"ok": True, "cfg": cfg, "persona": persona}
+    personas = {
+        "telegram": common.read_persona(tenant_id, "telegram"),
+        "avito": common.read_persona(tenant_id, "avito"),
+    }
+    cfg_payload = cfg
+    if isinstance(cfg, dict):
+        cfg_payload = dict(cfg)
+        integrations = cfg_payload.get("integrations")
+        if isinstance(integrations, dict):
+            integrations_copy = dict(integrations)
+            if "amocrm" in integrations_copy:
+                masked = amocrm_service.mask_amocrm_cfg(
+                    integrations_copy.get("amocrm"),
+                    tenant_id=int(tenant_id),
+                )
+                integrations_copy["amocrm"] = masked or {}
+            cfg_payload["integrations"] = integrations_copy
+    payload = {"ok": True, "cfg": cfg_payload, "persona": persona, "personas": personas}
     return JSONResponse(payload, headers=_no_store_headers())
 
 
@@ -3591,11 +4182,12 @@ async def settings_save(request: Request, tenant: int | str | None = None, k: st
 
     tenant_id, _ = auth
     common.ensure_tenant_files(tenant_id)
+    existing_cfg = common.read_tenant_config(tenant_id)
     try:
         payload = await request.json()
     except Exception:
         payload = {}
-    cfg = common.read_tenant_config(tenant_id)
+    cfg = existing_cfg
     if isinstance(payload.get("cfg"), dict):
         cfg = payload["cfg"]
     else:
@@ -3604,9 +4196,55 @@ async def settings_save(request: Request, tenant: int | str | None = None, k: st
                 cfg.setdefault(section, {}).update(payload[section])
         if isinstance(payload.get("catalogs"), list):
             cfg["catalogs"] = payload["catalogs"]
+    if isinstance(cfg, dict):
+        integrations = cfg.get("integrations")
+        if isinstance(integrations, dict) and "amocrm" in integrations:
+            amocrm_cfg = integrations.get("amocrm")
+            if isinstance(amocrm_cfg, dict):
+                existing_amocrm = amocrm_service.get_amocrm_cfg(existing_cfg) or {}
+                oauth_cfg = amocrm_cfg.get("oauth")
+                if isinstance(oauth_cfg, dict):
+                    secret = str(oauth_cfg.get("client_secret") or "").strip()
+                    if not secret or secret == "***":
+                        existing_secret = ""
+                        if isinstance(existing_amocrm, dict):
+                            existing_oauth = existing_amocrm.get("oauth")
+                            if isinstance(existing_oauth, Mapping):
+                                existing_secret = str(existing_oauth.get("client_secret") or "").strip()
+                        if existing_secret:
+                            oauth_cfg["client_secret"] = existing_secret
+                manual_cfg = amocrm_cfg.get("manual")
+                if isinstance(manual_cfg, dict):
+                    manual_token = str(manual_cfg.get("access_token") or "").strip()
+                    if manual_token and manual_token != "***":
+                        try:
+                            await amocrm_tokens.ensure_schema()
+                            await amocrm_tokens.upsert(
+                                int(tenant_id),
+                                access_token=manual_token,
+                                refresh_token=None,
+                                expires_at=None,
+                                obtained_at=datetime.now(tz=timezone.utc),
+                                raw_payload={"mode": "manual"},
+                            )
+                        except Exception:
+                            logger.exception(
+                                "amocrm_manual_token_store_failed tenant=%s",
+                                tenant_id,
+                            )
+                    manual_cfg.pop("access_token", None)
+                amocrm_cfg.pop("tokens", None)
     common.write_tenant_config(tenant_id, cfg)
     if isinstance(payload.get("persona"), str):
         common.write_persona(tenant_id, payload.get("persona") or "")
+    personas_payload = payload.get("personas")
+    if isinstance(personas_payload, Mapping):
+        for channel_key, text in personas_payload.items():
+            if channel_key not in {"telegram", "avito"}:
+                continue
+            if not isinstance(text, str):
+                continue
+            common.write_persona(tenant_id, text, channel=channel_key)
     return {"ok": True}
 
 

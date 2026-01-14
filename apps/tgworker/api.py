@@ -8,6 +8,7 @@ import time
 import re
 import random
 import uuid
+import io
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -377,6 +378,54 @@ def create_app() -> FastAPI:
         if not token:
             return None
         return f"@{token}"
+
+    @app.get("/media/{tenant}/{peer_id}/{message_id}")
+    async def download_media(
+        request: Request,
+        tenant: int,
+        peer_id: int,
+        message_id: int,
+    ):
+        unauthorized = _enforce_admin(request, "/media", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
+        manager = app.state.session_manager
+        client = await manager.get_client(int(tenant))
+        if client is None:
+            return JSONResponse({"error": "not_authorized"}, status_code=409, headers=dict(NO_STORE_HEADERS))
+        peer_entity = None
+        try:
+            peer_entity = await client.get_entity(int(peer_id))
+        except Exception:
+            peer_entity = int(peer_id)
+        try:
+            message = await client.get_messages(peer_entity, ids=[int(message_id)])
+        except Exception:
+            logger.exception("media_fetch_failed tenant=%s peer=%s message=%s", tenant, peer_id, message_id)
+            return JSONResponse({"error": "media_fetch_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS))
+        if isinstance(message, list):
+            message = next((item for item in message if item is not None), None)
+        if not message:
+            return JSONResponse({"error": "media_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+        buf = io.BytesIO()
+        try:
+            await client.download_media(message, file=buf)
+        except Exception:
+            logger.exception("media_download_failed tenant=%s peer=%s message=%s", tenant, peer_id, message_id)
+            return JSONResponse({"error": "media_download_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS))
+        data = buf.getvalue()
+        if not data:
+            return JSONResponse({"error": "media_empty"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+        filename = None
+        mime = None
+        file_obj = getattr(message, "file", None)
+        if file_obj is not None:
+            filename = getattr(file_obj, "name", None)
+            mime = getattr(file_obj, "mime_type", None)
+        headers = dict(NO_STORE_HEADERS)
+        if filename:
+            headers["Content-Disposition"] = f"attachment; filename={filename}"
+        return Response(content=data, media_type=mime or "application/octet-stream", headers=headers)
 
     async def _run_broadcast_job(
         job_id: str,

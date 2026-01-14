@@ -16,7 +16,7 @@ def _build_client(monkeypatch, cfg, persona=""):
     monkeypatch.setattr(client_module, "_resolve_key", lambda request, raw=None: "abc")
     monkeypatch.setattr(client_module, "_auth", lambda tenant, key: True)
     monkeypatch.setattr(client_module.C, "read_tenant_config", lambda tenant: cfg)
-    monkeypatch.setattr(client_module.C, "read_persona", lambda tenant: persona)
+    monkeypatch.setattr(client_module.C, "read_persona", lambda tenant, channel=None: persona)
 
     return TestClient(app)
 
