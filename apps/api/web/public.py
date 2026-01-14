@@ -583,8 +583,13 @@ _TG_HTTP_CLIENT: httpx.AsyncClient | None = None
 
 
 def _tg_admin_headers() -> dict[str, str]:
-    token = getattr(settings, "ADMIN_TOKEN", "") or ""
-    return {"X-Admin-Token": token}
+    token = (
+        os.getenv("ADMIN_TOKEN")
+        or os.getenv("TGWORKER_ADMIN_TOKEN")
+        or getattr(settings, "ADMIN_TOKEN", "")
+        or ""
+    ).strip()
+    return {"X-Admin-Token": token} if token else {}
 
 
 def _tg_client() -> httpx.AsyncClient:
@@ -3477,7 +3482,11 @@ def settings_get(request: Request, tenant: int | str | None = None, k: str | Non
     common.ensure_tenant_files(tenant_id)
     cfg = common.read_tenant_config(tenant_id)
     persona = common.read_persona(tenant_id)
-    payload = {"ok": True, "cfg": cfg, "persona": persona}
+    personas = {
+        "telegram": common.read_persona(tenant_id, "telegram"),
+        "avito": common.read_persona(tenant_id, "avito"),
+    }
+    payload = {"ok": True, "cfg": cfg, "persona": persona, "personas": personas}
     return JSONResponse(payload, headers=_no_store_headers())
 
 
