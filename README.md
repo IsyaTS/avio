@@ -39,6 +39,9 @@
   - Avito: из UI сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), видны в диалогах; дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`). Эхо бота игнорируется по ключу `avito:bot_echo:<tenant>:<chat_id>`.
   - Telegram: сообщения из клиента сохраняются как исходящие и видны в диалогах; тишина ставится так же, как и для Avito.
 
+## Каталог (CSV/XLSX/PDF)
+- Импорт приводит названия к безопасному виду (`clean_title`) и не падает на единицах/скобках в title (например, `110 (110 ММ)`); если title всё ещё содержит запрещённые токены — импорт вернёт ошибку.
+
 ## Client SPA (redesign)
 - Исходники: `apps/frontend/client-portal/` (Vite + React + TS + Tailwind).
 - Сборка: `cd apps/frontend/client-portal && npm ci && npm run build`.
@@ -46,6 +49,7 @@
 - Кабинет: `/client/{tenant}/settings` (legacy-страница доступна по `?legacy=1`).
 - /connect/* редиректят на вкладку «Каналы» в SPA.
 - Dev (опционально): поднять Vite и задать `VITE_DEV_SERVER_URL=http://localhost:5173`.
+- Черновик настроек в SPA сохраняется в `sessionStorage` (переключение вкладок не сбрасывает чекбоксы/поля).
 ## Avito вебхуки и multi-tenant
 - Маршрутизация Avito-событий выполняется по `account_id`. В вебхуках v3, где `account_id` отсутствует, используется fallback на `payload.value.user_id`, после чего вызывается `find_tenant_by_account`.
 - Если `account_id` не определён или не найден в конфиге арендатора, событие пропускается (нет дефолта на `TENANT/TENANT_ID`), чтобы не уезжать в чужой тенант.

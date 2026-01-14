@@ -491,6 +491,13 @@ def _validate_items(items: Sequence[Mapping[str, str]], header: Sequence[str]) -
             raise ValueError(f"invalid price value: {price}")
         title = item.get("title", "")
         if title_contains_forbidden(title):
+            cleaned_title = clean_title(title)
+            if cleaned_title and not title_contains_forbidden(cleaned_title):
+                try:
+                    item["title"] = cleaned_title
+                except Exception:
+                    pass
+                continue
             raise ValueError(f"forbidden tokens in title: {title}")
     if len(header) != len(set(header)):
         raise ValueError("duplicate columns in header")
@@ -597,6 +604,9 @@ def finalize_catalog_rows(
                 continue
             row[key_text] = sanitize_value(value)
         title = _choose_title(row, idx)
+        cleaned_title = clean_title(title)
+        if cleaned_title:
+            title = cleaned_title
         price = _choose_price(row)
         if price:
             price_filled += 1
