@@ -471,6 +471,190 @@
         });
       })();
     </script>
+    <script>
+      (function () {
+        const stateNode = document.getElementById('client-settings-state');
+        let state = {};
+        try {
+          state = JSON.parse(stateNode.textContent || '{}');
+        } catch (e) {
+          console.warn('client-settings-state parse failed', e);
+        }
+        const tenant = state.tenant || '0';
+        const draftKey = `avio:settings:draft:${tenant}`;
+
+        const settingsForm = document.getElementById('settings-form');
+        const personaNode = document.getElementById('persona-text');
+        const behaviorPanel = document.querySelector('[data-tab-panel="behavior"]');
+        const triggerRows = document.getElementById('trigger-rows');
+
+        const autoReplyToggle = document.getElementById('behavior-auto-reply');
+        const autoReplyText = document.getElementById('behavior-auto-reply-text');
+        const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
+        const avitoSmartReplyToggle = document.getElementById('behavior-avito-smart-reply');
+        const sendCatalogTgToggle = document.getElementById('behavior-send-catalog-telegram');
+        const photoMarkersNode = document.getElementById('behavior-photo-markers');
+        const photoReplyNode = document.getElementById('behavior-photo-reply');
+        const photoTtlNode = document.getElementById('behavior-photo-ttl');
+
+        function normalizePhrases(text) {
+          return String(text || '')
+            .split(/\n|,/)
+            .map((v) => v.trim())
+            .filter(Boolean);
+        }
+
+        function collectTriggerDraft() {
+          if (!triggerRows) return [];
+          const rows = Array.from(triggerRows.querySelectorAll('.surface.stack'));
+          return rows.map((row) => {
+            const phrasesNode = row.querySelector('.trigger-phrases');
+            const phrases = normalizePhrases(phrasesNode ? phrasesNode.value : '');
+            const channels = [];
+            const chTg = row.querySelector('.trigger-telegram');
+            const chAvito = row.querySelector('.trigger-avito');
+            const chWa = row.querySelector('.trigger-whatsapp');
+            if (chTg && chTg.checked) channels.push('telegram');
+            if (chAvito && chAvito.checked) channels.push('avito');
+            if (chWa && chWa.checked) channels.push('whatsapp');
+            const notifyNode = row.querySelector('.trigger-notify');
+            return {
+              phrases,
+              channels,
+              notify: notifyNode ? !!notifyNode.checked : false,
+            };
+          });
+        }
+
+        function saveDraft() {
+          const draft = {
+            tenant,
+            updated_at: Date.now(),
+            form: {},
+            persona: personaNode ? personaNode.value : '',
+            behavior: {
+              auto_reply: autoReplyToggle ? !!autoReplyToggle.checked : false,
+              auto_reply_text: autoReplyText ? autoReplyText.value : '',
+              avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
+              avito_smart_reply_enabled: avitoSmartReplyToggle ? !!avitoSmartReplyToggle.checked : false,
+              send_catalog_on_first_message: sendCatalogTgToggle ? !!sendCatalogTgToggle.checked : true,
+              photo_expected_markers: photoMarkersNode ? photoMarkersNode.value : '',
+              photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',
+              photo_expected_ttl: photoTtlNode ? photoTtlNode.value : '',
+              triggers: collectTriggerDraft(),
+            },
+          };
+          if (settingsForm) {
+            const formData = new FormData(settingsForm);
+            formData.forEach((value, key) => {
+              draft.form[key] = value;
+            });
+          }
+          try {
+            sessionStorage.setItem(draftKey, JSON.stringify(draft));
+          } catch (err) {
+            console.warn('settings draft save failed', err);
+          }
+        }
+
+        function applyTriggerDraft(triggerDraft) {
+          if (!triggerRows || !Array.isArray(triggerDraft)) return;
+          const rows = Array.from(triggerRows.querySelectorAll('.surface.stack'));
+          if (rows.length !== triggerDraft.length) {
+            return;
+          }
+          rows.forEach((row, idx) => {
+            const draft = triggerDraft[idx] || {};
+            const phrasesNode = row.querySelector('.trigger-phrases');
+            if (phrasesNode && Array.isArray(draft.phrases)) {
+              phrasesNode.value = draft.phrases.join('\n');
+            }
+            const channels = Array.isArray(draft.channels) ? draft.channels : [];
+            const chTg = row.querySelector('.trigger-telegram');
+            const chAvito = row.querySelector('.trigger-avito');
+            const chWa = row.querySelector('.trigger-whatsapp');
+            if (chTg) chTg.checked = channels.length ? channels.includes('telegram') : chTg.checked;
+            if (chAvito) chAvito.checked = channels.length ? channels.includes('avito') : chAvito.checked;
+            if (chWa) chWa.checked = channels.length ? channels.includes('whatsapp') : chWa.checked;
+            const notifyNode = row.querySelector('.trigger-notify');
+            if (notifyNode && typeof draft.notify === 'boolean') {
+              notifyNode.checked = draft.notify;
+            }
+          });
+        }
+
+        function restoreDraft() {
+          if (!sessionStorage) return;
+          let draft = null;
+          try {
+            draft = JSON.parse(sessionStorage.getItem(draftKey) || 'null');
+          } catch (err) {
+            draft = null;
+          }
+          if (!draft || String(draft.tenant || '') !== String(tenant)) {
+            return;
+          }
+          if (settingsForm && draft.form && typeof draft.form === 'object') {
+            Object.entries(draft.form).forEach(([key, value]) => {
+              const input = settingsForm.querySelector(`[name="${key}"]`);
+              if (input) {
+                input.value = value;
+              }
+            });
+          }
+          if (personaNode && typeof draft.persona === 'string') {
+            personaNode.value = draft.persona;
+          }
+          const behaviorDraft = draft.behavior || {};
+          if (autoReplyToggle && typeof behaviorDraft.auto_reply === 'boolean') {
+            autoReplyToggle.checked = behaviorDraft.auto_reply;
+          }
+          if (autoReplyText && typeof behaviorDraft.auto_reply_text === 'string') {
+            autoReplyText.value = behaviorDraft.auto_reply_text;
+          }
+          if (avitoPhoneTemplateNode && typeof behaviorDraft.avito_phone_tg_template === 'string') {
+            avitoPhoneTemplateNode.value = behaviorDraft.avito_phone_tg_template;
+          }
+          if (avitoSmartReplyToggle && typeof behaviorDraft.avito_smart_reply_enabled === 'boolean') {
+            avitoSmartReplyToggle.checked = behaviorDraft.avito_smart_reply_enabled;
+          }
+          if (sendCatalogTgToggle && typeof behaviorDraft.send_catalog_on_first_message === 'boolean') {
+            sendCatalogTgToggle.checked = behaviorDraft.send_catalog_on_first_message;
+          }
+          if (photoMarkersNode && typeof behaviorDraft.photo_expected_markers === 'string') {
+            photoMarkersNode.value = behaviorDraft.photo_expected_markers;
+          }
+          if (photoReplyNode && typeof behaviorDraft.photo_expected_reply === 'string') {
+            photoReplyNode.value = behaviorDraft.photo_expected_reply;
+          }
+          if (photoTtlNode && typeof behaviorDraft.photo_expected_ttl === 'string') {
+            photoTtlNode.value = behaviorDraft.photo_expected_ttl;
+          }
+          applyTriggerDraft(behaviorDraft.triggers);
+        }
+
+        let draftTimer = null;
+        function queueSaveDraft() {
+          if (draftTimer) window.clearTimeout(draftTimer);
+          draftTimer = window.setTimeout(saveDraft, 250);
+        }
+
+        if (settingsForm) {
+          settingsForm.addEventListener('input', queueSaveDraft);
+          settingsForm.addEventListener('change', queueSaveDraft);
+        }
+        if (personaNode) {
+          personaNode.addEventListener('input', queueSaveDraft);
+          personaNode.addEventListener('change', queueSaveDraft);
+        }
+        if (behaviorPanel) {
+          behaviorPanel.addEventListener('input', queueSaveDraft);
+          behaviorPanel.addEventListener('change', queueSaveDraft);
+        }
+
+        restoreDraft();
+      })();
+    </script>
 
 <section class="surface stack tab-panel hidden" data-tab-panel="catalog" data-testid="client-catalog">
     <div class="stack" style="gap: 6px;">

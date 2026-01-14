@@ -1081,6 +1081,442 @@ async def insert_message_out(
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
 
+async def get_lead_dialog_metadata(lead_id: int) -> Optional[Mapping[str, Any]]:
+    try:
+        lead_ref = int(lead_id)
+    except Exception:
+        return None
+    if lead_ref <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT l.id,
+               l.tenant_id,
+               l.channel,
+               l.peer,
+               l.contact,
+               l.title,
+               l.telegram_user_id,
+               l.telegram_username
+        FROM leads l
+        WHERE l.id = $1::bigint
+        LIMIT 1;
+    """,
+        lead_ref,
+    )
+    return row if row else None
+
+
+async def fetch_dialogs_for_tenant(tenant_id: int, limit: int = 200) -> List[Dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    if tenant_val <= 0:
+        return []
+    try:
+        limit_val = int(limit)
+    except Exception:
+        limit_val = 200
+    if limit_val <= 0:
+        limit_val = 50
+    limit_val = min(limit_val, 500)
+    rows = await _fetch(
+        """
+        SELECT l.id,
+               l.channel,
+               l.peer,
+               l.contact,
+               l.title,
+               l.telegram_username,
+               c.avito_login,
+               m.text AS last_message,
+               m.created_at AS last_ts
+        FROM leads l
+        LEFT JOIN contacts c
+            ON c.id = (
+                SELECT lc.contact_id
+                FROM lead_contacts lc
+                WHERE lc.lead_id = l.id
+                LIMIT 1
+            )
+        LEFT JOIN LATERAL (
+            SELECT m2.text, m2.created_at
+            FROM messages m2
+            WHERE m2.lead_id = l.id
+            ORDER BY m2.created_at DESC
+            LIMIT 1
+        ) m ON true
+        WHERE l.tenant_id = $1
+        ORDER BY m.created_at DESC NULLS LAST, l.updated_at DESC NULLS LAST
+        LIMIT $2;
+    """,
+        tenant_val,
+        limit_val,
+    )
+    return [dict(row) for row in rows]
+
+
+async def list_messages_for_lead(
+    tenant_id: int,
+    lead_id: int,
+    limit: int = 50,
+    before: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    try:
+        lead_val = int(lead_id)
+    except Exception:
+        return []
+    if tenant_val <= 0 or lead_val <= 0:
+        return []
+    try:
+        limit_val = int(limit)
+    except Exception:
+        limit_val = 50
+    if limit_val <= 0:
+        limit_val = 20
+    limit_val = min(limit_val, 200)
+    if before is None:
+        rows = await _fetch(
+            """
+            SELECT id, direction, text, status, is_bot, created_at
+            FROM messages
+            WHERE tenant_id = $1
+              AND lead_id = $2::bigint
+            ORDER BY created_at DESC
+            LIMIT $3;
+        """,
+            tenant_val,
+            lead_val,
+            limit_val,
+        )
+    else:
+        rows = await _fetch(
+            """
+            SELECT id, direction, text, status, is_bot, created_at
+            FROM messages
+            WHERE tenant_id = $1
+              AND lead_id = $2::bigint
+              AND created_at < $3
+            ORDER BY created_at DESC
+            LIMIT $4;
+        """,
+            tenant_val,
+            lead_val,
+            before,
+            limit_val,
+        )
+    return [dict(row) for row in rows]
+
+
+async def create_message_feedback(
+    tenant_id: int,
+    message_id: int,
+    rating: str,
+    comment: Optional[str],
+    *,
+    lead_id: Optional[int] = None,
+    expected_answer: Optional[str] = None,
+) -> int:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return 0
+    try:
+        message_val = int(message_id)
+    except Exception:
+        return 0
+    if tenant_val <= 0 or message_val <= 0:
+        return 0
+    lead_val = None
+    if lead_id is not None:
+        try:
+            lead_val = int(lead_id)
+        except Exception:
+            lead_val = None
+    try:
+        row = await _fetchrow(
+            """
+            INSERT INTO feedback(message_id, tenant_id, rating, comment, lead_id, expected_answer)
+            VALUES($1::bigint, $2, $3, $4, $5::bigint, $6)
+            RETURNING id;
+        """,
+            message_val,
+            tenant_val,
+            rating,
+            comment,
+            lead_val,
+            expected_answer,
+        )
+    except Exception:
+        return 0
+    return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
+
+
+async def get_message_metadata(message_id: int) -> Optional[Mapping[str, Any]]:
+    try:
+        message_val = int(message_id)
+    except Exception:
+        return None
+    if message_val <= 0:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT id, tenant_id, lead_id, direction, is_bot, text, created_at
+        FROM messages
+        WHERE id = $1::bigint
+        LIMIT 1;
+    """,
+        message_val,
+    )
+    return row if row else None
+
+
+async def get_previous_incoming_message(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    before: Optional[datetime] = None,
+) -> Optional[Mapping[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return None
+    try:
+        lead_val = int(lead_id)
+    except Exception:
+        return None
+    if tenant_val <= 0 or lead_val <= 0:
+        return None
+    if before is None:
+        row = await _fetchrow(
+            """
+            SELECT id, text, created_at
+            FROM messages
+            WHERE tenant_id = $1
+              AND lead_id = $2::bigint
+              AND direction = 0
+            ORDER BY created_at DESC
+            LIMIT 1;
+        """,
+            tenant_val,
+            lead_val,
+        )
+    else:
+        row = await _fetchrow(
+            """
+            SELECT id, text, created_at
+            FROM messages
+            WHERE tenant_id = $1
+              AND lead_id = $2::bigint
+              AND direction = 0
+              AND created_at < $3
+            ORDER BY created_at DESC
+            LIMIT 1;
+        """,
+            tenant_val,
+            lead_val,
+            before,
+        )
+    return row if row else None
+
+
+async def record_training_example(
+    tenant_id: int,
+    *,
+    lead_id: Optional[int],
+    message_id: Optional[int],
+    source: str,
+    source_feedback_id: Optional[int],
+    q_text: str,
+    a_text: str,
+    is_bad: bool = False,
+    embedding_status: str = "pending",
+) -> int:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return 0
+    if tenant_val <= 0:
+        return 0
+    lead_val = None
+    if lead_id is not None:
+        try:
+            lead_val = int(lead_id)
+        except Exception:
+            lead_val = None
+    message_val = None
+    if message_id is not None:
+        try:
+            message_val = int(message_id)
+        except Exception:
+            message_val = None
+    feedback_val = None
+    if source_feedback_id is not None:
+        try:
+            feedback_val = int(source_feedback_id)
+        except Exception:
+            feedback_val = None
+    row = await _fetchrow(
+        """
+        INSERT INTO training_examples(
+            tenant_id,
+            lead_id,
+            message_id,
+            source,
+            source_feedback_id,
+            q_text,
+            a_text,
+            is_bad,
+            embedding_status
+        )
+        VALUES($1, $2::bigint, $3::bigint, $4, $5::bigint, $6, $7, $8, $9)
+        RETURNING id;
+    """,
+        tenant_val,
+        lead_val,
+        message_val,
+        source,
+        feedback_val,
+        q_text,
+        a_text,
+        is_bad,
+        embedding_status,
+    )
+    return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
+
+
+async def mark_bad_bot_message(
+    tenant_id: int,
+    message_id: int,
+    *,
+    feedback_id: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> None:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return None
+    try:
+        message_val = int(message_id)
+    except Exception:
+        return None
+    if tenant_val <= 0 or message_val <= 0:
+        return None
+    feedback_val = None
+    if feedback_id is not None:
+        try:
+            feedback_val = int(feedback_id)
+        except Exception:
+            feedback_val = None
+    await _exec(
+        """
+        INSERT INTO bad_bot_messages(tenant_id, message_id, feedback_id, reason)
+        VALUES($1, $2::bigint, $3::bigint, $4)
+        ON CONFLICT (message_id) DO UPDATE
+        SET feedback_id = EXCLUDED.feedback_id,
+            reason = EXCLUDED.reason;
+    """,
+        tenant_val,
+        message_val,
+        feedback_val,
+        reason,
+    )
+
+
+async def get_feedback_counts(tenant_id: int) -> dict[str, int]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return {"like": 0, "dislike": 0}
+    if tenant_val <= 0:
+        return {"like": 0, "dislike": 0}
+    try:
+        rows = await _fetch(
+            """
+            SELECT rating, COUNT(*)::int AS total
+            FROM feedback
+            WHERE tenant_id = $1
+            GROUP BY rating;
+        """,
+            tenant_val,
+        )
+    except Exception:
+        return {"like": 0, "dislike": 0}
+    out = {"like": 0, "dislike": 0}
+    for row in rows:
+        rating = str(row.get("rating") or "").strip().lower()
+        total = int(row.get("total") or 0)
+        if rating in out:
+            out[rating] = total
+    return out
+
+
+async def feedback_exists(tenant_id: int, message_id: int) -> bool:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return False
+    try:
+        message_val = int(message_id)
+    except Exception:
+        return False
+    if tenant_val <= 0 or message_val <= 0:
+        return False
+    try:
+        row = await _fetchrow(
+            """
+            SELECT 1
+            FROM feedback
+            WHERE tenant_id = $1
+              AND message_id = $2::bigint
+            LIMIT 1;
+        """,
+            tenant_val,
+            message_val,
+        )
+    except Exception:
+        return False
+    return bool(row)
+
+
+async def list_feedback_message_ids(tenant_id: int, message_ids: list[int]) -> set[int]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return set()
+    if tenant_val <= 0 or not message_ids:
+        return set()
+    ids: list[int] = []
+    for candidate in message_ids:
+        try:
+            cid = int(candidate)
+        except Exception:
+            continue
+        if cid > 0:
+            ids.append(cid)
+    if not ids:
+        return set()
+    try:
+        rows = await _fetch(
+            """
+            SELECT message_id
+            FROM feedback
+            WHERE tenant_id = $1
+              AND message_id = ANY($2::bigint[]);
+        """,
+            tenant_val,
+            ids,
+        )
+    except Exception:
+        return set()
+    return {int(row.get("message_id")) for row in rows if row.get("message_id")}
+
+
 async def update_message_status(
     message_id: int,
     status: str,

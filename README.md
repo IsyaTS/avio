@@ -16,22 +16,10 @@
 ## Follow-ups и Avito автоответ
 
 - Правила follow-up лежат в `data/tenants/<id>/tenant.json` → `follow_up` (или через UI `/client/{tenant}/follow-ups`).
-- Базовый сценарий (по таймеру):
-  - Воркер `apps/worker` ставит задачи при входящих сообщениях по каналу (avito/telegram/whatsapp) и вынимает их из Redis.
+- Воркер `apps/worker` ставит задачи при входящих сообщениях по каналу (avito/telegram/whatsapp) и вынимает их из Redis:
   - ZSET `followup:schedule`, HASH `followup:job:{id}`; очередь на отправку — `OUTBOX_QUEUE_KEY`.
   - Дедуп: `followup:scheduled:{tenant}:{lead}:{rule}` и `followup:sent:{tenant}:{lead}:{rule}` (TTL 24ч по умолчанию). Удалите их, чтобы вручную переотправить для лида.
   - Тюнинг: `FOLLOWUPS_ENABLED` (on/off), `FOLLOWUP_POLL_INTERVAL`, `FOLLOWUP_BATCH_LIMIT`, `FOLLOWUP_SCHEDULE_DEDUP_TTL`, `FOLLOWUP_SENT_DEDUP_TTL`.
-- Условные follow-up (facts):
-  - В правилах можно задавать `condition` (например, `{ key: "ordered", op: "neq", value: "yes" }`).
-  - Вопросы могут записывать факт через `capture` (ключ + списки ответов "да/нет").
-  - Факты хранятся в Redis: `followup:fact:<tenant>:<lead>:<key>`; ожидание ответа — `followup:pending:<tenant>:<lead>`.
-  - TTL: `FOLLOWUP_FACT_TTL_SECONDS` (по умолчанию 90 дней), `FOLLOWUP_CAPTURE_TTL_SECONDS` (по умолчанию 14 дней).
-  - Синонимы ответов матчятся по словам; регистр не важен. Допускается неточное совпадение (по Левенштейну) для одного слова: `FOLLOWUP_FUZZY_MAX_DISTANCE` (по умолчанию `1`).
-- Мгновенные follow-up (сразу после ответа):
-  - В правиле включите `trigger_on_answer=true` и задайте `condition` по факту.
-  - Такие правила не планируются в `followup:schedule` и отправляются сразу после фиксации ответа.
-  - Если под один ответ подходят несколько правил, срабатывает первое по порядку в `follow_up`.
-- После отправки любого follow-up смарт-реплай для лида отключается на TTL (`handoff:silence:<tenant>:<lead>`), чтобы бот не продолжал диалог.
 - Avito автоответ:
   - Включить: `behavior.auto_reply=true`, заполнить `behavior.auto_reply_text` в конфиге арендатора.
   - Дедуп: `avito:auto_reply_sent:{tenant}:{lead}` (TTL `AVITO_AUTO_REPLY_TTL`, по умолчанию 86400).
@@ -40,13 +28,19 @@
 
 ## Диалоги (Avito + Telegram) и обратная связь
 - Вкладка «Диалоги» в кабинете клиента (`/client/{tenant}/settings#dialogs`) показывает список лидов слева и ленту сообщений справа; отправка ответов идёт через очереди воркера.
-- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback.
+- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback. При открытии диалога лента прокручивается к последнему сообщению.
 - API под ключ клиента (`k` + `tenant`):
   - `GET /api/dialogs` — список диалогов с last_message/last_ts.
   - `GET /api/dialogs/{lead_id}` — история сообщений.
   - `POST /api/dialogs/{lead_id}/send` — отправка текста (очередь OUTBOX).
   - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
-- База данных: в `messages` добавлен флаг `is_bot` (по умолчанию `false`), создана таблица `message_feedback` (tenant_id, message_id, rating, comment, handled, created_at).
+- База данных: в `messages` есть флаг `is_bot` (по умолчанию `false`); таблица `message_feedback` используется для лайков/дизлайков. Если таблицы нет, диалоги продолжают работать, но фидбек не сохраняется.
+- Сообщения менеджера:
+  - Avito: из UI сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), видны в диалогах; дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`). Эхо бота игнорируется по ключу `avito:bot_echo:<tenant>:<chat_id>`.
+  - Telegram: сообщения из клиента сохраняются как исходящие и видны в диалогах; тишина ставится так же, как и для Avito.
+
+## Каталог (CSV/XLSX/PDF)
+- Импорт приводит названия к безопасному виду (`clean_title`) и не падает на единицах/скобках в title (например, `110 (110 ММ)`); если title всё ещё содержит запрещённые токены — импорт вернёт ошибку.
 
 ## Client SPA (redesign)
 - Исходники: `apps/frontend/client-portal/` (Vite + React + TS + Tailwind).
@@ -55,7 +49,7 @@
 - Кабинет: `/client/{tenant}/settings` (legacy-страница доступна по `?legacy=1`).
 - /connect/* редиректят на вкладку «Каналы» в SPA.
 - Dev (опционально): поднять Vite и задать `VITE_DEV_SERVER_URL=http://localhost:5173`.
-
+- Черновик настроек в SPA сохраняется в `sessionStorage` (переключение вкладок не сбрасывает чекбоксы/поля).
 ## Avito вебхуки и multi-tenant
 - Маршрутизация Avito-событий выполняется по `account_id`. В вебхуках v3, где `account_id` отсутствует, используется fallback на `payload.value.user_id`, после чего вызывается `find_tenant_by_account`.
 - Если `account_id` не определён или не найден в конфиге арендатора, событие пропускается (нет дефолта на `TENANT/TENANT_ID`), чтобы не уезжать в чужой тенант.
@@ -63,26 +57,6 @@
 ## Telegram multi-tenant
 - Вебхук `/webhook/telegram` требует явный tenant (`tenant` или `tenant_id`); при его отсутствии возвращает 400.
 - Воркер игнорирует входящие Telegram-события без tenant, чтобы сообщения не попадали в дефолтный арендуемый контур.
-- Вкладка «Каналы»: кнопка «Отключить» вызывает `/pub/tg/logout` (принудительный logout, удаление сессии).
-- Если сессию завершили вручную в Telegram, статус автоматически синхронизируется: `/pub/tg/status` переводит сессию в `disconnected`, и можно снова получить QR.
-- `/pub/tg/start?force=1` всегда перезапускает сессию и выдаёт новый QR (обходит `already_authorized`).
-
-## Admin Telegram export (secret)
-- Секретная страница: `GET /admin/_secret/tgexport` (только админ), работает через tgworker и `ADMIN_TENANT_ID=999`.
-- Экспорт пишет TXT в `data/admin_exports/` (в контейнере: `/data/admin_exports`).
-- Broadcast: загрузите файл с username (1 строка = 1 username), задайте лимит и паузу, отправка идет последовательно с учетом FloodWait.
-- Критерии приемки:
-  1) Тенантские роуты/страницы не изменены и не показывают группы/каналы.
-  2) При отсутствии `ADMIN_TOKEN` новые admin endpoints возвращают 403/500.
-  3) Для `tenant_id=999` tgworker не регистрирует event handlers и не запускает smart-reply.
-  4) Экспорт из больших групп/каналов отдает TXT и сохраняет файл на диск.
-
-## Admin Avito Analytics (OAuth)
-- Страница: `/admin/avito-analytics` (только `ADMIN_TOKEN`).
-- OAuth поток отделён от tenant-подключений: `/admin/avito-analytics/oauth/start` → callback `/admin/avito-analytics/oauth/callback`.
-- Таблица `avito_analytics_tokens` хранит зашифрованные access/refresh токены (Fernet, ключ `AVITO_TOKEN_ENCRYPTION_KEY`).
-- UI: выбор аккаунта, период 7/30/90, карточки метрик, таблица объявлений, операции, блоки job:applications и VAS/продвижение, RAW JSON, экспорт JSON/CSV (items/operations/job/vas), ручное обновление кеша.
-- ENV: `AVITO_CLIENT_ID`, `AVITO_CLIENT_SECRET`, `AVITO_ANALYTICS_REDIRECT_URI`, `AVITO_ANALYTICS_SCOPES` (опционально), `AVITO_TOKEN_ENCRYPTION_KEY`, `AVITO_ANALYTICS_CACHE_TTL`.
 
 ## Telegram каталог (PDF)
 - PDF берётся из `data/tenants/<id>/uploads/catalog.pdf` или `meta.catalog_pdf_path` и в Telegram отправляется файлом (без ссылок на viewer).
@@ -99,80 +73,12 @@
 - Воркер при входящих в этот чат пишет `event=smart_reply_silenced`. Снять тишину: `redis-cli DEL handoff:silence:<tenant>:<lead_id>`.
 - Каталог кешируется отдельно ключом `catalog:sent:<tenant>:tg:<peer>` (TTL `STATE_TTL_SECONDS`), он не влияет на тишину, только на повторную отправку каталога.
 
-## Telegram автоответ (переключатель)
-- Настройка в кабинете: «Автоответ Telegram».
-- Хранится в `behavior.telegram_reply_enabled` (по умолчанию `true`).
-- При выключении входящие принимаются и сохраняются, но автоответ бота не отправляется.
-
-## amoCRM (Avio → amoCRM, односторонняя интеграция)
-- Интеграция включается в кабинете арендатора на вкладке «Каналы». Тенант нажимает «Подключить» и проходит OAuth; ручной ввод секретов в UI не требуется.
-- Конфиг хранится в `tenant.json` → `integrations.amocrm` (без токенов). Токены хранятся в БД (`amocrm_tokens`), в API возвращаются masked.
-- Поток: первое входящее сообщение нового лида → создание Contact (по телефону при наличии) + Lead в выбранной воронке, сохраняется связь `lead_id` ↔ `amo_lead_id`.
-- Дальше на каждом входящем:
-  - извлечение полей по regex‑правилам (`fields_rules`) и обновление custom fields только при изменении;
-  - продвижение по стадиям по правилам (`stages[].rule`) строго на 1 шаг за событие;
-  - опционально — примечание по шаблону;
-  - файлы/медиа загружаются через API файлов amoCRM и прикрепляются к сделке (во вкладке «Файлы»), без ссылок в заметках.
-- Вся переписка попадает в amoCRM как заметки: `[IN канал] ...` для клиента и `[OUT канал] ...` для менеджера.
-- Сообщения от авторизованного Telegram‑аккаунта менеджера пишутся в amoCRM сразу из webhook (manager/out).
-- Для входящих действует дедупликация по `message_id` (чтобы не было двойных заметок).
-- Outbox: все события пишутся в `crm_outbox` и обрабатываются воркером с ретраями; при недоступности amoCRM события накапливаются и повторяются без влияния на основной поток сообщений.
-
-### UI / настройка
-- Вкладка «Каналы» → секция amoCRM:
-  - Переключатель включения интеграции.
-  - Выбор воронки, список стадий (каждая стадия: `name`, `amo_stage_id`, `rule`).
-  - Правила извлечения полей: `key`, `regex`, `amo_field_id`, `apply_mode` (`last_inbound` | `any_history`).
-  - Статус подключения определяется по токену в БД.
-
-### Правила стадий (stage rules)
-Каждая стадия в `integrations.amocrm.stages[]` имеет правило:
-- `on_first_inbound` — только при первом входящем.
-- `on_inbound_count` — при количестве входящих `min_inbound_messages`.
-- `on_keyword` — при наличии ключевого слова в последнем входящем (case‑insensitive).
-- `on_field_present` — если поле извлечено (`field_key`).
-- `manual_only` — дальше не двигается автоматически.
-
-Дефолт, если пользователь не настроил:
-- Stage 0: `on_first_inbound`
-- Stage 1: `on_inbound_count` `{min_inbound_messages: 2}`
-- Stage 2: `on_inbound_count` `{min_inbound_messages: 4}`
-
-### Извлечение полей
-- Формат правила: `{ key, regex, amo_field_id, apply_mode }`.
-- `apply_mode=last_inbound` — по последнему входящему, `any_history` — по конкатенации последних N входящих (используется текущий срез).
-- Для телефона применяется нормализация (оставляем `+` и цифры).
-- Значения сохраняются локально для дедупа и не переотправляются без изменений.
-
-### Файлы/вложения
-- Вложения из Telegram/WhatsApp загружаются в amoCRM через Files API:
-  - открытие сессии `POST /v1.0/sessions` на `drive_url` аккаунта;
-  - загрузка частей файла;
-  - привязка к сделке `PUT /api/v4/leads/{lead_id}/files`.
-- Ссылки в заметки не добавляются, только фактические файлы.
-
-### OAuth
-- Старт: `GET /pub/integrations/amocrm/oauth/start?tenant_id=...&k=...`
-- Callback: `GET /pub/integrations/amocrm/oauth/callback?code=...&state=...`
-- State содержит tenant_id + nonce + HMAC (ключ из env).
-- Refresh токен одноразовый, при обновлении сохраняется новый refresh.
-
-### Outbox события
-- `create_lead`, `update_fields`, `update_contact_fields`, `move_stage`, `add_note`, `add_files`.
-- Логи: `amocrm_outbox_enqueued`, `amocrm_event_done`, `amocrm_event_retry`.
-
-### Диагностика
-- Проверка подключения: `GET /pub/integrations/amocrm/status?tenant_id=...&k=...`
-- Пробный запрос: `POST /pub/integrations/amocrm/test?tenant_id=...&k=...`
-- Если amoCRM недоступна — события остаются в `crm_outbox` и повторяются.
-
 ## Avito ответы
 - Для Avito события воркер берёт автоответ из настроек арендатора `behavior.auto_reply_text` (UI: раздел «Поведение и триггеры»). Если текста нет или флаг `behavior.auto_reply` выключен, автоответ не отправляется. Персона больше не используется для Avito-автоответа.
 - Если в Avito-сообщении найден российский номер телефона (формат `+7`/`7`/`8`, приводим к `+7XXXXXXXXXX`, строго 11 цифр), воркер один раз отправляет лидеру сообщение в Telegram от сессии этого же тенанта. Текст берётся из `behavior.avito_phone_tg_template` (UI вкладка «Поведение»); если пусто — падаем назад на `persona.meta.avito_phone_tg_template` (старый формат). Дедуп по ключу `avito:phone_tg_sent:<tenant>:<lead_id>` с TTL `AVITO_PHONE_TG_TTL` (по умолчанию 86400, отключается `AVITO_PHONE_TG_DEDUP_DISABLED=1`).
 - Автоответ Avito отправляется один раз на lead/chat: при удачной постановке в очередь ставится ключ `avito:auto_reply_sent:<tenant>:<lead_id>` с TTL `AVITO_AUTO_REPLY_TTL` (по умолчанию 86400).
 - Сбросить дедуп автоответа: `redis-cli DEL avito:auto_reply_sent:<tenant>:<lead_id>` (для dev `docker compose exec redis ...`).
 - Триггеры тишины: в UI «Поведение и триггеры» можно задать фразы + каналы (TG/Avito/WA). При совпадении воркер ставит тишину и (по желанию) уведомляет менеджера; автоответчик/LLM не отвечают.
-- Эхо сообщений Avito: чтобы не глушить чат после ответа бота, при успешной отправке бот кеширует последний текст в Redis `avito:bot_echo:<tenant>:<chat_id>` (TTL `AVITO_BOT_ECHO_TTL_SECONDS`, по умолчанию 120). В вебхуке Avito, если входящее сообщение с `author_id == account_id` совпадает с этим текстом, событие считается эхом и игнорируется. Иначе считается сообщением менеджера и ставит `handoff:silence:<tenant>:<lead_id>`.
 - Настройки поведения и триггеры лежат в `tenant.json` → `behavior` (`auto_reply`, `auto_reply_text`, `triggers`).
 - Переключатели per-tenant:
   - `behavior.send_catalog_on_first_message` — отправлять ли PDF‑каталог первым сообщением в Telegram (по умолчанию `true`).
@@ -198,7 +104,7 @@
 - Dev-override: в деве использовать `docker-compose.override.test.yml` + `.env.dev` (если есть) для портов/ENV, прод — без dev-override.
 
 ## PUBLIC_KEY для фронта
-- Публичные маршруты Telegram (`/pub/tg/*`) и WhatsApp (`/pub/wa/*`) принимают ключ только через параметр `?k=` и сравнивают его со значением `PUBLIC_KEY` из окружения.
+- Публичные маршруты Telegram (`/pub/tg/*`) и WhatsApp (`/pub/wa/*`) принимают ключ через `?k=`. Для TG допускается ключ арендатора (tenant key) или `PUBLIC_KEY`, для WA — `PUBLIC_KEY`.
 - Значение `PUBLIC_KEY` обязательно и должно отличаться от `ADMIN_TOKEN`, чтобы не давать фронту доступ к административным операциям.
 - При отсутствии `PUBLIC_KEY` система временно принимает `ADMIN_TOKEN` как запасной вариант, но это режим совместимости и рекомендуется задать отдельный ключ для фронта как можно раньше.
 
@@ -212,7 +118,6 @@
 ### Дефолтная персона
 - Базовый шаблон хранится в `libs/agents/persona_default_ru.md` и подставляется, если у арендатора нет собственного `persona.md`.
 - Override на уровне арендатора находится в `tenants/<ID>/persona.md` и перекрывает дефолт после сохранения в клиентском кабинете.
-- Для разделения по каналам можно создать `tenants/<ID>/persona_telegram.md` и `tenants/<ID>/persona_avito.md`; если файл не задан или пустой, используется базовая `persona.md`.
 - Плейсхолдеры: `{AGENT_NAME}`, `{BRAND}`, `{CITY}` берутся из паспорта бренда, `{CHANNEL}` — из фактического канала диалога (fallback `WhatsApp`), `{WHATSAPP_LINK}` и `{CATALOG_URL}` — из настроек арендатора (если пусто — подставляется пустая строка).
 - `{CURRENCY}` всегда нормализуется в `₽`.
 - В секции `meta` можно указать дополнительные артефакты:
@@ -592,11 +497,6 @@ docker exec avio-app-1 curl -fsS -H "X-Auth-Token:${ADMIN_TOKEN}" http://waweb-1
         forbid_tags: ["apartment_only"]
     ```
   - Эти блоки работают для любых категорий (двери, сантехника, услуги). Чтобы «натренировать» нового арендатора, добавляем словари и правила в `persona.md` и перезагружаем страницу — код автоматически помечает каталог и фильтрует рекомендации.
-- **Обучение по лайкам/дизлайкам.** Вкладка «Диалоги» сохраняет оценки боту (`/api/feedback`): дизлайк требует комментарий и корректный ответ. Для каждого тенанта создаются `training_examples` в Postgres, плохие ответы помечаются в `bad_bot_messages`, retrieval пер-тенант добавляется в prompt (`build_examples_block_async`). Если embeddings недоступны, retrieval падает на TF‑IDF (встроенный lightweight‑shim).
-  - **Принудительная подстановка корректировок.** В `ask_llm` используется принудительный ответ, если top‑пример с `source=correction` набирает `score >= 0.8`. Это позволяет мгновенно применять фидбэк без LLM.
-  - **Короткие сообщения.** Для 1–2 коротких токенов включено правило `force_match_short`: если токены входят в `q_text` примера (упрощённый prefix‑match), бот отвечает корректировкой даже при низком score.
-  - **Настройки в `tenant.json` → `learning`:** `force_match` (bool), `force_match_score` (float, default 0.8), `force_match_short` (bool), `force_match_short_tokens` (int, default 2), `force_match_short_min_len` (int, default 3).
-  - Экспорт датасета: `python scripts/finetune/export_sft_dataset.py --tenant <id> --output /tmp/sft.jsonl`; DPO‑пары: `python scripts/finetune/export_dpo_dataset.py --tenant <id> --output /tmp/dpo.jsonl`. Файнтюн по умолчанию выключен (таблица `tenant_models`, флаг `use_finetune=false`).
 - **Локальная проверка диалогов.** Команда `test` (обёртка над `scripts/chat_simulator.py`) работает из `.venv`. Полезные параметры: `--tenant`, `--contact`, `--channel`, `--reset`, `--show-messages`. Внутри сессии команда `reset` очищает состояние текущего контакта.
 - **Состояния диалогов.** Redis-хранилище (`sales_state:<tenant>:<contact>`) монтируется на хост в `data/redis`. Для ручного сброса:  
   ```bash

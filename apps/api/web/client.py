@@ -1,6 +1,5 @@
 import csv
 import io
-import asyncio
 import json
 import mimetypes
 import os
@@ -8,6 +7,7 @@ import pathlib
 import re
 import time
 import uuid
+import asyncio
 from typing import Any, Dict, Optional
 from urllib.parse import quote, quote_plus
 
@@ -26,7 +26,6 @@ from libs.core import catalog_index
 from libs.core import onboarding_chat
 from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
-from libs.core.training import utils as training_utils
 from libs.core import db as db
 from libs.core.common import OUTBOX_QUEUE_KEY
 from libs.core.export import whatsapp as whatsapp_exporter
@@ -123,6 +122,15 @@ def _sanitize_text(text: str) -> str:
     # redact whatsapp jids
     text = re.sub(r"\b\d{5,}@s\.whatsapp\.net\b", "<WA_ID>", text)
     return text
+
+
+def _sanitize_training_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = str(text).replace("\r", " ").replace("\n", " ").strip()
+    while "  " in cleaned:
+        cleaned = cleaned.replace("  ", " ")
+    return cleaned
 
 
 def _detect_encoding(payload: bytes) -> str:
@@ -655,9 +663,7 @@ def client_settings(tenant: int, request: Request):
         "asset_version": asset_version_value,
         "behavior": behavior_state,
     }
-    legacy_flag = str(request.query_params.get("legacy") or "").strip().lower() in {"1", "true", "yes", "on"}
-    template_name = "client/settings.html" if legacy_flag else "client/spa.html"
-    response = render_template(template_name, context)
+    response = render_template("client/spa.html", context)
     response.headers["Cache-Control"] = "no-store"
     if key:
         try:
@@ -758,8 +764,6 @@ async def save_behavior(tenant: int, request: Request):
     behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
     behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
     behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
-    if payload.get("telegram_reply_enabled") is not None:
-        behavior["telegram_reply_enabled"] = bool(payload.get("telegram_reply_enabled"))
     if payload.get("send_catalog_on_first_message") is not None:
         behavior["send_catalog_on_first_message"] = bool(payload.get("send_catalog_on_first_message"))
     behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
@@ -815,106 +819,6 @@ async def save_follow_ups(tenant: int, request: Request):
 
     validated: list[dict[str, object]] = []
     allowed_channels = {"telegram", "avito", "whatsapp", "any", "*"}
-    fact_key_max_len = 64
-
-    def _normalize_fact_key(raw: Any) -> str:
-        key = str(raw or "").strip().lower()
-        if not key:
-            return ""
-        key = re.sub(r"\s+", "_", key)
-        if fact_key_max_len and len(key) > fact_key_max_len:
-            key = key[:fact_key_max_len]
-        return key
-
-    def _normalize_phrase_list(raw_value: Any) -> list[str]:
-        if raw_value is None:
-            return []
-        items: list[str] = []
-        if isinstance(raw_value, str):
-            items = re.split(r"[\n,]+", raw_value)
-        elif isinstance(raw_value, (list, tuple, set)):
-            for entry in raw_value:
-                if entry is None:
-                    continue
-                items.append(str(entry))
-        else:
-            items = [str(raw_value)]
-        cleaned: list[str] = []
-        for item in items:
-            token = str(item or "").strip().lower()
-            if token:
-                cleaned.append(token)
-        return cleaned
-
-    def _normalize_condition(raw_value: Any) -> dict | list | None:
-        if not raw_value:
-            return None
-        if isinstance(raw_value, dict):
-            raw_list = [raw_value]
-        elif isinstance(raw_value, list):
-            raw_list = raw_value
-        else:
-            return None
-        normalized: list[dict] = []
-        op_aliases = {"=": "eq", "==": "eq", "!=": "neq", "<>": "neq"}
-        allowed_ops = {"eq", "neq", "exists", "not_exists", "in", "not_in"}
-        for cond in raw_list:
-            if not isinstance(cond, dict):
-                continue
-            key = _normalize_fact_key(cond.get("key") or cond.get("fact"))
-            if not key:
-                continue
-            op_raw = str(cond.get("op") or cond.get("operator") or "eq").strip().lower()
-            op = op_aliases.get(op_raw, op_raw)
-            if op not in allowed_ops:
-                op = "eq"
-            if op in {"exists", "not_exists"}:
-                normalized.append({"key": key, "op": op})
-                continue
-            value = cond.get("value")
-            if op in {"in", "not_in"}:
-                values = _normalize_phrase_list(value)
-                if not values:
-                    continue
-                normalized.append({"key": key, "op": op, "value": values})
-                continue
-            if value is None:
-                continue
-            value_str = str(value).strip().lower()
-            if not value_str:
-                continue
-            normalized.append({"key": key, "op": op, "value": value_str})
-        if not normalized:
-            return None
-        if len(normalized) == 1:
-            return normalized[0]
-        return normalized
-
-    def _normalize_capture(raw_value: Any) -> dict | None:
-        if not isinstance(raw_value, dict):
-            return None
-        key = _normalize_fact_key(raw_value.get("key") or raw_value.get("fact"))
-        if not key:
-            return None
-        label_raw = raw_value.get("label") or raw_value.get("title")
-        label = str(label_raw).strip() if label_raw is not None else ""
-        yes_tokens = _normalize_phrase_list(raw_value.get("yes") or raw_value.get("yes_tokens"))
-        no_tokens = _normalize_phrase_list(raw_value.get("no") or raw_value.get("no_tokens"))
-        if not yes_tokens and not no_tokens:
-            yes_tokens = ["да"]
-            no_tokens = ["нет"]
-        value_yes = str(raw_value.get("value_yes") or raw_value.get("valueYes") or "yes").strip().lower()
-        value_no = str(raw_value.get("value_no") or raw_value.get("valueNo") or "no").strip().lower()
-        payload = {
-            "key": key,
-            "yes": yes_tokens,
-            "no": no_tokens,
-            "value_yes": value_yes,
-            "value_no": value_no,
-        }
-        if label:
-            payload["label"] = label
-        return payload
 
     for rule in rules_raw:
         if not isinstance(rule, dict):
@@ -926,6 +830,8 @@ async def save_follow_ups(tenant: int, request: Request):
             delay_minutes = int(rule.get("delay_minutes") or 0)
         except Exception:
             delay_minutes = 0
+        if delay_minutes <= 0:
+            continue
         text_value = str(rule.get("text") or "").strip()
         if not text_value:
             continue
@@ -936,25 +842,15 @@ async def save_follow_ups(tenant: int, request: Request):
         if max_attempts < 0:
             max_attempts = 0
         active = bool(rule.get("active", True))
-        condition = _normalize_condition(rule.get("condition"))
-        capture = _normalize_capture(rule.get("capture"))
-        trigger_on_answer = bool(rule.get("trigger_on_answer"))
-        if delay_minutes <= 0 and not trigger_on_answer:
-            continue
-        payload_rule: dict[str, object] = {
-            "channel": channel,
-            "delay_minutes": delay_minutes if delay_minutes > 0 else 0,
-            "text": text_value,
-            "max_attempts": max_attempts,
-            "active": active,
-        }
-        if trigger_on_answer:
-            payload_rule["trigger_on_answer"] = True
-        if condition:
-            payload_rule["condition"] = condition
-        if capture:
-            payload_rule["capture"] = capture
-        validated.append(payload_rule)
+        validated.append(
+            {
+                "channel": channel,
+                "delay_minutes": delay_minutes,
+                "text": text_value,
+                "max_attempts": max_attempts,
+                "active": active,
+            }
+        )
 
     cfg = C.read_tenant_config(tenant)
     if not isinstance(cfg, dict):
@@ -1069,6 +965,8 @@ async def get_dialog_messages_api(
                 before_dt = None
 
     messages = await db.list_messages_for_lead(tenant_id, lead_id, limit=limit_val, before=before_dt)
+    if messages:
+        messages = list(reversed(messages))
     message_ids = [msg.get("id") for msg in messages if msg.get("id")]
     feedback_ids = await db.list_feedback_message_ids(tenant_id, message_ids)
     formatted = []
@@ -1240,7 +1138,7 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
     comment = str(comment_raw).strip() if comment_raw is not None else ""
     expected_answer_raw = payload.get("expected_answer") if rating == "dislike" else payload.get("expected_answer") or ""
     expected_answer = str(expected_answer_raw).strip() if expected_answer_raw is not None else ""
-    sanitized_expected = training_utils.sanitize_text(expected_answer) if expected_answer else ""
+    sanitized_expected = _sanitize_training_text(expected_answer) if expected_answer else ""
     if rating == "dislike":
         if not expected_answer:
             return JSONResponse({"detail": "expected_answer_required"}, status_code=400)
@@ -1256,7 +1154,6 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
         return JSONResponse({"detail": "feedback_not_allowed"}, status_code=400)
 
     lead_id = metadata.get("lead_id")
-    # Find the last inbound user message before this bot reply to pair Q->A
     q_text = ""
     try:
         created_at = metadata.get("created_at")
@@ -1266,7 +1163,7 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
             created_at = datetime.now(timezone.utc)
         previous = await db.get_previous_incoming_message(int(tenant_id), int(lead_id or 0), before=created_at)
         if previous and previous.get("text"):
-            q_text = training_utils.sanitize_text(str(previous.get("text") or ""))
+            q_text = _sanitize_training_text(str(previous.get("text") or ""))
     except Exception:
         q_text = ""
 
@@ -1284,9 +1181,8 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
     if not feedback_id:
         return JSONResponse({"detail": "feedback_failed"}, status_code=500)
 
-    # Training example: persist sanitized pair per tenant
     try:
-        message_text = training_utils.sanitize_text(str(metadata.get("text") or ""))
+        message_text = _sanitize_training_text(str(metadata.get("text") or ""))
         source = "like" if rating == "like" else "correction"
         a_text = message_text if rating == "like" else expected_answer
         if q_text and a_text:
@@ -1297,7 +1193,7 @@ async def submit_feedback_api(request: Request, tenant: int | str | None = None)
                 source=source,
                 source_feedback_id=feedback_id,
                 q_text=q_text,
-                a_text=training_utils.sanitize_text(a_text),
+                a_text=_sanitize_training_text(a_text),
                 is_bad=False,
                 embedding_status="pending",
             )
@@ -1349,8 +1245,12 @@ async def save_persona(tenant: int, request: Request):
     if not _auth(tenant, key):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     payload = await request.json()
-    channel = (payload.get("channel") or "").strip().lower()
-    channel = channel if channel in {"telegram", "avito"} else None
+    channel_raw = payload.get("channel")
+    channel = None
+    if isinstance(channel_raw, str) and channel_raw.strip():
+        candidate = channel_raw.strip().lower()
+        if candidate in {"telegram", "avito"}:
+            channel = candidate
     C.write_persona(tenant, payload.get("text") or "", channel=channel)
     return {"ok": True}
 

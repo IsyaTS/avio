@@ -70,6 +70,12 @@ const normalizeFactKey = (raw: string, fallback: string) => {
 
 const SettingsTab: React.FC = () => {
   const { bootstrap, api, settings, refreshSettings, setSettings } = useClient();
+  const draftKey = useMemo(
+    () => `client-settings-draft:${api.tenantId || 'unknown'}`,
+    [api.tenantId]
+  );
+  const [draftInitialized, setDraftInitialized] = useState(false);
+  const [hasDraft, setHasDraft] = useState(false);
 
   const passportDefaults = bootstrap.form || {};
   const behaviorDefaults = bootstrap.behavior || {};
@@ -134,7 +140,7 @@ const SettingsTab: React.FC = () => {
   const settingsReady = Boolean(settings && settings.cfg);
 
   useEffect(() => {
-    if (!settingsReady) return;
+    if (!settingsReady || hasDraft) return;
     const cfg = settings?.cfg || {};
     const passport = (cfg as Record<string, any>).passport || {};
     if (!brand && passport.brand) setBrand(passport.brand);
@@ -161,6 +167,7 @@ const SettingsTab: React.FC = () => {
     personaBase,
     personaTelegram,
     personaAvito,
+    hasDraft,
   ]);
 
   useEffect(() => {
@@ -169,6 +176,97 @@ const SettingsTab: React.FC = () => {
       setPersonaBase(settings.persona || '');
     }
   }, [settings, personaBase]);
+
+  useEffect(() => {
+    if (draftInitialized) return;
+    const raw = sessionStorage.getItem(draftKey);
+    if (!raw) {
+      setDraftInitialized(true);
+      return;
+    }
+    try {
+      const draft = JSON.parse(raw) as Record<string, any>;
+      if (typeof draft.brand === 'string') setBrand(draft.brand);
+      if (typeof draft.agent === 'string') setAgent(draft.agent);
+      if (typeof draft.city === 'string') setCity(draft.city);
+      if (typeof draft.currency === 'string') setCurrency(draft.currency);
+      if (typeof draft.tone === 'string') setTone(draft.tone);
+      if (typeof draft.personaBase === 'string') setPersonaBase(draft.personaBase);
+      if (typeof draft.personaTelegram === 'string') setPersonaTelegram(draft.personaTelegram);
+      if (typeof draft.personaAvito === 'string') setPersonaAvito(draft.personaAvito);
+      if (typeof draft.personaChannel === 'string') {
+        setPersonaChannel(draft.personaChannel as 'base' | 'telegram' | 'avito');
+      }
+      if (typeof draft.autoReply === 'boolean') setAutoReply(draft.autoReply);
+      if (typeof draft.autoReplyText === 'string') setAutoReplyText(draft.autoReplyText);
+      if (typeof draft.avitoPhoneTemplate === 'string') setAvitoPhoneTemplate(draft.avitoPhoneTemplate);
+      if (typeof draft.avitoSmartReply === 'boolean') setAvitoSmartReply(draft.avitoSmartReply);
+      if (typeof draft.telegramReplyEnabled === 'boolean') {
+        setTelegramReplyEnabled(draft.telegramReplyEnabled);
+      }
+      if (typeof draft.sendCatalogTg === 'boolean') setSendCatalogTg(draft.sendCatalogTg);
+      if (typeof draft.photoMarkers === 'string') setPhotoMarkers(draft.photoMarkers);
+      if (typeof draft.photoReply === 'string') setPhotoReply(draft.photoReply);
+      if (typeof draft.photoTtl === 'string') setPhotoTtl(draft.photoTtl);
+      if (Array.isArray(draft.triggers)) setTriggers(draft.triggers as TriggerRule[]);
+      if (Array.isArray(draft.followups)) setFollowups(draft.followups as FollowUpRule[]);
+      setHasDraft(true);
+    } catch (error) {
+      setHasDraft(false);
+    } finally {
+      setDraftInitialized(true);
+    }
+  }, [draftKey, draftInitialized]);
+
+  useEffect(() => {
+    if (!draftInitialized) return;
+    const payload = {
+      brand,
+      agent,
+      city,
+      currency,
+      tone,
+      personaChannel,
+      personaBase,
+      personaTelegram,
+      personaAvito,
+      autoReply,
+      autoReplyText,
+      avitoPhoneTemplate,
+      avitoSmartReply,
+      telegramReplyEnabled,
+      sendCatalogTg,
+      photoMarkers,
+      photoReply,
+      photoTtl,
+      triggers,
+      followups,
+    };
+    sessionStorage.setItem(draftKey, JSON.stringify(payload));
+  }, [
+    draftInitialized,
+    draftKey,
+    brand,
+    agent,
+    city,
+    currency,
+    tone,
+    personaChannel,
+    personaBase,
+    personaTelegram,
+    personaAvito,
+    autoReply,
+    autoReplyText,
+    avitoPhoneTemplate,
+    avitoSmartReply,
+    telegramReplyEnabled,
+    sendCatalogTg,
+    photoMarkers,
+    photoReply,
+    photoTtl,
+    triggers,
+    followups,
+  ]);
 
   useEffect(() => {
     const loadFollowups = async () => {
