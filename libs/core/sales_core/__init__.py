@@ -1364,12 +1364,26 @@ def _persist_pdf_index_metadata(
         pass
 
 
-def read_persona(tenant: int) -> str:
+def _persona_cache_key(tenant: int, channel: str | None) -> tuple[int, str]:
+    return int(tenant), (channel or "").strip().lower()
+
+
+def _persona_path(tenant: int, channel: str | None) -> pathlib.Path:
+    base = tenant_dir(tenant)
+    channel_name = (channel or "").strip().lower()
+    if channel_name:
+        return base / f"persona_{channel_name}.md"
+    return base / "persona.md"
+
+
+def read_persona(tenant: int, channel: str | None = None) -> str:
     ensure_tenant_files(tenant)
-    path = tenant_dir(tenant) / "persona.md"
+    path = _persona_path(tenant, channel)
+    if channel and not path.exists():
+        path = _persona_path(tenant, None)
     try:
         mtime = path.stat().st_mtime
-        cached = _TENANT_PERSONA_CACHE.get(int(tenant))
+        cached = _TENANT_PERSONA_CACHE.get(_persona_cache_key(int(tenant), channel))
         if cached and cached[0] == mtime:
             return cached[1]
     except Exception:
@@ -1377,7 +1391,7 @@ def read_persona(tenant: int) -> str:
     with open(path, "r", encoding="utf-8") as fh:
         text = fh.read()
     try:
-        _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text)
+        _TENANT_PERSONA_CACHE[_persona_cache_key(int(tenant), channel)] = (mtime, text)
     except Exception:
         pass
     try:
@@ -1387,16 +1401,16 @@ def read_persona(tenant: int) -> str:
     return text
 
 
-def write_persona(tenant: int, text: str) -> None:
+def write_persona(tenant: int, text: str, channel: str | None = None) -> None:
     ensure_tenant_files(tenant)
-    path = tenant_dir(tenant) / "persona.md"
+    path = _persona_path(tenant, channel)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text or "")
     try:
         mtime = path.stat().st_mtime
-        _TENANT_PERSONA_CACHE[int(tenant)] = (mtime, text or "")
+        _TENANT_PERSONA_CACHE[_persona_cache_key(int(tenant), channel)] = (mtime, text or "")
     except Exception:
-        _TENANT_PERSONA_CACHE.pop(int(tenant), None)
+        _TENANT_PERSONA_CACHE.pop(_persona_cache_key(int(tenant), channel), None)
     _PERSONA_HINTS_CACHE.pop(int(tenant), None)
 
 
@@ -1494,7 +1508,7 @@ def load_persona(tenant: int | None = None, channel: str | None = None) -> str:
     """Возвращает persona.md с подстановкой брендинга."""
     if tenant is not None:
         try:
-            persona = read_persona(tenant)
+            persona = read_persona(tenant, channel)
             if not persona.strip():
                 persona = DEFAULT_PERSONA_MD
         except Exception:

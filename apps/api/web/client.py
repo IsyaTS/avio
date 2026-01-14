@@ -838,7 +838,13 @@ async def save_persona(tenant: int, request: Request):
     if not _auth(tenant, key):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     payload = await request.json()
-    C.write_persona(tenant, payload.get("text") or "")
+    channel_raw = payload.get("channel")
+    channel = None
+    if isinstance(channel_raw, str) and channel_raw.strip():
+        candidate = channel_raw.strip().lower()
+        if candidate in {"telegram", "avito"}:
+            channel = candidate
+    C.write_persona(tenant, payload.get("text") or "", channel=channel)
     return {"ok": True}
 
 
