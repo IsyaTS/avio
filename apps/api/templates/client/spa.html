@@ -1,0 +1,22 @@
+{% extends "layouts/base.html" %}
+{% set page_title = title or 'Клиентский кабинет' %}
+{% set tenant_id = tenant_id if tenant_id is defined else tenant %}
+{% set redirect_url = '/client/' ~ tenant_id ~ '/settings?legacy=1' %}
+{% if key %}{% set redirect_url = redirect_url ~ '&k=' ~ key %}{% endif %}
+
+{% block content %}
+<section class="surface stack" style="gap: 8px;">
+    <h2 class="section-title" style="font-size:1.35rem;">Клиентский кабинет</h2>
+    <p class="section-subtitle">Загружаем настройки…</p>
+    <p class="status-text muted">Если страница не открылась автоматически, используйте ссылку ниже.</p>
+    <a class="btn btn--secondary" href="{{ redirect_url }}">Открыть настройки</a>
+</section>
+<script>
+  (function () {
+    const target = {{ redirect_url | tojson }};
+    if (target) {
+      window.location.replace(target);
+    }
+  })();
+</script>
+{% endblock %}
