@@ -26,6 +26,36 @@
   - Требуются валидные токены в `integrations.avito` (`account_id`, `refresh_token`, `access_token`); иначе будет `reason=token_unavailable`.
   - Диагностика: ищите в логах воркера `avito_auto_reply_enqueued`/`avito_auto_reply_skip`, для токенов — `token_unavailable` или ошибки Avito API.
 
+## Диалоги (Avito + Telegram) и обратная связь
+- Вкладка «Диалоги» в кабинете клиента (`/client/{tenant}/settings#dialogs`) показывает список лидов слева и ленту сообщений справа; отправка ответов идёт через очереди воркера.
+- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback.
+- API под ключ клиента (`k` + `tenant`):
+  - `GET /api/dialogs` — список диалогов с last_message/last_ts.
+  - `GET /api/dialogs/{lead_id}` — история сообщений.
+  - `POST /api/dialogs/{lead_id}/send` — отправка текста (очередь OUTBOX).
+  - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
+- База данных: в `messages` добавлен флаг `is_bot` (по умолчанию `false`), создана таблица `message_feedback` (tenant_id, message_id, rating, comment, handled, created_at).
+- Avito сообщения менеджера из UI тоже сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), поэтому видны в диалогах.
+- Для Avito менеджерских сообщений дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`); если сообщение совпадает с кэшом эха бота (`avito:bot_echo:<tenant>:<chat_id>`), оно игнорируется как эхо и в историю не пишется.
+## Диалоги (Avito + Telegram) и обратная связь
+- Вкладка «Диалоги» в кабинете клиента (`/client/{tenant}/settings#dialogs`) показывает список лидов слева и ленту сообщений справа; отправка ответов идёт через очереди воркера.
+- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback.
+- API под ключ клиента (`k` + `tenant`):
+  - `GET /api/dialogs` — список диалогов с last_message/last_ts.
+  - `GET /api/dialogs/{lead_id}` — история сообщений.
+  - `POST /api/dialogs/{lead_id}/send` — отправка текста (очередь OUTBOX).
+  - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
+- База данных: в `messages` добавлен флаг `is_bot` (по умолчанию `false`), создана таблица `message_feedback` (tenant_id, message_id, rating, comment, handled, created_at).
+- Avito сообщения менеджера из UI тоже сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), поэтому видны в диалогах.
+- Для Avito менеджерских сообщений дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`); если сообщение совпадает с кэшом эха бота (`avito:bot_echo:<tenant>:<chat_id>`), оно игнорируется как эхо и в историю не пишется.
+
+## Client SPA (redesign)
+- Исходники: `apps/frontend/client-portal/` (Vite + React + TS + Tailwind).
+- Сборка: `cd apps/frontend/client-portal && npm ci && npm run build`.
+- Статика: `apps/api/static/spa/client/`, отдаётся по `/static/spa/client/`.
+- Кабинет: `/client/{tenant}/settings` (legacy-страница доступна по `?legacy=1`).
+- /connect/* редиректят на вкладку «Каналы» в SPA.
+- Dev (опционально): поднять Vite и задать `VITE_DEV_SERVER_URL=http://localhost:5173`.
 ## Avito вебхуки и multi-tenant
 - Маршрутизация Avito-событий выполняется по `account_id`. В вебхуках v3, где `account_id` отсутствует, используется fallback на `payload.value.user_id`, после чего вызывается `find_tenant_by_account`.
 - Если `account_id` не определён или не найден в конфиге арендатора, событие пропускается (нет дефолта на `TENANT/TENANT_ID`), чтобы не уезжать в чужой тенант.

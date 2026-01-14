@@ -864,11 +864,6 @@ DEFAULT_TENANT_JSON = {
         "explain": False,
         "use_universal_pdf_pipeline": False,
     },
-    "cta": {
-        "primary": "Оставьте контакт или удобный канал связи — подготовлю точный расчёт сегодня.",
-        "fallback": "Поделитесь, что важно в продукте, и соберу подбор за пару минут.",
-        "handoff_wa": "Готов перейти в WhatsApp. Напишите мне — отвечаю быстро.",
-    },
     "catalogs": [],
     "funnel": {
         "avito_to_wa": {
@@ -2597,42 +2592,7 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
             continue
 
     if not items:
-        if has_custom_catalogs:
-            return []
-        items = [
-            {
-                "sku": "SKU-101",
-                "type": "гаджет",
-                "title": "Умная колонка Echo Mini",
-                "price": "5990",
-                "color": "графит",
-                "brand": "Soundify",
-            },
-            {
-                "sku": "SKU-204",
-                "type": "освещение",
-                "title": "Лампа Loft Aura",
-                "price": "8900",
-                "color": "латунь",
-                "brand": "Loftly",
-            },
-            {
-                "sku": "SKU-350",
-                "type": "офис",
-                "title": "Кресло Support Pro",
-                "price": "21900",
-                "color": "чёрный",
-                "brand": "Ergo",
-            },
-            {
-                "sku": "SKU-480",
-                "type": "кухня",
-                "title": "Набор ножей ChefLine",
-                "price": "12900",
-                "color": "стальной",
-                "brand": "ChefLine",
-            },
-        ]
+        return []
 
     try:
         _apply_catalog_attribute_rules(items, persona_meta)
@@ -4055,22 +4015,7 @@ class SalesConversationEngine:
         return None
 
     def _choose_question(self, currency: str, max_per_turn: int) -> Optional[str]:
-        if max_per_turn <= 0:
-            return None
-        question = self._next_spin_question()
-        if not question:
-            question = self._next_bant_question(currency)
-        if not question:
-            return None
-        if question in self.state.asked_questions:
-            return None
-        fingerprint = quality.question_fingerprint(question)
-        if fingerprint and fingerprint in (self.state.asked_question_fingerprints or []):
-            return None
-        if question.strip() == (self.state.last_question_text or "").strip():
-            return None
-        self._remember_question(question)
-        return question
+        return None
 
     def _remember_question(self, question: str) -> None:
         _remember_question_state(self.state, question)
@@ -4079,14 +4024,6 @@ class SalesConversationEngine:
         _remember_cta_state(self.state, cta_text)
 
     def pending_question(self) -> Optional[str]:
-        focus = self._focus_phrase()
-        for stage in ("s", "p", "i", "n"):
-            if self.state.spin.get(stage, "pending") == "pending":
-                return SPIN_TEMPLATES[stage][0].format(focus=focus)
-        for key in ("budget", "need", "timeline", "authority"):
-            if not self.state.bant.get(key):
-                template = BANT_TEMPLATES[key][0]
-                return template.format(currency=self.branding.get("CURRENCY", "₽"), focus=focus, city=self.branding.get("CITY", ""))
         return None
 
     def _challenger_block(self) -> Tuple[str, str, str]:
@@ -4242,8 +4179,7 @@ class SalesConversationEngine:
         scarcity = self._choose_scarcity(items)
         reciprocity = self._choose_reciprocity()
         upsell = self._choose_upsell()
-        if _cta_allowed(self.state, self.channel_name):
-            cta_line = self._choose_cta(cta_primary, cta_fallback)
+        cta_line = ""
         message_parts = {
             "greeting": greeting,
             "teach": teach,
@@ -4293,8 +4229,6 @@ class SalesConversationEngine:
         self.state.last_bot_reply = reply
         self.state.append_history("assistant", reply)
         self.state.last_updated_ts = time.time()
-        if cta_line:
-            self._remember_cta(cta_line)
         return reply
 
     def summary_for_llm(self) -> str:
@@ -4444,11 +4378,7 @@ def make_rule_based_reply(
     currency = branding["CURRENCY"]
     items = search_catalog(needs, limit=4, tenant=tenant, query=last_user_text)
 
-    cta_cfg = cfg.get("cta", {}) if isinstance(cfg, dict) else {}
-    cta_primary = (cta_cfg.get("primary") or pick_cta(contact_id, channel_name).get("text") or "").strip()
-    cta_fallback = (cta_cfg.get("fallback") or '').strip()
-
-    reply = engine.build_reply(items, cta_primary, cta_fallback, currency, last_user_text or "")
+    reply = engine.build_reply(items, "", "", currency, last_user_text or "")
     save_sales_state(state)
     return reply
 
@@ -4492,9 +4422,7 @@ async def build_llm_messages(
     engine = SalesConversationEngine(state, branding, cfg, channel_name, persona_hints=persona_hints)
     summary = engine.summary_for_llm()
 
-    cta_cfg = cfg.get("cta", {}) if isinstance(cfg, dict) else {}
     limits_cfg = cfg.get("limits", {}) if isinstance(cfg, dict) else {}
-    cta_allowed = _cta_allowed(state, channel_name)
 
     try:
         catalog_window = int(limits_cfg.get("catalog_page_size", 8))
@@ -4533,11 +4461,6 @@ async def build_llm_messages(
                 [
                     f"Бренд: {branding['BRAND']} ({branding['CITY']})",
                     f"Канал: {channel_name}",
-                    (
-                        "CTA: запрещён в этом ответе"
-                        if not cta_allowed
-                        else f"CTA: {cta_cfg.get('primary') or 'держи жёсткий CTA в конце'}"
-                    ),
                     f"Каталог на ответ: {limits_cfg.get('catalog_page_size', 8)} позиций",
                 ],
             )
@@ -4577,6 +4500,7 @@ async def build_llm_messages(
             if transcript.strip():
                 system_blocks.append(f"Недавний диалог:\n{transcript}")
 
+    cta_allowed = False
     reply_rules: list[str] = []
     if channel_name.lower() in {"whatsapp", "telegram"}:
         reply_rules.append(

@@ -400,6 +400,7 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
         or value.get("sender_id")
         or payload.get("user_id")
     )
+    manager_outgoing = False
     if account_id is not None and avito_user_id is not None and avito_user_id == account_id:
         lead_id = avito.stable_lead_id(account_id, chat_id)
         if _redis_queue is not None:
@@ -410,10 +411,18 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
                     ex=HANDOFF_SILENCE_TTL_SECONDS,
                 )
             except Exception:
-                logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
+                logger.debug(
+                    "handoff_flag_set_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
+                )
         else:
             logger.debug("handoff_flag_set_skipped_no_redis tenant=%s lead_id=%s", tenant, lead_id)
-        return True
+        logger.info(
+            "avito_webhook_manager_outgoing tenant=%s account_id=%s chat_id=%s",
+            tenant,
+            account_id,
+            chat_id,
+        )
+        manager_outgoing = True
 
     avito_login = None
     login_candidate = value.get("author_login") or payload.get("user_login")
@@ -434,6 +443,8 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
         "channel": "avito",
         "tenant": tenant,
         "tenant_id": tenant,
+        "manager": manager_outgoing,
+        "out": manager_outgoing,
         "account_id": account_id,
         "chat_id": chat_id,
         "lead_id": lead_id,
