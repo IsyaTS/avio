@@ -7,6 +7,7 @@ import pathlib
 import re
 import time
 import uuid
+import asyncio
 from typing import Any, Dict, Optional
 from urllib.parse import quote, quote_plus
 
@@ -26,6 +27,7 @@ from libs.core import onboarding_chat
 from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
 from libs.core import db as db
+from libs.core.common import OUTBOX_QUEUE_KEY
 from libs.core.export import whatsapp as whatsapp_exporter
 
 # NOTE: expose frequently used helpers after ensuring aliases are registered
@@ -49,6 +51,7 @@ router = APIRouter()
 _log = logging.getLogger("training")
 _LOG_PREFIX = "[training]"
 _wa_log = logging.getLogger("wa_export")
+_dialogs_log = logging.getLogger("client.dialogs")
 
 _CLIENT_SETTINGS_JS: str | None = None
 
@@ -119,6 +122,15 @@ def _sanitize_text(text: str) -> str:
     # redact whatsapp jids
     text = re.sub(r"\b\d{5,}@s\.whatsapp\.net\b", "<WA_ID>", text)
     return text
+
+
+def _sanitize_training_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = str(text).replace("\r", " ").replace("\n", " ").strip()
+    while "  " in cleaned:
+        cleaned = cleaned.replace("  ", " ")
+    return cleaned
 
 
 def _detect_encoding(payload: bytes) -> str:
@@ -221,6 +233,36 @@ def _resolve_key(request: Request | None, raw: str | None = None) -> str:
 
 def _auth(tenant: int, key: str) -> bool:
     return C.valid_key(int(tenant), key or "")
+
+
+def _resolve_tenant_and_key(request: Request, tenant: int | str | None) -> tuple[int, str] | Response:
+    tenant_raw = tenant if tenant is not None else request.query_params.get("tenant")
+    try:
+        tenant_id = int(str(tenant_raw).strip())
+    except Exception:
+        return JSONResponse({"detail": "invalid_tenant"}, status_code=400)
+    if tenant_id <= 0:
+        return JSONResponse({"detail": "invalid_tenant"}, status_code=400)
+
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant_id, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return tenant_id, key
+
+
+def _isoformat(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif value is None:
+        return None
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _tenant_root(tenant: int) -> pathlib.Path:
@@ -816,6 +858,371 @@ async def save_follow_ups(tenant: int, request: Request):
     cfg["follow_up"] = validated
     C.write_tenant_config(tenant, cfg)
     return {"ok": True, "rules_saved": len(validated)}
+
+
+@router.get("/api/dialogs")
+async def list_dialogs_api(request: Request, tenant: int | str | None = None, limit: int = 200):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    try:
+        limit_val = int(limit)
+    except Exception:
+        limit_val = 200
+    if limit_val <= 0:
+        limit_val = 50
+    limit_val = min(limit_val, 500)
+
+    dialogs_raw = await db.fetch_dialogs_for_tenant(tenant_id, limit=limit_val)
+    dialogs: list[dict[str, Any]] = []
+
+    def _title_is_numeric(value: str) -> bool:
+        return value.strip().isdigit() if isinstance(value, str) else False
+
+    for entry in dialogs_raw:
+        channel_name = (entry.get("channel") or "").strip().lower() or "unknown"
+        if channel_name not in {"telegram", "avito", "whatsapp", "unknown"}:
+            continue
+        lead_id = entry.get("id")
+        try:
+            lead_ref = int(lead_id)
+        except Exception:
+            lead_ref = 0
+        raw_title = entry.get("title")
+        raw_contact = entry.get("contact")
+        raw_peer = entry.get("peer")
+        avito_login = entry.get("avito_login")
+        telegram_username = entry.get("telegram_username")
+        if channel_name == "avito":
+            title = avito_login or raw_title or raw_contact
+            if title and _title_is_numeric(str(title)):
+                title = avito_login
+            if not title:
+                title = "Avito · клиент"
+        elif channel_name == "telegram":
+            title = raw_title or telegram_username or raw_contact
+            if title and _title_is_numeric(str(title)):
+                title = telegram_username
+            if not title:
+                title = "Telegram · клиент"
+        else:
+            title = raw_title or raw_contact or raw_peer
+        if not title:
+            title = f"Лид {lead_ref}" if lead_ref else "Лид"
+        lead_ref_str = str(lead_ref)
+        dialogs.append(
+            {
+                "id": lead_ref_str,
+                "id_num": lead_ref,
+                "id_str": lead_ref_str,
+                "channel": channel_name,
+                "title": title,
+                "contact": entry.get("contact"),
+                "last_message": entry.get("last_message"),
+                "last_ts": _isoformat(entry.get("last_ts")),
+                "unread": 0,
+            }
+        )
+
+    return {"ok": True, "dialogs": dialogs}
+
+
+@router.get("/api/dialogs/{lead_id}")
+async def get_dialog_messages_api(
+    lead_id: int,
+    request: Request,
+    tenant: int | str | None = None,
+    limit: int = 50,
+    before: str | None = None,
+):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    lead_meta = await db.get_lead_dialog_metadata(lead_id)
+    if not lead_meta or int(lead_meta.get("tenant_id") or 0) != int(tenant_id):
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+
+    try:
+        limit_val = int(limit)
+    except Exception:
+        limit_val = 50
+    if limit_val <= 0:
+        limit_val = 20
+    limit_val = min(limit_val, 200)
+
+    before_dt: datetime | None = None
+    if before:
+        try:
+            before_dt = datetime.fromisoformat(before)
+        except Exception:
+            try:
+                before_dt = datetime.fromtimestamp(float(before))
+            except Exception:
+                before_dt = None
+
+    messages = await db.list_messages_for_lead(tenant_id, lead_id, limit=limit_val, before=before_dt)
+    if messages:
+        messages = list(reversed(messages))
+    message_ids = [msg.get("id") for msg in messages if msg.get("id")]
+    feedback_ids = await db.list_feedback_message_ids(tenant_id, message_ids)
+    formatted = []
+    for msg in messages:
+        msg_id = msg.get("id")
+        formatted.append(
+            {
+                "id": msg_id,
+                "direction": msg.get("direction") or 0,
+                "text": msg.get("text") or "",
+                "ts": _isoformat(msg.get("created_at")),
+                "status": msg.get("status") or "",
+                "from_bot": bool(msg.get("is_bot")),
+                "feedbacked": bool(msg_id and msg_id in feedback_ids),
+            }
+        )
+
+    return {
+        "ok": True,
+        "dialog_id": lead_id,
+        "channel": lead_meta.get("channel"),
+        "title": lead_meta.get("title") or lead_meta.get("contact"),
+        "messages": formatted,
+    }
+
+
+@router.post("/api/dialogs/{lead_id}/send")
+async def send_dialog_message_api(
+    lead_id: int,
+    request: Request,
+    tenant: int | str | None = None,
+):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"detail": "empty_text"}, status_code=400)
+
+    lead_meta = await db.get_lead_dialog_metadata(lead_id)
+    if not lead_meta or int(lead_meta.get("tenant_id") or 0) != int(tenant_id):
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+
+    channel = (lead_meta.get("channel") or "").strip().lower()
+    if channel not in {"telegram", "avito"}:
+        return JSONResponse({"detail": "unsupported_channel"}, status_code=400)
+
+    telegram_user_id: int | None = None
+    if channel == "telegram":
+        tg_raw = lead_meta.get("telegram_user_id") or lead_meta.get("peer")
+        try:
+            telegram_user_id = int(tg_raw)
+        except Exception:
+            telegram_user_id = None
+        if telegram_user_id is not None and telegram_user_id <= 0:
+            telegram_user_id = None
+
+    try:
+        message_id = await db.insert_message_out(
+            lead_id,
+            text,
+            None,
+            status="queued",
+            tenant_id=tenant_id,
+            channel=channel,
+            telegram_user_id=telegram_user_id,
+            telegram_username=lead_meta.get("telegram_username"),
+            title=lead_meta.get("title"),
+            is_bot=False,
+        )
+    except Exception:
+        _dialogs_log.exception("dialog_send_insert_failed tenant=%s lead=%s", tenant_id, lead_id)
+        return JSONResponse({"detail": "db_error"}, status_code=500)
+    if not message_id:
+        return JSONResponse({"detail": "db_error"}, status_code=500)
+
+    queue_item: dict[str, Any] = {
+        "lead_id": lead_id,
+        "tenant_id": tenant_id,
+        "tenant": tenant_id,
+        "provider": channel,
+        "ch": channel,
+        "channel": channel,
+        "text": text,
+        "origin": "dialogs.ui",
+        "_message_db_id": message_id,
+        "_resolved_lead_id": lead_id,
+        "queued_at": time.time(),
+    }
+    if telegram_user_id:
+        queue_item["telegram_user_id"] = telegram_user_id
+        queue_item["peer"] = telegram_user_id
+    elif lead_meta.get("peer"):
+        queue_item["peer"] = lead_meta.get("peer")
+    if lead_meta.get("contact"):
+        queue_item["contact"] = lead_meta.get("contact")
+    if lead_meta.get("title"):
+        queue_item["title"] = lead_meta.get("title")
+
+    try:
+        redis_client = C.redis_client()
+    except Exception:
+        return JSONResponse({"detail": "queue_unavailable"}, status_code=503)
+
+    try:
+        payload = json.dumps(queue_item, ensure_ascii=False)
+    except Exception:
+        payload = None
+
+    if not payload:
+        return JSONResponse({"detail": "queue_error"}, status_code=502)
+
+    try:
+        lpush_fn = getattr(redis_client, "lpush", None)
+        if callable(lpush_fn):
+            if asyncio.iscoroutinefunction(lpush_fn):  # pragma: no cover - async redis client
+                await lpush_fn(OUTBOX_QUEUE_KEY, payload)
+            else:
+                lpush_fn(OUTBOX_QUEUE_KEY, payload)
+        else:
+            raise RuntimeError("redis_lpush_missing")
+    except Exception:
+        _dialogs_log.exception(
+            "dialog_send_enqueue_failed tenant=%s lead=%s channel=%s", tenant_id, lead_id, channel
+        )
+        return JSONResponse({"detail": "queue_error"}, status_code=502)
+
+    message_payload = {
+        "id": message_id,
+        "direction": 1,
+        "text": text,
+        "ts": _isoformat(datetime.now(timezone.utc)),
+        "status": "queued",
+        "from_bot": False,
+    }
+    return {"ok": True, "queued": True, "message": message_payload}
+
+
+@router.post("/api/feedback")
+async def submit_feedback_api(request: Request, tenant: int | str | None = None):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    message_id = payload.get("message_id")
+    try:
+        message_ref = int(message_id)
+    except Exception:
+        return JSONResponse({"detail": "invalid_message"}, status_code=400)
+    if message_ref <= 0:
+        return JSONResponse({"detail": "invalid_message"}, status_code=400)
+
+    rating = (payload.get("rating") or "").strip().lower()
+    if rating not in {"like", "dislike"}:
+        return JSONResponse({"detail": "invalid_rating"}, status_code=400)
+
+    comment_raw = payload.get("comment") if rating == "dislike" else payload.get("comment") or ""
+    comment = str(comment_raw).strip() if comment_raw is not None else ""
+    expected_answer_raw = payload.get("expected_answer") if rating == "dislike" else payload.get("expected_answer") or ""
+    expected_answer = str(expected_answer_raw).strip() if expected_answer_raw is not None else ""
+    sanitized_expected = _sanitize_training_text(expected_answer) if expected_answer else ""
+    if rating == "dislike":
+        if not expected_answer:
+            return JSONResponse({"detail": "expected_answer_required"}, status_code=400)
+        if not sanitized_expected:
+            sanitized_expected = expected_answer.strip()
+
+    metadata = await db.get_message_metadata(message_ref)
+    if not metadata or int(metadata.get("tenant_id") or 0) != int(tenant_id):
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+    if int(metadata.get("direction") or 0) != 1:
+        return JSONResponse({"detail": "feedback_not_allowed"}, status_code=400)
+    if not bool(metadata.get("is_bot")):
+        return JSONResponse({"detail": "feedback_not_allowed"}, status_code=400)
+
+    lead_id = metadata.get("lead_id")
+    q_text = ""
+    try:
+        created_at = metadata.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        if created_at is None or not isinstance(created_at, datetime):
+            created_at = datetime.now(timezone.utc)
+        previous = await db.get_previous_incoming_message(int(tenant_id), int(lead_id or 0), before=created_at)
+        if previous and previous.get("text"):
+            q_text = _sanitize_training_text(str(previous.get("text") or ""))
+    except Exception:
+        q_text = ""
+
+    if await db.feedback_exists(tenant_id, message_ref):
+        return {"ok": True, "feedback_id": None, "already_exists": True}
+
+    feedback_id = await db.create_message_feedback(
+        tenant_id,
+        message_ref,
+        rating,
+        comment or sanitized_expected or None,
+        lead_id=lead_id,
+        expected_answer=sanitized_expected or expected_answer or None,
+    )
+    if not feedback_id:
+        return JSONResponse({"detail": "feedback_failed"}, status_code=500)
+
+    try:
+        message_text = _sanitize_training_text(str(metadata.get("text") or ""))
+        source = "like" if rating == "like" else "correction"
+        a_text = message_text if rating == "like" else expected_answer
+        if q_text and a_text:
+            await db.record_training_example(
+                tenant_id,
+                lead_id=lead_id,
+                message_id=message_ref,
+                source=source,
+                source_feedback_id=feedback_id,
+                q_text=q_text,
+                a_text=_sanitize_training_text(a_text),
+                is_bad=False,
+                embedding_status="pending",
+            )
+    except Exception:
+        _dialogs_log.exception("training_example_create_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
+
+    if rating == "dislike":
+        try:
+            await db.mark_bad_bot_message(
+                tenant_id,
+                message_ref,
+                feedback_id=feedback_id,
+                reason=comment or expected_answer or "dislike",
+            )
+        except Exception:
+            _dialogs_log.exception("mark_bad_bot_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
+
+    return {"ok": True, "feedback_id": feedback_id}
+
+
+@router.get("/api/feedback/stats")
+async def feedback_stats_api(request: Request, tenant: int | str | None = None):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    counts = await db.get_feedback_counts(tenant_id)
+    return {"ok": True, "likes": counts.get("like", 0), "dislikes": counts.get("dislike", 0)}
 
 
 @router.post("/client/{tenant}/settings/json")

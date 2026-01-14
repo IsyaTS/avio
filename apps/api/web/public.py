@@ -553,10 +553,19 @@ def connect_avito(tenant: int, request: Request, k: str | None = None, key: str 
 
 
 def _tg_base_url() -> str:
-    base = getattr(settings, "WORKER_BASE_URL", "") or ""
-    cleaned = str(base).strip()
-    if cleaned:
-        return cleaned.rstrip("/") or getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+    candidates = [
+        os.getenv("TG_WORKER_URL"),
+        os.getenv("TGWORKER_URL"),
+        getattr(settings, "TG_WORKER_URL", None),
+        getattr(settings, "TGWORKER_BASE_URL", None),
+        getattr(settings, "WORKER_BASE_URL", None),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        cleaned = str(candidate).strip()
+        if cleaned:
+            return cleaned.rstrip("/") or getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
     return getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
 
 
@@ -2226,6 +2235,25 @@ def _has_public_tg_access(
     return (resolved is not None, resolved)
 
 
+def _has_tg_access_for_tenant(
+    tenant_id: int,
+    request: Request,
+    key_candidate: str | None,
+    *,
+    allow_admin: bool = True,
+    query_param_only: bool = False,
+) -> tuple[bool, str | None]:
+    key = (key_candidate or "").strip()
+    if key and common.valid_key(tenant_id, key):
+        return True, key
+    return _has_public_tg_access(
+        request,
+        key_candidate,
+        allow_admin=allow_admin,
+        query_param_only=query_param_only,
+    )
+
+
 def _invalid_tenant_response(
     route: str,
     tenant_candidate: int | str | None,
@@ -2502,7 +2530,8 @@ async def tg_start(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access_for_tenant(
+        tenant_id,
         request,
         key_candidate,
         allow_admin=False,
@@ -2574,7 +2603,8 @@ async def _handle_tg_twofa(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access_for_tenant(
+        tenant_id,
         request,
         key_candidate,
         allow_admin=False,
@@ -2739,7 +2769,7 @@ async def tg_restart(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate, force=True)
 
-    allowed, _ = _has_public_tg_access(request, key_candidate)
+    allowed, _ = _has_tg_access_for_tenant(tenant_id, request, key_candidate)
     if not allowed:
         return _unauthorized_response(route, tenant_id, force=True)
 
@@ -2771,7 +2801,8 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access_for_tenant(
+        tenant_id,
         request,
         key_candidate,
         allow_admin=False,
@@ -2838,7 +2869,8 @@ async def tg_qr_png(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, validated_key = _has_public_tg_access(
+    allowed, validated_key = _has_tg_access_for_tenant(
+        tenant_id,
         request,
         key_candidate,
         allow_admin=False,
@@ -2896,7 +2928,7 @@ async def tg_qr_png(
 @router.get("/pub/tg/qr.txt")
 def tg_qr_txt(request: Request, qr_id: str | None = None, k: str | None = None, key: str | None = None):
     key_candidate = k or key or request.query_params.get("k") or request.query_params.get("key")
-    allowed, _ = _has_public_tg_access(request, key_candidate)
+    allowed, _ = _has_tg_access_for_tenant(tenant_id, request, key_candidate)
     if not allowed:
         return _unauthorized_response("/pub/tg/qr.txt", None)
     qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
@@ -2971,7 +3003,7 @@ async def tg_logout(
     except ValueError:
         return _invalid_tenant_response(route, tenant_candidate)
 
-    allowed, _ = _has_public_tg_access(request, key_candidate)
+    allowed, _ = _has_tg_access_for_tenant(tenant_id, request, key_candidate)
     if not allowed:
         return _unauthorized_response(route, tenant_id)
 

@@ -136,7 +136,7 @@ const TrainingTab: React.FC = () => {
     if (!api.tenantId || !api.key) return;
     setLoadingDialogs(true);
     try {
-      const data = await requestJson<any>(buildUrl(dialogsListUrl, api));
+      const data = await requestJson<any>(buildUrl(dialogsListUrl, api, { _: Date.now() }));
       const listRaw: any[] = Array.isArray(data) ? data : data.dialogs || [];
       const list: DialogItem[] = listRaw.map((entry) => {
         const idStr = entry?.id_str ?? entry?.id ?? '';
@@ -162,6 +162,7 @@ const TrainingTab: React.FC = () => {
     try {
       const url = buildUrl(dialogsDetailUrl.replace('{lead_id}', String(dialog.id)), api, {
         limit: 50,
+        _: Date.now(),
       });
       const data = await requestJson<{ messages: DialogMessage[] }>(url);
       setMessages(data.messages || []);
@@ -196,10 +197,7 @@ const TrainingTab: React.FC = () => {
   useEffect(() => {
     if (!messagesRef.current) return;
     const container = messagesRef.current;
-    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
-    if (atBottom) {
-      container.scrollTop = container.scrollHeight;
-    }
+    container.scrollTop = container.scrollHeight;
   }, [messages]);
 
   const handleSend = async () => {

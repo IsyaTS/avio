@@ -28,26 +28,16 @@
 
 ## Диалоги (Avito + Telegram) и обратная связь
 - Вкладка «Диалоги» в кабинете клиента (`/client/{tenant}/settings#dialogs`) показывает список лидов слева и ленту сообщений справа; отправка ответов идёт через очереди воркера.
-- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback.
+- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback. При открытии диалога лента прокручивается к последнему сообщению.
 - API под ключ клиента (`k` + `tenant`):
   - `GET /api/dialogs` — список диалогов с last_message/last_ts.
   - `GET /api/dialogs/{lead_id}` — история сообщений.
   - `POST /api/dialogs/{lead_id}/send` — отправка текста (очередь OUTBOX).
   - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
-- База данных: в `messages` добавлен флаг `is_bot` (по умолчанию `false`), создана таблица `message_feedback` (tenant_id, message_id, rating, comment, handled, created_at).
-- Avito сообщения менеджера из UI тоже сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), поэтому видны в диалогах.
-- Для Avito менеджерских сообщений дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`); если сообщение совпадает с кэшом эха бота (`avito:bot_echo:<tenant>:<chat_id>`), оно игнорируется как эхо и в историю не пишется.
-## Диалоги (Avito + Telegram) и обратная связь
-- Вкладка «Диалоги» в кабинете клиента (`/client/{tenant}/settings#dialogs`) показывает список лидов слева и ленту сообщений справа; отправка ответов идёт через очереди воркера.
-- Интерфейс автообновляется (polling ~5с) без необходимости жать «Обновить»; ручные кнопки остаются как fallback.
-- API под ключ клиента (`k` + `tenant`):
-  - `GET /api/dialogs` — список диалогов с last_message/last_ts.
-  - `GET /api/dialogs/{lead_id}` — история сообщений.
-  - `POST /api/dialogs/{lead_id}/send` — отправка текста (очередь OUTBOX).
-  - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
-- База данных: в `messages` добавлен флаг `is_bot` (по умолчанию `false`), создана таблица `message_feedback` (tenant_id, message_id, rating, comment, handled, created_at).
-- Avito сообщения менеджера из UI тоже сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), поэтому видны в диалогах.
-- Для Avito менеджерских сообщений дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`); если сообщение совпадает с кэшом эха бота (`avito:bot_echo:<tenant>:<chat_id>`), оно игнорируется как эхо и в историю не пишется.
+- База данных: в `messages` есть флаг `is_bot` (по умолчанию `false`); таблица `message_feedback` используется для лайков/дизлайков. Если таблицы нет, диалоги продолжают работать, но фидбек не сохраняется.
+- Сообщения менеджера:
+  - Avito: из UI сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), видны в диалогах; дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`). Эхо бота игнорируется по ключу `avito:bot_echo:<tenant>:<chat_id>`.
+  - Telegram: сообщения из клиента сохраняются как исходящие и видны в диалогах; тишина ставится так же, как и для Avito.
 
 ## Client SPA (redesign)
 - Исходники: `apps/frontend/client-portal/` (Vite + React + TS + Tailwind).
@@ -110,7 +100,7 @@
 - Dev-override: в деве использовать `docker-compose.override.test.yml` + `.env.dev` (если есть) для портов/ENV, прод — без dev-override.
 
 ## PUBLIC_KEY для фронта
-- Публичные маршруты Telegram (`/pub/tg/*`) и WhatsApp (`/pub/wa/*`) принимают ключ только через параметр `?k=` и сравнивают его со значением `PUBLIC_KEY` из окружения.
+- Публичные маршруты Telegram (`/pub/tg/*`) и WhatsApp (`/pub/wa/*`) принимают ключ через `?k=`. Для TG допускается ключ арендатора (tenant key) или `PUBLIC_KEY`, для WA — `PUBLIC_KEY`.
 - Значение `PUBLIC_KEY` обязательно и должно отличаться от `ADMIN_TOKEN`, чтобы не давать фронту доступ к административным операциям.
 - При отсутствии `PUBLIC_KEY` система временно принимает `ADMIN_TOKEN` как запасной вариант, но это режим совместимости и рекомендуется задать отдельный ключ для фронта как можно раньше.
 
