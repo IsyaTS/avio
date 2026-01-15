@@ -515,12 +515,20 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
         )
         manager_outgoing = True
         if text or attachments:
+            logger.info(
+                "avito_outgoing_eval tenant=%s chat_id=%s echo=%s text_len=%s attachments=%s",
+                tenant,
+                chat_id,
+                int(bool(echo_detected)),
+                len(text or ""),
+                len(attachments),
+            )
             if not echo_detected:
                 display_text = text
                 if not display_text and attachments:
                     display_text = "Вложение"
                 try:
-                    await insert_message_out(
+                    stored_id = await insert_message_out(
                         lead_id,
                         display_text,
                         message_id_str,
@@ -529,10 +537,26 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
                         channel="avito",
                         is_bot=False,
                     )
-                except Exception:
-                    logger.debug(
-                        "avito_outgoing_store_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
+                    logger.info(
+                        "avito_outgoing_stored tenant=%s chat_id=%s lead_id=%s msg_id=%s",
+                        tenant,
+                        chat_id,
+                        lead_id,
+                        stored_id,
                     )
+                except Exception as exc:
+                    logger.warning(
+                        "avito_outgoing_store_failed tenant=%s chat_id=%s error=%s",
+                        tenant,
+                        chat_id,
+                        exc,
+                    )
+            else:
+                logger.info(
+                    "avito_outgoing_skipped_echo tenant=%s chat_id=%s",
+                    tenant,
+                    chat_id,
+                )
             # Skip processing bot/manager echoes to avoid double replies.
             return False
 
