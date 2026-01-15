@@ -870,8 +870,6 @@ async def save_follow_ups(tenant: int, request: Request):
             delay_minutes = int(rule.get("delay_minutes") or 0)
         except Exception:
             delay_minutes = 0
-        if delay_minutes <= 0:
-            continue
         text_value = str(rule.get("text") or "").strip()
         if not text_value:
             continue
@@ -881,14 +879,26 @@ async def save_follow_ups(tenant: int, request: Request):
             max_attempts = 1
         if max_attempts < 0:
             max_attempts = 0
+        trigger_on_answer = bool(rule.get("trigger_on_answer"))
+        if delay_minutes <= 0 and not trigger_on_answer:
+            continue
         active = bool(rule.get("active", True))
+        condition = rule.get("condition")
+        if not isinstance(condition, (dict, list)):
+            condition = None
+        capture = rule.get("capture")
+        if not isinstance(capture, dict):
+            capture = None
         validated.append(
             {
                 "channel": channel,
-                "delay_minutes": delay_minutes,
+                "delay_minutes": delay_minutes if delay_minutes > 0 else 0,
                 "text": text_value,
                 "max_attempts": max_attempts,
                 "active": active,
+                "trigger_on_answer": trigger_on_answer,
+                "condition": condition,
+                "capture": capture,
             }
         )
 
