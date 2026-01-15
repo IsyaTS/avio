@@ -56,6 +56,7 @@ const CatalogTab: React.FC = () => {
   const [photoDraftInitialized, setPhotoDraftInitialized] = useState(false);
   const [photoTagInputs, setPhotoTagInputs] = useState<Record<string, string>>({});
   const [showPhotoList, setShowPhotoList] = useState(false);
+  const [previewPhoto, setPreviewPhoto] = useState<PhotoEntry | null>(null);
 
   const uploadUrl = useMemo(() => buildUrl('/pub/catalog/upload', api), [api]);
   const statusUrl = useMemo(() => buildUrl('/pub/catalog/status', api), [api]);
@@ -409,12 +410,21 @@ const CatalogTab: React.FC = () => {
                 {photos.map((photo) => (
                   <div key={photo.id} className="rounded-2xl border border-slate-200 bg-white p-3 space-y-2">
                     {photo.url && (
-                      <img
-                        src={photo.url}
-                        alt={photo.original || photo.filename || 'photo'}
-                        className="h-40 w-full rounded-xl object-cover"
-                        loading="lazy"
-                      />
+                      <button
+                        type="button"
+                        className="group relative h-40 w-full overflow-hidden rounded-xl"
+                        onClick={() => setPreviewPhoto(photo)}
+                      >
+                        <img
+                          src={photo.url}
+                          alt={photo.original || photo.filename || 'photo'}
+                          className="h-40 w-full rounded-xl object-cover transition duration-200 group-hover:scale-[1.02]"
+                          loading="lazy"
+                        />
+                        <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-900/0 text-xs font-semibold uppercase tracking-[0.2em] text-white/0 transition duration-200 group-hover:bg-slate-900/40 group-hover:text-white/90">
+                          Открыть
+                        </span>
+                      </button>
                     )}
                     <div className="text-sm font-semibold text-slate-900">
                       {photo.original || photo.filename || photo.id}
@@ -513,6 +523,28 @@ const CatalogTab: React.FC = () => {
           </>
         )}
       </div>
+
+      {previewPhoto && previewPhoto.url && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6"
+          onClick={() => setPreviewPhoto(null)}
+        >
+          <div className="relative max-h-[90vh] w-full max-w-6xl" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="absolute right-3 top-3 rounded-full bg-white/90 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-700 shadow"
+              onClick={() => setPreviewPhoto(null)}
+            >
+              Закрыть
+            </button>
+            <img
+              src={previewPhoto.url}
+              alt={previewPhoto.original || previewPhoto.filename || 'photo'}
+              className="max-h-[90vh] w-full rounded-2xl object-contain"
+            />
+          </div>
+        </div>
+      )}
 
       <div className="card space-y-4">
         <div className="flex items-center justify-between">
