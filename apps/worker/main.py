@@ -83,6 +83,7 @@ from libs.core.common import (
     default_fallback_reply,
     HANDOFF_SILENCE_TTL_SECONDS,
     handoff_silence_key,
+    handoff_silence_meta_key,
     AVITO_BOT_ECHO_TTL_SECONDS,
     avito_bot_echo_key,
 )
@@ -300,12 +301,21 @@ async def _mark_handoff_silence(
     if tenant_id <= 0 or lead_id <= 0:
         return
     silence_key = handoff_silence_key(int(tenant_id), int(lead_id))
+    meta_key = handoff_silence_meta_key(int(tenant_id), int(lead_id))
+    timestamp = int(time.time())
     try:
         await r.set(
             silence_key,
-            str(int(time.time())),
+            str(timestamp),
             ex=HANDOFF_SILENCE_TTL_SECONDS,
         )
+        if meta_key:
+            meta_payload = {"reason": reason or "unknown", "ts": timestamp}
+            await r.set(
+                meta_key,
+                json.dumps(meta_payload, ensure_ascii=False),
+                ex=HANDOFF_SILENCE_TTL_SECONDS,
+            )
     except Exception:
         log(
             f"event=handoff_flag_set_failed tenant={tenant_id} lead_id={lead_id}"  # noqa: G004

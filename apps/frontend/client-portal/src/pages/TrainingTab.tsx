@@ -23,6 +23,14 @@ type DialogMessage = {
   isTemp?: boolean;
 };
 
+type SilenceInfo = {
+  active: boolean;
+  reason?: string | null;
+  since?: string | null;
+  ttl_seconds?: number | null;
+  auto_reply_enabled?: boolean;
+};
+
 type FeedbackCounts = { like: number; dislike: number };
 
 type PhotoItem = {
@@ -41,6 +49,7 @@ const TrainingTab: React.FC = () => {
   const [dialogs, setDialogs] = useState<DialogItem[]>([]);
   const [activeDialog, setActiveDialog] = useState<DialogItem | null>(null);
   const [messages, setMessages] = useState<DialogMessage[]>([]);
+  const [silenceInfo, setSilenceInfo] = useState<SilenceInfo | null>(null);
   const [loadingDialogs, setLoadingDialogs] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sendText, setSendText] = useState('');
@@ -88,6 +97,22 @@ const TrainingTab: React.FC = () => {
       return { label: 'telegram', className: 'bg-sky-100 text-sky-700' };
     }
     return { label: channel || 'channel', className: 'bg-slate-100 text-slate-500' };
+  };
+
+  const silenceReasonLabel = (reason?: string | null) => {
+    switch ((reason || '').toLowerCase()) {
+      case 'manager_outgoing':
+        return 'Менеджер ответил';
+      case 'photo_received':
+        return 'Получено фото';
+      case 'trigger_match':
+        return 'Сработал триггер тишины';
+      case 'followup_sent':
+        return 'Отправлен фоллоу‑ап';
+      case 'silence_active':
+      default:
+        return 'Тишина включена';
+    }
   };
 
   const refreshTrainingStatus = async () => {
@@ -175,8 +200,9 @@ const TrainingTab: React.FC = () => {
         limit: 50,
         _: Date.now(),
       });
-      const data = await requestJson<{ messages: DialogMessage[] }>(url);
+      const data = await requestJson<{ messages: DialogMessage[]; silence?: SilenceInfo }>(url);
       setMessages(data.messages || []);
+      setSilenceInfo(data.silence || null);
     } catch (error) {
       toast.error('Не удалось загрузить сообщения');
     } finally {
@@ -210,6 +236,7 @@ const TrainingTab: React.FC = () => {
 
   useEffect(() => {
     setSelectedPhoto('');
+    setSilenceInfo(null);
   }, [activeDialog?.id]);
 
   useEffect(() => {
@@ -398,6 +425,18 @@ const TrainingTab: React.FC = () => {
                         </span>
                       );
                     })()}
+                    {silenceInfo && (silenceInfo.active || silenceInfo.auto_reply_enabled === false) && (
+                      <div className="mt-1 text-xs text-amber-600">
+                        {silenceInfo.active
+                          ? `Бот молчит: ${silenceReasonLabel(silenceInfo.reason)}`
+                          : 'Автоответ выключен'}
+                        {silenceInfo.active && silenceInfo.ttl_seconds && (
+                          <span className="ml-2 text-amber-500">
+                            · осталось ~{Math.ceil(silenceInfo.ttl_seconds / 60)} мин
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button className="btn-secondary" onClick={() => fetchMessages(activeDialog)}>Обновить диалог</button>
                 </div>

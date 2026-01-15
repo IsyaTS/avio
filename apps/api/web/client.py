@@ -27,7 +27,11 @@ from libs.core import onboarding_chat
 from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
 from libs.core import db as db
-from libs.core.common import OUTBOX_QUEUE_KEY
+from libs.core.common import (
+    OUTBOX_QUEUE_KEY,
+    handoff_silence_key,
+    handoff_silence_meta_key,
+)
 from libs.core.export import whatsapp as whatsapp_exporter
 
 # NOTE: expose frequently used helpers after ensuring aliases are registered
@@ -263,6 +267,90 @@ def _isoformat(value: Any) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def _ts_iso(ts: int | None) -> str | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _channel_reply_enabled(cfg: Mapping[str, Any], channel: str) -> bool:
+    behavior = cfg.get("behavior") if isinstance(cfg, Mapping) else None
+    behavior_map = behavior if isinstance(behavior, Mapping) else {}
+    channel_norm = (channel or "").strip().lower()
+    if channel_norm == "telegram":
+        for key in ("telegram_reply_enabled", "telegram_smart_reply_enabled", "telegram_ai_enabled"):
+            if key in behavior_map:
+                return bool(behavior_map.get(key))
+        root_flag = behavior_map.get("telegram_reply_enabled")
+        if root_flag is not None:
+            return bool(root_flag)
+        return True
+    if channel_norm == "avito":
+        return True
+    return True
+
+
+def _load_silence_status(
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "active": False,
+        "reason": None,
+        "since": None,
+        "ttl_seconds": None,
+        "auto_reply_enabled": True,
+    }
+    try:
+        cfg = C.read_tenant_config(tenant_id)
+    except Exception:
+        cfg = {}
+    result["auto_reply_enabled"] = _channel_reply_enabled(cfg, channel)
+    redis_client = C.redis_client()
+    silence_key = handoff_silence_key(int(tenant_id), int(lead_id))
+    if not silence_key:
+        return result
+    try:
+        raw_ts = redis_client.get(silence_key)
+    except Exception:
+        raw_ts = None
+    if not raw_ts:
+        return result
+    result["active"] = True
+    try:
+        ts_val = int(raw_ts)
+    except Exception:
+        ts_val = None
+    result["since"] = _ts_iso(ts_val)
+    try:
+        ttl = redis_client.ttl(silence_key)
+    except Exception:
+        ttl = None
+    if isinstance(ttl, int) and ttl >= 0:
+        result["ttl_seconds"] = ttl
+    meta_key = handoff_silence_meta_key(int(tenant_id), int(lead_id))
+    try:
+        meta_raw = redis_client.get(meta_key) if meta_key else None
+    except Exception:
+        meta_raw = None
+    if isinstance(meta_raw, str) and meta_raw.strip():
+        try:
+            payload = json.loads(meta_raw)
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            reason = payload.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                result["reason"] = reason.strip()
+    if not result.get("reason"):
+        result["reason"] = "silence_active"
+    return result
 
 
 def _tenant_root(tenant: int) -> pathlib.Path:
@@ -1034,12 +1122,15 @@ async def get_dialog_messages_api(
             }
         )
 
+    silence = _load_silence_status(tenant_id, lead_id, lead_meta.get("channel") or "")
+
     return {
         "ok": True,
         "dialog_id": lead_id,
         "channel": lead_meta.get("channel"),
         "title": lead_meta.get("title") or lead_meta.get("contact"),
         "messages": formatted,
+        "silence": silence,
     }
 
 

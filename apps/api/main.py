@@ -184,6 +184,7 @@ from libs.core.common import (
     HANDOFF_SILENCE_TTL_SECONDS,
     get_outbox_whitelist,
     handoff_silence_key,
+    handoff_silence_meta_key,
     whitelist_contains_number,
 )
 _FALSE_OUTBOX_VALUES = {"0", "false", "no", "off", "disabled"}
@@ -206,11 +207,20 @@ async def _mark_handoff_silence(
     if redis_client is None:
         return
     try:
+        timestamp = int(time.time())
         await redis_client.set(
             handoff_silence_key(int(tenant), int(lead_id)),
-            str(int(time.time())),
+            str(timestamp),
             ex=HANDOFF_SILENCE_TTL_SECONDS,
         )
+        meta_key = handoff_silence_meta_key(int(tenant), int(lead_id))
+        if meta_key:
+            payload = {"reason": "manager_outgoing", "ts": timestamp}
+            await redis_client.set(
+                meta_key,
+                json.dumps(payload, ensure_ascii=False),
+                ex=HANDOFF_SILENCE_TTL_SECONDS,
+            )
     except Exception:
         transport_logger.debug(
             "handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True

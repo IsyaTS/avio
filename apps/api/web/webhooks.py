@@ -35,6 +35,7 @@ from libs.core.common import (
     HANDOFF_SILENCE_TTL_SECONDS,
     default_fallback_reply,
     handoff_silence_key,
+    handoff_silence_meta_key,
     is_manager_telegram,
     is_manager_whatsapp,
     smart_reply_enabled,
@@ -671,11 +672,20 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     provider,
                 )
         try:
+            timestamp = int(time.time())
             await _redis_queue.set(
                 handoff_silence_key(int(tenant), int(lead_id)),
-                str(int(time.time())),
+                str(timestamp),
                 ex=HANDOFF_SILENCE_TTL_SECONDS,
             )
+            meta_key = handoff_silence_meta_key(int(tenant), int(lead_id))
+            if meta_key:
+                payload = {"reason": "manager_outgoing", "ts": timestamp}
+                await _redis_queue.set(
+                    meta_key,
+                    json.dumps(payload, ensure_ascii=False),
+                    ex=HANDOFF_SILENCE_TTL_SECONDS,
+                )
         except Exception:
             logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
         try:
@@ -1064,11 +1074,20 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
 
     if has_photo:
         try:
+            timestamp = int(time.time())
             await _redis_queue.set(
                 handoff_silence_key(int(tenant), int(lead_id)),
-                str(int(time.time())),
+                str(timestamp),
                 ex=HANDOFF_SILENCE_TTL_SECONDS,
             )
+            meta_key = handoff_silence_meta_key(int(tenant), int(lead_id))
+            if meta_key:
+                payload = {"reason": "photo_received", "ts": timestamp}
+                await _redis_queue.set(
+                    meta_key,
+                    json.dumps(payload, ensure_ascii=False),
+                    ex=HANDOFF_SILENCE_TTL_SECONDS,
+                )
         except Exception:
             logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
         try:

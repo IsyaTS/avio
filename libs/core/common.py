@@ -65,6 +65,12 @@ def handoff_silence_key(tenant: int, lead_id: int) -> str:
 
     return f"handoff:silence:{int(tenant)}:{int(lead_id)}"
 
+
+def handoff_silence_meta_key(tenant: int, lead_id: int) -> str:
+    """Redis key for storing silence reason metadata."""
+
+    return f"handoff:silence:meta:{int(tenant)}:{int(lead_id)}"
+
 try:
     _AVITO_BOT_ECHO_TTL = int(os.getenv("AVITO_BOT_ECHO_TTL_SECONDS", "120"))
 except Exception:
@@ -384,6 +390,7 @@ __all__ = [
     "AI_ENABLED_DEFAULT",
     "HANDOFF_SILENCE_TTL_SECONDS",
     "handoff_silence_key",
+    "handoff_silence_meta_key",
     "AVITO_BOT_ECHO_TTL_SECONDS",
     "avito_bot_echo_key",
     "normalize_echo_text",

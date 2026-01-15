@@ -19,7 +19,12 @@ from libs.core.db import (
     get_lead_peer,
     get_telegram_user_id_by_lead,
 )
-from libs.core.common import HANDOFF_SILENCE_TTL_SECONDS, OUTBOX_QUEUE_KEY, handoff_silence_key
+from libs.core.common import (
+    HANDOFF_SILENCE_TTL_SECONDS,
+    OUTBOX_QUEUE_KEY,
+    handoff_silence_key,
+    handoff_silence_meta_key,
+)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
@@ -561,11 +566,20 @@ async def _mute_smart_reply(tenant_id: int, lead_id: int) -> None:
     if tenant_id <= 0 or lead_id <= 0:
         return
     try:
+        timestamp = int(time.time())
         await r.set(
             handoff_silence_key(int(tenant_id), int(lead_id)),
-            str(int(time.time())),
+            str(timestamp),
             ex=HANDOFF_SILENCE_TTL_SECONDS,
         )
+        meta_key = handoff_silence_meta_key(int(tenant_id), int(lead_id))
+        if meta_key:
+            payload = {"reason": "followup_sent", "ts": timestamp}
+            await r.set(
+                meta_key,
+                json.dumps(payload, ensure_ascii=False),
+                ex=HANDOFF_SILENCE_TTL_SECONDS,
+            )
     except Exception:
         pass
 

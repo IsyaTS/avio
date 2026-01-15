@@ -61,6 +61,7 @@ from libs.core.common import (
     HANDOFF_SILENCE_TTL_SECONDS,
     avito_bot_echo_key,
     handoff_silence_key,
+    handoff_silence_meta_key,
     normalize_echo_text,
 )
 from . import common as common
@@ -472,11 +473,20 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
                 if not echo_detected and text:
                     echo_detected = await _is_recent_bot_echo(int(tenant), int(lead_id), text)
                 if not echo_detected:
+                    timestamp = int(time.time())
                     await _redis_queue.set(
                         handoff_silence_key(int(tenant), int(lead_id)),
-                        str(int(time.time())),
+                        str(timestamp),
                         ex=HANDOFF_SILENCE_TTL_SECONDS,
                     )
+                    meta_key = handoff_silence_meta_key(int(tenant), int(lead_id))
+                    if meta_key:
+                        payload = {"reason": "manager_outgoing", "ts": timestamp}
+                        await _redis_queue.set(
+                            meta_key,
+                            json.dumps(payload, ensure_ascii=False),
+                            ex=HANDOFF_SILENCE_TTL_SECONDS,
+                        )
             except Exception:
                 logger.debug(
                     "handoff_flag_set_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
