@@ -48,6 +48,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
       OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-45}
       PLANNER_ATTEMPTS: ${PLANNER_ATTEMPTS:-3}
+      RESPONSE_PIPELINE_ENABLED: ${RESPONSE_PIPELINE_ENABLED:-1}
     depends_on: [redis, postgres]
     working_dir: /app
     command: gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:8000 apps.api.main:app --timeout 60 --keep-alive 20
