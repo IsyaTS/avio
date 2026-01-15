@@ -1109,6 +1109,28 @@ async def get_dialog_messages_api(
                 before_dt = None
 
     messages = await db.list_messages_for_lead(tenant_id, lead_id, limit=limit_val, before=before_dt)
+    if messages:
+        def _sort_key(item: dict) -> tuple[float, int]:
+            ts_value = item.get("created_at")
+            ts_num = 0.0
+            if isinstance(ts_value, datetime):
+                try:
+                    ts_num = ts_value.timestamp()
+                except Exception:
+                    ts_num = 0.0
+            elif isinstance(ts_value, str):
+                try:
+                    ts_num = datetime.fromisoformat(ts_value).timestamp()
+                except Exception:
+                    ts_num = 0.0
+            msg_id = item.get("id")
+            try:
+                msg_id_val = int(msg_id)
+            except Exception:
+                msg_id_val = 0
+            return (ts_num, msg_id_val)
+
+        messages = sorted(messages, key=_sort_key)
     message_ids = [msg.get("id") for msg in messages if msg.get("id")]
     feedback_ids = await db.list_feedback_message_ids(tenant_id, message_ids)
     formatted = []
