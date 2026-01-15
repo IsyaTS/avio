@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Mapping
 from urllib.parse import quote, quote_plus
 
 import logging
