@@ -1109,8 +1109,6 @@ async def get_dialog_messages_api(
                 before_dt = None
 
     messages = await db.list_messages_for_lead(tenant_id, lead_id, limit=limit_val, before=before_dt)
-    if messages:
-        messages = list(reversed(messages))
     message_ids = [msg.get("id") for msg in messages if msg.get("id")]
     feedback_ids = await db.list_feedback_message_ids(tenant_id, message_ids)
     formatted = []
