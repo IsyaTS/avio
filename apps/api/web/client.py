@@ -732,6 +732,7 @@ def client_settings(tenant: int, request: Request):
         "dialogs_list": "/api/dialogs",
         "dialogs_detail": "/api/dialogs/{lead_id}",
         "dialogs_send": "/api/dialogs/{lead_id}/send",
+        "dialogs_unsilence": "/api/dialogs/{lead_id}/unsilence",
         "dialogs_test": "/api/dialogs/test",
         "tenant_stats": "/api/tenant/stats",
         "feedback_stats": "/api/feedback/stats",
@@ -1320,6 +1321,36 @@ async def test_dialog_api(request: Request, tenant: int | str | None = None):
     except Exception:
         reply_text = default_fallback_reply(tenant_id)
     return {"ok": True, "reply": reply_text}
+
+
+@router.post("/api/dialogs/{lead_id}/unsilence")
+async def dialogs_unsilence_api(
+    request: Request, lead_id: int, tenant: int | str | None = None
+):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    try:
+        lead_id = int(lead_id)
+    except Exception:
+        return JSONResponse({"detail": "invalid_lead"}, status_code=400)
+    if lead_id <= 0:
+        return JSONResponse({"detail": "invalid_lead"}, status_code=400)
+
+    try:
+        redis_client = C.redis_client()
+    except Exception:
+        return JSONResponse({"detail": "redis_unavailable"}, status_code=503)
+
+    silence_key = handoff_silence_key(tenant_id, lead_id)
+    meta_key = handoff_silence_meta_key(tenant_id, lead_id)
+    try:
+        deleted = redis_client.delete(silence_key, meta_key)
+    except Exception:
+        return JSONResponse({"detail": "redis_error"}, status_code=500)
+
+    return {"ok": True, "deleted": int(deleted or 0)}
 
 
 @router.get("/api/tenant/stats")

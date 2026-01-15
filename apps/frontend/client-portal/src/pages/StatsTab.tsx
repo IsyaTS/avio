@@ -28,11 +28,16 @@ const StatsTab: React.FC = () => {
   useEffect(() => {
     const load = async () => {
       if (!api.tenantId || !api.key) return;
-      const url = buildUrl(bootstrap.urls?.tenant_stats || '/api/tenant/stats', api);
+      const url = buildUrl(bootstrap.urls?.tenant_stats || '/api/tenant/stats', api, { _: Date.now() });
       const data = await requestJson<TenantQueueStats>(url);
       if (data) setQueueStats(data);
     };
     load().catch(() => undefined);
+    if (!api.tenantId || !api.key) return;
+    const timer = window.setInterval(() => {
+      load().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [api.tenantId, api.key, bootstrap.urls]);
 
   return (

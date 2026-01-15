@@ -93,6 +93,10 @@ const TrainingTab: React.FC = () => {
   const dialogsListUrl = useMemo(() => bootstrap.urls?.dialogs_list || '/api/dialogs', [bootstrap.urls]);
   const dialogsDetailUrl = useMemo(() => bootstrap.urls?.dialogs_detail || '/api/dialogs/{lead_id}', [bootstrap.urls]);
   const dialogsSendUrl = useMemo(() => bootstrap.urls?.dialogs_send || '/api/dialogs/{lead_id}/send', [bootstrap.urls]);
+  const dialogsUnsilenceUrl = useMemo(
+    () => bootstrap.urls?.dialogs_unsilence || '/api/dialogs/{lead_id}/unsilence',
+    [bootstrap.urls]
+  );
   const feedbackUrl = useMemo(() => bootstrap.urls?.feedback || '/api/feedback', [bootstrap.urls]);
   const feedbackStatsUrl = useMemo(() => bootstrap.urls?.feedback_stats || '/api/feedback/stats', [bootstrap.urls]);
   const photosListUrl = useMemo(() => bootstrap.urls?.photos_list || '/pub/files/photos/list', [bootstrap.urls]);
@@ -217,6 +221,18 @@ const TrainingTab: React.FC = () => {
       toast.error('Не удалось загрузить сообщения');
     } finally {
       setLoadingMessages(false);
+    }
+  };
+
+  const handleUnsilence = async () => {
+    if (!activeDialog) return;
+    try {
+      const url = buildUrl(dialogsUnsilenceUrl.replace('{lead_id}', String(activeDialog.id)), api);
+      await requestJson(url, { method: 'POST' });
+      await fetchMessages(activeDialog);
+      toast.success('Тишина снята');
+    } catch (error) {
+      toast.error('Не удалось снять тишину');
     }
   };
 
@@ -481,7 +497,16 @@ const TrainingTab: React.FC = () => {
                       </div>
                     )}
                   </div>
-                  <button className="btn-secondary" onClick={() => fetchMessages(activeDialog)}>Обновить диалог</button>
+                  <div className="flex items-center gap-2">
+                    {silenceInfo?.active && (
+                      <button className="btn-ghost" onClick={handleUnsilence}>
+                        Снять тишину
+                      </button>
+                    )}
+                    <button className="btn-secondary" onClick={() => fetchMessages(activeDialog)}>
+                      Обновить диалог
+                    </button>
+                  </div>
                 </div>
                 <div ref={messagesRef} className="flex-1 overflow-y-auto py-4 space-y-4">
                   {loadingMessages && <div className="text-sm text-slate-400">Загрузка…</div>}
