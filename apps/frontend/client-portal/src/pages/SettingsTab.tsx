@@ -426,6 +426,32 @@ const SettingsTab: React.FC = () => {
   const handleSaveFollowups = async () => {
     const endpoint = bootstrap.urls?.save_followups || `/client/${api.tenantId}/follow-ups`;
     if (!api.tenantId || !api.key) return;
+    for (let i = 0; i < followups.length; i += 1) {
+      const rule = followups[i];
+      if (!rule.text || !rule.text.trim()) {
+        toast.error(`Фоллоу-ап #${i + 1}: заполните текст`);
+        return;
+      }
+      const delay = Number(rule.delay_minutes || 0);
+      if (!rule.trigger_on_answer && delay <= 0) {
+        toast.error(`Фоллоу-ап #${i + 1}: укажите задержку или включите «сразу после ответа»`);
+        return;
+      }
+      const condition = Array.isArray(rule.condition) ? rule.condition[0] : rule.condition;
+      if (condition) {
+        const key = String((condition as any).key || '').trim();
+        const op = String((condition as any).op || 'eq').trim();
+        const value = (condition as any).value;
+        if (!key) {
+          toast.error(`Фоллоу-ап #${i + 1}: укажите факт для условия`);
+          return;
+        }
+        if (!['exists', 'not_exists'].includes(op) && (value == null || String(value).trim() === '')) {
+          toast.error(`Фоллоу-ап #${i + 1}: укажите значение для условия`);
+          return;
+        }
+      }
+    }
     try {
       const payload = { rules: followups };
       await postJson(buildUrl(endpoint, api), payload);
@@ -832,6 +858,9 @@ const SettingsTab: React.FC = () => {
                               />
                             </label>
                           </div>
+                          <div className="text-xs text-slate-400">
+                            Задержка считается от первого входящего сообщения, если не включено «сразу после ответа».
+                          </div>
                         </div>
                       </div>
 
@@ -885,6 +914,11 @@ const SettingsTab: React.FC = () => {
                               />
                               Отправить сразу после ответа
                             </label>
+                          )}
+                          {conditionMode === 'conditional' && (
+                            <div className="text-xs text-slate-400">
+                              Для «молчания» используйте условие «факт не существует» + задержку.
+                            </div>
                           )}
 
                           {conditionMode === 'conditional' && (
