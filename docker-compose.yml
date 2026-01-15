@@ -1,5 +1,6 @@
 services:
   redis:
+    container_name: avio-redis-1
     image: redis:7-alpine
     command: ["redis-server","--appendonly","yes"]
     volumes:
@@ -7,6 +8,7 @@ services:
     restart: unless-stopped
 
   postgres:
+    container_name: avio-postgres-1
     image: postgres:15-alpine
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
@@ -18,6 +20,7 @@ services:
     restart: unless-stopped
 
   app:
+    container_name: avio-app-1
     build:
       context: .
       dockerfile: Dockerfile
@@ -58,6 +61,7 @@ services:
       - "0.0.0.0:${APP_PORT:-8000}:8000"
 
   worker:
+    container_name: avio-worker-1
     image: avio/app:local
     env_file: .env
     environment:
@@ -102,6 +106,7 @@ services:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
 
   tgworker:
+    container_name: avio-tgworker-1
     image: avio/app:local
     env_file: .env
     environment:
@@ -139,6 +144,7 @@ services:
       - ./tg-sessions:/app/tg-sessions:rw
 
   wabaileys:
+    container_name: avio-wabaileys-1
     build:
       context: .
       dockerfile: apps/wabaileys/Dockerfile
@@ -176,6 +182,7 @@ services:
     restart: unless-stopped
 
   caddy:
+    container_name: avio-caddy-1
     image: caddy:2
     restart: unless-stopped
     depends_on:

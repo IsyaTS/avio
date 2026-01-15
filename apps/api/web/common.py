@@ -742,6 +742,7 @@ def valid_key(tenant: int, kk: str) -> bool:
     tenant_id = int(tenant)
 
     tenant_key = ""
+    extra_keys: list[str] = []
     try:
         cfg = read_tenant_config(tenant_id)
     except Exception:
@@ -750,13 +751,39 @@ def valid_key(tenant: int, kk: str) -> bool:
         passport = cfg.get("passport")
         if isinstance(passport, dict):
             tenant_key = _normalize_key(passport.get("public_key"))
+        integrations = cfg.get("integrations")
+        if isinstance(integrations, dict):
+            raw_keys = integrations.get("client_keys")
+            if isinstance(raw_keys, (list, tuple)):
+                extra_keys = [str(item or "").strip() for item in raw_keys if item]
 
     if tenant_key and candidate == tenant_key:
         return True
+    if extra_keys:
+        for key in extra_keys:
+            if _normalize_key(key) == candidate:
+                return True
+
+    meta = _load_key_meta(tenant_id)
+    if isinstance(meta, dict):
+        meta_key = _normalize_key(meta.get("key"))
+        if meta_key and candidate == meta_key:
+            return True
 
     stored_key = _normalize_key(get_tenant_pubkey(tenant_id) or "")
     if stored_key and candidate == stored_key:
         return True
+
+    legacy = _with_redis(lambda client: client.hgetall(keys_hkey(tenant_id)) or {}, {})
+    if legacy:
+        for stored_key, raw_meta in legacy.items():
+            try:
+                parsed = json.loads(raw_meta) if raw_meta else {}
+            except Exception:
+                parsed = {}
+            for value in (parsed.get("value"), parsed.get("key"), stored_key):
+                if _normalize_key(value) == candidate:
+                    return True
 
     return False
 
