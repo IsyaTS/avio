@@ -105,6 +105,12 @@ const SettingsTab: React.FC = () => {
   const [sendCatalogTg, setSendCatalogTg] = useState(
     Boolean(behaviorDefaults.send_catalog_on_first_message)
   );
+  const [autoPhotoEnabled, setAutoPhotoEnabled] = useState(
+    Boolean(behaviorDefaults.auto_photo_enabled)
+  );
+  const [autoPhotoMax, setAutoPhotoMax] = useState(
+    behaviorDefaults.auto_photo_max ? String(behaviorDefaults.auto_photo_max) : ''
+  );
   const [photoMarkers, setPhotoMarkers] = useState(
     (behaviorDefaults.photo_expected_markers || []).join('\n')
   );
@@ -205,6 +211,8 @@ const SettingsTab: React.FC = () => {
         setTelegramReplyEnabled(draft.telegramReplyEnabled);
       }
       if (typeof draft.sendCatalogTg === 'boolean') setSendCatalogTg(draft.sendCatalogTg);
+      if (typeof draft.autoPhotoEnabled === 'boolean') setAutoPhotoEnabled(draft.autoPhotoEnabled);
+      if (typeof draft.autoPhotoMax === 'string') setAutoPhotoMax(draft.autoPhotoMax);
       if (typeof draft.photoMarkers === 'string') setPhotoMarkers(draft.photoMarkers);
       if (typeof draft.photoReply === 'string') setPhotoReply(draft.photoReply);
       if (typeof draft.photoTtl === 'string') setPhotoTtl(draft.photoTtl);
@@ -236,6 +244,8 @@ const SettingsTab: React.FC = () => {
       avitoSmartReply,
       telegramReplyEnabled,
       sendCatalogTg,
+      autoPhotoEnabled,
+      autoPhotoMax,
       photoMarkers,
       photoReply,
       photoTtl,
@@ -261,6 +271,8 @@ const SettingsTab: React.FC = () => {
     avitoSmartReply,
     telegramReplyEnabled,
     sendCatalogTg,
+    autoPhotoEnabled,
+    autoPhotoMax,
     photoMarkers,
     photoReply,
     photoTtl,
@@ -363,6 +375,8 @@ const SettingsTab: React.FC = () => {
       avito_smart_reply_enabled: avitoSmartReply,
       telegram_reply_enabled: telegramReplyEnabled,
       send_catalog_on_first_message: sendCatalogTg,
+      auto_photo_enabled: autoPhotoEnabled,
+      auto_photo_max: autoPhotoMax ? Number(autoPhotoMax) : 0,
       triggers,
       photo_expected_markers: photoMarkers
         .split(/\n|,/)
@@ -533,6 +547,20 @@ const SettingsTab: React.FC = () => {
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 md:col-span-2">
             <input type="checkbox" checked={sendCatalogTg} onChange={(e) => setSendCatalogTg(e.target.checked)} />
             <span className="text-sm font-medium text-slate-700">Отправлять PDF-каталог первым сообщением (Telegram)</span>
+          </label>
+          <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
+            <input type="checkbox" checked={autoPhotoEnabled} onChange={(e) => setAutoPhotoEnabled(e.target.checked)} />
+            <span className="text-sm font-medium text-slate-700">Авто‑отправка фото</span>
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-medium text-slate-600">Максимум фото за ответ</span>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={autoPhotoMax}
+              onChange={(e) => setAutoPhotoMax(e.target.value)}
+            />
           </label>
           <label className="space-y-2 md:col-span-2">
             <span className="text-sm font-medium text-slate-600">Текст автоответа Avito</span>

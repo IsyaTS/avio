@@ -10,7 +10,7 @@ import StatsTab from './pages/StatsTab';
 const navItems = [
   { label: 'Настройки', path: '/settings' },
   { label: 'Каналы', path: '/channels' },
-  { label: 'Каталог', path: '/catalog' },
+  { label: 'Файлы', path: '/catalog' },
   { label: 'Обучение', path: '/training' },
   { label: 'Статистика', path: '/stats' },
 ];

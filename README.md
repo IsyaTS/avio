@@ -32,7 +32,7 @@
 - API под ключ клиента (`k` + `tenant`):
   - `GET /api/dialogs` — список диалогов с last_message/last_ts.
   - `GET /api/dialogs/{lead_id}` — история сообщений.
-  - `POST /api/dialogs/{lead_id}/send` — отправка текста (очередь OUTBOX).
+  - `POST /api/dialogs/{lead_id}/send` — отправка текста или фото (очередь OUTBOX). Поля: `text` и/или `photo_id`.
   - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
 - База данных: в `messages` есть флаг `is_bot` (по умолчанию `false`); таблица `message_feedback` используется для лайков/дизлайков. Если таблицы нет, диалоги продолжают работать, но фидбек не сохраняется.
 - Сообщения менеджера:
@@ -41,6 +41,24 @@
 
 ## Каталог (CSV/XLSX/PDF)
 - Импорт приводит названия к безопасному виду (`clean_title`) и не падает на единицах/скобках в title (например, `110 (110 ММ)`); если title всё ещё содержит запрещённые токены — импорт вернёт ошибку.
+
+## Файлы: фото (Avito + Telegram)
+- Фото хранятся в `data/tenants/<id>/uploads/photos/` и описываются в `manifest.json` рядом (без БД).
+- Ограничения: только `jpg/jpeg/png/gif/bmp/heic`, размер до **24 MB** (лимит Avito).
+- Метаданные фото (через UI «Файлы»): `title`, `tags`, `usage`, `channels`, `auto`, `priority`.
+- Публичные endpoints (требуют `tenant` + `k`):
+  - `GET /pub/files/photos/list` — список фото (с URL для превью).
+  - `POST /pub/files/photos/upload` — загрузка (multipart, поле `file`).
+  - `DELETE /pub/files/photos/{photo_id}` — удаление.
+  - `GET /pub/files/photos/{photo_id}` — отдача файла (используется для превью и Telegram).
+  - `POST /pub/files/photos/{photo_id}/meta` — обновление метаданных фото.
+- Отправка:
+  - Telegram: через tgworker с attachment URL.
+  - Avito: `uploadImages` → `messages/image` (отправка изображения без ссылок).
+- Авто‑отправка (LLM):
+  - Включается флагом `behavior.auto_photo_enabled` и лимитом `behavior.auto_photo_max` (макс фото за ответ).
+  - Бот выбирает фото только из тех, где `auto=true` и канал входит в `channels`.
+  - Для выбора используются `tags`/`usage` и текст клиента/ответ бота.
 
 ## Client SPA (redesign)
 - Исходники: `apps/frontend/client-portal/` (Vite + React + TS + Tailwind).

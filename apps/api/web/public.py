@@ -23,7 +23,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import qrcode
 from qrcode.image.svg import SvgImage
 
-from fastapi import APIRouter, Request, UploadFile, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, Request, UploadFile, BackgroundTasks, HTTPException, Query, File
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse, FileResponse
 import httpx
@@ -105,6 +105,16 @@ router = APIRouter()
 oauth_router = APIRouter(prefix="/v1/oauth/avito", tags=["avito_oauth"])
 
 CATALOG_VIEW_TEMPLATE = "catalog/view.html"
+PHOTO_MAX_BYTES = 24 * 1024 * 1024  # Avito limit (24 MB) sets global cap
+PHOTO_ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".heic"}
+PHOTO_ALLOWED_MIMES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/bmp",
+    "image/heic",
+    "image/heif",
+}
 
 
 def _qr_cache_ttl() -> int:
@@ -3549,6 +3559,58 @@ async def settings_save(request: Request, tenant: int | str | None = None, k: st
     return {"ok": True}
 
 
+def _photo_root(tenant_id: int) -> pathlib.Path:
+    core_module.ensure_tenant_files(tenant_id)
+    root = core_module.tenant_dir(tenant_id) / "uploads" / "photos"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _photo_manifest_path(tenant_id: int) -> pathlib.Path:
+    return _photo_root(tenant_id) / "manifest.json"
+
+
+def _read_photo_manifest(tenant_id: int) -> list[dict[str, Any]]:
+    path = _photo_manifest_path(tenant_id)
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:
+        return []
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict)]
+    return []
+
+
+def _write_photo_manifest(tenant_id: int, entries: list[dict[str, Any]]) -> None:
+    path = _photo_manifest_path(tenant_id)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(entries, fh, ensure_ascii=False, indent=2)
+
+
+def _photo_public_url(request: Request, tenant_id: int, key: str, photo_id: str) -> str:
+    base = common.public_url(request, f"/pub/files/photos/{photo_id}")
+    if not base:
+        return ""
+    joiner = "&" if "?" in base else "?"
+    return f"{base}{joiner}tenant={tenant_id}&k={quote_plus(key)}"
+
+
+def _validate_photo_upload(filename: str, content_type: str | None) -> tuple[bool, str]:
+    if not filename:
+        return False, "empty_file"
+    ext = pathlib.Path(filename).suffix.lower()
+    if ext not in PHOTO_ALLOWED_EXTS:
+        return False, "unsupported_extension"
+    if content_type:
+        mime = content_type.strip().lower()
+        if mime and mime not in PHOTO_ALLOWED_MIMES and mime != "application/octet-stream":
+            return False, "unsupported_mime"
+    return True, ""
+
+
 # Move public catalog helpers closer to settings endpoints for discoverability.
 @router.get("/pub/catalog/csv")
 def public_catalog_csv_get(
@@ -3970,6 +4032,219 @@ async def catalog_upload(
         return RedirectResponse(url=redirect_url, status_code=303)
 
     return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "filename": filename})
+
+
+@router.get("/pub/files/photos/list")
+def photos_list(request: Request, tenant: int | str | None = None, k: str | None = None):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, key = auth
+
+    entries = _read_photo_manifest(tenant_id)
+    items: list[dict[str, Any]] = []
+    for entry in sorted(entries, key=lambda item: item.get("uploaded_at", 0), reverse=True):
+        photo_id = str(entry.get("id") or "").strip()
+        if not photo_id:
+            continue
+        payload = dict(entry)
+        payload["url"] = _photo_public_url(request, tenant_id, key, photo_id)
+        items.append(payload)
+    return {"ok": True, "photos": items}
+
+
+@router.post("/pub/files/photos/upload")
+async def photos_upload(
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+    file: UploadFile = File(...),
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, key = auth
+
+    filename = (file.filename or "").strip()
+    ok, reason = _validate_photo_upload(filename, file.content_type)
+    if not ok:
+        return JSONResponse({"ok": False, "error": reason}, status_code=400)
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse({"ok": False, "error": "empty_file"}, status_code=400)
+    if len(raw) > PHOTO_MAX_BYTES:
+        return JSONResponse(
+            {"ok": False, "error": "file_too_large", "max_size_bytes": PHOTO_MAX_BYTES},
+            status_code=400,
+        )
+
+    ext = pathlib.Path(filename).suffix.lower()
+    photo_id = uuid.uuid4().hex
+    safe_name = f"photo_{photo_id}{ext}"
+    root = _photo_root(tenant_id)
+    target = root / safe_name
+    target.write_bytes(raw)
+
+    rel_path = str(target.relative_to(core_module.tenant_dir(tenant_id)))
+    mime = (file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream")
+
+    entry = {
+        "id": photo_id,
+        "filename": safe_name,
+        "original": filename,
+        "mime": mime,
+        "size": len(raw),
+        "uploaded_at": int(time.time()),
+        "path": rel_path,
+    }
+
+    entries = _read_photo_manifest(tenant_id)
+    entries.insert(0, entry)
+    _write_photo_manifest(tenant_id, entries)
+
+    entry_with_url = dict(entry)
+    entry_with_url["url"] = _photo_public_url(request, tenant_id, key, photo_id)
+    return {"ok": True, "photo": entry_with_url}
+
+
+@router.delete("/pub/files/photos/{photo_id}")
+def photos_delete(
+    photo_id: str,
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    entries = _read_photo_manifest(tenant_id)
+    remaining: list[dict[str, Any]] = []
+    removed_entry: dict[str, Any] | None = None
+    for entry in entries:
+        entry_id = str(entry.get("id") or "")
+        if entry_id == photo_id and removed_entry is None:
+            removed_entry = entry
+            continue
+        remaining.append(entry)
+    if removed_entry is None:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+
+    rel_path = str(removed_entry.get("path") or "")
+    if rel_path:
+        target = core_module.tenant_dir(tenant_id) / rel_path
+        try:
+            target = target.resolve()
+            tenant_root = core_module.tenant_dir(tenant_id).resolve()
+        except Exception:
+            target = None
+        if target is not None and str(target).startswith(str(tenant_root)) and target.exists():
+            try:
+                target.unlink()
+            except Exception:
+                logger.warning("photo_delete_failed tenant=%s path=%s", tenant_id, rel_path)
+
+    _write_photo_manifest(tenant_id, remaining)
+    return {"ok": True}
+
+
+@router.get("/pub/files/photos/{photo_id}")
+def photos_file(
+    photo_id: str,
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    entries = _read_photo_manifest(tenant_id)
+    entry = next((item for item in entries if str(item.get("id") or "") == photo_id), None)
+    if not entry:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+
+    rel_path = str(entry.get("path") or "")
+    if not rel_path:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+    target = core_module.tenant_dir(tenant_id) / rel_path
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+
+    mime = entry.get("mime") or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    filename = entry.get("original") or target.name
+    return FileResponse(target, media_type=mime, filename=filename)
+
+
+@router.post("/pub/files/photos/{photo_id}/meta")
+async def photos_update_meta(
+    photo_id: str,
+    request: Request,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    auth = _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, key = auth
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    entries = _read_photo_manifest(tenant_id)
+    entry = next((item for item in entries if str(item.get("id") or "") == photo_id), None)
+    if not entry:
+        return JSONResponse({"detail": "not_found"}, status_code=404)
+
+    title = payload.get("title")
+    if isinstance(title, str):
+        entry["title"] = title.strip()
+    usage = payload.get("usage")
+    if isinstance(usage, str):
+        entry["usage"] = usage.strip()
+
+    tags_raw = payload.get("tags")
+    tags: list[str] = []
+    if isinstance(tags_raw, (list, tuple, set)):
+        tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()]
+    elif isinstance(tags_raw, str):
+        tags = [chunk.strip() for chunk in tags_raw.split(",") if chunk.strip()]
+    if tags:
+        entry["tags"] = tags
+    elif tags_raw is not None:
+        entry["tags"] = []
+
+    channels_raw = payload.get("channels")
+    channels: list[str] = []
+    if isinstance(channels_raw, (list, tuple, set)):
+        channels = [str(ch).strip().lower() for ch in channels_raw if str(ch).strip()]
+    elif isinstance(channels_raw, str):
+        channels = [chunk.strip().lower() for chunk in channels_raw.split(",") if chunk.strip()]
+    if channels:
+        entry["channels"] = channels
+    elif channels_raw is not None:
+        entry["channels"] = []
+
+    if payload.get("auto") is not None:
+        entry["auto"] = bool(payload.get("auto"))
+
+    if payload.get("priority") is not None:
+        try:
+            entry["priority"] = int(payload.get("priority") or 0)
+        except Exception:
+            entry["priority"] = 0
+
+    _write_photo_manifest(tenant_id, entries)
+    entry_with_url = dict(entry)
+    entry_with_url["url"] = _photo_public_url(request, tenant_id, key, photo_id)
+    return {"ok": True, "photo": entry_with_url}
 
 
 @router.get("/pub/catalog/view/{tenant}", response_class=HTMLResponse)

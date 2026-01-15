@@ -269,6 +269,32 @@ def _tenant_root(tenant: int) -> pathlib.Path:
     return pathlib.Path(C.tenant_dir(tenant))
 
 
+def _photo_manifest_path(tenant: int) -> pathlib.Path:
+    return _tenant_root(tenant) / "uploads" / "photos" / "manifest.json"
+
+
+def _read_photo_manifest(tenant: int) -> list[dict[str, Any]]:
+    path = _photo_manifest_path(tenant)
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:
+        return []
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict)]
+    return []
+
+
+def _photo_public_url(request: Request, tenant_id: int, key: str, photo_id: str) -> str:
+    base = C.public_url(request, f"/pub/files/photos/{photo_id}")
+    if not base:
+        return ""
+    joiner = "&" if "?" in base else "?"
+    return f"{base}{joiner}tenant={tenant_id}&k={quote_plus(key)}"
+
+
 def _safe_path(tenant: int, relative: str | pathlib.Path | None) -> pathlib.Path | None:
     if not relative:
         return None
@@ -574,6 +600,8 @@ def client_settings(tenant: int, request: Request):
         "auto_reply_text": behavior_cfg.get("auto_reply_text") or "",
         "avito_smart_reply_enabled": bool(behavior_cfg.get("avito_smart_reply_enabled")),
         "send_catalog_on_first_message": behavior_cfg.get("send_catalog_on_first_message"),
+        "auto_photo_enabled": bool(behavior_cfg.get("auto_photo_enabled")),
+        "auto_photo_max": behavior_cfg.get("auto_photo_max") or 0,
         "triggers": triggers_raw,
         "photo_expected_markers": behavior_cfg.get("photo_expected_markers") or [],
         "photo_expected_reply": behavior_cfg.get("photo_expected_reply") or "",
@@ -602,6 +630,11 @@ def client_settings(tenant: int, request: Request):
         "upload_catalog": "/pub/catalog/upload",
         "csv_get": "/pub/catalog/csv",
         "csv_save": "/pub/catalog/csv",
+        "photos_list": "/pub/files/photos/list",
+        "photos_upload": "/pub/files/photos/upload",
+        "photos_delete": "/pub/files/photos/{photo_id}",
+        "photos_file": "/pub/files/photos/{photo_id}",
+        "photos_meta": "/pub/files/photos/{photo_id}/meta",
         "training_upload": "/pub/training/upload",
         "training_status": "/pub/training/status",
         "whatsapp_export": "/pub/wa/export",
@@ -766,6 +799,13 @@ async def save_behavior(tenant: int, request: Request):
     behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
     if payload.get("send_catalog_on_first_message") is not None:
         behavior["send_catalog_on_first_message"] = bool(payload.get("send_catalog_on_first_message"))
+    if payload.get("auto_photo_enabled") is not None:
+        behavior["auto_photo_enabled"] = bool(payload.get("auto_photo_enabled"))
+    try:
+        auto_photo_max = int(payload.get("auto_photo_max") or 0)
+    except Exception:
+        auto_photo_max = 0
+    behavior["auto_photo_max"] = auto_photo_max if auto_photo_max >= 0 else 0
     behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
     markers_raw = payload.get("photo_expected_markers") or []
     markers: list[str] = []
@@ -1002,15 +1042,31 @@ async def send_dialog_message_api(
     auth = _resolve_tenant_and_key(request, tenant)
     if isinstance(auth, Response):
         return auth
-    tenant_id, _ = auth
+    tenant_id, key = auth
 
     try:
         payload = await request.json()
     except Exception:
         payload = {}
     text = (payload.get("text") or "").strip()
-    if not text:
+    photo_id = (payload.get("photo_id") or "").strip()
+    attachment: dict[str, Any] | None = None
+    if photo_id:
+        entries = _read_photo_manifest(tenant_id)
+        photo_entry = next((item for item in entries if str(item.get("id") or "") == photo_id), None)
+        if not photo_entry:
+            return JSONResponse({"detail": "photo_not_found"}, status_code=404)
+        attachment = {
+            "type": "image",
+            "path": photo_entry.get("path"),
+            "filename": photo_entry.get("original") or photo_entry.get("filename"),
+            "mime": photo_entry.get("mime"),
+            "size": photo_entry.get("size"),
+            "url": _photo_public_url(request, tenant_id, key, photo_id),
+        }
+    if not text and not attachment:
         return JSONResponse({"detail": "empty_text"}, status_code=400)
+    display_text = text or "Фото"
 
     lead_meta = await db.get_lead_dialog_metadata(lead_id)
     if not lead_meta or int(lead_meta.get("tenant_id") or 0) != int(tenant_id):
@@ -1033,7 +1089,7 @@ async def send_dialog_message_api(
     try:
         message_id = await db.insert_message_out(
             lead_id,
-            text,
+            display_text,
             None,
             status="queued",
             tenant_id=tenant_id,
@@ -1041,7 +1097,6 @@ async def send_dialog_message_api(
             telegram_user_id=telegram_user_id,
             telegram_username=lead_meta.get("telegram_username"),
             title=lead_meta.get("title"),
-            is_bot=False,
         )
     except Exception:
         _dialogs_log.exception("dialog_send_insert_failed tenant=%s lead=%s", tenant_id, lead_id)
@@ -1062,6 +1117,8 @@ async def send_dialog_message_api(
         "_resolved_lead_id": lead_id,
         "queued_at": time.time(),
     }
+    if attachment:
+        queue_item["attachment"] = attachment
     if telegram_user_id:
         queue_item["telegram_user_id"] = telegram_user_id
         queue_item["peer"] = telegram_user_id
@@ -1103,7 +1160,7 @@ async def send_dialog_message_api(
     message_payload = {
         "id": message_id,
         "direction": 1,
-        "text": text,
+        "text": display_text,
         "ts": _isoformat(datetime.now(timezone.utc)),
         "status": "queued",
         "from_bot": False,

@@ -7,9 +7,11 @@ import time
 import asyncio
 import urllib.request
 import urllib.error
+import mimetypes
 import tempfile
 import subprocess
 import shutil
+import pathlib
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 from urllib.parse import (
     urljoin,
@@ -35,6 +37,7 @@ from libs.core.sales_core import (
     ask_llm,
     persona_meta_config,
     read_tenant_config,
+    tenant_dir,
 )
 
 from libs.core.db import (
@@ -118,6 +121,7 @@ ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _OUTBOX_ENABLED_RAW = (os.getenv("OUTBOX_ENABLED") or "").strip().lower()
 OUTBOX_ENABLED = _OUTBOX_ENABLED_RAW not in {"0", "false"}
 AVITO_TIMEOUT = getattr(core_settings, "AVITO_TIMEOUT", 10.0)
+AVITO_IMAGE_MAX_BYTES = 24 * 1024 * 1024
 _INBOX_ENABLED_RAW = (os.getenv("INBOX_ENABLED") or "").strip().lower()
 INBOX_ENABLED = _INBOX_ENABLED_RAW not in {"", "0", "false", "no", "off"}
 INCOMING_QUEUE_KEY = (
@@ -667,6 +671,277 @@ def _photo_expectation_config(tenant_id: int) -> tuple[list[str], str, int]:
         ttl_val = 0
     ttl = ttl_val if ttl_val > 0 else 0
     return markers, reply, ttl
+
+
+def _photo_auto_config(tenant_id: int) -> tuple[bool, int]:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, Mapping):
+        return False, 1
+    behavior = cfg.get("behavior")
+    if not isinstance(behavior, Mapping):
+        return False, 1
+    enabled = bool(behavior.get("auto_photo_enabled"))
+    try:
+        max_count = int(behavior.get("auto_photo_max") or 0)
+    except Exception:
+        max_count = 0
+    if max_count <= 0:
+        max_count = 1
+    return enabled, max_count
+
+
+def _load_photo_manifest(tenant_id: int) -> list[dict[str, Any]]:
+    try:
+        path = tenant_dir(int(tenant_id)) / "uploads" / "photos" / "manifest.json"
+    except Exception:
+        return []
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:
+        return []
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict)]
+    return []
+
+
+def _tenant_public_key(tenant_id: int) -> str:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        return ""
+    if not isinstance(cfg, Mapping):
+        return ""
+    passport = cfg.get("passport")
+    if isinstance(passport, Mapping):
+        key = str(passport.get("public_key") or "").strip()
+        if key:
+            return key
+    return str(cfg.get("public_key") or "").strip()
+
+
+def _build_photo_public_url(tenant_id: int, photo_id: str) -> str:
+    base = (APP_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        return ""
+    key = _tenant_public_key(tenant_id)
+    if not key:
+        return ""
+    return f"{base}/pub/files/photos/{photo_id}?tenant={tenant_id}&k={key}"
+
+
+def _normalize_photo_candidates(tenant_id: int, channel: str) -> list[dict[str, Any]]:
+    entries = _load_photo_manifest(tenant_id)
+    normalized: list[dict[str, Any]] = []
+    channel_norm = channel.strip().lower()
+    for entry in entries:
+        photo_id = str(entry.get("id") or "").strip()
+        if not photo_id:
+            continue
+        if not entry.get("auto"):
+            continue
+        channels_raw = entry.get("channels") if isinstance(entry.get("channels"), list) else []
+        channels = [str(ch).strip().lower() for ch in channels_raw if str(ch).strip()]
+        if channels and channel_norm not in channels:
+            continue
+        try:
+            priority = int(entry.get("priority") or 0)
+        except Exception:
+            priority = 0
+        normalized.append(
+            {
+                "id": photo_id,
+                "title": entry.get("title") or entry.get("original") or entry.get("filename") or photo_id,
+                "filename": entry.get("filename") or entry.get("original") or "",
+                "tags": entry.get("tags") or [],
+                "usage": entry.get("usage") or "",
+                "priority": priority,
+                "path": entry.get("path"),
+            }
+        )
+    normalized.sort(key=lambda item: int(item.get("priority") or 0), reverse=True)
+    return normalized
+
+
+def _score_photo_candidate(candidate: Mapping[str, Any], text: str) -> int:
+    hay = (text or "").lower()
+    if not hay:
+        return 0
+    tokens: list[str] = []
+    for key in ("title", "usage"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            tokens.extend(re.split(r"[,\n;]+", value.lower()))
+    tags = candidate.get("tags")
+    if isinstance(tags, list):
+        tokens.extend(str(tag).lower() for tag in tags if str(tag).strip())
+    score = 0
+    for token in tokens:
+        clean = token.strip()
+        if clean and clean in hay:
+            score += 1
+    return score
+
+
+def _select_photos_by_tags(
+    candidates: list[dict[str, Any]],
+    user_text: str,
+    reply_text: str,
+    max_count: int,
+) -> list[dict[str, Any]]:
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    combined = f"{user_text}\n{reply_text}".strip()
+    for item in candidates:
+        score = _score_photo_candidate(item, combined)
+        if score <= 0:
+            continue
+        try:
+            priority = int(item.get("priority") or 0)
+        except Exception:
+            priority = 0
+        scored.append((score, priority, item))
+    if not scored:
+        return []
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in scored[:max_count]]
+
+
+def _guess_photo_mime(photo: Mapping[str, Any]) -> str:
+    candidate = str(photo.get("path") or photo.get("url") or photo.get("name") or "")
+    if candidate:
+        mime, _ = mimetypes.guess_type(candidate)
+        if mime:
+            return mime
+    return "image/jpeg"
+
+
+def _extract_photo_ids(reply_text: str, allowed: set[str], max_count: int) -> list[str]:
+    cleaned = (reply_text or "").strip()
+    if not cleaned:
+        return []
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+        return []
+    try:
+        payload = json.loads(match.group(0))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    raw_ids = payload.get("photo_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    seen: list[str] = []
+    for item in raw_ids:
+        candidate = str(item).strip()
+        if not candidate or candidate not in allowed:
+            continue
+        if candidate in seen:
+            continue
+        seen.append(candidate)
+        if len(seen) >= max_count:
+            break
+    return seen
+
+
+async def _select_auto_photos(
+    tenant_id: int,
+    channel: str,
+    user_text: str,
+    reply_text: str,
+) -> list[dict[str, Any]]:
+    enabled, max_count = _photo_auto_config(tenant_id)
+    if not enabled:
+        return []
+    candidates = _normalize_photo_candidates(tenant_id, channel)
+    if not candidates:
+        return []
+    allowed_ids = {item["id"] for item in candidates if item.get("id")}
+    tag_selected = _select_photos_by_tags(candidates, user_text, reply_text, max_count)
+    if tag_selected:
+        attachments: list[dict[str, Any]] = []
+        for photo in tag_selected:
+            url = _build_photo_public_url(tenant_id, photo["id"])
+            if channel == "telegram" and not url:
+                continue
+            attachments.append(
+                {
+                    "type": "image",
+                    "url": url,
+                    "path": photo.get("path"),
+                    "name": photo.get("filename") or photo.get("path") or photo.get("title"),
+                    "mime": _guess_photo_mime(photo),
+                }
+            )
+            if len(attachments) >= max_count:
+                break
+        if attachments:
+            log(
+                "event=auto_photo_selected tenant=%s channel=%s method=tags count=%s ids=%s",
+                tenant_id,
+                channel,
+                len(attachments),
+                [att.get("path") or att.get("url") for att in attachments],
+            )
+            return attachments
+    log(
+        "event=auto_photo_candidates tenant=%s channel=%s count=%s",
+        tenant_id,
+        channel,
+        len(candidates),
+    )
+    listing = "\n".join(
+        f"- id: {item['id']}\n  title: {item['title']}\n  tags: {', '.join(item.get('tags') or [])}\n  usage: {item.get('usage') or ''}"
+        for item in candidates[:30]
+    )
+    system_prompt = (
+        "Ты выбираешь фото для отправки пользователю. "
+        "Верни только JSON вида {\"photo_ids\": [\"...\"]}. "
+        "Если фото не нужны, верни {\"photo_ids\": []}. "
+        f"Максимум фото: {max_count}. Используй только id из списка."
+    )
+    user_prompt = (
+        f"Сообщение клиента: {user_text}\n"
+        f"Ответ бота: {reply_text}\n"
+        f"Доступные фото:\n{listing}"
+    )
+    try:
+        llm_reply = await ask_llm(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            tenant=tenant_id,
+            contact_id=0,
+            channel=channel,
+        )
+    except Exception:
+        return []
+    selected = _extract_photo_ids(str(llm_reply), allowed_ids, max_count)
+    if not selected:
+        return []
+
+    attachments: list[dict[str, Any]] = []
+    for photo in candidates:
+        if photo["id"] not in selected:
+            continue
+        url = _build_photo_public_url(tenant_id, photo["id"])
+        if channel == "telegram" and not url:
+            continue
+        attachments.append(
+            {
+                "type": "image",
+                "url": url,
+                "path": photo.get("path"),
+                "name": photo.get("filename") or photo.get("path") or photo.get("title"),
+                "mime": _guess_photo_mime(photo),
+            }
+        )
+        if len(attachments) >= max_count:
+            break
+    return attachments
 
 
 def _extract_ru_phone(text: str) -> str:
@@ -1981,6 +2256,8 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
                     )
                 break
 
+    attachments = await _select_auto_photos(tenant_id, "telegram", text, reply_text)
+
     out_payload: Dict[str, Any] = {
         "lead_id": int(lead_id),
         "tenant": int(tenant_id),
@@ -1989,7 +2266,7 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         "ch": "telegram",
         "channel": "telegram",
         "text": reply_text,
-        "attachments": [],
+        "attachments": attachments or [],
     }
     if message_id:
         out_payload["message_id"] = message_id
@@ -2670,6 +2947,8 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
+    attachments = await _select_auto_photos(tenant_id, "avito", text, reply_text)
+
     out_payload: Dict[str, Any] = {
         "lead_id": int(lead_id),
         "tenant": int(tenant_id),
@@ -2678,7 +2957,7 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         "ch": "avito",
         "channel": "avito",
         "text": reply_text,
-        "attachments": [],
+        "attachments": attachments or [],
         "chat_id": chat_id,
         "peer": chat_id,
         "peer_id": chat_id,
@@ -3012,9 +3291,25 @@ async def send_avito(
     *,
     chat_id: Optional[str] = None,
     account_id: Optional[int] = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> tuple[int, str]:
     text_value = (text or "").strip()
-    if not text_value:
+    attachments_list = attachments or []
+    image_attachment: dict[str, Any] | None = None
+    for item in attachments_list:
+        if not isinstance(item, Mapping):
+            continue
+        type_raw = str(item.get("type") or item.get("kind") or "").strip().lower()
+        mime_raw = str(
+            item.get("mime")
+            or item.get("mime_type")
+            or item.get("mimetype")
+            or ""
+        ).strip().lower()
+        if type_raw in {"image", "photo", "picture"} or mime_raw.startswith("image/"):
+            image_attachment = dict(item)
+            break
+    if not text_value and not image_attachment:
         return (0, "empty")
 
     try:
@@ -3042,33 +3337,123 @@ async def send_avito(
         )
         return (0, "missing_chat")
 
-    url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages"
-    payload = {"type": "text", "message": {"text": text_value}}
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    async def _with_refresh(request_fn) -> httpx.Response:
+        response = await request_fn(token)
+        if response.status_code == 401 and integration.get("refresh_token"):
+            try:
+                refreshed = await avito_integration.refresh_access_token(int(tenant_id))
+                new_token = str(refreshed.get("access_token") or "").strip()
+            except avito_integration.AvitoOAuthError as exc:
+                log(
+                    "event=send_result status=error reason=token_refresh_failed channel=avito tenant=%s error=%s"
+                    % (tenant_id, exc)
+                )
+                return response
+            if new_token:
+                response = await request_fn(new_token)
+        return response
 
-    async def _post_message(current_token: str) -> httpx.Response:
-        headers["Authorization"] = f"Bearer {current_token}"
+    async def _post_text(current_token: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages"
+        payload = {"type": "text", "message": {"text": text_value}}
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Content-Type": "application/json",
+        }
         async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
             return await client.post(url, json=payload, headers=headers)
 
-    response = await _post_message(token)
+    async def _post_image(current_token: str, image_id: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages/image"
+        payload = {"image_id": image_id}
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, json=payload, headers=headers)
 
-    if response.status_code == 401 and integration.get("refresh_token"):
+    async def _upload_image(current_token: str, data: bytes, filename: str, mime: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/uploadImages"
+        headers = {"Authorization": f"Bearer {current_token}"}
+        files = {"uploadfile[]": (filename, data, mime)}
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, files=files, headers=headers)
+
+    response: httpx.Response | None = None
+
+    if image_attachment:
+        attachment_path = None
+        for key in ("path", "relative_path", "file_path"):
+            raw_path = image_attachment.get(key)
+            if isinstance(raw_path, str) and raw_path.strip():
+                attachment_path = raw_path.strip()
+                break
+        image_bytes: bytes | None = None
+        filename = (
+            image_attachment.get("filename")
+            or image_attachment.get("name")
+            or image_attachment.get("title")
+            or "image.jpg"
+        )
+        if attachment_path:
+            try:
+                base_dir = tenant_dir(int(tenant_id))
+                candidate = pathlib.Path(attachment_path)
+                if not candidate.is_absolute():
+                    candidate = base_dir / candidate
+                resolved = candidate.resolve()
+                if str(resolved).startswith(str(base_dir.resolve())) and resolved.is_file():
+                    image_bytes = resolved.read_bytes()
+            except Exception:
+                image_bytes = None
+        if image_bytes is None:
+            url = image_attachment.get("url")
+            if isinstance(url, str) and url.strip():
+                try:
+                    async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+                        download = await client.get(url.strip())
+                    if 200 <= download.status_code < 300:
+                        image_bytes = download.content
+                except Exception:
+                    image_bytes = None
+        if image_bytes is None:
+            return (0, "image_unavailable")
+        if len(image_bytes) > AVITO_IMAGE_MAX_BYTES:
+            return (0, "image_too_large")
+
+        mime = (
+            image_attachment.get("mime")
+            or image_attachment.get("mime_type")
+            or image_attachment.get("content_type")
+            or mimetypes.guess_type(str(filename))[0]
+            or "application/octet-stream"
+        )
+
+        upload_response = await _with_refresh(
+            lambda current_token: _upload_image(current_token, image_bytes, str(filename), str(mime))
+        )
+        if not (200 <= upload_response.status_code < 300):
+            return (upload_response.status_code, upload_response.text)
         try:
-            refreshed = await avito_integration.refresh_access_token(int(tenant_id))
-            new_token = str(refreshed.get("access_token") or "").strip()
-        except avito_integration.AvitoOAuthError as exc:
-            log(
-                "event=send_result status=error reason=token_refresh_failed channel=avito tenant=%s error=%s"
-                % (tenant_id, exc)
-            )
+            upload_payload = upload_response.json()
+        except Exception:
+            upload_payload = {}
+        image_id = ""
+        if isinstance(upload_payload, dict):
+            for key in upload_payload.keys():
+                image_id = str(key)
+                break
+        if not image_id:
+            return (0, "image_upload_failed")
+        response = await _with_refresh(lambda current_token: _post_image(current_token, image_id))
+        if not (200 <= response.status_code < 300):
             return (response.status_code, response.text)
 
-        if new_token:
-            response = await _post_message(new_token)
+    if text_value:
+        response = await _with_refresh(_post_text)
+    if response is None:
+        return (0, "empty")
 
     log(
         "event=send_result channel=avito tenant=%s lead_id=%s status=%s",
@@ -3296,7 +3681,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     avito_account_id = _coerce_int(item.get("account_id"))
     avito_chat_id_hint = item.get("chat_id") or item.get("peer") or item.get("peer_id")
 
-    if not text and not attachment:
+    if not text and not attachment and not attachments:
         log(
             f"event=send_result status=skipped reason=empty channel={channel} lead_id={lead_id}"
         )
@@ -3651,6 +4036,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             text,
             chat_id=chat_hint,
             account_id=avito_account_id,
+            attachments=attachments or None,
         )
     elif channel == "telegram":
         peer_id = None
