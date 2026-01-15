@@ -25,6 +25,14 @@ type DialogMessage = {
 
 type FeedbackCounts = { like: number; dislike: number };
 
+type PhotoItem = {
+  id: string;
+  original?: string;
+  filename?: string;
+  url?: string;
+  size?: number;
+};
+
 const TrainingTab: React.FC = () => {
   const { api, bootstrap } = useClient();
   const [trainingStatus, setTrainingStatus] = useState('');
@@ -36,6 +44,8 @@ const TrainingTab: React.FC = () => {
   const [loadingDialogs, setLoadingDialogs] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sendText, setSendText] = useState('');
+  const [photos, setPhotos] = useState<PhotoItem[]>([]);
+  const [selectedPhoto, setSelectedPhoto] = useState('');
   const [feedbackCounts, setFeedbackCounts] = useState<FeedbackCounts | null>(null);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -67,6 +77,7 @@ const TrainingTab: React.FC = () => {
   const dialogsSendUrl = useMemo(() => bootstrap.urls?.dialogs_send || '/api/dialogs/{lead_id}/send', [bootstrap.urls]);
   const feedbackUrl = useMemo(() => bootstrap.urls?.feedback || '/api/feedback', [bootstrap.urls]);
   const feedbackStatsUrl = useMemo(() => bootstrap.urls?.feedback_stats || '/api/feedback/stats', [bootstrap.urls]);
+  const photosListUrl = useMemo(() => bootstrap.urls?.photos_list || '/pub/files/photos/list', [bootstrap.urls]);
 
   const channelBadge = (channel?: string) => {
     const value = (channel || '').toLowerCase();
@@ -173,8 +184,22 @@ const TrainingTab: React.FC = () => {
     }
   };
 
+  const fetchPhotos = async () => {
+    if (!api.tenantId || !api.key) return;
+    try {
+      const data = await requestJson<{ photos: PhotoItem[] }>(buildUrl(photosListUrl, api));
+      setPhotos(data.photos || []);
+    } catch (error) {
+      setPhotos([]);
+    }
+  };
+
   useEffect(() => {
     fetchDialogs().catch(() => undefined);
+  }, [api.tenantId, api.key]);
+
+  useEffect(() => {
+    fetchPhotos().catch(() => undefined);
   }, [api.tenantId, api.key]);
 
   useEffect(() => {
@@ -182,6 +207,10 @@ const TrainingTab: React.FC = () => {
       fetchMessages(activeDialog).catch(() => undefined);
     }
   }, [activeDialog]);
+
+  useEffect(() => {
+    setSelectedPhoto('');
+  }, [activeDialog?.id]);
 
   useEffect(() => {
     if (!api.tenantId || !api.key) return;
@@ -201,21 +230,25 @@ const TrainingTab: React.FC = () => {
   }, [messages]);
 
   const handleSend = async () => {
-    if (!activeDialog || !sendText.trim()) return;
+    if (!activeDialog) return;
+    const trimmed = sendText.trim();
+    if (!trimmed && !selectedPhoto) return;
     const tempId = `temp-${Date.now()}`;
     const tempMessage: DialogMessage = {
       id: tempId,
       direction: 1,
-      text: sendText,
+      text: trimmed || 'Фото',
       ts: new Date().toISOString(),
       status: 'sending',
       isTemp: true,
     };
     setMessages((prev) => [...prev, tempMessage]);
     setSendText('');
+    setSelectedPhoto('');
     try {
       await postJson(buildUrl(dialogsSendUrl.replace('{lead_id}', String(activeDialog.id)), api), {
-        text: tempMessage.text,
+        text: trimmed,
+        photo_id: selectedPhoto || undefined,
       });
       fetchMessages(activeDialog).catch(() => undefined);
     } catch (error) {
@@ -378,17 +411,39 @@ const TrainingTab: React.FC = () => {
                   ))}
                 </div>
                 <div className="border-t border-slate-100 pt-3">
-                  <div className="flex gap-3">
-                    <textarea
-                      className="textarea"
-                      rows={2}
-                      placeholder="Введите сообщение…"
-                      value={sendText}
-                      onChange={(e) => setSendText(e.target.value)}
-                    />
-                    <button className="btn" onClick={handleSend}>
-                      Отправить
-                    </button>
+                  <div className="flex flex-col gap-3">
+                    <div className="flex gap-3">
+                      <textarea
+                        className="textarea"
+                        rows={2}
+                        placeholder="Введите сообщение…"
+                        value={sendText}
+                        onChange={(e) => setSendText(e.target.value)}
+                      />
+                      <button className="btn" onClick={handleSend}>
+                        Отправить
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <select
+                        className="input"
+                        value={selectedPhoto}
+                        onChange={(e) => setSelectedPhoto(e.target.value)}
+                      >
+                        <option value="">Без фото</option>
+                        {photos.map((photo) => (
+                          <option key={photo.id} value={photo.id}>
+                            {photo.original || photo.filename || photo.id}
+                          </option>
+                        ))}
+                      </select>
+                      <button className="btn-secondary" onClick={() => fetchPhotos().catch(() => undefined)}>
+                        Обновить фото
+                      </button>
+                      {selectedPhoto && (
+                        <span className="text-xs text-slate-500">Фото прикреплено</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </>
