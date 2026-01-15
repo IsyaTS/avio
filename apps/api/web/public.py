@@ -54,7 +54,7 @@ from redis import exceptions as redis_ex
 
 from . import client as C
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
-from libs.core.db import insert_message_in, list_messages_for_lead, upsert_lead
+from libs.core.db import insert_message_in, insert_message_out, list_messages_for_lead, upsert_lead
 from libs.core.integrations import avito
 from libs.core.common import (
     AVITO_BOT_ECHO_TTL_SECONDS,
@@ -456,6 +456,9 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
             if voice_id:
                 attachments.append({"type": "voice", "url": voice_id})
 
+    message_id = value.get("id") or event.get("event_id") or event.get("id")
+    message_id_str = str(message_id) if message_id is not None else None
+
     avito_user_id = _coerce_int(
         content_raw.get("author_id")
         or value.get("author_id")
@@ -500,8 +503,26 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
             chat_id,
         )
         manager_outgoing = True
-        # Skip processing bot/manager echoes to avoid double replies.
         if text or attachments:
+            if not echo_detected:
+                display_text = text
+                if not display_text and attachments:
+                    display_text = "Вложение"
+                try:
+                    await insert_message_out(
+                        lead_id,
+                        display_text,
+                        message_id_str,
+                        status="sent",
+                        tenant_id=int(tenant),
+                        channel="avito",
+                        is_bot=False,
+                    )
+                except Exception:
+                    logger.debug(
+                        "avito_outgoing_store_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
+                    )
+            # Skip processing bot/manager echoes to avoid double replies.
             return False
 
     avito_login = None
@@ -512,9 +533,6 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
     if not text and not attachments:
         logger.info("avito_webhook_skip reason=empty_message tenant=%s account_id=%s chat_id=%s raw_event=%s", tenant, account_id, chat_id, json.dumps(event, ensure_ascii=False))
         return False
-
-    message_id = value.get("id") or event.get("event_id") or event.get("id")
-    message_id_str = str(message_id) if message_id is not None else None
 
     lead_id = avito.stable_lead_id(account_id, chat_id)
 
