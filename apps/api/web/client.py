@@ -27,10 +27,12 @@ from libs.core import onboarding_chat
 from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
 from libs.core import db as db
+from libs.core.sales_core import ask_llm, build_llm_messages
 from libs.core.common import (
     OUTBOX_QUEUE_KEY,
     handoff_silence_key,
     handoff_silence_meta_key,
+    default_fallback_reply,
 )
 from libs.core.export import whatsapp as whatsapp_exporter
 
@@ -729,6 +731,7 @@ def client_settings(tenant: int, request: Request):
         "dialogs_list": "/api/dialogs",
         "dialogs_detail": "/api/dialogs/{lead_id}",
         "dialogs_send": "/api/dialogs/{lead_id}/send",
+        "dialogs_test": "/api/dialogs/test",
         "feedback_stats": "/api/feedback/stats",
         "feedback": "/api/feedback",
     }
@@ -1267,6 +1270,66 @@ async def send_dialog_message_api(
         "from_bot": False,
     }
     return {"ok": True, "queued": True, "message": message_payload}
+
+
+@router.post("/api/dialogs/test")
+async def test_dialog_api(request: Request, tenant: int | str | None = None):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"detail": "empty_text"}, status_code=400)
+
+    channel = str(payload.get("channel") or "telegram").strip().lower() or "telegram"
+    if channel not in {"telegram", "avito", "whatsapp"}:
+        channel = "telegram"
+
+    history_raw = payload.get("history") or []
+    history: list[dict[str, str]] = []
+    if isinstance(history_raw, list):
+        for item in history_raw[-12:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(item.get("text") or item.get("content") or "").strip()
+            if not content:
+                continue
+            history.append({"role": role, "content": content})
+
+    try:
+        base_messages = await build_llm_messages(
+            contact_id=0,
+            last_user_text=text,
+            channel=channel,
+            tenant=tenant_id,
+        )
+    except Exception:
+        base_messages = []
+
+    if base_messages and isinstance(base_messages[0], dict) and base_messages[0].get("role") == "system":
+        messages = [base_messages[0]]
+    else:
+        messages = [{"role": "system", "content": ""}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": text})
+
+    try:
+        reply = await ask_llm(messages, tenant=tenant_id, contact_id=0, channel=channel)
+    except Exception:
+        reply = ""
+    reply_text = str(reply or "").strip()
+    if not reply_text:
+        reply_text = default_fallback_reply(tenant_id)
+    return {"ok": True, "reply": reply_text}
 
 
 @router.post("/api/feedback")

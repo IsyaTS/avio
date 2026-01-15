@@ -41,6 +41,11 @@ type PhotoItem = {
   size?: number;
 };
 
+type TestMessage = {
+  role: 'user' | 'assistant';
+  text: string;
+};
+
 const TrainingTab: React.FC = () => {
   const { api, bootstrap } = useClient();
   const [trainingStatus, setTrainingStatus] = useState('');
@@ -56,6 +61,10 @@ const TrainingTab: React.FC = () => {
   const [photos, setPhotos] = useState<PhotoItem[]>([]);
   const [selectedPhoto, setSelectedPhoto] = useState('');
   const [feedbackCounts, setFeedbackCounts] = useState<FeedbackCounts | null>(null);
+  const [testMessages, setTestMessages] = useState<TestMessage[]>([]);
+  const [testInput, setTestInput] = useState('');
+  const [testChannel, setTestChannel] = useState('telegram');
+  const [testLoading, setTestLoading] = useState(false);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
 
@@ -87,6 +96,7 @@ const TrainingTab: React.FC = () => {
   const feedbackUrl = useMemo(() => bootstrap.urls?.feedback || '/api/feedback', [bootstrap.urls]);
   const feedbackStatsUrl = useMemo(() => bootstrap.urls?.feedback_stats || '/api/feedback/stats', [bootstrap.urls]);
   const photosListUrl = useMemo(() => bootstrap.urls?.photos_list || '/pub/files/photos/list', [bootstrap.urls]);
+  const dialogsTestUrl = useMemo(() => bootstrap.urls?.dialogs_test || '/api/dialogs/test', [bootstrap.urls]);
 
   const channelBadge = (channel?: string) => {
     const value = (channel || '').toLowerCase();
@@ -330,6 +340,39 @@ const TrainingTab: React.FC = () => {
     window.open(url, '_blank');
   };
 
+  const handleTestSend = async () => {
+    const text = testInput.trim();
+    if (!text) {
+      toast.error('Введите сообщение');
+      return;
+    }
+    const history = testMessages.map((msg) => ({ role: msg.role, text: msg.text }));
+    setTestMessages((prev) => [...prev, { role: 'user', text }]);
+    setTestInput('');
+    setTestLoading(true);
+    try {
+      const data = await postJson(buildUrl(dialogsTestUrl, api), {
+        text,
+        channel: testChannel,
+        history,
+      });
+      const replyText = String(data?.reply || '').trim();
+      setTestMessages((prev) => [
+        ...prev,
+        { role: 'assistant', text: replyText || 'Ответ не получен' },
+      ]);
+    } catch (error) {
+      toast.error('Не удалось получить ответ');
+    } finally {
+      setTestLoading(false);
+    }
+  };
+
+  const handleTestClear = () => {
+    setTestMessages([]);
+    setTestInput('');
+  };
+
   return (
     <div className="space-y-6">
       <div className="grid gap-6 lg:grid-cols-2">
@@ -488,6 +531,54 @@ const TrainingTab: React.FC = () => {
               </>
             )}
           </div>
+        </div>
+      </div>
+
+      <div className="card space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="card-title">Тестовый диалог</div>
+            <div className="card-subtitle">Ответы не отправляются в реальные каналы.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              className="input"
+              value={testChannel}
+              onChange={(e) => setTestChannel(e.target.value)}
+            >
+              <option value="telegram">Telegram</option>
+              <option value="avito">Avito</option>
+              <option value="whatsapp">WhatsApp</option>
+            </select>
+            <button className="btn-ghost" onClick={handleTestClear}>Очистить</button>
+          </div>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 h-64 overflow-y-auto space-y-3">
+          {testMessages.length === 0 && (
+            <div className="text-sm text-slate-400">Введите фразу клиента, чтобы увидеть ответ.</div>
+          )}
+          {testMessages.map((msg, idx) => (
+            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div
+                className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm shadow-subtle ${
+                  msg.role === 'user' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'
+                }`}
+              >
+                <div className="whitespace-pre-wrap">{msg.text}</div>
+              </div>
+            </div>
+          ))}
+          {testLoading && <div className="text-xs text-slate-400">Генерируем ответ…</div>}
+        </div>
+        <div className="flex flex-col gap-3">
+          <textarea
+            className="textarea"
+            rows={2}
+            placeholder="Введите сообщение клиента…"
+            value={testInput}
+            onChange={(e) => setTestInput(e.target.value)}
+          />
+          <button className="btn" onClick={handleTestSend}>Отправить</button>
         </div>
       </div>
     </div>
