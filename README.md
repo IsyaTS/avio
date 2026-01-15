@@ -46,6 +46,10 @@
 - Фото хранятся в `data/tenants/<id>/uploads/photos/` и описываются в `manifest.json` рядом (без БД).
 - Ограничения: только `jpg/jpeg/png/gif/bmp/heic`, размер до **24 MB** (лимит Avito).
 - Метаданные фото (через UI «Файлы»): `title`, `tags`, `usage`, `channels`, `auto`, `priority`.
+- UI нововведения:
+  - Папка 📁 «Фото (N)» — список фото разворачивается по клику.
+  - Мультизагрузка: можно выбрать несколько файлов за раз.
+  - Предпросмотр: клик по фото открывает просмотр почти на весь экран.
 - Публичные endpoints (требуют `tenant` + `k`):
   - `GET /pub/files/photos/list` — список фото (с URL для превью).
   - `POST /pub/files/photos/upload` — загрузка (multipart, поле `file`).
