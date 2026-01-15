@@ -468,11 +468,22 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
     manager_outgoing = False
     if account_id is not None and avito_user_id is not None and avito_user_id == account_id:
         lead_id = avito.stable_lead_id(account_id, chat_id)
+        echo_detected = False
         if _redis_queue is not None:
             try:
                 echo_key = avito_bot_echo_key(int(tenant), chat_id)
                 echo_payload = await _redis_queue.get(echo_key)
-                echo_detected = bool(echo_payload)
+                if echo_payload and text:
+                    try:
+                        payload = json.loads(echo_payload)
+                    except Exception:
+                        payload = {}
+                    cached_text = ""
+                    if isinstance(payload, Mapping):
+                        cached_text = normalize_echo_text(str(payload.get("text") or ""))
+                    incoming_text = normalize_echo_text(text)
+                    if cached_text and incoming_text and cached_text == incoming_text:
+                        echo_detected = True
                 if not echo_detected and text:
                     echo_detected = await _is_recent_bot_echo(int(tenant), int(lead_id), text)
                 if not echo_detected:
