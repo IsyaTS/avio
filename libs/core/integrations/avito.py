@@ -111,6 +111,8 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 _ACCOUNT_TENANT_CACHE: dict[int, int] = {}
+_CHAT_ACCOUNT_CACHE: dict[str, tuple[float, int, int]] = {}
+_CHAT_ACCOUNT_TTL_SECONDS = 300
 
 
 def _cache_account_mapping(tenant: int, account_id: Any) -> None:
@@ -191,6 +193,97 @@ def stable_lead_id(account_id: Any, chat_id: Any) -> int:
     digest = hashlib.sha1(base.encode("utf-8")).hexdigest()
     # Use upper 60 bits to stay within signed BIGINT range
     return int(digest[:15], 16) or int(digest[15:30], 16) or 1
+
+
+async def _chat_exists(token: str, account_id: int, chat_id: str) -> bool:
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    urls = [
+        f"https://api.avito.ru/messenger/v1/accounts/{account_id}/chats/{chat_id}",
+        f"https://api.avito.ru/messenger/v3/accounts/{account_id}/chats/{chat_id}",
+    ]
+    async with httpx.AsyncClient(timeout=OAUTH_TIMEOUT) as client:
+        for url in urls:
+            try:
+                response = await client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "avito_chat_lookup_failed account_id=%s chat_id=%s url=%s error=%s",
+                    account_id,
+                    chat_id,
+                    url,
+                    exc,
+                )
+                continue
+            if response.status_code == 200:
+                return True
+            if response.status_code in (403, 404):
+                continue
+            if response.status_code == 401:
+                raise AvitoOAuthError("Avito token unauthorized while resolving chat")
+            logger.info(
+                "avito_chat_lookup_unexpected account_id=%s chat_id=%s url=%s status=%s",
+                account_id,
+                chat_id,
+                url,
+                response.status_code,
+            )
+    return False
+
+
+async def resolve_tenant_by_chat(chat_id: str) -> tuple[Optional[int], Optional[int]]:
+    chat_key = str(chat_id or "").strip()
+    if not chat_key:
+        return None, None
+    now = time.time()
+    cached = _CHAT_ACCOUNT_CACHE.get(chat_key)
+    if cached and now - cached[0] <= _CHAT_ACCOUNT_TTL_SECONDS:
+        return cached[1], cached[2]
+
+    tenants_root = getattr(core_module, "TENANTS_DIR", None)
+    if tenants_root is None:
+        return None, None
+    try:
+        entries = list(tenants_root.iterdir())
+    except Exception:
+        entries = []
+
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            tenant_id = int(entry.name)
+        except Exception:
+            continue
+        integration = get_integration(tenant_id)
+        if not integration:
+            continue
+        account_id = _coerce_int(integration.get("account_id"))
+        if account_id is None:
+            continue
+        try:
+            token, _ = await ensure_access_token(tenant_id)
+        except AvitoOAuthError:
+            continue
+        except Exception:
+            logger.exception("avito_chat_lookup_token_failed tenant=%s", tenant_id)
+            continue
+        try:
+            if await _chat_exists(token, account_id, chat_key):
+                _CHAT_ACCOUNT_CACHE[chat_key] = (now, int(tenant_id), int(account_id))
+                _cache_account_mapping(int(tenant_id), int(account_id))
+                return int(tenant_id), int(account_id)
+        except AvitoOAuthError:
+            continue
+        except Exception:
+            logger.exception(
+                "avito_chat_lookup_failed tenant=%s account_id=%s chat_id=%s",
+                tenant_id,
+                account_id,
+                chat_key,
+            )
+            continue
+
+    return None, None
 
 
 async def _refresh_access_token(tenant: int, integration: Mapping[str, Any]) -> dict[str, Any]:

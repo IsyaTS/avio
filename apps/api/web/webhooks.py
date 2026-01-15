@@ -772,6 +772,11 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "stage=incoming_duplicate ch=telegram tenant=%s message_id=%s", tenant, message_id
         )
         return _ok({"skipped": True, "reason": "duplicate"})
+    if provider == "avito" and await _is_duplicate("avito", tenant, message_id or None):
+        logger.info(
+            "stage=incoming_duplicate ch=avito tenant=%s message_id=%s", tenant, message_id
+        )
+        return _ok({"skipped": True, "reason": "duplicate"})
     logger.info(
         "stage=pre_reply_checks ch=%s tenant=%s lead_id=%s msg=%s has_photo=%s attachments=%s text_len=%s",
         channel,

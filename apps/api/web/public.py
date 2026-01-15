@@ -18,6 +18,7 @@ import base64
 import random
 import secrets
 import html
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import qrcode
@@ -53,9 +54,15 @@ from redis import exceptions as redis_ex
 
 from . import client as C
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
-from libs.core.db import insert_message_in, upsert_lead
+from libs.core.db import insert_message_in, list_messages_for_lead, upsert_lead
 from libs.core.integrations import avito
-from libs.core.common import HANDOFF_SILENCE_TTL_SECONDS, handoff_silence_key
+from libs.core.common import (
+    AVITO_BOT_ECHO_TTL_SECONDS,
+    HANDOFF_SILENCE_TTL_SECONDS,
+    avito_bot_echo_key,
+    handoff_silence_key,
+    normalize_echo_text,
+)
 from . import common as common
 from .client import read_csv_table, write_csv_table
 from . import webhooks as webhook_module  # type: ignore
@@ -112,6 +119,39 @@ def _qr_cache_ttl() -> int:
 
 
 INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
+
+async def _is_recent_bot_echo(
+    tenant: int,
+    lead_id: int,
+    text: str,
+    *,
+    window_seconds: int = 120,
+) -> bool:
+    if not text or tenant <= 0 or lead_id <= 0:
+        return False
+    try:
+        messages = await list_messages_for_lead(tenant, lead_id, limit=10)
+    except Exception:
+        return False
+    if not messages:
+        return False
+    now = datetime.now(timezone.utc)
+    needle = normalize_echo_text(text)
+    for msg in messages:
+        if not msg or not msg.get("is_bot"):
+            continue
+        if int(msg.get("direction") or 0) != 1:
+            continue
+        msg_text = normalize_echo_text(str(msg.get("text") or ""))
+        if not msg_text or msg_text != needle:
+            continue
+        ts = msg.get("created_at")
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if (now - ts).total_seconds() <= window_seconds:
+                return True
+    return False
 
 
 def _no_store_headers(extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -316,29 +356,6 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
     )
     logger.warning("avito_webhook_received raw_event=%s", json.dumps(event, ensure_ascii=False))
 
-    # Avito v3 webhooks may omit account_id; fall back to value.user_id (account) if present.
-    if account_id is None:
-        account_id = _coerce_int(
-            (payload.get("value") or {}).get("user_id")
-            or payload.get("user_id")
-            or event.get("user_id")
-        )
-
-    if account_id is not None:
-        tenant = avito.find_tenant_by_account(account_id)
-
-    if tenant is None:
-        tenant = _coerce_int(payload.get("tenant") or event.get("tenant"))
-    if tenant is None or tenant <= 0:
-        logger.warning(
-            "avito_webhook_skip reason=unknown_tenant account_id=%s raw_event=%s",
-            account_id,
-            json.dumps(event, ensure_ascii=False),
-        )
-        return False
-
-    tenant = int(tenant)
-
     value_raw = payload.get("value") or event.get("value") or {}
     value = value_raw if isinstance(value_raw, Mapping) else {}
     if not value:
@@ -368,6 +385,40 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
             json.dumps(event, ensure_ascii=False),
         )
         return False
+
+    if account_id is None:
+        resolved_tenant, resolved_account = await avito.resolve_tenant_by_chat(chat_id)
+        if resolved_tenant is not None and resolved_account is not None:
+            tenant = int(resolved_tenant)
+            account_id = int(resolved_account)
+        else:
+            account_id = _coerce_int(
+                (payload.get("value") or {}).get("user_id")
+                or payload.get("user_id")
+                or event.get("user_id")
+            )
+
+    if account_id is not None and tenant is None:
+        tenant = avito.find_tenant_by_account(account_id)
+
+    if tenant is None:
+        tenant = _coerce_int(payload.get("tenant") or event.get("tenant"))
+    if tenant is None:
+        tenant = _coerce_int(request.query_params.get("tenant") or request.query_params.get("t"))
+    if tenant is None or tenant <= 0:
+        logger.warning(
+            "avito_webhook_skip reason=unknown_tenant account_id=%s chat_id=%s raw_event=%s",
+            account_id,
+            chat_id,
+            json.dumps(event, ensure_ascii=False),
+        )
+        return False
+
+    tenant = int(tenant)
+    if account_id is None:
+        integration = avito.get_integration(tenant)
+        if integration:
+            account_id = _coerce_int(integration.get("account_id"))
 
     message_type = str(value.get("type") or "").strip().lower()
     text_candidate = ""
@@ -405,11 +456,17 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
         lead_id = avito.stable_lead_id(account_id, chat_id)
         if _redis_queue is not None:
             try:
-                await _redis_queue.set(
-                    handoff_silence_key(int(tenant), int(lead_id)),
-                    str(int(time.time())),
-                    ex=HANDOFF_SILENCE_TTL_SECONDS,
-                )
+                echo_key = avito_bot_echo_key(int(tenant), chat_id)
+                echo_payload = await _redis_queue.get(echo_key)
+                echo_detected = bool(echo_payload)
+                if not echo_detected and text:
+                    echo_detected = await _is_recent_bot_echo(int(tenant), int(lead_id), text)
+                if not echo_detected:
+                    await _redis_queue.set(
+                        handoff_silence_key(int(tenant), int(lead_id)),
+                        str(int(time.time())),
+                        ex=HANDOFF_SILENCE_TTL_SECONDS,
+                    )
             except Exception:
                 logger.debug(
                     "handoff_flag_set_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
@@ -423,6 +480,9 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
             chat_id,
         )
         manager_outgoing = True
+        # Skip processing bot/manager echoes to avoid double replies.
+        if text or attachments:
+            return False
 
     avito_login = None
     login_candidate = value.get("author_login") or payload.get("user_login")
@@ -482,7 +542,7 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
 
 
 async def _ensure_avito_webhook(tenant: int, request: Request) -> None:
-    target_url = common.public_url(request, "/webhook/avito")
+    target_url = common.public_url(request, f"/webhook/avito?tenant={int(tenant)}")
     try:
         success = await avito.ensure_webhook(int(tenant), target_url)
     except avito.AvitoOAuthError as exc:
