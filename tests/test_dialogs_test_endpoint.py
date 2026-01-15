@@ -2,17 +2,14 @@ from fastapi.testclient import TestClient
 
 from apps.api import main as app_main
 import apps.api.web.client as client_mod
+from libs.core.response_pipeline import PipelineResult
 
 
 def test_dialogs_test_endpoint(monkeypatch):
-    async def fake_build_llm_messages(*args, **kwargs):
-        return [{"role": "system", "content": "system"}]
+    async def fake_pipeline(*args, **kwargs):
+        return PipelineResult(reply_text="тестовый ответ")
 
-    async def fake_ask_llm(*args, **kwargs):
-        return "тестовый ответ"
-
-    monkeypatch.setattr(client_mod, "build_llm_messages", fake_build_llm_messages)
-    monkeypatch.setattr(client_mod, "ask_llm", fake_ask_llm)
+    monkeypatch.setattr(client_mod, "run_response_pipeline", fake_pipeline)
 
     client = TestClient(app_main.app)
     response = client.post(

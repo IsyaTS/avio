@@ -44,6 +44,7 @@ from libs.core.sales_core import (
     read_tenant_config,
     tenant_dir,
 )
+from libs.core.response_pipeline import run_response_pipeline
 
 from libs.core.db import (
     init_db,
@@ -666,6 +667,11 @@ def _avito_smart_reply_enabled(tenant_id: int) -> bool:
                 if flag is not None:
                     return bool(flag)
     return False
+
+
+def _response_pipeline_enabled() -> bool:
+    flag = str(os.getenv("RESPONSE_PIPELINE_ENABLED", "")).strip().lower()
+    return flag in {"1", "true", "yes", "on"}
 
 
 def _extract_avito_user_name(payload: Mapping[str, Any], *, author_id: int | None, account_id: int | None) -> str:
@@ -2497,23 +2503,46 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     contact_id = _coerce_int(event.get("contact_id"))
     refer_id = contact_id if contact_id and contact_id > 0 else lead_id
 
-    try:
-        messages = await build_llm_messages(refer_id, text, "telegram", tenant=tenant_id)
-    except Exception as exc:
-        log(
-            "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=build_messages error=%s"
-            % (tenant_id, lead_id, exc)
+    reply = ""
+    reply_text = ""
+    if _response_pipeline_enabled():
+        try:
+            result = await run_response_pipeline(
+                tenant_id=tenant_id,
+                channel="telegram",
+                user_text=text,
+                contact_id=refer_id if refer_id > 0 else 0,
+                enable_photos=False,
+                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
+                log_fn=log,
+            )
+            reply_text = result.reply_text
+            reply = reply_text
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=pipeline error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            reply_text = default_fallback_reply(tenant_id)
+            reply = reply_text
+    else:
+        try:
+            messages = await build_llm_messages(refer_id, text, "telegram", tenant=tenant_id)
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=build_messages error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            return
+
+        reply = await _ask_llm_with_fallback(
+            messages,
+            tenant_id=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="telegram",
         )
-        return
-
-    reply = await _ask_llm_with_fallback(
-        messages,
-        tenant_id=tenant_id,
-        contact_id=refer_id if refer_id > 0 else None,
-        channel="telegram",
-    )
-
-    reply_text = (reply or "").strip()
+        reply_text = (reply or "").strip()
+    reply_text = reply_text.strip()
     # Strip catalog links from LLM replies for telegram; файл отправляется отдельным механизмом.
     if reply_text:
         reply_text = re.sub(r"https?://\\S*/pub/catalog/file/\\S*", "", reply_text).strip()
@@ -2830,28 +2859,52 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
-    try:
-        messages = await build_llm_messages(
-            refer_id,
-            text,
-            "whatsapp",
-            tenant=tenant_id,
-        )
-    except Exception as exc:
-        log(
-            "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=build_messages error=%s payload=%s"
-            % (tenant_id, lead_id, exc, event)
-        )
-        return
+    reply = ""
+    reply_text = ""
+    if _response_pipeline_enabled():
+        try:
+            result = await run_response_pipeline(
+                tenant_id=tenant_id,
+                channel="whatsapp",
+                user_text=text,
+                contact_id=refer_id if refer_id > 0 else 0,
+                enable_photos=False,
+                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
+                log_fn=log,
+            )
+            reply_text = result.reply_text
+            reply = reply_text
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=pipeline error=%s payload=%s"
+                % (tenant_id, lead_id, exc, event)
+            )
+            reply_text = default_fallback_reply(tenant_id)
+            reply = reply_text
+    else:
+        try:
+            messages = await build_llm_messages(
+                refer_id,
+                text,
+                "whatsapp",
+                tenant=tenant_id,
+            )
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=build_messages error=%s payload=%s"
+                % (tenant_id, lead_id, exc, event)
+            )
+            return
 
-    reply = await _ask_llm_with_fallback(
-        messages,
-        tenant_id=tenant_id,
-        contact_id=refer_id if refer_id > 0 else None,
-        channel="whatsapp",
-    )
+        reply = await _ask_llm_with_fallback(
+            messages,
+            tenant_id=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="whatsapp",
+        )
 
-    reply_text = (reply or "").strip()
+        reply_text = (reply or "").strip()
+    reply_text = reply_text.strip()
     _log_smart_reply_diag("whatsapp", tenant_id, lead_id, reply)
     if not reply_text:
         log(
@@ -3269,28 +3322,52 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
 
     refer_id = contact_id if contact_id and contact_id > 0 else lead_id
 
-    try:
-        messages = await build_llm_messages(
-            refer_id,
-            text,
-            "avito",
-            tenant=tenant_id,
-        )
-    except Exception as exc:
-        log(
-            "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=build_messages error=%s"
-            % (tenant_id, lead_id, exc)
-        )
-        return
+    reply = ""
+    reply_text = ""
+    if _response_pipeline_enabled():
+        try:
+            result = await run_response_pipeline(
+                tenant_id=tenant_id,
+                channel="avito",
+                user_text=text,
+                contact_id=refer_id if refer_id > 0 else 0,
+                enable_photos=False,
+                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
+                log_fn=log,
+            )
+            reply_text = result.reply_text
+            reply = reply_text
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=pipeline error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            reply_text = default_fallback_reply(tenant_id)
+            reply = reply_text
+    else:
+        try:
+            messages = await build_llm_messages(
+                refer_id,
+                text,
+                "avito",
+                tenant=tenant_id,
+            )
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=build_messages error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            return
 
-    reply = await _ask_llm_with_fallback(
-        messages,
-        tenant_id=tenant_id,
-        contact_id=refer_id if refer_id > 0 else None,
-        channel="avito",
-    )
+        reply = await _ask_llm_with_fallback(
+            messages,
+            tenant_id=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="avito",
+        )
 
-    reply_text = (reply or "").strip()
+        reply_text = (reply or "").strip()
+    reply_text = reply_text.strip()
     _log_smart_reply_diag("avito", tenant_id, lead_id, reply)
     if not reply_text:
         log(

@@ -28,6 +28,7 @@ from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
 from libs.core import db as db
 from libs.core.sales_core import ask_llm, build_llm_messages
+from libs.core.response_pipeline import run_response_pipeline
 from libs.core.common import (
     OUTBOX_QUEUE_KEY,
     handoff_silence_key,
@@ -1307,28 +1308,16 @@ async def test_dialog_api(request: Request, tenant: int | str | None = None):
             history.append({"role": role, "content": content})
 
     try:
-        base_messages = await build_llm_messages(
-            contact_id=0,
-            last_user_text=text,
+        result = await run_response_pipeline(
+            tenant_id=tenant_id,
             channel=channel,
-            tenant=tenant_id,
+            user_text=text,
+            history=history,
+            contact_id=0,
+            enable_photos=False,
         )
+        reply_text = result.reply_text
     except Exception:
-        base_messages = []
-
-    if base_messages and isinstance(base_messages[0], dict) and base_messages[0].get("role") == "system":
-        messages = [base_messages[0]]
-    else:
-        messages = [{"role": "system", "content": ""}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": text})
-
-    try:
-        reply = await ask_llm(messages, tenant=tenant_id, contact_id=0, channel=channel)
-    except Exception:
-        reply = ""
-    reply_text = str(reply or "").strip()
-    if not reply_text:
         reply_text = default_fallback_reply(tenant_id)
     return {"ok": True, "reply": reply_text}
 
