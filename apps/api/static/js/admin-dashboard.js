@@ -34,6 +34,11 @@
   const generateBtn = document.getElementById('generate-key');
   const refreshBtn = document.getElementById('refresh-keys');
   const refreshWAButton = document.getElementById('wa-refresh');
+  const queueOutbox = document.getElementById('queue-outbox');
+  const queueFollowups = document.getElementById('queue-followups');
+  const queueDlq = document.getElementById('queue-dlq');
+  const queueTenants = document.getElementById('queue-tenants');
+  const queueRefresh = document.getElementById('queue-refresh');
 
   const dashboardState = {
     currentTenant: tenant,
@@ -306,6 +311,41 @@
     }
   }
 
+  async function refreshQueueStats() {
+    if (!queueOutbox || !queueFollowups || !queueDlq) return;
+    queueOutbox.textContent = '...';
+    queueFollowups.textContent = '...';
+    queueDlq.textContent = '...';
+    try {
+      const data = await fetchJSON('/admin/queue-stats');
+      queueOutbox.textContent = `${data.outbox_len || 0}`;
+      queueFollowups.textContent = `${data.followup_scheduled_len || 0}`;
+      queueDlq.textContent = `${data.dlq_len || 0}`;
+      if (queueTenants) {
+        const sampled = data.sampled || 0;
+        const items = Array.isArray(data.outbox_by_tenant) ? data.outbox_by_tenant : [];
+        if (!items.length) {
+          queueTenants.textContent = sampled
+            ? `Примерно по ${sampled} сообщениям — активных тенантов не найдено.`
+            : 'Нет данных очереди.';
+        } else {
+          const preview = items
+            .slice(0, 5)
+            .map((row) => `#${row.tenant_id}: ${row.count}`)
+            .join(' · ');
+          queueTenants.textContent = `Топ тенантов (из ${sampled} сообщений): ${preview}`;
+        }
+      }
+    } catch (error) {
+      queueOutbox.textContent = '—';
+      queueFollowups.textContent = '—';
+      queueDlq.textContent = '—';
+      if (queueTenants) {
+        queueTenants.textContent = error.message || 'Не удалось получить данные очередей';
+      }
+    }
+  }
+
   if (tenantInput) {
     tenantInput.value = dashboardState.currentTenant;
   }
@@ -332,6 +372,9 @@
   if (refreshWAButton) {
     refreshWAButton.addEventListener('click', refreshWA);
   }
+  if (queueRefresh) {
+    queueRefresh.addEventListener('click', refreshQueueStats);
+  }
 
   if (waLink) {
     waLink.href = absoluteUrl(`/admin/wa/qr.svg?tenant=${dashboardState.currentTenant}`);
@@ -339,4 +382,5 @@
 
   renderKeys();
   refreshWA();
+  refreshQueueStats();
 })();

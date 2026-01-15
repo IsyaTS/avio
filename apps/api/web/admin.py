@@ -15,6 +15,7 @@ import httpx
 from libs.constants import ADMIN_TENANT_ID
 from libs.core import sales_core as core
 from libs.core.sales_core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
+from libs.core.common import OUTBOX_QUEUE_KEY, OUTBOX_DLQ_KEY
 from libs.core.repo import provider_tokens as provider_tokens_repo
 from . import common as C
 from .ui import render_template
@@ -97,6 +98,66 @@ async def keys_list(tenant: int, request: Request):
         "ok": True,
         "items": C.list_keys(int(tenant)),
         "provider_token": provider_token,
+    }
+
+
+@router.get("/admin/queue-stats")
+def queue_stats(request: Request, sample: int = 500):
+    if not _auth_ok(request):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    try:
+        redis_client = C.redis_client()
+    except Exception:
+        return JSONResponse({"detail": "redis_unavailable"}, status_code=503)
+
+    sample_limit = max(0, min(int(sample or 0), 2000))
+    try:
+        outbox_len = int(redis_client.llen(OUTBOX_QUEUE_KEY))
+    except Exception:
+        outbox_len = 0
+    try:
+        dlq_len = int(redis_client.llen(OUTBOX_DLQ_KEY))
+    except Exception:
+        dlq_len = 0
+    try:
+        followup_len = int(redis_client.zcard("followup:schedule"))
+    except Exception:
+        followup_len = 0
+
+    tenant_counts: dict[int, int] = {}
+    sampled = 0
+    if sample_limit > 0:
+        try:
+            items = redis_client.lrange(OUTBOX_QUEUE_KEY, 0, sample_limit - 1)
+        except Exception:
+            items = []
+        sampled = len(items)
+        for raw in items:
+            try:
+                payload = json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            tenant_raw = payload.get("tenant_id") or payload.get("tenant")
+            try:
+                tenant_id = int(tenant_raw)
+            except Exception:
+                continue
+            if tenant_id <= 0:
+                continue
+            tenant_counts[tenant_id] = tenant_counts.get(tenant_id, 0) + 1
+
+    top_tenants = [
+        {"tenant_id": tid, "count": count}
+        for tid, count in sorted(tenant_counts.items(), key=lambda item: item[1], reverse=True)[:20]
+    ]
+
+    return {
+        "ok": True,
+        "outbox_len": outbox_len,
+        "dlq_len": dlq_len,
+        "followup_scheduled_len": followup_len,
+        "sampled": sampled,
+        "outbox_by_tenant": top_tenants,
     }
 
 

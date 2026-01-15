@@ -732,6 +732,7 @@ def client_settings(tenant: int, request: Request):
         "dialogs_detail": "/api/dialogs/{lead_id}",
         "dialogs_send": "/api/dialogs/{lead_id}/send",
         "dialogs_test": "/api/dialogs/test",
+        "tenant_stats": "/api/tenant/stats",
         "feedback_stats": "/api/feedback/stats",
         "feedback": "/api/feedback",
     }
@@ -1330,6 +1331,59 @@ async def test_dialog_api(request: Request, tenant: int | str | None = None):
     if not reply_text:
         reply_text = default_fallback_reply(tenant_id)
     return {"ok": True, "reply": reply_text}
+
+
+@router.get("/api/tenant/stats")
+async def tenant_stats_api(request: Request, tenant: int | str | None = None, sample: int = 500):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    try:
+        redis_client = C.redis_client()
+    except Exception:
+        return JSONResponse({"detail": "redis_unavailable"}, status_code=503)
+
+    sample_limit = max(0, min(int(sample or 0), 2000))
+    try:
+        outbox_len = int(redis_client.llen(OUTBOX_QUEUE_KEY))
+    except Exception:
+        outbox_len = 0
+    try:
+        followup_len = int(redis_client.zcard("followup:schedule"))
+    except Exception:
+        followup_len = 0
+
+    tenant_outbox = 0
+    sampled = 0
+    if sample_limit > 0:
+        try:
+            items = redis_client.lrange(OUTBOX_QUEUE_KEY, 0, sample_limit - 1)
+        except Exception:
+            items = []
+        sampled = len(items)
+        for raw in items:
+            try:
+                payload = json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            tenant_raw = payload.get("tenant_id") or payload.get("tenant")
+            try:
+                tenant_val = int(tenant_raw)
+            except Exception:
+                continue
+            if tenant_val == int(tenant_id):
+                tenant_outbox += 1
+
+    return {
+        "ok": True,
+        "tenant_id": tenant_id,
+        "outbox_total": outbox_len,
+        "outbox_tenant": tenant_outbox,
+        "followup_scheduled_len": followup_len,
+        "sampled": sampled,
+    }
 
 
 @router.post("/api/feedback")

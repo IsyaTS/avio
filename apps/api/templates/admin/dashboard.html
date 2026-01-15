@@ -90,6 +90,33 @@
         </div>
     </div>
 </section>
+
+<section class="surface stack" data-testid="admin-queue-stats">
+    <div class="toolbar">
+        <div class="stack" style="gap: 6px;">
+            <h2 class="section-title" style="font-size: 1.35rem;">Очереди</h2>
+            <p class="section-subtitle">Сводка по исходящим и фоллоу-апам (примерно по выборке).</p>
+        </div>
+        <div class="actions" style="display:flex; gap: 12px; flex-wrap: wrap;">
+            <button id="queue-refresh" type="button" class="btn btn--secondary">Обновить</button>
+        </div>
+    </div>
+    <div class="grid grid--three" style="gap: 16px;">
+        <div class="hint">
+            <div class="label">Outbox</div>
+            <div id="queue-outbox" class="badge tag-neutral">—</div>
+        </div>
+        <div class="hint">
+            <div class="label">Follow-ups</div>
+            <div id="queue-followups" class="badge tag-neutral">—</div>
+        </div>
+        <div class="hint">
+            <div class="label">DLQ</div>
+            <div id="queue-dlq" class="badge tag-neutral">—</div>
+        </div>
+    </div>
+    <div id="queue-tenants" class="status-text"></div>
+</section>
 <script id="admin-dashboard-state" type="application/json">{{ {
     "tenant": tenant,
     "keys": keys,
