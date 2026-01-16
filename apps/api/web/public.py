@@ -3448,6 +3448,7 @@ async def avito_oauth_authorize(request: Request, tenant: int, k: str):
 
 @oauth_router.get("/callback")
 async def avito_oauth_callback(
+    request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
@@ -3568,6 +3569,19 @@ async def avito_oauth_callback(
         )
     except Exception:
         logger.exception("avito_account_sync_failed tenant=%s", tenant_id)
+
+    try:
+        target_url = common.public_url(request, "/webhook/avito")
+        success = await avito.ensure_webhook(int(tenant_id), target_url)
+        if not success:
+            logger.warning(
+                "avito_webhook_register_failed tenant=%s error=unexpected_response",
+                tenant_id,
+            )
+    except avito.AvitoOAuthError as exc:
+        logger.warning("avito_webhook_register_failed tenant=%s error=%s", tenant_id, exc)
+    except Exception:
+        logger.exception("avito_webhook_register_failed tenant=%s", tenant_id)
 
     return HTMLResponse(_avito_callback_html(True, "ok", {"tenant": tenant_id}))
 
