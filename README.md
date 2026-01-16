@@ -913,6 +913,49 @@ vps test 2025-10-23T12:59:53+03:00
 - Диагностика: ключевые логи — `avito_phone_detected`, `avito_phone_tg_sent`, `telegram_contact_linked_by_phone`/`relinked_by_phone`, `notify_prepare`/`notify_send_success`. Убедитесь, что tgworker в статусе authorized, иначе вызовы `/send` вернут `authkey_unregistered`/`not_authorized`.
 - Команда для получения chat_id: curl -s "https://api.telegram.org/bot8270398713:AAEc6bubm0thzC_qWSNH8j00Di5vOIfpMtI/getUpdates"
 
+## Очистка диска (runbook)
+Ниже список безопасных действий для освобождения места. Выполнять от root.
+
+1) Диагностика:
+```bash
+df -hT
+du -xh / --max-depth=1 | sort -h
+du -xh / --max-depth=2 | sort -h | tail -n 50
+```
+
+2) Docker (неиспользуемые образы/контейнеры/volume):
+```bash
+docker image prune -a -f
+docker container prune -f
+docker volume prune -f
+```
+
+3) Journald (уменьшить журналы):
+```bash
+journalctl --vacuum-time=7d
+# или
+journalctl --vacuum-size=200M
+```
+
+4) Архивные логи и кэши:
+```bash
+rm -f /var/log/*.gz /var/log/*.[0-9]
+apt-get clean
+rm -rf /var/cache/apt/archives/*
+```
+
+5) Пользовательские кэши (если не нужны):
+```bash
+rm -rf /home/deploy/.npm/_cacache
+rm -rf /home/deploy/.cache
+rm -rf /home/deploy/.vscode-server
+```
+
+6) Проверка "удаленные, но открытые" файлы:
+```bash
+lsof +L1 | awk '{print $7, $9}' | sort -n | tail -n 20
+```
+
 ## Healthcheck
 - Скрипт `avio-healthcheck.sh` теперь только логирует сбои (`/var/log/avio-healthcheck.log`) и не перезапускает контейнеры при ошибке внешнего `/health`.
 - Cron-запись: `*/5 * * * * /usr/local/bin/avio-healthcheck.sh >/dev/null 2>&1`.

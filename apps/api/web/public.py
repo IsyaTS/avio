@@ -54,7 +54,13 @@ from redis import exceptions as redis_ex
 
 from . import client as C
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
-from libs.core.db import insert_message_in, insert_message_out, list_messages_for_lead, upsert_lead
+from libs.core.db import (
+    find_lead_by_peer,
+    insert_message_in,
+    insert_message_out,
+    list_messages_for_lead,
+    upsert_lead,
+)
 from libs.core.integrations import avito
 from libs.core.common import (
     AVITO_BOT_ECHO_TTL_SECONDS,
@@ -468,12 +474,18 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
     manager_outgoing = False
     if account_id is not None and avito_user_id is not None and avito_user_id == account_id:
         lead_id = avito.stable_lead_id(account_id, chat_id)
+        try:
+            resolved = await find_lead_by_peer(int(tenant), "avito", chat_id)
+        except Exception:
+            resolved = None
+        if resolved and resolved.get("id"):
+            lead_id = int(resolved["id"])
         echo_detected = False
         if _redis_queue is not None:
             try:
                 echo_key = avito_bot_echo_key(int(tenant), chat_id)
                 echo_payload = await _redis_queue.get(echo_key)
-                if echo_payload and text:
+                if echo_payload:
                     try:
                         payload = json.loads(echo_payload)
                     except Exception:
