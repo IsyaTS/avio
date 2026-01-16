@@ -3019,6 +3019,15 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     user_id = _coerce_int(event.get("avito_user_id") or (event.get("avito") or {}).get("user_id"))
     login_value = event.get("avito_login") or (event.get("avito") or {}).get("login")
     login = login_value.strip() if isinstance(login_value, str) else None
+    integration = avito_integration.get_integration(int(tenant_id)) or {}
+    token_value = str(integration.get("access_token") or "").strip()
+    refresh_value = str(integration.get("refresh_token") or "").strip()
+    if not token_value and not refresh_value:
+        log(
+            "event=avito_incoming_skip reason=disconnected tenant=%s chat_id=%s"
+            % (tenant_id, chat_id)
+        )
+        return
     if not login:
         try:
             login = await _resolve_avito_user_name(
