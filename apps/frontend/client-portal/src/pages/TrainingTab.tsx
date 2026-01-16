@@ -67,6 +67,7 @@ const TrainingTab: React.FC = () => {
   const [testLoading, setTestLoading] = useState(false);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
 
   const trainingUploadUrl = useMemo(() => {
     if (bootstrap.urls?.training_upload) {
@@ -276,9 +277,21 @@ const TrainingTab: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [api.tenantId, api.key, activeDialog]);
 
-  useEffect(() => {
-    if (!messagesRef.current) return;
+  const handleMessagesScroll = () => {
     const container = messagesRef.current;
+    if (!container) return;
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+    stickToBottomRef.current = distance < 64;
+  };
+
+  useEffect(() => {
+    stickToBottomRef.current = true;
+  }, [activeDialog?.id]);
+
+  useEffect(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    if (!stickToBottomRef.current) return;
     container.scrollTop = container.scrollHeight;
   }, [messages]);
 
@@ -437,7 +450,7 @@ const TrainingTab: React.FC = () => {
 
         <div className="grid gap-4 lg:grid-cols-[320px,1fr]">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 h-[620px] overflow-y-auto space-y-2">
-            {loadingDialogs && <div className="text-sm text-slate-400">Загрузка…</div>}
+            {loadingDialogs && dialogs.length === 0 && <div className="text-sm text-slate-400">Загрузка…</div>}
             {!loadingDialogs && dialogs.length === 0 && (
               <div className="text-sm text-slate-400">Диалогов пока нет.</div>
             )}
@@ -508,8 +521,14 @@ const TrainingTab: React.FC = () => {
                     </button>
                   </div>
                 </div>
-                <div ref={messagesRef} className="flex-1 overflow-y-auto py-4 space-y-4">
-                  {loadingMessages && <div className="text-sm text-slate-400">Загрузка…</div>}
+                <div
+                  ref={messagesRef}
+                  className="flex-1 overflow-y-auto py-4 space-y-4"
+                  onScroll={handleMessagesScroll}
+                >
+                  {loadingMessages && messages.length === 0 && (
+                    <div className="text-sm text-slate-400">Загрузка…</div>
+                  )}
                   {!loadingMessages && messages.length === 0 && (
                     <div className="text-sm text-slate-400">Сообщений нет.</div>
                   )}

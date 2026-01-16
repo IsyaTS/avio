@@ -651,26 +651,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     )
 
     if manager_flag:
-        if text or has_photo:
-            try:
-                await insert_message_out(
-                    lead_id,
-                    text or "",
-                    message_id or None,
-                    status="sent",
-                    tenant_id=tenant,
-                    channel=channel,
-                    telegram_user_id=peer_id if provider == "telegram" else None,
-                    telegram_username=telegram_username,
-                    title=None,
-                )
-            except Exception:
-                logger.exception(
-                    "manager_message_store_failed tenant=%s lead_id=%s provider=%s",
-                    tenant,
-                    lead_id,
-                    provider,
-                )
         try:
             timestamp = int(time.time())
             await _redis_queue.set(
