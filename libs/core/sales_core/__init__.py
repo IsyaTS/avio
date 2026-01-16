@@ -756,22 +756,41 @@ def extract_persona_hints(persona: str) -> PersonaHints:
     return hints
 
 
-_PERSONA_HINTS_CACHE: Dict[int | None, Tuple[str, PersonaHints]] = {}
+_PERSONA_HINTS_CACHE: Dict[tuple[int | None, str], Tuple[str, PersonaHints]] = {}
 
 
-def load_persona_hints(tenant: int | None = None) -> PersonaHints:
-    persona_text = load_persona(tenant)
-    fingerprint = hashlib.sha1(persona_text.encode("utf-8")).hexdigest() if persona_text else ""
-    key: int | None
+def _persona_hints_cache_key(tenant: int | None, channel: str | None) -> tuple[int | None, str]:
+    channel_key = (channel or "").strip().lower()
     try:
-        key = int(tenant) if tenant is not None else None
+        tenant_key = int(tenant) if tenant is not None else None
     except Exception:
-        key = None
-    cached = _PERSONA_HINTS_CACHE.get(key)
+        tenant_key = None
+    return tenant_key, channel_key
+
+
+def _clear_persona_hints_cache(tenant: int | None) -> None:
+    if tenant is None:
+        _PERSONA_HINTS_CACHE.clear()
+        return
+    try:
+        tenant_key = int(tenant)
+    except Exception:
+        _PERSONA_HINTS_CACHE.clear()
+        return
+    for cache_key in list(_PERSONA_HINTS_CACHE.keys()):
+        if cache_key[0] == tenant_key:
+            _PERSONA_HINTS_CACHE.pop(cache_key, None)
+
+
+def load_persona_hints(tenant: int | None = None, channel: str | None = None) -> PersonaHints:
+    persona_text = load_persona(tenant, channel)
+    fingerprint = hashlib.sha1(persona_text.encode("utf-8")).hexdigest() if persona_text else ""
+    cache_key = _persona_hints_cache_key(tenant, channel)
+    cached = _PERSONA_HINTS_CACHE.get(cache_key)
     if cached and cached[0] == fingerprint:
         return cached[1]
     hints = extract_persona_hints(persona_text)
-    _PERSONA_HINTS_CACHE[key] = (fingerprint, hints)
+    _PERSONA_HINTS_CACHE[cache_key] = (fingerprint, hints)
     return hints
 
 
@@ -1395,7 +1414,7 @@ def read_persona(tenant: int, channel: str | None = None) -> str:
     except Exception:
         pass
     try:
-        _PERSONA_HINTS_CACHE.pop(int(tenant), None)
+        _clear_persona_hints_cache(int(tenant))
     except Exception:
         _PERSONA_HINTS_CACHE.clear()
     return text
@@ -1411,7 +1430,7 @@ def write_persona(tenant: int, text: str, channel: str | None = None) -> None:
         _TENANT_PERSONA_CACHE[_persona_cache_key(int(tenant), channel)] = (mtime, text or "")
     except Exception:
         _TENANT_PERSONA_CACHE.pop(_persona_cache_key(int(tenant), channel), None)
-    _PERSONA_HINTS_CACHE.pop(int(tenant), None)
+    _clear_persona_hints_cache(int(tenant))
 
 
 def load_tenant(tenant: int) -> dict:
@@ -4323,8 +4342,9 @@ def observe_user_message(
         cfg = load_tenant(tenant or 0)
     brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
-    hints = persona_hints or load_persona_hints(tenant)
-    engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
+    channel_name = (channel or brand["CHANNEL"]).strip() or "WhatsApp"
+    hints = persona_hints or load_persona_hints(tenant, channel_name)
+    engine = SalesConversationEngine(state, brand, cfg, channel_name, persona_hints=hints)
     engine.observe_user(text or "")
     _apply_persona_need_mappings(state, tenant, text or "")
     save_sales_state(state)
@@ -4341,8 +4361,9 @@ def summarize_sales_state(
     cfg = tenant_cfg if tenant_cfg is not None else load_tenant(tenant or 0)
     brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
-    hints = load_persona_hints(tenant)
-    engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
+    channel_name = (channel or brand["CHANNEL"]).strip() or "WhatsApp"
+    hints = load_persona_hints(tenant, channel_name)
+    engine = SalesConversationEngine(state, brand, cfg, channel_name, persona_hints=hints)
     return engine.summary_for_llm()
 
 
@@ -4357,8 +4378,9 @@ def record_bot_reply(
     cfg = tenant_cfg if tenant_cfg is not None else load_tenant(tenant or 0)
     brand = branding or _branding_for_tenant(tenant, channel)
     state = load_sales_state(tenant, contact_id)
-    hints = load_persona_hints(tenant)
-    engine = SalesConversationEngine(state, brand, cfg, channel or brand["CHANNEL"], persona_hints=hints)
+    channel_name = (channel or brand["CHANNEL"]).strip() or "WhatsApp"
+    hints = load_persona_hints(tenant, channel_name)
+    engine = SalesConversationEngine(state, brand, cfg, channel_name, persona_hints=hints)
     if reply:
         state.last_bot_reply = reply.strip()
         state.append_history("assistant", reply.strip())
@@ -4383,7 +4405,7 @@ def make_rule_based_reply(
         except Exception:
             cfg = json.loads(json.dumps(DEFAULT_TENANT_JSON, ensure_ascii=False))
 
-    persona_hints = load_persona_hints(tenant)
+    persona_hints = load_persona_hints(tenant, channel_name)
     state = load_sales_state(tenant, contact_id)
     engine = SalesConversationEngine(state, branding, cfg, channel_name, persona_hints=persona_hints)
     engine.observe_user(last_user_text or "")
@@ -4407,12 +4429,8 @@ async def build_llm_messages(
     """Собираем системный промпт с учётом брендинга арендатора."""
     persona = load_persona(tenant, channel)
     persona_hints = extract_persona_hints(persona)
-    cache_key: int | None
-    try:
-        cache_key = int(tenant) if tenant is not None else None
-    except Exception:
-        cache_key = None
     fingerprint = hashlib.sha1(persona.encode("utf-8")).hexdigest() if persona else ""
+    cache_key = _persona_hints_cache_key(tenant, channel)
     _PERSONA_HINTS_CACHE[cache_key] = (fingerprint, persona_hints)
     branding = _branding_for_tenant(tenant, channel)
     channel_name = (channel or branding["CHANNEL"]).strip() or "WhatsApp"
@@ -4656,7 +4674,7 @@ async def ask_llm(
     try:
         openai.api_key = settings.OPENAI_API_KEY  # type: ignore
 
-        persona_hints = load_persona_hints(tenant)
+        persona_hints = load_persona_hints(tenant, channel_name)
         state = load_sales_state(tenant, contact_ref)
 
         # 1. План + ответ через двухшаговый пайплайн
