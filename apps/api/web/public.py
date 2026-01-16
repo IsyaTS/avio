@@ -3588,6 +3588,18 @@ async def avito_oauth_disconnect(request: Request, tenant: int, k: str):
         "account_login": None,
     }
     try:
+        target_url = common.public_url(request, "/webhook/avito")
+        await avito.delete_webhook(int(tenant_id), target_url)
+        legacy_url = common.public_url(
+            request, f"/webhook/avito?tenant={int(tenant_id)}"
+        )
+        if legacy_url != target_url:
+            await avito.delete_webhook(int(tenant_id), legacy_url)
+    except avito.AvitoOAuthError:
+        logger.warning("avito_webhook_delete_failed tenant=%s reason=oauth", tenant_id)
+    except Exception:
+        logger.exception("avito_webhook_delete_failed tenant=%s", tenant_id)
+    try:
         common.ensure_tenant_files(int(tenant_id))
     except Exception:
         logger.exception("avito_oauth_disconnect_failed tenant=%s", tenant_id)

@@ -578,3 +578,54 @@ async def _list_webhooks(token: str) -> list[dict[str, Any]]:
     elif isinstance(payload, list):
         result = [dict(item) for item in payload if isinstance(item, Mapping)]
     return result
+
+
+async def delete_webhook(tenant: int, url: str) -> bool:
+    url_value = str(url or "").strip()
+    if not url_value:
+        return False
+    token, _ = await ensure_access_token(int(tenant))
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    normalized = url_value.rstrip("/")
+    try:
+        existing = await _list_webhooks(token)
+    except AvitoOAuthError:
+        raise
+    except Exception:
+        logger.exception("avito_webhook_list_failed tenant=%s", tenant)
+        existing = []
+    if existing:
+        found = False
+        for entry in existing:
+            try:
+                entry_url = str(entry.get("url") or "").rstrip("/")
+            except Exception:
+                entry_url = ""
+            if entry_url == normalized:
+                found = True
+                break
+        if not found:
+            return True
+
+    target = "https://api.avito.ru/messenger/v1/webhook/unsubscribe"
+    async with httpx.AsyncClient(timeout=OAUTH_TIMEOUT) as client:
+        response = await client.post(target, json={"url": url_value}, headers=headers)
+
+    if response.status_code in (200, 204):
+        return True
+    if response.status_code == 401:
+        raise AvitoOAuthError("Avito token unauthorized while deleting webhook")
+    if response.status_code >= 500:
+        logger.warning(
+            "avito_webhook_delete_failed status=%s body=%s", response.status_code, response.text
+        )
+        return False
+    logger.info(
+        "avito_webhook_delete_unexpected status=%s body=%s",
+        response.status_code,
+        response.text,
+    )
+    return False
