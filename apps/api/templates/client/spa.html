@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or 'Клиентский кабинет' }}</title>
+    <link rel="icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
+    <link rel="shortcut icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
     {% set spa_assets = client_spa_assets(request) %}
     {% if spa_assets.css %}
       {% for css in spa_assets.css %}
@@ -15,7 +17,7 @@
     {% endif %}
   </head>
   <body>
-    <script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
+    <script id="client-settings-state" type="application/json">{{ state_payload | tojson }}</script>
     <div id="root"></div>
     {% if spa_assets.js %}
       {% for js in spa_assets.js %}

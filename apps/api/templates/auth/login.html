@@ -1,0 +1,31 @@
+{% extends "marketing/base.html" %}
+{% block content %}
+  <section class="auth-wrap">
+    <div class="auth-card">
+      <h1>Войти в кабинет</h1>
+      <p class="lead">Используйте email и пароль, чтобы продолжить работу.</p>
+      {% if error %}
+        <div class="alert">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="/auth/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        {% if next %}
+          <input type="hidden" name="next" value="{{ next }}" />
+        {% endif %}
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" required autocomplete="email" />
+        </label>
+        <label>
+          <span>Пароль</span>
+          <input type="password" name="password" required autocomplete="current-password" />
+        </label>
+        <button class="btn btn--primary" type="submit">Войти</button>
+      </form>
+      <div class="auth-links">
+        <a href="/forgot">Забыли пароль?</a>
+        <a href="/register">Создать аккаунт</a>
+      </div>
+    </div>
+  </section>
+{% endblock %}

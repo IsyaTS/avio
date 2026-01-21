@@ -18,14 +18,24 @@ from libs.core.sales_core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_
 from libs.core.common import OUTBOX_QUEUE_KEY, OUTBOX_DLQ_KEY
 from libs.core.repo import provider_tokens as provider_tokens_repo
 from . import common as C
+from . import auth_utils
 from .ui import render_template
 
 router = APIRouter()
 _log = logging.getLogger("app.web.admin")
 
 
+def _allow_query_token() -> bool:
+    raw = (os.getenv("ADMIN_ALLOW_QUERY_TOKEN") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off", "disabled"}
+
+
 def _auth_ok(request: Request) -> bool:
-    token = (request.query_params.get("token") or request.headers.get("X-Admin-Token") or "").strip()
+    token = ""
+    if _allow_query_token():
+        token = (request.query_params.get("token") or "").strip()
+    if not token:
+        token = (request.headers.get("X-Admin-Token") or "").strip()
     if token and token == settings.ADMIN_TOKEN:
         return True
     cookie = (request.cookies.get(ADMIN_COOKIE) or "").strip()
@@ -40,23 +50,39 @@ def login(request: Request, token: str | None = None):
 
     admin_token = settings.ADMIN_TOKEN
     error = None
+    status_code = 200
 
+    token = (token or "").strip()
     if token:
-        token = token.strip()
-        if token and token == admin_token:
-            resp = RedirectResponse(url="/admin", status_code=303)
-            # In dev (http) secure cookies are not stored, so only mark secure when using https.
-            secure_flag = request.url.scheme == "https"
-            resp.set_cookie(
-                ADMIN_COOKIE,
-                admin_token,
-                max_age=60 * 60 * 24 * 14,
-                httponly=True,
-                secure=secure_flag,
-                samesite="lax",
+        if not _allow_query_token():
+            error = "Вход по ссылке отключен."
+        else:
+            allowed, _ = auth_utils.rate_limit_check(
+                action="admin_login",
+                email=None,
+                request=request,
+                limit=5,
+                window_seconds=900,
+                block_seconds=900,
             )
-            return resp
-        error = "Неверный токен доступа"
+            if not allowed:
+                error = "Слишком много попыток входа. Попробуйте позже."
+                status_code = 429
+            elif token == admin_token:
+                resp = RedirectResponse(url="/admin", status_code=303)
+                # In dev (http) secure cookies are not stored, so only mark secure when using https.
+                secure_flag = request.url.scheme == "https"
+                resp.set_cookie(
+                    ADMIN_COOKIE,
+                    admin_token,
+                    max_age=60 * 60 * 24 * 14,
+                    httponly=True,
+                    secure=secure_flag,
+                    samesite="lax",
+                )
+                return resp
+            else:
+                error = "Неверный токен доступа"
 
     context = {
         "request": request,
@@ -64,7 +90,7 @@ def login(request: Request, token: str | None = None):
         "subtitle": "Доступ для команды",
         "error": error,
     }
-    return render_template("admin/login.html", context)
+    return render_template("admin/login.html", context, status_code=status_code)
 
 
 @router.get("/admin")

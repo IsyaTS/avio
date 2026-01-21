@@ -13,6 +13,46 @@
 
 Новые модули кладём в `apps/*` или `libs/core/*`; совместимость с старым `app.*` больше не используется.
 
+## Public landing + Email Auth
+- Новый публичный лендинг доступен по `/` (включается флагом `ENABLE_PUBLIC_LANDING=1`).
+- Авторизация/регистрация по email включается флагом `ENABLE_EMAIL_AUTH=1`.
+- Админка `/admin` остаётся внутренней (без ссылок на публичные страницы).
+- Доступ к `/client/{tenant}/settings`:
+  - по сессии (cookie) — без `k`
+  - fallback на старую схему `?k=` и cookie `client_key` (если `AUTH_FALLBACK_MAGIC_LINK=1`, по умолчанию включён).
+
+### Новые эндпоинты
+- `GET /login`, `GET /register` — формы входа/регистрации.
+- `POST /auth/login`, `POST /auth/register`.
+- `GET /auth/verify?token=...` — подтверждение email.
+- `GET /forgot`, `POST /auth/forgot` — сброс пароля.
+- `GET /reset?token=...`, `POST /auth/reset` — установка нового пароля.
+- `POST /auth/logout`, `GET /dashboard`.
+
+### Переменные окружения
+- Флаги:
+  - `ENABLE_PUBLIC_LANDING=1|0`
+  - `ENABLE_EMAIL_AUTH=1|0`
+  - `AUTH_FALLBACK_MAGIC_LINK=1|0` (по умолчанию `1`)
+- Сессии:
+  - `SESSION_COOKIE_NAME=avio_session`
+  - `SESSION_TTL_DAYS=14`
+  - `AUTH_COOKIE_SECURE=1` (если за прокси и https не виден в `request.url.scheme`)
+- Email:
+  - `PUBLIC_BASE_URL=https://<domain>`
+  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`
+  - `SMTP_TLS=1` (по умолчанию), `SMTP_SSL=1` (если нужно SSL)
+
+### Таблицы БД
+- `auth_tenants`, `users`, `user_tokens`, `user_sessions` (создаются через `ensure_auth_schema()` на старте).
+  - Жёсткое правило: `users.tenant_id` UNIQUE → 1 пользователь = 1 tenant.
+  - Токены (`verify/reset`) хранятся как SHA‑256 хэши, сырые токены не логируются.
+
+### Безопасность
+- rate‑limit на login/register/resend (Redis, fallback in‑memory в тестах).
+- CSRF для форм (double submit cookie).
+- cookie сессии: HttpOnly + SameSite=Lax, Secure в проде.
+
 ## Follow-ups и Avito автоответ
 
 - Правила follow-up лежат в `data/tenants/<id>/tenant.json` → `follow_up` (или через UI `/client/{tenant}/follow-ups`).
@@ -43,8 +83,9 @@
   - `POST /api/feedback` — лайк/дизлайк для ответов бота (`rating` = like|dislike, dislike требует `comment`).
 - База данных: в `messages` есть флаг `is_bot` (по умолчанию `false`); таблица `message_feedback` используется для лайков/дизлайков. Если таблицы нет, диалоги продолжают работать, но фидбек не сохраняется.
 - Сообщения менеджера:
-  - Avito: из UI сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), видны в диалогах; дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`). Эхо бота игнорируется по ключу `avito:bot_echo:<tenant>:<chat_id>`.
-  - Telegram: сообщения из клиента сохраняются как исходящие и видны в диалогах; тишина ставится так же, как и для Avito.
+- Avito: из UI сохраняются в `messages` как исходящие (`direction=1`, `is_bot=false`), видны в диалогах; дополнительно ставится тишина (`handoff:silence:<tenant>:<lead>`). Эхо бота игнорируется по ключу `avito:bot_echo:<tenant>:<chat_id>`.
+- Telegram: сообщения из клиента сохраняются как исходящие и видны в диалогах; тишина ставится так же, как и для Avito.
+  - Avito фото-эхо: при отправке фото бот кэширует echo-маркер (`__image__`) вместе с текстом, а webhook сравнивает входящие события с этим списком. Это предотвращает ложную тишину от исходящих фото.
 
 ## LLM pipeline (единый путь ответа)
 - Общая сборка ответа вынесена в `libs/core/response_pipeline.py`: формирует системный prompt, добавляет историю и вызывает LLM.
@@ -72,7 +113,8 @@
   - Telegram: через tgworker с attachment URL.
   - Avito: `uploadImages` → `messages/image` (отправка изображения без ссылок).
 - Авто‑отправка (LLM):
-  - Включается флагом `behavior.auto_photo_enabled` и лимитом `behavior.auto_photo_max` (макс фото за ответ).
+- Включается флагом `behavior.auto_photo_enabled` и лимитом `behavior.auto_photo_max` (макс фото за ответ).
+- Авто‑подбор фото работает только по тегам/usage (LLM‑подбор отключён).
   - Бот выбирает фото только из тех, где `auto=true` и канал входит в `channels`.
   - Для выбора используются `tags`/`usage` и текст клиента/ответ бота.
 
@@ -99,6 +141,7 @@
 
 ## Telegram фото → handoff (тишина)
 - В `/webhook/telegram` парсится `message.provider_raw`/`media`/`photo` (в т.ч. Telethon `MessageMediaPhoto`). Фото/любое вложение ставит `has_photo=True`.
+- В `/webhook/avito` `content.image.sizes` может быть `dict` (а не список); URL берём из значений этого словаря, чтобы корректно проставлять `attachments` и `has_photo`.
 - По умолчанию любое фото/вложение ставит флаг тишины: Redis ключ `handoff:silence:<tenant>:<lead_id>`, TTL `HANDOFF_SILENCE_TTL_SECONDS` (по умолчанию 86400). Smart reply/LLM не отправляются до истечения TTL.
 - Если у арендатора включено ожидание фото (`behavior.photo_expected_markers`), то:
   - когда бот отправляет ответ с любым маркером, ставится `conv:state:<tenant>:<lead_id>=waiting_photo` (TTL `photo_expected_ttl` или TTL тишины по умолчанию);

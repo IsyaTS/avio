@@ -53,6 +53,7 @@ from urllib.parse import quote, quote_plus, urlencode
 from redis import exceptions as redis_ex
 
 from . import client as C
+from . import auth_utils
 from libs.core.metrics import MESSAGE_IN_COUNTER, DB_ERRORS_COUNTER
 from libs.core.db import (
     find_lead_by_peer,
@@ -449,13 +450,23 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
     if isinstance(content_raw, Mapping):
         if message_type == "image":
             image = content_raw.get("image") if isinstance(content_raw.get("image"), Mapping) else {}
-            sizes = image.get("sizes") if isinstance(image.get("sizes"), list) else []
+            sizes_raw = image.get("sizes")
+            sizes: list[Mapping[str, Any]] = []
+            if isinstance(sizes_raw, list):
+                sizes = [entry for entry in sizes_raw if isinstance(entry, Mapping)]
             url = ""
             for entry in sizes:
-                if isinstance(entry, Mapping) and entry.get("url"):
+                if entry.get("url"):
                     url = entry["url"]
+            if not url and isinstance(sizes_raw, Mapping):
+                for entry in sizes_raw.values():
+                    if isinstance(entry, str) and entry:
+                        url = entry
+                        break
             if url:
                 attachments.append({"type": "image", "url": url, "name": image.get("name") or "image"})
+            if not text:
+                text = "__image__"
         elif message_type == "voice":
             voice = content_raw.get("voice") if isinstance(content_raw.get("voice"), Mapping) else {}
             voice_id = voice.get("voice_id") or voice.get("id")
@@ -491,10 +502,20 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
                     except Exception:
                         payload = {}
                     cached_text = ""
+                    cached_extra: list[str] = []
                     if isinstance(payload, Mapping):
                         cached_text = normalize_echo_text(str(payload.get("text") or ""))
+                        extra_raw = payload.get("extra")
+                        if isinstance(extra_raw, list):
+                            cached_extra = [
+                                normalize_echo_text(str(entry or ""))
+                                for entry in extra_raw
+                                if str(entry or "").strip()
+                            ]
                     incoming_text = normalize_echo_text(text)
                     if cached_text and incoming_text and cached_text == incoming_text:
+                        echo_detected = True
+                    elif cached_extra and incoming_text and incoming_text in cached_extra:
                         echo_detected = True
                 if not echo_detected and text:
                     echo_detected = await _is_recent_bot_echo(int(tenant), int(lead_id), text)
@@ -2225,6 +2246,9 @@ async def _resolve_tenant_and_key(
                 if value:
                     key_candidate = value
                     break
+        if not key_candidate:
+            cookies = getattr(request, "cookies", None) or {}
+            key_candidate = cookies.get("client_key")
 
         needs_body = (
             allow_body and request.method.upper() in {"POST", "PUT", "PATCH"}
@@ -2670,22 +2694,11 @@ async def tg_start(
         query_keys=("k",),
         allow_body=request.method.upper() == "POST",
     )
-    try:
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        return _invalid_tenant_response(route, tenant_candidate)
-
-    allowed, validated_key = _has_tg_access_for_tenant(
-        tenant_id,
-        request,
-        key_candidate,
-        allow_admin=False,
-        query_param_only=True,
-    )
-    if not allowed:
-        return _unauthorized_response(route, tenant_id)
-
-    _log_public_tg_request(route, tenant_id, validated_key)
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, validated_key = auth
+    _log_public_tg_request(route, tenant_id, validated_key or "session")
 
     fallback_paths = ["/qr/start", "/rpc/start", "/session/start"]
     payload = {"tenant": tenant_id}
@@ -2743,21 +2756,11 @@ async def _handle_tg_twofa(
 ) -> Response:
     _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, key)
-    try:
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        return _invalid_tenant_response(route, tenant_candidate)
-
-    allowed, validated_key = _has_tg_access_for_tenant(
-        tenant_id,
-        request,
-        key_candidate,
-        allow_admin=False,
-    )
-    if not allowed:
-        return _unauthorized_response(route, tenant_id)
-
-    _log_public_tg_request(route, tenant_id, validated_key)
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, validated_key = auth
+    _log_public_tg_request(route, tenant_id, validated_key or "session")
 
     client_token = _client_identifier(request)
 
@@ -2909,14 +2912,10 @@ async def tg_restart(
     route = "/pub/tg/restart"
     _log_deprecated(route)
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-    try:
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        return _invalid_tenant_response(route, tenant_candidate, force=True)
-
-    allowed, _ = _has_tg_access_for_tenant(tenant_id, request, key_candidate)
-    if not allowed:
-        return _unauthorized_response(route, tenant_id, force=True)
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
 
     try:
         upstream = await C.tg_post(
@@ -2941,22 +2940,11 @@ async def tg_status(request: Request, tenant: int | str | None = None, k: str | 
         query_keys=("k",),
         allow_body=False,
     )
-    try:
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        return _invalid_tenant_response(route, tenant_candidate)
-
-    allowed, validated_key = _has_tg_access_for_tenant(
-        tenant_id,
-        request,
-        key_candidate,
-        allow_admin=False,
-        query_param_only=True,
-    )
-    if not allowed:
-        return _unauthorized_response(route, tenant_id)
-
-    _log_public_tg_request(route, tenant_id, validated_key)
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, validated_key = auth
+    _log_public_tg_request(route, tenant_id, validated_key or "session")
 
     fallback_paths = ["/status", "/rpc/status", "/session/status"]
     params = {"tenant": tenant_id}
@@ -3009,20 +2997,10 @@ async def tg_qr_png(
         query_keys=("k",),
         allow_body=False,
     )
-    try:
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        return _invalid_tenant_response(route, tenant_candidate)
-
-    allowed, validated_key = _has_tg_access_for_tenant(
-        tenant_id,
-        request,
-        key_candidate,
-        allow_admin=False,
-        query_param_only=True,
-    )
-    if not allowed:
-        return _unauthorized_response(route, tenant_id)
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
 
     qr_identifier = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
     if not qr_identifier:
@@ -3071,14 +3049,30 @@ async def tg_qr_png(
 
 
 @router.get("/pub/tg/qr.txt")
-def tg_qr_txt(request: Request, qr_id: str | None = None, k: str | None = None, key: str | None = None):
-    key_candidate = k or key or request.query_params.get("k") or request.query_params.get("key")
-    allowed, _ = _has_tg_access_for_tenant(tenant_id, request, key_candidate)
-    if not allowed:
-        return _unauthorized_response("/pub/tg/qr.txt", None)
+async def tg_qr_txt(
+    request: Request,
+    tenant: int | str | None = None,
+    qr_id: str | None = None,
+    k: str | None = None,
+    key: str | None = None,
+):
+    route = "/pub/tg/qr.txt"
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+        request,
+        tenant,
+        k or key,
+        query_keys=("k", "key"),
+        allow_body=False,
+    )
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, validated_key = auth
+    _log_public_tg_request(route, tenant_id, validated_key or "session")
+
     qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
     if not qr_value:
-        _log_tg_proxy("/pub/tg/qr.txt", None, 400, None, error="missing_qr_id")
+        _log_tg_proxy(route, tenant_id, 400, None, error="missing_qr_id")
         return JSONResponse(
             {"error": "missing_qr_id"},
             status_code=400,
@@ -3143,14 +3137,10 @@ async def tg_logout(
 ):
     route = "/pub/tg/logout"
     tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, k or key)
-    try:
-        tenant_id = _coerce_tenant(tenant_candidate)
-    except ValueError:
-        return _invalid_tenant_response(route, tenant_candidate)
-
-    allowed, _ = _has_tg_access_for_tenant(tenant_id, request, key_candidate)
-    if not allowed:
-        return _unauthorized_response(route, tenant_id)
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
 
     try:
         upstream = await C.tg_post(
@@ -3378,17 +3368,46 @@ def _resolve_public_settings_key(request: Request, key_candidate: str | None) ->
     return (cookies.get("client_key") or "").strip()
 
 
-def _authorize_public_settings_request(
+async def _authorize_public_settings_request(
     request: Request,
     tenant: int | str | None,
     key_candidate: str | None,
 ) -> tuple[int, str] | Response:
+    user = await auth_utils.get_current_user(request)
+    session_tenant = int(user.get("tenant_id") or 0) if isinstance(user, dict) else 0
+    if session_tenant > 0:
+        if tenant is None or str(tenant).strip() == "":
+            tenant_id = session_tenant
+            resolved_key = _resolve_public_settings_key(request, key_candidate)
+            if not resolved_key:
+                resolved_key = (C.get_tenant_pubkey(int(tenant_id)) or "").strip()
+                if not resolved_key:
+                    keys = C.list_keys(int(tenant_id))
+                    resolved_key = (keys[0].get("key") if keys else "") or ""
+            return tenant_id, resolved_key
+        try:
+            tenant_id = _coerce_tenant(tenant)
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        if int(tenant_id) == int(session_tenant):
+            resolved_key = _resolve_public_settings_key(request, key_candidate)
+            if not resolved_key:
+                resolved_key = (C.get_tenant_pubkey(int(tenant_id)) or "").strip()
+                if not resolved_key:
+                    keys = C.list_keys(int(tenant_id))
+                    resolved_key = (keys[0].get("key") if keys else "") or ""
+            return tenant_id, resolved_key
+
     try:
         tenant_id = _coerce_tenant(tenant)
     except ValueError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
     resolved_key = _resolve_public_settings_key(request, key_candidate)
+
+    if not auth_utils.magic_link_enabled():
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+
     if not resolved_key or not common.valid_key(tenant_id, resolved_key):
         return JSONResponse({"detail": "invalid_key"}, status_code=401)
 
@@ -3396,8 +3415,8 @@ def _authorize_public_settings_request(
 
 
 @oauth_router.get("/status")
-async def avito_oauth_status(request: Request, tenant: int, k: str):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_oauth_status(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3438,8 +3457,8 @@ async def avito_oauth_status(request: Request, tenant: int, k: str):
 
 
 @oauth_router.get("/authorize")
-async def avito_oauth_authorize(request: Request, tenant: int, k: str):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_oauth_authorize(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3599,8 +3618,8 @@ async def avito_oauth_callback(
 
 
 @oauth_router.post("/disconnect")
-async def avito_oauth_disconnect(request: Request, tenant: int, k: str):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_oauth_disconnect(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3640,8 +3659,8 @@ async def avito_oauth_disconnect(request: Request, tenant: int, k: str):
 
 
 @oauth_router.post("/webhook")
-async def avito_oauth_webhook(request: Request, tenant: int, k: str):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_oauth_webhook(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3676,8 +3695,10 @@ async def avito_oauth_webhook(request: Request, tenant: int, k: str):
 
 
 @router.get("/pub/settings/get")
-def settings_get(request: Request, tenant: int | str | None = None, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def settings_get(
+    request: Request, tenant: int | str | None = None, k: str | None = None
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3694,8 +3715,10 @@ def settings_get(request: Request, tenant: int | str | None = None, k: str | Non
 
 
 @router.post("/pub/settings/save")
-async def settings_save(request: Request, tenant: int | str | None = None, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def settings_save(
+    request: Request, tenant: int | str | None = None, k: str | None = None
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3774,10 +3797,10 @@ def _validate_photo_upload(filename: str, content_type: str | None) -> tuple[boo
 
 # Move public catalog helpers closer to settings endpoints for discoverability.
 @router.get("/pub/catalog/csv")
-def public_catalog_csv_get(
+async def public_catalog_csv_get(
     request: Request, tenant: int | str | None = None, k: str | None = None
 ):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -3796,7 +3819,7 @@ def public_catalog_csv_get(
 async def public_catalog_csv_save(
     request: Request, tenant: int | str | None = None, k: str | None = None
 ):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
 
@@ -4196,8 +4219,10 @@ async def catalog_upload(
 
 
 @router.get("/pub/files/photos/list")
-def photos_list(request: Request, tenant: int | str | None = None, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def photos_list(
+    request: Request, tenant: int | str | None = None, k: str | None = None
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, key = auth
@@ -4221,7 +4246,7 @@ async def photos_upload(
     k: str | None = None,
     file: UploadFile = File(...),
 ):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, key = auth
@@ -4270,13 +4295,13 @@ async def photos_upload(
 
 
 @router.delete("/pub/files/photos/{photo_id}")
-def photos_delete(
+async def photos_delete(
     photo_id: str,
     request: Request,
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, _ = auth
@@ -4312,13 +4337,13 @@ def photos_delete(
 
 
 @router.get("/pub/files/photos/{photo_id}")
-def photos_file(
+async def photos_file(
     photo_id: str,
     request: Request,
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, _ = auth
@@ -4347,7 +4372,7 @@ async def photos_update_meta(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, key = auth

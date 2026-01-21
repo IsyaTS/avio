@@ -1134,53 +1134,7 @@ async def _select_auto_photos(
         channel,
         len(candidates),
     )
-    listing = "\n".join(
-        f"- id: {item['id']}\n  title: {item['title']}\n  tags: {', '.join(item.get('tags') or [])}\n  usage: {item.get('usage') or ''}"
-        for item in candidates[:30]
-    )
-    system_prompt = (
-        "Ты выбираешь фото для отправки пользователю. "
-        "Верни только JSON вида {\"photo_ids\": [\"...\"]}. "
-        "Если фото не нужны, верни {\"photo_ids\": []}. "
-        f"Максимум фото: {max_count}. Используй только id из списка."
-    )
-    user_prompt = (
-        f"Сообщение клиента: {user_text}\n"
-        f"Ответ бота: {reply_text}\n"
-        f"Доступные фото:\n{listing}"
-    )
-    try:
-        llm_reply = await ask_llm(
-            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            tenant=tenant_id,
-            contact_id=0,
-            channel=channel,
-        )
-    except Exception:
-        return []
-    selected = _extract_photo_ids(str(llm_reply), allowed_ids, max_count)
-    if not selected:
-        return []
-
-    attachments: list[dict[str, Any]] = []
-    for photo in candidates:
-        if photo["id"] not in selected:
-            continue
-        url = _build_photo_public_url(tenant_id, photo["id"])
-        if channel == "telegram" and not url:
-            continue
-        attachments.append(
-            {
-                "type": "image",
-                "url": url,
-                "path": photo.get("path"),
-                "name": photo.get("filename") or photo.get("path") or photo.get("title"),
-                "mime": _guess_photo_mime(photo),
-            }
-        )
-        if len(attachments) >= max_count:
-            break
-    return attachments
+    return []
 
 
 def _extract_ru_phone(text: str) -> str:
@@ -4544,11 +4498,18 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         )
         if 200 <= st < 300 and not manager_message:
             echo_text = normalize_echo_text(text or "")
+            echo_variants: list[str] = []
+            if echo_text:
+                echo_variants.append(echo_text)
+            if attachments:
+                echo_variants.append("__image__")
+            if not echo_text and attachments:
+                echo_text = "__image__"
             if echo_text:
                 chat_key = chat_hint or (str(avito_chat_id_hint).strip() if avito_chat_id_hint else "")
                 if chat_key:
                     try:
-                        payload = {"text": echo_text, "ts": int(time.time())}
+                        payload = {"text": echo_text, "extra": echo_variants, "ts": int(time.time())}
                         await r.set(
                             avito_bot_echo_key(tenant, chat_key),
                             json.dumps(payload, ensure_ascii=False),

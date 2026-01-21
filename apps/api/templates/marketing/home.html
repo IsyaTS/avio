@@ -22,29 +22,75 @@
       </div>
     </div>
     <div class="hero-visual" data-reveal style="--delay: 220ms">
-      <div class="visual-card visual-card--primary">
-        <div class="visual-header">
-          <div class="visual-title">Диалоги и статусы</div>
-          <span class="status-pill">Live</span>
-        </div>
-        <div class="visual-body">
-          <div class="chat-line incoming">Клиент: нужна дверь с зеркалом</div>
-          <div class="chat-line outgoing">Avio: уточните город и размеры</div>
-          <div class="chat-line incoming">Екатеринбург, 900×2050</div>
-          <div class="chat-line outgoing">Отправляю варианты и каталог</div>
-        </div>
-        <div class="visual-footer">
-          <span>Follow‑up</span>
-          <span>Каталоги</span>
-          <span>Фото</span>
+      <div class="visual-card visual-card--primary visual-card--chat">
+        <div class="chat-window">
+          <div class="chat-window-header">
+            <div class="chat-avatar">НР</div>
+            <div class="chat-title">
+              <div class="chat-name">Иван Иванов</div>
+              <div class="chat-sub">Avito · в сети</div>
+            </div>
+            <div class="chat-badges">
+              <span class="badge-pill badge-pill--avito">Avito</span>
+              <span class="badge-pill">Автоответы</span>
+            </div>
+          </div>
+          <div class="chat-window-body">
+            <div class="chat-bubble incoming">
+              <p>Добрый день! Нужна входная дверь с зеркалом.</p>
+              <span class="chat-time">10:23</span>
+            </div>
+            <div class="chat-bubble outgoing">
+              <p>Подскажите город и размеры проёма — подберу 3–5 вариантов.</p>
+              <span class="chat-time">Avio · 10:23</span>
+            </div>
+            <div class="chat-bubble incoming">
+              <p>Екатеринбург, 900×2050.</p>
+              <span class="chat-time">10:24</span>
+            </div>
+            <div class="chat-bubble outgoing">
+              <p>Нашёл варианты. Отправляю каталог и фото.</p>
+              <div class="chat-attachments">
+                <div class="attachment-card">
+                  <div class="attachment-icon">PDF</div>
+                  <div>
+                    <div class="attachment-title">Каталог дверей</div>
+                    <div class="attachment-meta">6 страниц</div>
+                  </div>
+                </div>
+                <div class="attachment-photo"></div>
+              </div>
+              <span class="chat-time">Avio · 10:24</span>
+            </div>
+            <div class="chat-bubble incoming">
+              <p>Сколько будет доставка?</p>
+              <span class="chat-time">10:25</span>
+            </div>
+            <div class="chat-bubble outgoing">
+              <p>До 2 дней. Нужна установка или только доставка?</p>
+              <span class="chat-time">Avio · 10:25</span>
+            </div>
+            <div class="chat-typing">
+              <span></span><span></span><span></span>
+              <span class="typing-label">Avio печатает…</span>
+            </div>
+          </div>
+          <div class="chat-window-footer">
+            <div class="chat-tags">
+              <span>Автосообщения</span>
+              <span>Каталоги</span>
+              <span>Фото</span>
+              <span>Уведомления</span>
+            </div>
+          </div>
         </div>
       </div>
       <div class="visual-card visual-card--secondary">
         <h3>Сигналы в моменте</h3>
         <ul>
-          <li>Уточнён город → персональные сроки.</li>
-          <li>Интерес к цене → прайс и скидки.</li>
-          <li>Номер телефона → уведомление менеджеру.</li>
+          <li>Уточнён город → персональные сроки и логистика.</li>
+          <li>Интерес к цене → прайс, условия, варианты оплаты.</li>
+          <li>Номер телефона → уведомление менеджеру и контроль.</li>
         </ul>
       </div>
     </div>
@@ -59,8 +105,8 @@
     </div>
     <div class="feature-grid">
       <article class="feature-card" data-reveal style="--delay: 0ms">
-        <h3>Сценарии без хаоса</h3>
-        <p>Follow‑up, условия и напоминания работают прозрачно и не раздражают клиентов.</p>
+        <h3>Автосообщения без хаоса</h3>
+        <p>Автосообщения, условия и напоминания работают прозрачно и не раздражают клиентов.</p>
       </article>
       <article class="feature-card" data-reveal style="--delay: 60ms">
         <h3>Единый контроль</h3>
@@ -68,7 +114,7 @@
       </article>
       <article class="feature-card" data-reveal style="--delay: 120ms">
         <h3>Автоконтент</h3>
-        <p>Каталоги, фото и FAQ отправляются именно тогда, когда это нужно лидy.</p>
+        <p>Каталоги, фото и FAQ отправляются именно тогда, когда это нужно лиду.</p>
       </article>
       <article class="feature-card" data-reveal style="--delay: 180ms">
         <h3>Гибкие персоны</h3>
@@ -77,6 +123,44 @@
       <article class="feature-card" data-reveal style="--delay: 240ms">
         <h3>Интеграции</h3>
         <p>Avito и Telegram подключаются за минуты, без тяжёлых внедрений.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="audience" class="section">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <h2>Кому подходит Avio</h2>
+      <p class="section-subtitle">Для команд, которые получают десятки входящих заявок и хотят отвечать быстро.</p>
+    </div>
+    <div class="audience-grid">
+      <article class="audience-card" data-reveal style="--delay: 0ms">
+        <h3>Отдел продаж</h3>
+        <p>Закрывайте больше сделок благодаря скорости и единым сценариям.</p>
+        <ul class="audience-list">
+          <li>Ответ за 5 секунд</li>
+          <li>Автоматические вопросы</li>
+          <li>Уведомления менеджеру</li>
+        </ul>
+      </article>
+      <article class="audience-card" data-reveal style="--delay: 80ms">
+        <h3>Маркетинг</h3>
+        <p>Снижение стоимости лида за счёт быстрых ответов и понятных шагов.</p>
+        <ul class="audience-list">
+          <li>Контроль каналов</li>
+          <li>Сценарии под нишу</li>
+          <li>Единая аналитика</li>
+        </ul>
+      </article>
+      <article class="audience-card" data-reveal style="--delay: 160ms">
+        <h3>Руководитель</h3>
+        <p>Видите всю картину и контролируете качество ответа команды.</p>
+        <ul class="audience-list">
+          <li>Прозрачные статусы</li>
+          <li>Автоматические напоминания</li>
+          <li>История диалогов</li>
+        </ul>
       </article>
     </div>
   </div>
@@ -107,7 +191,7 @@
         <div class="step-index">03</div>
         <div>
           <h3>Запуск</h3>
-          <p>Автоответы, follow‑up и контроль менеджеров — всё в одном кабинете.</p>
+          <p>Автоответы, автосообщения и контроль менеджеров — всё в одном кабинете.</p>
         </div>
       </div>
     </div>
@@ -146,6 +230,29 @@
   </div>
 </section>
 
+<section id="faq" class="section section--muted">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <h2>Ответы на частые вопросы</h2>
+      <p class="section-subtitle">Коротко о том, как всё устроено и что нужно для старта.</p>
+    </div>
+    <div class="faq-grid">
+      <details class="faq-item" data-reveal>
+        <summary>Сколько времени занимает подключение?</summary>
+        <p>От 5 до 15 минут: подключаем канал, загружаем каталог и запускаем сценарии.</p>
+      </details>
+      <details class="faq-item" data-reveal style="--delay: 80ms">
+        <summary>Можно ли отключать автоответы для конкретного чата?</summary>
+        <p>Да, менеджер может отключить автоответы в диалоге и вести клиента вручную.</p>
+      </details>
+      <details class="faq-item" data-reveal style="--delay: 160ms">
+        <summary>Что бот отправляет в чате?</summary>
+        <p>Только то, что вы настроите: тексты, каталоги, фото и автоматические напоминания.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
 <section id="proof" class="section section--muted">
   <div class="container">
     <div class="section-head" data-reveal>
@@ -165,7 +272,7 @@
         <span>Руководитель продаж</span>
       </article>
       <article class="testimonial-card" data-reveal style="--delay: 80ms">
-        <p>Follow‑up перестали раздражать — теперь это аккуратный сценарий.</p>
+        <p>Автосообщения перестали раздражать — теперь это аккуратный сценарий.</p>
         <span>Собственник бизнеса</span>
       </article>
       <article class="testimonial-card" data-reveal style="--delay: 160ms">

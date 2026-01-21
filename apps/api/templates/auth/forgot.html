@@ -1,0 +1,23 @@
+{% extends "marketing/base.html" %}
+{% block content %}
+  <section class="auth-wrap">
+    <div class="auth-card">
+      <h1>Сброс пароля</h1>
+      <p class="lead">Мы отправим ссылку для сброса на ваш email.</p>
+      {% if error %}
+        <div class="alert">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="/auth/forgot">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" required autocomplete="email" />
+        </label>
+        <button class="btn btn--primary" type="submit">Отправить ссылку</button>
+      </form>
+      <div class="auth-links">
+        <a href="/login">Вернуться к входу</a>
+      </div>
+    </div>
+  </section>
+{% endblock %}

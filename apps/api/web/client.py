@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 from zoneinfo import ZoneInfo
 
 from . import common as C
+from . import auth_utils
 from .ui import render_template
 
 from libs.core import catalog as catalog_module
@@ -653,7 +654,7 @@ def write_csv_table(
 
 
 @router.get("/client/{tenant}/settings")
-def client_settings(tenant: int, request: Request):
+async def client_settings(tenant: int, request: Request):
     raw_query_key = (request.query_params.get("k") or "").strip()
     raw_cookie_key = ""
     try:
@@ -663,11 +664,20 @@ def client_settings(tenant: int, request: Request):
 
     client_key = raw_query_key or raw_cookie_key
     provided_key = _resolve_key(request, client_key)
-    if not _auth(tenant, provided_key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    session_user = await auth_utils.get_current_user(request)
+    session_allowed = bool(session_user and int(session_user.get("tenant_id") or 0) == int(tenant))
+    if not session_allowed:
+        if not auth_utils.magic_link_enabled() or not _auth(tenant, provided_key):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
     tenant_key = (C.get_tenant_pubkey(int(tenant)) or "").strip()
     key = client_key
+    if session_allowed:
+        if (not key) or (not C.valid_key(int(tenant), key)):
+            key = tenant_key
+            if not key:
+                keys = C.list_keys(int(tenant))
+                key = (keys[0].get("key") if keys else "") or ""
 
     C.ensure_tenant_files(tenant)
     cfg = C.read_tenant_config(tenant)
@@ -797,13 +807,26 @@ def client_settings(tenant: int, request: Request):
             response.set_cookie(
                 "client_key",
                 key,
-                max_age=14 * 24 * 3600,
-                httponly=True,
-                samesite="lax",
+                **auth_utils.cookie_params(
+                    request,
+                    ttl_seconds=14 * 24 * 3600,
+                    httponly=True,
+                ),
             )
         except Exception:
             pass
     return response
+
+
+@router.get("/client/settings")
+async def client_settings_short(request: Request):
+    session_user = await auth_utils.get_current_user(request)
+    if not session_user:
+        return RedirectResponse(url="/login")
+    tenant_id = int(session_user.get("tenant_id") or 0)
+    if tenant_id <= 0:
+        return JSONResponse({"detail": "invalid_tenant"}, status_code=400)
+    return await client_settings(tenant_id, request)
 
 
 @router.post("/client/{tenant}/settings/save")

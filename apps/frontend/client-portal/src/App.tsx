@@ -96,10 +96,6 @@ const AppLayout: React.FC = () => {
               ☰
             </button>
             <div>
-              <div className="text-sm text-slate-500">Настройки клиента</div>
-              <div className="text-lg font-semibold text-slate-900" style={{ fontFamily: 'Space Grotesk' }}>
-                Admin Dashboard
-              </div>
             </div>
             <div className="hidden items-center gap-3 lg:flex">
               <span className="badge badge-neutral">beta</span>

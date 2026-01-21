@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     {% set page_title = title or page_title or 'Avio' %}
     <title>{{ page_title }}</title>
+    <link rel="icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}">
+    <link rel="shortcut icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}">
     <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">

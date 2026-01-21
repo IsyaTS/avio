@@ -512,39 +512,30 @@ const SettingsTab: React.FC = () => {
             <button className="btn" onClick={handleSavePassport}>Сохранить паспорт</button>
           </div>
         </div>
-        <div className="card space-y-3">
-          <div className="card-title">Tenant</div>
-          <div className="text-3xl font-semibold text-slate-900">#{api.tenantId || '—'}</div>
-          <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Ключ доступа</div>
-          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 break-all">
-            {api.key || '—'}
+        <div className="card space-y-6">
+          <div>
+            <div className="card-title">Персона</div>
+            <div className="card-subtitle">Описание голоса ассистента, цели и стиль общения.</div>
           </div>
-        </div>
-      </div>
-
-      <div className="card space-y-6">
-        <div>
-          <div className="card-title">Персона</div>
-          <div className="card-subtitle">Описание голоса ассистента, цели и стиль общения.</div>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-            Канал персоны
-          </span>
-          <select
-            className="input w-full max-w-[220px]"
-            value={personaChannel}
-            onChange={(e) => setPersonaChannel(e.target.value as 'base' | 'telegram' | 'avito')}
-          >
-            <option value="base">Основная (общая)</option>
-            <option value="telegram">Telegram</option>
-            <option value="avito">Avito</option>
-          </select>
-        </div>
-        <textarea className="textarea" rows={8} value={personaValue} onChange={(e) => handlePersonaChange(e.target.value)} />
-        <div className="flex flex-wrap gap-3">
-          <button className="btn" onClick={handleSavePersona}>Сохранить персону</button>
-          <button className="btn-secondary" onClick={handleDownloadConfig}>Скачать JSON конфиг</button>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Канал персоны
+            </span>
+            <select
+              className="input w-full max-w-[220px]"
+              value={personaChannel}
+              onChange={(e) => setPersonaChannel(e.target.value as 'base' | 'telegram' | 'avito')}
+            >
+              <option value="base">Основная (общая)</option>
+              <option value="telegram">Telegram</option>
+              <option value="avito">Avito</option>
+            </select>
+          </div>
+          <textarea className="textarea" rows={8} value={personaValue} onChange={(e) => handlePersonaChange(e.target.value)} />
+          <div className="flex flex-wrap gap-3">
+            <button className="btn" onClick={handleSavePersona}>Сохранить персону</button>
+            <button className="btn-secondary" onClick={handleDownloadConfig}>Скачать JSON конфиг</button>
+          </div>
         </div>
       </div>
 

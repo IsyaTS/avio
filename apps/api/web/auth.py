@@ -549,7 +549,7 @@ async def resend_verify(request: Request, background_tasks: BackgroundTasks):
 
 
 @router.get("/auth/verify")
-async def verify_email(request: Request, token: str | None = None, background_tasks: BackgroundTasks):
+async def verify_email(request: Request, background_tasks: BackgroundTasks, token: str | None = None):
     if not auth_utils.auth_enabled():
         return _auth_disabled()
     if not token:

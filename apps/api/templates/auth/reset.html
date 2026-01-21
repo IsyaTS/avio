@@ -1,0 +1,28 @@
+{% extends "marketing/base.html" %}
+{% block content %}
+  <section class="auth-wrap">
+    <div class="auth-card">
+      <h1>Новый пароль</h1>
+      <p class="lead">Введите новый пароль для аккаунта.</p>
+      {% if error %}
+        <div class="alert">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="/auth/reset">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="token" value="{{ token }}" />
+        <label>
+          <span>Новый пароль</span>
+          <input type="password" name="password" required autocomplete="new-password" />
+        </label>
+        <label>
+          <span>Повторите пароль</span>
+          <input type="password" name="confirm_password" required autocomplete="new-password" />
+        </label>
+        <button class="btn btn--primary" type="submit">Сохранить пароль</button>
+      </form>
+      <div class="auth-links">
+        <a href="/login">Вернуться к входу</a>
+      </div>
+    </div>
+  </section>
+{% endblock %}

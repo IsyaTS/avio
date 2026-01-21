@@ -38,6 +38,7 @@ sys.modules.setdefault("core", core)
 _EXPECTED_WEB_ATTRS: dict[str, tuple[str, ...]] = {
     "common": ("router",),
     "admin": ("router",),
+    "auth": ("router",),
     "public": ("router", "templates"),
     "analytics_avito": ("router",),
     "client": ("router",),
@@ -85,6 +86,7 @@ def _import_web_module(module_name: str) -> ModuleType:
 
 _common_mod = _import_web_module("common")
 _admin_mod = _import_web_module("admin")
+_auth_mod = _import_web_module("auth")
 _public_mod = _import_web_module("public")
 _analytics_avito_mod = _import_web_module("analytics_avito")
 _client_mod = _import_web_module("client")
@@ -102,6 +104,7 @@ tenant_whatsapp_provider = getattr(core, "tenant_whatsapp_provider", lambda tena
 
 C = _common_mod  # type: ignore[assignment]
 admin_router = _admin_mod.router  # type: ignore[attr-defined]
+auth_router = _auth_mod.router  # type: ignore[attr-defined]
 public_router = _public_mod.router  # type: ignore[attr-defined]
 analytics_avito_router = _analytics_avito_mod.router  # type: ignore[attr-defined]
 client_router = _client_mod.router  # type: ignore[attr-defined]
@@ -425,6 +428,17 @@ def _transport_client(channel: str, provider: str | None = None) -> httpx.AsyncC
 
 _WORKER_HEALTH_URL = "http://worker:8000/health"
 _WORKER_HEALTH_TIMEOUT = httpx.Timeout(0.75)
+_FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if not value:
+        return default
+    return value not in _FALSE_VALUES
 
 
 async def _ensure_worker_healthy() -> None:
@@ -440,12 +454,13 @@ async def _ensure_worker_healthy() -> None:
         raise HTTPException(status_code=502, detail="worker_unreachable")
 
 
-app = FastAPI(title="avio-api")
-
-
-@app.get("/")
-async def root_ping() -> dict[str, bool]:
-    return {"ok": True}
+_docs_enabled = _env_flag("ENABLE_API_DOCS", default=True)
+app = FastAPI(
+    title="avio-api",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 
 
 @app.head("/")
@@ -500,6 +515,25 @@ async def _startup_run_provider_token_migration() -> None:
     except Exception:
         logging.getLogger("app.migrations").exception(
             "provider_tokens_migration_failed",
+        )
+
+
+@app.on_event("startup")
+async def _startup_run_auth_migration() -> None:
+    if IS_TESTING:
+        return
+    module = globals().get("db_module")
+    runner = getattr(module, "ensure_auth_schema", None)
+    if runner is None:
+        logging.getLogger("app.migrations").info(
+            "auth_migration_skip reason=no_db_module",
+        )
+        return
+    try:
+        await runner()  # type: ignore[misc]
+    except Exception:
+        logging.getLogger("app.migrations").exception(
+            "auth_migration_failed",
         )
         raise
 
@@ -1030,15 +1064,13 @@ async def internal_catalog_file(
 
 # монтирование роутеров
 app.include_router(admin_router)
+app.include_router(auth_router)
 app.include_router(public_router)
 app.include_router(analytics_avito_router)
 app.include_router(client_router)
 app.include_router(internal_tenant_router)
 app.include_router(webhook)
 app.include_router(webhooks_router)
-
-@app.get("/")
-def root(): return RedirectResponse(url="/admin")
 
 @app.post("/internal/tenant/{tenant}/wa/qr")
 async def internal_tenant_wa_qr(tenant: int, request: Request):
@@ -1157,6 +1189,17 @@ async def _log_requests(request: Request, call_next):
     return response
 
 
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    return response
+
+
 if hasattr(app, "middleware"):
     app.middleware("http")(_bypass_client_settings_cache)
     app.middleware("http")(_log_requests)
+    app.middleware("http")(_security_headers)
