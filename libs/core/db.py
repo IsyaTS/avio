@@ -77,6 +77,30 @@ def _normalize_whatsapp_jid(raw: Optional[str], is_group: bool = False) -> str:
     return f"{normalized.lower()}{_WHATSAPP_PRIVATE_SUFFIX}"
 
 
+def _max_tenant_id_fs() -> int:
+    base = getattr(core_module, "TENANTS_DIR", None)
+    if not base:
+        return 0
+    try:
+        entries = list(pathlib.Path(base).iterdir())
+    except Exception:
+        return 0
+    max_id = 0
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if not name.isdigit():
+            continue
+        try:
+            value = int(name)
+        except Exception:
+            continue
+        if value > max_id:
+            max_id = value
+    return max_id
+
+
 async def _ensure_pool() -> Any:
     """Ленивое создание пула. Вернёт None, если БД не настроена или недоступна."""
     global _pool
@@ -172,6 +196,120 @@ async def ensure_provider_tokens_schema() -> None:
             except Exception:
                 _log.exception("provider_tokens_migration_failed statement=%s", statement.strip().split("\n", 1)[0])
                 raise
+
+
+async def ensure_auth_schema() -> None:
+    pool = await _ensure_pool()
+    if not pool:
+        _log.info("auth_schema_skip reason=no_pool")
+        return
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS auth_tenants (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            tenant_id BIGINT NOT NULL UNIQUE REFERENCES auth_tenants(id) ON DELETE CASCADE,
+            contact TEXT,
+            preferred_messenger TEXT,
+            is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_login_at TIMESTAMPTZ
+        )
+        """,
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'users'
+                  AND column_name = 'contact'
+            ) THEN
+                EXECUTE 'ALTER TABLE users ADD COLUMN contact TEXT';
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'users'
+                  AND column_name = 'preferred_messenger'
+            ) THEN
+                EXECUTE 'ALTER TABLE users ADD COLUMN preferred_messenger TEXT';
+            END IF;
+        END $$;
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS user_tokens (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL,
+            token_type TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            request_ip TEXT
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_user_tokens_hash ON user_tokens(token_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id)",
+        """
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            session_id_hash TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires_at TIMESTAMPTZ NOT NULL,
+            revoked_at TIMESTAMPTZ,
+            user_agent TEXT,
+            ip TEXT
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_user_sessions_hash ON user_sessions(session_id_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id)",
+    )
+    async with pool.acquire() as con:
+        for statement in statements:
+            try:
+                await con.execute(statement)
+            except Exception:
+                _log.exception(
+                    "auth_schema_failed statement=%s",
+                    statement.strip().split("\n", 1)[0],
+                )
+                raise
+
+        max_fs = _max_tenant_id_fs()
+        if max_fs > 0:
+            try:
+                row = await con.fetchrow(
+                    "SELECT pg_get_serial_sequence('auth_tenants', 'id') AS seq"
+                )
+                seq = None
+                if row:
+                    seq = row.get("seq") if hasattr(row, "get") else row[0]
+                if seq:
+                    await con.execute(
+                        """
+                        SELECT setval(
+                            $1::regclass,
+                            GREATEST((SELECT COALESCE(MAX(id), 0) FROM auth_tenants), $2),
+                            true
+                        )
+                        """,
+                        seq,
+                        int(max_fs),
+                    )
+            except Exception:
+                _log.exception("auth_schema_sequence_adjust_failed")
 
 
 async def current_alembic_revision() -> Optional[str]:

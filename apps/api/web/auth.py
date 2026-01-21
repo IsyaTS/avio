@@ -407,7 +407,13 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
 
     password_hash = auth_utils.hash_password(password)
     try:
-        user = await auth_repo.create_user(email, password_hash, tenant_id)
+        user = await auth_repo.create_user(
+            email,
+            password_hash,
+            tenant_id,
+            contact=contact,
+            preferred_messenger=messenger,
+        )
     except db_module.DatabaseUnavailableError:
         return JSONResponse({"detail": "db_unavailable"}, status_code=503)
     if not user:
