@@ -549,7 +549,7 @@ async def resend_verify(request: Request, background_tasks: BackgroundTasks):
 
 
 @router.get("/auth/verify")
-async def verify_email(request: Request, token: str | None = None, background_tasks: BackgroundTasks | None = None):
+async def verify_email(request: Request, token: str | None = None, background_tasks: BackgroundTasks):
     if not auth_utils.auth_enabled():
         return _auth_disabled()
     if not token:
@@ -621,8 +621,6 @@ async def verify_email(request: Request, token: str | None = None, background_ta
         )
     client_key = (C.get_tenant_pubkey(tenant_id) or "").strip()
     response = RedirectResponse(url=_session_redirect_path(request, tenant_id), status_code=303)
-    if background_tasks is not None:
-        response.background = background_tasks
     _set_session_cookies(request, response, session_id, client_key or None)
     return response
 
