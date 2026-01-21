@@ -155,12 +155,18 @@
 
   if (registerForm) {
     const requiredNames = ["email", "phone", "password"];
+    const extraInputs = Array.from(
+      registerForm.querySelectorAll("[data-extra-fields] input, [data-extra-fields] select")
+    );
     const updateExtra = () => {
       const ready = requiredNames.every((name) => {
         const input = registerForm.querySelector(`[name=\"${name}\"]`);
         return input && String(input.value || \"\").trim().length > 0;
       });
       registerForm.classList.toggle(\"is-expanded\", ready);
+      extraInputs.forEach((field) => {
+        field.disabled = !ready;
+      });
     };
 
     registerForm.addEventListener(\"input\", updateExtra);
