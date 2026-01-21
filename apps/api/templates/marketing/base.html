@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="{{ static_url(request, 'css/design-tokens.css') }}?v={{ client_settings_version }}" />
-  <link rel="stylesheet" href="{{ static_url(request, 'landing/landing.css') }}?v={{ client_settings_version }}" />
+  <link rel="stylesheet" href="{{ static_url(request, 'css/design-tokens.css') }}?v={{ landing_version }}" />
+  <link rel="stylesheet" href="{{ static_url(request, 'landing/landing.css') }}?v={{ landing_version }}" />
   {% if extra_head %}{{ extra_head | safe }}{% endif %}
 </head>
 <body class="{{ body_class or '' }}">
@@ -71,6 +71,6 @@
     </div>
   </footer>
   {% if extra_scripts %}{{ extra_scripts | safe }}{% endif %}
-  <script src="{{ static_url(request, 'landing/landing.js') }}?v={{ client_settings_version }}" defer></script>
+  <script src="{{ static_url(request, 'landing/landing.js') }}?v={{ landing_version }}" defer></script>
 </body>
 </html>

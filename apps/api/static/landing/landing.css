@@ -641,6 +641,9 @@ body.nav-open .nav-overlay {
   font-family: inherit;
   color: var(--text);
   background: #f8fafc;
+  box-shadow: none;
+  appearance: none;
+  -webkit-appearance: none;
   transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
 }
 

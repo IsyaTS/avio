@@ -262,6 +262,34 @@ def client_settings_version() -> str:
     return asset_version()
 
 
+def favicon_version() -> str:
+    try:
+        root = pathlib.Path(__file__).resolve().parents[1] / "static" / "branding"
+        ico = root / "favicon.ico"
+        png = root / "favicon.png"
+        mtimes = []
+        for path in (ico, png):
+            if path.exists():
+                mtimes.append(int(path.stat().st_mtime))
+        if mtimes:
+            return str(max(mtimes))
+    except OSError:
+        return asset_version()
+    return asset_version()
+
+
+def landing_version() -> str:
+    try:
+        root = pathlib.Path(__file__).resolve().parents[1] / "static" / "landing"
+        paths = [root / "landing.css", root / "landing.js"]
+        mtimes = [int(path.stat().st_mtime) for path in paths if path.exists()]
+        if mtimes:
+            return str(max(mtimes))
+    except OSError:
+        return asset_version()
+    return asset_version()
+
+
 def _admin_token() -> str:
     return (getattr(settings, "ADMIN_TOKEN", "") or os.getenv("ADMIN_TOKEN") or "").strip()
 
