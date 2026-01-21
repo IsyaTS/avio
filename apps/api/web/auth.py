@@ -499,14 +499,6 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse({"detail": "db_unavailable"}, status_code=503)
     verify_url = _email_verify_link(request, token_raw)
     background_tasks.add_task(_send_verify_email, email, verify_url)
-    background_tasks.add_task(
-        _notify_registration,
-        tenant_id,
-        email=email,
-        phone=phone,
-        contact=contact,
-        messenger=messenger,
-    )
 
     context = _base_context(request, "Проверьте почту · Avio")
     context["message"] = "Мы отправили ссылку для подтверждения на ваш email."
@@ -557,7 +549,7 @@ async def resend_verify(request: Request, background_tasks: BackgroundTasks):
 
 
 @router.get("/auth/verify")
-async def verify_email(request: Request, token: str | None = None):
+async def verify_email(request: Request, token: str | None = None, background_tasks: BackgroundTasks | None = None):
     if not auth_utils.auth_enabled():
         return _auth_disabled()
     if not token:
@@ -609,8 +601,28 @@ async def verify_email(request: Request, token: str | None = None):
     await auth_repo.update_last_login(user_id)
 
     tenant_id = int(user["tenant_id"])
+    try:
+        cfg = C.read_tenant_config(tenant_id)
+    except Exception:
+        cfg = {}
+    passport = cfg.get("passport") or {}
+    phone = str(passport.get("phone") or "").strip()
+    contact = str(user.get("contact") or "").strip()
+    messenger = str(user.get("preferred_messenger") or "").strip()
+
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _notify_registration,
+            tenant_id,
+            email=str(user.get("email") or ""),
+            phone=phone,
+            contact=contact,
+            messenger=messenger,
+        )
     client_key = (C.get_tenant_pubkey(tenant_id) or "").strip()
     response = RedirectResponse(url=_session_redirect_path(request, tenant_id), status_code=303)
+    if background_tasks is not None:
+        response.background = background_tasks
     _set_session_cookies(request, response, session_id, client_key or None)
     return response
 
