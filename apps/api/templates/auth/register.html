@@ -32,13 +32,7 @@
           </label>
           <label>
             <span>Где удобно принять менеджера</span>
-            <select name="messenger" required>
-              <option value="" {% if not messenger %}selected{% endif %}>Выберите мессенджер</option>
-              <option value="telegram" {% if messenger == 'telegram' %}selected{% endif %}>Telegram</option>
-              <option value="whatsapp" {% if messenger == 'whatsapp' %}selected{% endif %}>WhatsApp</option>
-              <option value="avito" {% if messenger == 'avito' %}selected{% endif %}>Avito</option>
-              <option value="other" {% if messenger == 'other' %}selected{% endif %}>Другое</option>
-            </select>
+            <input type="text" name="messenger" value="{{ messenger or '' }}" required placeholder="Например: Telegram или WhatsApp" autocomplete="off" />
           </label>
         </div>
         <button class="btn btn--primary" type="submit">Создать аккаунт</button>

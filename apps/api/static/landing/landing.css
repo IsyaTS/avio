@@ -632,31 +632,27 @@ body.nav-open .nav-overlay {
 .auth-card input[type=\"email\"],
 .auth-card input[type=\"password\"],
 .auth-card input[type=\"text\"],
-.auth-card input[type=\"tel\"],
-.auth-card select {
+.auth-card input[type=\"tel\"] {
   width: 100%;
   padding: 12px 14px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--surface-border);
+  border: 1px solid rgba(148, 163, 184, 0.35);
   font-size: 0.95rem;
   font-family: inherit;
   color: var(--text);
-  background: #fff;
+  background: #f8fafc;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
 }
 
-.auth-card select {
-  appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
-    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
-  background-position: calc(100% - 18px) calc(50% - 3px), calc(100% - 12px) calc(50% - 3px);
-  background-size: 6px 6px, 6px 6px;
-  background-repeat: no-repeat;
+.auth-card input::placeholder {
+  color: rgba(100, 116, 139, 0.8);
 }
 
-.auth-card input:focus-visible,
-.auth-card select:focus-visible {
+.auth-card input:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+  border-color: rgba(37, 99, 235, 0.5);
+  background: #fff;
 }
 
 .extra-fields {
