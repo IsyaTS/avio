@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 import re
+import json
 from html import escape
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -22,6 +23,73 @@ router = APIRouter()
 _log = logging.getLogger("app.web.auth")
 _NOTIFY_BOT_TOKEN = (os.getenv("NOTIFY_BOT_TOKEN") or "").strip()
 _NOTIFY_BOT_PARSE_MODE = (os.getenv("NOTIFY_BOT_PARSE_MODE") or "HTML").strip()
+_DEFAULT_META_DESCRIPTION = (
+    "Avio подключает Avito и Telegram, отвечает за 5 секунд, отправляет каталоги и "
+    "помогает доводить клиента до сделки без ручной рутины."
+)
+_DEFAULT_TITLE = "Avio — умные диалоги в Avito и Telegram"
+_REGISTER_DESCRIPTION = "Создайте аккаунт Avio и запустите умные продажи в мессенджерах."
+_LOGIN_DESCRIPTION = "Войдите в Avio, чтобы управлять каналами и диалогами."
+_FORGOT_DESCRIPTION = "Восстановите доступ к Avio, если забыли пароль."
+_RESET_DESCRIPTION = "Задайте новый пароль для аккаунта Avio."
+_FAQ_ITEMS = [
+    {
+        "question": "Сколько времени занимает подключение?",
+        "answer": "От 5 до 15 минут: подключаем канал, загружаем каталог и запускаем сценарии.",
+    },
+    {
+        "question": "Можно ли отключать автоответы для конкретного чата?",
+        "answer": "Да, менеджер может отключить автоответы в диалоге и вести клиента вручную.",
+    },
+    {
+        "question": "Что бот отправляет в чате?",
+        "answer": "Только то, что вы настроите: тексты, каталоги, фото и автоматические напоминания.",
+    },
+]
+
+
+def _canonical_url(request: Request, path: str | None = None) -> str:
+    base = C.public_base_url(request).rstrip("/")
+    if not path:
+        path = getattr(getattr(request, "url", None), "path", "") or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if not base:
+        return path
+    if path == "/":
+        return f"{base}/"
+    return f"{base}{path}"
+
+
+def _public_static(request: Request, path: str) -> str:
+    return C.public_url(request, C.static_url(request, path))
+
+
+def _org_schema(request: Request) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Avio",
+        "url": C.public_base_url(request).rstrip("/") or "",
+        "logo": _public_static(request, "branding/favicon.png"),
+    }
+
+
+def _faq_schema(request: Request, items: list[dict[str, str]]) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+            {
+                "@type": "Question",
+                "name": item["question"],
+                "acceptedAnswer": {"@type": "Answer", "text": item["answer"]},
+            }
+            for item in items
+        ],
+    }
+
+
 
 
 def _render_with_csrf(request: Request, template: str, context: dict, status_code: int = 200) -> Response:
@@ -67,11 +135,33 @@ def _auth_disabled() -> Response:
     return Response(status_code=404)
 
 
-def _base_context(request: Request, title: str) -> dict:
+def _base_context(
+    request: Request,
+    title: str,
+    *,
+    description: str | None = None,
+    og_type: str = "website",
+    structured_data: list[dict] | None = None,
+) -> dict:
+    canonical_url = _canonical_url(request)
+    meta_description = description or _DEFAULT_META_DESCRIPTION
+    og_title = title or _DEFAULT_TITLE
+    og_description = meta_description
+    og_image = _public_static(request, "branding/favicon.png")
+    structured_items = list(structured_data) if structured_data else []
+    structured_items.insert(0, _org_schema(request))
     return {
         "request": request,
-        "title": title,
+        "title": title or _DEFAULT_TITLE,
         "show_auth_links": auth_utils.auth_enabled(),
+        "canonical_url": canonical_url,
+        "meta_description": meta_description,
+        "og_title": og_title,
+        "og_description": og_description,
+        "og_url": canonical_url,
+        "og_type": og_type,
+        "og_image": og_image,
+        "structured_data": [json.dumps(item, ensure_ascii=False) for item in structured_items],
     }
 
 
@@ -83,9 +173,10 @@ def _register_context(
     phone: str = "",
     contact: str = "",
     messenger: str = "",
+    description: str | None = None,
     error: str | None = None,
 ) -> dict:
-    context = _base_context(request, title)
+    context = _base_context(request, title, description=description)
     context.update(
         {
             "email": email,
@@ -194,7 +285,12 @@ def _send_reset_email(to_email: str, reset_url: str) -> None:
 async def landing(request: Request):
     if not auth_utils.landing_enabled():
         return RedirectResponse(url="/admin")
-    context = _base_context(request, "Avio — умные продажи в мессенджерах")
+    context = _base_context(
+        request,
+        "Avio — умные диалоги в Avito и Telegram",
+        description=_DEFAULT_META_DESCRIPTION,
+        structured_data=[_faq_schema(request, _FAQ_ITEMS)],
+    )
     context["show_auth_links"] = auth_utils.auth_enabled()
     return render_template("marketing/home.html", context)
 
@@ -206,7 +302,7 @@ async def login_form(request: Request):
     user = await auth_utils.get_current_user(request)
     if user:
         return RedirectResponse(url=_session_redirect_path(request, int(user["tenant_id"])))
-    context = _base_context(request, "Вход · Avio")
+    context = _base_context(request, "Вход · Avio", description=_LOGIN_DESCRIPTION)
     context["next"] = auth_utils.safe_redirect_path(request.query_params.get("next"))
     return _render_with_csrf(request, "auth/login.html", context)
 
@@ -221,12 +317,12 @@ async def login_submit(request: Request, background_tasks: BackgroundTasks):
 
     email = auth_utils.normalize_email(form.get("email") or "")
     if not email or "@" not in email:
-        context = _base_context(request, "Сброс пароля · Avio")
+        context = _base_context(request, "Сброс пароля · Avio", description=_FORGOT_DESCRIPTION)
         context["error"] = "Введите корректный email."
         return _render_with_csrf(request, "auth/forgot.html", context, status_code=400)
     password = str(form.get("password") or "")
     if not email or "@" not in email or not password:
-        context = _base_context(request, "Вход · Avio")
+        context = _base_context(request, "Вход · Avio", description=_LOGIN_DESCRIPTION)
         context["error"] = "Введите корректный email и пароль."
         return _render_with_csrf(request, "auth/login.html", context, status_code=400)
 
@@ -247,12 +343,12 @@ async def login_submit(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse({"detail": "db_unavailable"}, status_code=503)
     if not user:
         auth_utils.verify_password("dummy-password", auth_utils.hash_password("dummy"))
-        context = _base_context(request, "Вход · Avio")
+        context = _base_context(request, "Вход · Avio", description=_LOGIN_DESCRIPTION)
         context["error"] = "Неверный email или пароль."
         return _render_with_csrf(request, "auth/login.html", context, status_code=401)
 
     if not auth_utils.verify_password(password, user.get("password_hash") or ""):
-        context = _base_context(request, "Вход · Avio")
+        context = _base_context(request, "Вход · Avio", description=_LOGIN_DESCRIPTION)
         context["error"] = "Неверный email или пароль."
         return _render_with_csrf(request, "auth/login.html", context, status_code=401)
 
@@ -278,7 +374,7 @@ async def login_submit(request: Request, background_tasks: BackgroundTasks):
                 return JSONResponse({"detail": "db_unavailable"}, status_code=503)
             verify_url = _email_verify_link(request, token_raw)
             background_tasks.add_task(_send_verify_email, email, verify_url)
-        context = _base_context(request, "Вход · Avio")
+        context = _base_context(request, "Вход · Avio", description=_LOGIN_DESCRIPTION)
         context["error"] = "Подтвердите email, мы отправили ссылку."
         context["email"] = email
         return _render_with_csrf(request, "auth/login.html", context, status_code=403)
@@ -322,7 +418,11 @@ async def logout(request: Request):
 async def register_form(request: Request):
     if not auth_utils.auth_enabled():
         return _auth_disabled()
-    context = _base_context(request, "Регистрация · Avio")
+    context = _register_context(
+        request,
+        "Регистрация · Avio",
+        description=_REGISTER_DESCRIPTION,
+    )
     return _render_with_csrf(request, "auth/register.html", context)
 
 
@@ -362,6 +462,7 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
             phone=phone,
             contact=contact,
             messenger=messenger,
+            description=_REGISTER_DESCRIPTION,
             error="Введите корректный email.",
         )
         return _render_with_csrf(request, "auth/register.html", context, status_code=400)
@@ -375,6 +476,7 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
             phone=phone,
             contact=contact,
             messenger=messenger,
+            description=_REGISTER_DESCRIPTION,
             error="Введите номер телефона.",
         )
         return _render_with_csrf(request, "auth/register.html", context, status_code=400)
@@ -387,6 +489,7 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
             phone=phone,
             contact=contact,
             messenger=messenger,
+            description=_REGISTER_DESCRIPTION,
             error="Укажите контакт для связи.",
         )
         return _render_with_csrf(request, "auth/register.html", context, status_code=400)
@@ -399,6 +502,7 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
             phone=phone,
             contact=contact,
             messenger=messenger,
+            description=_REGISTER_DESCRIPTION,
             error="Выберите удобный мессенджер.",
         )
         return _render_with_csrf(request, "auth/register.html", context, status_code=400)
@@ -412,6 +516,7 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
             phone=phone,
             contact=contact,
             messenger=messenger,
+            description=_REGISTER_DESCRIPTION,
             error=message or "Пароли не совпадают.",
         )
         return _render_with_csrf(request, "auth/register.html", context, status_code=400)
@@ -482,6 +587,7 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
             phone=phone,
             contact=contact,
             messenger=messenger,
+            description=_REGISTER_DESCRIPTION,
             error="Не удалось создать пользователя. Попробуйте снова.",
         )
         return _render_with_csrf(request, "auth/register.html", context, status_code=500)
@@ -629,7 +735,7 @@ async def verify_email(request: Request, background_tasks: BackgroundTasks, toke
 async def forgot_form(request: Request):
     if not auth_utils.auth_enabled():
         return _auth_disabled()
-    context = _base_context(request, "Сброс пароля · Avio")
+    context = _base_context(request, "Сброс пароля · Avio", description=_FORGOT_DESCRIPTION)
     return _render_with_csrf(request, "auth/forgot.html", context)
 
 
@@ -680,7 +786,7 @@ async def forgot_submit(request: Request, background_tasks: BackgroundTasks):
 async def reset_form(request: Request, token: str | None = None):
     if not auth_utils.auth_enabled():
         return _auth_disabled()
-    context = _base_context(request, "Новый пароль · Avio")
+    context = _base_context(request, "Новый пароль · Avio", description=_RESET_DESCRIPTION)
     context["token"] = token or ""
     return _render_with_csrf(request, "auth/reset.html", context)
 
@@ -699,7 +805,7 @@ async def reset_submit(request: Request):
 
     ok, message = auth_utils.password_ok(password)
     if not ok or password != confirm:
-        context = _base_context(request, "Новый пароль · Avio")
+        context = _base_context(request, "Новый пароль · Avio", description=_RESET_DESCRIPTION)
         context["token"] = token
         context["error"] = message or "Пароли не совпадают."
         return _render_with_csrf(request, "auth/reset.html", context, status_code=400)

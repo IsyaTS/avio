@@ -4,6 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ title or "Avio" }}</title>
+  {% if canonical_url %}<link rel="canonical" href="{{ canonical_url }}" />{% endif %}
+  {% if meta_description %}<meta name="description" content="{{ meta_description }}" />{% endif %}
+  {% if og_title %}<meta property="og:title" content="{{ og_title }}" />{% endif %}
+  {% if og_description %}<meta property="og:description" content="{{ og_description }}" />{% endif %}
+  {% if og_url %}<meta property="og:url" content="{{ og_url }}" />{% endif %}
+  {% if og_type %}<meta property="og:type" content="{{ og_type }}" />{% endif %}
+  {% if og_image %}<meta property="og:image" content="{{ og_image }}" />{% endif %}
+  <meta property="og:site_name" content="Avio" />
   <link rel="icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
   <link rel="shortcut icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
   <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
@@ -11,6 +19,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="{{ static_url(request, 'css/design-tokens.css') }}?v={{ landing_version }}" />
   <link rel="stylesheet" href="{{ static_url(request, 'landing/landing.css') }}?v={{ landing_version }}" />
+  {% if structured_data %}
+    {% for schema_json in structured_data %}
+    <script type="application/ld+json">{{ schema_json | safe }}</script>
+    {% endfor %}
+  {% endif %}
   {% if extra_head %}{{ extra_head | safe }}{% endif %}
 </head>
 <body class="{{ body_class or '' }}">
