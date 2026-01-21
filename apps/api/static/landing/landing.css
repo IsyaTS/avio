@@ -629,10 +629,10 @@ body.nav-open .nav-overlay {
   color: var(--text-muted);
 }
 
-.auth-card input[type=\"email\"],
-.auth-card input[type=\"password\"],
-.auth-card input[type=\"text\"],
-.auth-card input[type=\"tel\"] {
+.auth-card input[type="email"],
+.auth-card input[type="password"],
+.auth-card input[type="text"],
+.auth-card input[type="tel"] {
   width: 100%;
   padding: 12px 14px;
   border-radius: var(--radius-md) !important;
