@@ -307,6 +307,7 @@ async def landing(request: Request):
 
 
 @router.get("/robots.txt")
+@router.head("/robots.txt")
 async def robots_txt(request: Request) -> Response:
     if not auth_utils.landing_enabled():
         return Response(status_code=404)
@@ -333,6 +334,7 @@ async def robots_txt(request: Request) -> Response:
 
 
 @router.get("/sitemap.xml")
+@router.head("/sitemap.xml")
 async def sitemap_xml(request: Request) -> Response:
     if not auth_utils.landing_enabled():
         return Response(status_code=404)
