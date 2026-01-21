@@ -53,6 +53,33 @@ async def ensure_schema() -> None:
     await runner()
 
 
+def _max_fs_tenant_id() -> int:
+    getter = getattr(db_module, "_max_tenant_id_fs", None)
+    if not callable(getter):
+        return 0
+    try:
+        return int(getter() or 0)
+    except Exception:
+        return 0
+
+
+async def _max_db_tenant_id() -> int:
+    row = await _fetchrow("SELECT COALESCE(MAX(id), 0) AS max_id FROM auth_tenants")
+    if not row:
+        return 0
+    data = _row_to_dict(row) or {}
+    try:
+        return int(data.get("max_id") or 0)
+    except Exception:
+        return 0
+
+
+async def _next_tenant_id() -> int:
+    max_fs = _max_fs_tenant_id()
+    max_db = await _max_db_tenant_id()
+    return max(max_fs, max_db) + 1
+
+
 async def _fetchrow(sql: str, *args: Any):
     fetchrow = getattr(db_module, "_fetchrow", None)
     if fetchrow is None:
@@ -117,14 +144,26 @@ async def create_tenant() -> int:
         _MEM["tenants"][tenant_id] = {"id": tenant_id, "created_at": _now()}
         return tenant_id
 
-    row = await _fetchrow(
-        "INSERT INTO auth_tenants DEFAULT VALUES RETURNING id",
-    )
-    if not row:
-        raise db_module.DatabaseUnavailableError("tenant_create_failed")
-    data = _row_to_dict(row) or {}
-    tenant_id = data.get("id")
-    return int(tenant_id or 0)
+    unique_violation = getattr(getattr(db_module, "asyncpg", None), "UniqueViolationError", None)
+    next_id = await _next_tenant_id()
+    for _ in range(5):
+        try:
+            row = await _fetchrow(
+                "INSERT INTO auth_tenants(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id",
+                int(next_id),
+            )
+        except Exception as exc:
+            if unique_violation and isinstance(exc, unique_violation):
+                row = None
+            else:
+                raise
+        if row:
+            data = _row_to_dict(row) or {}
+            tenant_id = data.get("id")
+            return int(tenant_id or next_id)
+        next_id += 1
+
+    raise db_module.DatabaseUnavailableError("tenant_create_failed")
 
 
 async def delete_tenant(tenant_id: int) -> None:
