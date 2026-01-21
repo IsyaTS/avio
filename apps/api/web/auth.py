@@ -124,7 +124,7 @@ async def _notify_registration(
         return
     url = f"https://api.telegram.org/bot{_NOTIFY_BOT_TOKEN}/sendMessage"
     text = (
-        "<b>Новая регистрация</b>\n"
+        "Новая регистрация\n"
         f"Tenant: {tenant_id}\n"
         f"Email: {escape(email)}\n"
         f"Телефон: {escape(phone)}\n"
