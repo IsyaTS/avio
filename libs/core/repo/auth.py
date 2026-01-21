@@ -60,10 +60,13 @@ async def _fetchrow(sql: str, *args: Any):
         return None
     asyncpg_module = getattr(db_module, "asyncpg", None)
     undefined_table_error = getattr(asyncpg_module, "UndefinedTableError", None)
+    undefined_column_error = getattr(asyncpg_module, "UndefinedColumnError", None)
     try:
         return await fetchrow(sql, *args)
     except Exception as exc:
-        if undefined_table_error and isinstance(exc, undefined_table_error):
+        if (undefined_table_error and isinstance(exc, undefined_table_error)) or (
+            undefined_column_error and isinstance(exc, undefined_column_error)
+        ):
             await ensure_schema()
             return await fetchrow(sql, *args)
         raise
@@ -76,10 +79,13 @@ async def _exec(sql: str, *args: Any) -> int:
         return 0
     asyncpg_module = getattr(db_module, "asyncpg", None)
     undefined_table_error = getattr(asyncpg_module, "UndefinedTableError", None)
+    undefined_column_error = getattr(asyncpg_module, "UndefinedColumnError", None)
     try:
         return await exec_fn(sql, *args)
     except Exception as exc:
-        if undefined_table_error and isinstance(exc, undefined_table_error):
+        if (undefined_table_error and isinstance(exc, undefined_table_error)) or (
+            undefined_column_error and isinstance(exc, undefined_column_error)
+        ):
             await ensure_schema()
             return await exec_fn(sql, *args)
         raise
@@ -92,10 +98,13 @@ async def _fetch(sql: str, *args: Any):
         return []
     asyncpg_module = getattr(db_module, "asyncpg", None)
     undefined_table_error = getattr(asyncpg_module, "UndefinedTableError", None)
+    undefined_column_error = getattr(asyncpg_module, "UndefinedColumnError", None)
     try:
         return await fetch_fn(sql, *args)
     except Exception as exc:
-        if undefined_table_error and isinstance(exc, undefined_table_error):
+        if (undefined_table_error and isinstance(exc, undefined_table_error)) or (
+            undefined_column_error and isinstance(exc, undefined_column_error)
+        ):
             await ensure_schema()
             return await fetch_fn(sql, *args)
         raise
