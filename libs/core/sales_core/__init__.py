@@ -870,6 +870,9 @@ DEFAULT_TENANT_JSON = {
         "currency": "₽",
         "channel": "WhatsApp",
         "whatsapp_link": "https://wa.me/7XXXXXXXXXX",
+        "phone": "",
+        "contact": "",
+        "preferred_messenger": "",
     },
     "behavior": {
         "always_full_catalog": True,

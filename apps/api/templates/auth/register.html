@@ -1,0 +1,51 @@
+{% extends "marketing/base.html" %}
+{% block content %}
+  <section class="auth-wrap">
+    <div class="auth-card">
+      <h1>Регистрация</h1>
+      <p class="lead">Создайте кабинет и получите доступ к настройкам.</p>
+      {% if error %}
+        <div class="alert">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="/auth/register" class="js-register-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" value="{{ email or '' }}" required autocomplete="email" />
+        </label>
+        <label>
+          <span>Телефон</span>
+          <input type="tel" name="phone" value="{{ phone or '' }}" required autocomplete="tel" />
+        </label>
+        <label>
+          <span>Пароль</span>
+          <input type="password" name="password" required autocomplete="new-password" />
+        </label>
+        <label>
+          <span>Повторите пароль</span>
+          <input type="password" name="confirm_password" required autocomplete="new-password" />
+        </label>
+        <div class="extra-fields" data-extra-fields>
+          <label>
+            <span>Контакт (ник Telegram или другое)</span>
+            <input type="text" name="contact" value="{{ contact or '' }}" required autocomplete="username" />
+          </label>
+          <label>
+            <span>Где удобно принять менеджера</span>
+            <select name="messenger" required>
+              <option value="" {% if not messenger %}selected{% endif %}>Выберите мессенджер</option>
+              <option value="telegram" {% if messenger == 'telegram' %}selected{% endif %}>Telegram</option>
+              <option value="whatsapp" {% if messenger == 'whatsapp' %}selected{% endif %}>WhatsApp</option>
+              <option value="avito" {% if messenger == 'avito' %}selected{% endif %}>Avito</option>
+              <option value="other" {% if messenger == 'other' %}selected{% endif %}>Другое</option>
+            </select>
+          </label>
+        </div>
+        <button class="btn btn--primary" type="submit">Создать аккаунт</button>
+      </form>
+      <div class="auth-links">
+        <a href="/login">Уже есть аккаунт?</a>
+      </div>
+    </div>
+  </section>
+{% endblock %}

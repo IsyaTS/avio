@@ -5,6 +5,7 @@
   const navToggle = document.querySelector(".nav-toggle");
   const navOverlay = document.querySelector(".nav-overlay");
   const navPanel = document.querySelector(".nav-panel");
+  const registerForm = document.querySelector(".js-register-form");
 
   const setHeaderState = () => {
     if (!header) return;
@@ -150,5 +151,19 @@
         closeMenu();
       }
     });
+  }
+
+  if (registerForm) {
+    const requiredNames = ["email", "phone", "password"];
+    const updateExtra = () => {
+      const ready = requiredNames.every((name) => {
+        const input = registerForm.querySelector(`[name=\"${name}\"]`);
+        return input && String(input.value || \"\").trim().length > 0;
+      });
+      registerForm.classList.toggle(\"is-expanded\", ready);
+    };
+
+    registerForm.addEventListener(\"input\", updateExtra);
+    updateExtra();
   }
 })();

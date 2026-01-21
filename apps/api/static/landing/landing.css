@@ -631,7 +631,9 @@ body.nav-open .nav-overlay {
 
 .auth-card input[type=\"email\"],
 .auth-card input[type=\"password\"],
-.auth-card input[type=\"text\"] {
+.auth-card input[type=\"text\"],
+.auth-card input[type=\"tel\"],
+.auth-card select {
   width: 100%;
   padding: 12px 14px;
   border-radius: var(--radius-md);
@@ -642,9 +644,32 @@ body.nav-open .nav-overlay {
   background: #fff;
 }
 
-.auth-card input:focus-visible {
+.auth-card select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 18px) calc(50% - 3px), calc(100% - 12px) calc(50% - 3px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+.auth-card input:focus-visible,
+.auth-card select:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+.extra-fields {
+  display: grid;
+  gap: 14px;
+}
+
+body.has-js .js-register-form .extra-fields {
+  display: none;
+}
+
+body.has-js .js-register-form.is-expanded .extra-fields {
+  display: grid;
 }
 
 .auth-links {
