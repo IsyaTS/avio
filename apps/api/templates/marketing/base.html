@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title or "Avio" }}</title>
+  <link rel="icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
+  <link rel="shortcut icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ static_url(request, 'css/design-tokens.css') }}?v={{ client_settings_version }}" />
+  <link rel="stylesheet" href="{{ static_url(request, 'landing/landing.css') }}?v={{ client_settings_version }}" />
+  {% if extra_head %}{{ extra_head | safe }}{% endif %}
+</head>
+<body class="{{ body_class or '' }}">
+  <div class="bg-sheen"></div>
+  <div class="bg-orb bg-orb--one" data-orb data-speed="0.25"></div>
+  <div class="bg-orb bg-orb--two" data-orb data-speed="0.18"></div>
+  <div class="bg-orb bg-orb--three" data-orb data-speed="0.32"></div>
+
+  <header class="site-header">
+    <a class="brand brand-link" href="/">
+      <img class="brand-icon" src="{{ static_url(request, 'branding/favicon.png') }}?v={{ favicon_version }}" alt="Avio" />
+      <span class="brand-name">Avio</span>
+    </a>
+    <div class="nav-panel" id="nav-panel">
+      <nav class="site-nav" aria-label="Основная навигация">
+        <a class="nav-link" href="/#features">Возможности</a>
+        <a class="nav-link" href="/#how">Как работает</a>
+        <a class="nav-link" href="/#demo">Каналы</a>
+        <a class="nav-link" href="/#proof">Отзывы</a>
+        <a class="nav-link" href="/#security">Безопасность</a>
+      </nav>
+      {% if show_auth_links %}
+      <div class="nav-actions">
+        <a class="btn btn--ghost" href="/login">Войти</a>
+        <a class="btn btn--primary" href="/register">Регистрация</a>
+      </div>
+      {% endif %}
+    </div>
+    <button class="nav-toggle" type="button" aria-label="Открыть меню" aria-expanded="false" aria-controls="nav-panel">
+      <span class="nav-toggle-bar"></span>
+      <span class="nav-toggle-bar"></span>
+      <span class="nav-toggle-bar"></span>
+    </button>
+  </header>
+  <div class="nav-overlay" data-nav-overlay></div>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer" id="contacts">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <strong>Avio</strong>
+        <span>Платформа умных продаж в мессенджерах</span>
+      </div>
+      <div class="footer-links">
+        <a href="/#features">Возможности</a>
+        <a href="/#how">Как работает</a>
+        <a href="/#demo">Каналы</a>
+        <a href="/#proof">Отзывы</a>
+        <a href="/login">Войти</a>
+      </div>
+      <div class="footer-meta">
+        <span>support@avio.website</span>
+        <span>© {{ (year or 2026) }}</span>
+      </div>
+    </div>
+  </footer>
+  {% if extra_scripts %}{{ extra_scripts | safe }}{% endif %}
+  <script src="{{ static_url(request, 'landing/landing.js') }}?v={{ client_settings_version }}" defer></script>
+</body>
+</html>

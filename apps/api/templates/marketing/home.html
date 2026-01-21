@@ -1,0 +1,223 @@
+{% extends "marketing/base.html" %}
+{% block content %}
+<section id="top" class="hero section section--hero">
+  <div class="container hero-grid">
+    <div class="hero-content" data-reveal>
+      <p class="eyebrow">Автоматизация продаж в мессенджерах</p>
+      <h1>Умные диалоги в Avito и Telegram, которые доводят клиента до сделки.</h1>
+      <p class="lead">
+        Avio подключает каналы, отвечает за 5 секунд, отправляет каталоги и помогает
+        закрывать сделки без ручной рутины.
+      </p>
+      {% if show_auth_links %}
+      <div class="hero-actions" data-reveal style="--delay: 120ms">
+        <a class="btn btn--primary" href="/register">Попробовать бесплатно</a>
+        <a class="btn btn--ghost" href="/login">Войти</a>
+      </div>
+      {% endif %}
+      <div class="hero-metrics" data-reveal style="--delay: 180ms">
+        <div class="metric-pill">+38% конверсия из заявки в диалог</div>
+        <div class="metric-pill">до 3× быстрее реакция</div>
+        <div class="metric-pill">24/7 без потери контекста</div>
+      </div>
+    </div>
+    <div class="hero-visual" data-reveal style="--delay: 220ms">
+      <div class="visual-card visual-card--primary">
+        <div class="visual-header">
+          <div class="visual-title">Диалоги и статусы</div>
+          <span class="status-pill">Live</span>
+        </div>
+        <div class="visual-body">
+          <div class="chat-line incoming">Клиент: нужна дверь с зеркалом</div>
+          <div class="chat-line outgoing">Avio: уточните город и размеры</div>
+          <div class="chat-line incoming">Екатеринбург, 900×2050</div>
+          <div class="chat-line outgoing">Отправляю варианты и каталог</div>
+        </div>
+        <div class="visual-footer">
+          <span>Follow‑up</span>
+          <span>Каталоги</span>
+          <span>Фото</span>
+        </div>
+      </div>
+      <div class="visual-card visual-card--secondary">
+        <h3>Сигналы в моменте</h3>
+        <ul>
+          <li>Уточнён город → персональные сроки.</li>
+          <li>Интерес к цене → прайс и скидки.</li>
+          <li>Номер телефона → уведомление менеджеру.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" class="section">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <h2>Преимущества, которые ценит отдел продаж</h2>
+      <p class="section-subtitle">Сфокусированы на скорости ответа, контроле и сохранении контекста.</p>
+    </div>
+    <div class="feature-grid">
+      <article class="feature-card" data-reveal style="--delay: 0ms">
+        <h3>Сценарии без хаоса</h3>
+        <p>Follow‑up, условия и напоминания работают прозрачно и не раздражают клиентов.</p>
+      </article>
+      <article class="feature-card" data-reveal style="--delay: 60ms">
+        <h3>Единый контроль</h3>
+        <p>История диалогов, статусы автоответов и действия менеджеров в одном окне.</p>
+      </article>
+      <article class="feature-card" data-reveal style="--delay: 120ms">
+        <h3>Автоконтент</h3>
+        <p>Каталоги, фото и FAQ отправляются именно тогда, когда это нужно лидy.</p>
+      </article>
+      <article class="feature-card" data-reveal style="--delay: 180ms">
+        <h3>Гибкие персоны</h3>
+        <p>Стили общения под нишу и канал — Avito и Telegram ощущаются по‑разному.</p>
+      </article>
+      <article class="feature-card" data-reveal style="--delay: 240ms">
+        <h3>Интеграции</h3>
+        <p>Avito и Telegram подключаются за минуты, без тяжёлых внедрений.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="section section--muted">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <h2>Как это работает</h2>
+      <p class="section-subtitle">Три шага до полноценного автодиалога.</p>
+    </div>
+    <div class="steps">
+      <div class="step" data-reveal style="--delay: 0ms">
+        <div class="step-index">01</div>
+        <div>
+          <h3>Подключение</h3>
+          <p>Авторизация канала и выдача ссылки клиенту — всё без ручной настройки.</p>
+        </div>
+      </div>
+      <div class="step" data-reveal style="--delay: 80ms">
+        <div class="step-index">02</div>
+        <div>
+          <h3>Обучение</h3>
+          <p>Загрузка каталога, теги фото, частые вопросы и ответы.</p>
+        </div>
+      </div>
+      <div class="step" data-reveal style="--delay: 160ms">
+        <div class="step-index">03</div>
+        <div>
+          <h3>Запуск</h3>
+          <p>Автоответы, follow‑up и контроль менеджеров — всё в одном кабинете.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="demo" class="section">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <h2>Демо продукта</h2>
+      <p class="section-subtitle">Как выглядит у клиентов в реальном потоке.</p>
+    </div>
+    <div class="demo-grid">
+      <div class="demo-card" data-reveal style="--delay: 0ms">
+        <div class="demo-preview">
+          <div class="demo-pill">Диалоги</div>
+          <span class="demo-title">Единое окно общения</span>
+        </div>
+        <p>Менеджер видит всю историю, автоответы и тишину в одном интерфейсе.</p>
+      </div>
+      <div class="demo-card" data-reveal style="--delay: 80ms">
+        <div class="demo-preview">
+          <div class="demo-pill">Каталоги</div>
+          <span class="demo-title">Контент по условиям</span>
+        </div>
+        <p>Каталоги, фото и ответы подбираются автоматически и отправляются вовремя.</p>
+      </div>
+      <div class="demo-card" data-reveal style="--delay: 160ms">
+        <div class="demo-preview">
+          <div class="demo-pill">Контроль</div>
+          <span class="demo-title">Статусы и аналитика</span>
+        </div>
+        <p>Все диалоги в контроле: кто отвечает, где тишина, что отправлено.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="proof" class="section section--muted">
+  <div class="container">
+    <div class="section-head" data-reveal>
+      <h2>Компании уже используют Avio</h2>
+      <p class="section-subtitle">Пилотный доступ для команд, которые хотят расти быстрее.</p>
+    </div>
+    <div class="logo-row" data-reveal>
+      <span class="logo-pill">Ритейл</span>
+      <span class="logo-pill">Стройка</span>
+      <span class="logo-pill">Мебель</span>
+      <span class="logo-pill">Инженерия</span>
+      <span class="logo-pill">Производство</span>
+    </div>
+    <div class="testimonial-grid">
+      <article class="testimonial-card" data-reveal style="--delay: 0ms">
+        <p>Стало проще отвечать быстро и не терять клиентов.</p>
+        <span>Руководитель продаж</span>
+      </article>
+      <article class="testimonial-card" data-reveal style="--delay: 80ms">
+        <p>Follow‑up перестали раздражать — теперь это аккуратный сценарий.</p>
+        <span>Собственник бизнеса</span>
+      </article>
+      <article class="testimonial-card" data-reveal style="--delay: 160ms">
+        <p>Команда видит контекст и меньше переключается между каналами.</p>
+        <span>Операционный менеджер</span>
+      </article>
+    </div>
+    {% if show_auth_links %}
+    <div class="inline-cta" data-reveal style="--delay: 200ms">
+      <a class="btn btn--primary" href="/register">Запросить доступ</a>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<section id="security" class="section">
+  <div class="container security-grid">
+    <div class="security-copy" data-reveal>
+      <h2>Безопасность и контроль</h2>
+      <p class="section-subtitle">Доступы по ролям, журнал действий и защита от переборов паролей.</p>
+    </div>
+    <div class="security-card" data-reveal style="--delay: 120ms">
+      <div>
+        <h3>Сессии и аудит</h3>
+        <p>Каждый вход фиксируется, а сессии можно отзывать в один клик.</p>
+      </div>
+      <div>
+        <h3>Защита данных</h3>
+        <p>Ключи и токены хранятся безопасно, поддерживаются ограничения доступа.</p>
+      </div>
+      <div>
+        <h3>Командный контроль</h3>
+        <p>Менеджеры видят свои диалоги, руководитель — всю картину.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="cta" class="section section--cta">
+  <div class="container">
+    <div class="cta-card" data-reveal>
+      <div>
+        <h2>Готовы подключить Avio за 5 минут?</h2>
+        <p>Регистрация займёт минуту. Можно начать бесплатно.</p>
+      </div>
+      {% if show_auth_links %}
+      <div class="cta-actions">
+        <a class="btn btn--primary" href="/register">Создать аккаунт</a>
+        <a class="btn btn--ghost" href="/login">Войти</a>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}
