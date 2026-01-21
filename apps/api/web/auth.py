@@ -3,13 +3,15 @@ from __future__ import annotations
 import os
 import logging
 import re
+from html import escape
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from libs.core import emailer
+from libs.core import emailer, common as core_common
 from libs.core.repo import auth as auth_repo
 from libs.core import db as db_module
 from . import common as C
@@ -18,6 +20,8 @@ from . import auth_utils
 
 router = APIRouter()
 _log = logging.getLogger("app.web.auth")
+_NOTIFY_BOT_TOKEN = (os.getenv("NOTIFY_BOT_TOKEN") or "").strip()
+_NOTIFY_BOT_PARSE_MODE = (os.getenv("NOTIFY_BOT_PARSE_MODE") or "HTML").strip()
 
 
 def _render_with_csrf(request: Request, template: str, context: dict, status_code: int = 200) -> Response:
@@ -101,6 +105,59 @@ def _email_verify_link(request: Request, token: str) -> str:
         base = ""
     query = urlencode({"token": token})
     return f"{base}/auth/verify?{query}"
+
+
+async def _notify_registration(
+    tenant_id: int,
+    *,
+    email: str,
+    phone: str,
+    contact: str,
+    messenger: str,
+) -> None:
+    if not _NOTIFY_BOT_TOKEN:
+        _log.info("event=registration_notify_skip reason=missing_token tenant=%s", tenant_id)
+        return
+    chat_ids = core_common.notification_chat_ids(tenant_id, "registration")
+    if not chat_ids:
+        _log.info("event=registration_notify_skip reason=no_chat_ids tenant=%s", tenant_id)
+        return
+    url = f"https://api.telegram.org/bot{_NOTIFY_BOT_TOKEN}/sendMessage"
+    text = (
+        "<b>Новая регистрация</b>\n"
+        f"Tenant: {tenant_id}\n"
+        f"Email: {escape(email)}\n"
+        f"Телефон: {escape(phone)}\n"
+        f"Контакт: {escape(contact)}\n"
+        f"Мессенджер: {escape(messenger)}"
+    )
+    payload_base = {
+        "text": text,
+        "parse_mode": _NOTIFY_BOT_PARSE_MODE or "HTML",
+        "disable_web_page_preview": True,
+    }
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for chat_id in chat_ids:
+            payload = dict(payload_base)
+            payload["chat_id"] = int(chat_id)
+            try:
+                resp = await client.post(url, json=payload)
+            except Exception as exc:
+                _log.warning(
+                    "event=registration_notify_failed tenant=%s chat_id=%s error=%s",
+                    tenant_id,
+                    chat_id,
+                    exc,
+                )
+                continue
+            if resp.status_code >= 300:
+                _log.warning(
+                    "event=registration_notify_failed tenant=%s chat_id=%s status=%s body=%s",
+                    tenant_id,
+                    chat_id,
+                    resp.status_code,
+                    resp.text,
+                )
 
 
 def _email_reset_link(request: Request, token: str) -> str:
@@ -442,6 +499,14 @@ async def register_submit(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse({"detail": "db_unavailable"}, status_code=503)
     verify_url = _email_verify_link(request, token_raw)
     background_tasks.add_task(_send_verify_email, email, verify_url)
+    background_tasks.add_task(
+        _notify_registration,
+        tenant_id,
+        email=email,
+        phone=phone,
+        contact=contact,
+        messenger=messenger,
+    )
 
     context = _base_context(request, "Проверьте почту · Avio")
     context["message"] = "Мы отправили ссылку для подтверждения на ваш email."
