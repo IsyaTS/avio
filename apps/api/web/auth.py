@@ -4,6 +4,7 @@ import os
 import logging
 import re
 import json
+import pathlib
 from html import escape
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -88,6 +89,16 @@ def _faq_schema(request: Request, items: list[dict[str, str]]) -> dict:
             for item in items
         ],
     }
+
+
+def _landing_lastmod() -> str | None:
+    try:
+        base = pathlib.Path(__file__).resolve().parents[1]
+        target = base / "templates" / "marketing" / "home.html"
+        ts = target.stat().st_mtime
+    except Exception:
+        return None
+    return datetime.utcfromtimestamp(ts).date().isoformat()
 
 
 
@@ -293,6 +304,55 @@ async def landing(request: Request):
     )
     context["show_auth_links"] = auth_utils.auth_enabled()
     return render_template("marketing/home.html", context)
+
+
+@router.get("/robots.txt")
+async def robots_txt(request: Request) -> Response:
+    if not auth_utils.landing_enabled():
+        return Response(status_code=404)
+    base = auth_utils.build_email_base_url(request).rstrip("/")
+    sitemap_url = f"{base}/sitemap.xml" if base else "/sitemap.xml"
+    lines = [
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /admin",
+        "Disallow: /client",
+        "Disallow: /login",
+        "Disallow: /register",
+        "Disallow: /auth",
+        "Disallow: /forgot",
+        "Disallow: /reset",
+        "Disallow: /dashboard",
+        "Disallow: /settings",
+        "Disallow: /pub",
+        "Disallow: /internal",
+        "Disallow: /docs",
+        f"Sitemap: {sitemap_url}",
+    ]
+    return Response("\n".join(lines) + "\n", media_type="text/plain")
+
+
+@router.get("/sitemap.xml")
+async def sitemap_xml(request: Request) -> Response:
+    if not auth_utils.landing_enabled():
+        return Response(status_code=404)
+    base = auth_utils.build_email_base_url(request).rstrip("/")
+    lastmod = _landing_lastmod()
+    url_items = [
+        {"loc": f"{base}/" if base else "/", "lastmod": lastmod},
+    ]
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for item in url_items:
+        parts.append("  <url>")
+        parts.append(f"    <loc>{escape(item['loc'])}</loc>")
+        if item.get("lastmod"):
+            parts.append(f"    <lastmod>{item['lastmod']}</lastmod>")
+        parts.append("  </url>")
+    parts.append("</urlset>")
+    return Response("\n".join(parts), media_type="application/xml")
 
 
 @router.get("/login")
