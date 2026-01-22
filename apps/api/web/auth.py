@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response, FileResponse
 
 from libs.core import emailer, common as core_common
 from libs.core.repo import auth as auth_repo
@@ -582,6 +582,15 @@ async def robots_txt(request: Request) -> Response:
         f"Sitemap: {sitemap_url}",
     ]
     return Response("\n".join(lines) + "\n", media_type="text/plain")
+
+
+@router.get("/yandex_f8f0345ae289e20c.html")
+@router.head("/yandex_f8f0345ae289e20c.html")
+async def yandex_verification() -> Response:
+    path = pathlib.Path(__file__).resolve().parents[1] / "static" / "yandex_f8f0345ae289e20c.html"
+    if not path.exists():
+        return Response(status_code=404)
+    return FileResponse(str(path), media_type="text/html")
 
 
 @router.get("/sitemap.xml")
