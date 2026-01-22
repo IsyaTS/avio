@@ -33,6 +33,7 @@ _REGISTER_DESCRIPTION = "Создайте аккаунт Avio и запусти�
 _LOGIN_DESCRIPTION = "Войдите в Avio, чтобы управлять каналами и диалогами."
 _FORGOT_DESCRIPTION = "Восстановите доступ к Avio, если забыли пароль."
 _RESET_DESCRIPTION = "Задайте новый пароль для аккаунта Avio."
+_CANONICAL_BASE = "https://avio.website"
 _FAQ_ITEMS = [
     {
         "question": "Сколько времени занимает подключение?",
@@ -50,7 +51,7 @@ _FAQ_ITEMS = [
 
 
 def _canonical_url(request: Request, path: str | None = None) -> str:
-    base = C.public_base_url(request).rstrip("/")
+    base = _CANONICAL_BASE.rstrip("/")
     if not path:
         path = getattr(getattr(request, "url", None), "path", "") or "/"
     if not path.startswith("/"):
@@ -63,7 +64,7 @@ def _canonical_url(request: Request, path: str | None = None) -> str:
 
 
 def _public_static(request: Request, path: str) -> str:
-    return C.public_url(request, C.static_url(request, path))
+    return f"{_CANONICAL_BASE}{C.static_url(request, path)}"
 
 
 def _org_schema(request: Request) -> dict:
@@ -71,8 +72,17 @@ def _org_schema(request: Request) -> dict:
         "@context": "https://schema.org",
         "@type": "Organization",
         "name": "Avio",
-        "url": C.public_base_url(request).rstrip("/") or "",
+        "url": _CANONICAL_BASE,
         "logo": _public_static(request, "branding/favicon.png"),
+    }
+
+
+def _website_schema() -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Avio",
+        "url": _CANONICAL_BASE,
     }
 
 
@@ -99,6 +109,57 @@ def _landing_lastmod() -> str | None:
     except Exception:
         return None
     return datetime.utcfromtimestamp(ts).date().isoformat()
+
+
+def _template_lastmod(template_name: str) -> str | None:
+    try:
+        base = pathlib.Path(__file__).resolve().parents[1]
+        target = base / "templates" / "marketing" / template_name
+        ts = target.stat().st_mtime
+    except Exception:
+        return None
+    return datetime.utcfromtimestamp(ts).date().isoformat()
+
+
+def _breadcrumb_schema(items: list[tuple[str, str]]) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "position": idx + 1,
+                "name": title,
+                "item": url,
+            }
+            for idx, (title, url) in enumerate(items)
+        ],
+    }
+
+
+def _blog_schema(
+    request: Request,
+    *,
+    title: str,
+    description: str,
+    path: str,
+) -> dict:
+    url = _canonical_url(request, path)
+    logo = _public_static(request, "branding/favicon.png")
+    return {
+        "@context": "https://schema.org",
+        "@type": "BlogPosting",
+        "headline": title,
+        "description": description,
+        "url": url,
+        "image": logo,
+        "author": {"@type": "Organization", "name": "Avio"},
+        "publisher": {
+            "@type": "Organization",
+            "name": "Avio",
+            "logo": {"@type": "ImageObject", "url": logo},
+        },
+    }
 
 
 
@@ -160,6 +221,7 @@ def _base_context(
     og_description = meta_description
     og_image = _public_static(request, "branding/favicon.png")
     structured_items = list(structured_data) if structured_data else []
+    structured_items.insert(0, _website_schema())
     structured_items.insert(0, _org_schema(request))
     return {
         "request": request,
@@ -306,12 +368,128 @@ async def landing(request: Request):
     return render_template("marketing/home.html", context)
 
 
+def _render_marketing_page(
+    request: Request,
+    *,
+    template: str,
+    title: str,
+    breadcrumb_title: str,
+    description: str,
+    path: str,
+    extra_structured: list[dict] | None = None,
+) -> Response:
+    breadcrumbs = _breadcrumb_schema(
+        [
+            ("Главная", _canonical_url(request, "/")),
+            (breadcrumb_title, _canonical_url(request, path)),
+        ]
+    )
+    structured = list(extra_structured or [])
+    structured.insert(0, breadcrumbs)
+    context = _base_context(
+        request,
+        title,
+        description=description,
+        structured_data=structured,
+    )
+    context["show_auth_links"] = auth_utils.auth_enabled()
+    return render_template(f"marketing/{template}", context)
+
+
+@router.get("/features")
+async def marketing_features(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="features.html",
+        title="Возможности · Avio",
+        breadcrumb_title="Возможности",
+        description="Ключевые сценарии Avio: автоответы, каталоги, контроль диалогов и умные подсказки.",
+        path="/features",
+    )
+
+
+@router.get("/solutions")
+async def marketing_solutions(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="solutions.html",
+        title="Решения · Avio",
+        breadcrumb_title="Решения",
+        description="Как Avio помогает бизнесам в Avito и Telegram закрывать сделки быстрее.",
+        path="/solutions",
+    )
+
+
+@router.get("/pricing")
+async def marketing_pricing(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="pricing.html",
+        title="Тарифы · Avio",
+        breadcrumb_title="Тарифы",
+        description="Прозрачные условия и быстрый старт с Avio.",
+        path="/pricing",
+    )
+
+
+@router.get("/faq")
+async def marketing_faq(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="faq.html",
+        title="FAQ · Avio",
+        breadcrumb_title="FAQ",
+        description="Ответы на частые вопросы о запуске Avio.",
+        path="/faq",
+        extra_structured=[_faq_schema(request, _FAQ_ITEMS)],
+    )
+
+
+@router.get("/blog")
+async def marketing_blog(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="blog.html",
+        title="Блог · Avio",
+        breadcrumb_title="Блог",
+        description="Практические материалы о продажах в мессенджерах.",
+        path="/blog",
+    )
+
+
+@router.get("/blog/avio-launch")
+async def marketing_blog_post(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    title = "Как Avio ускоряет сделки в Avito и Telegram"
+    description = "Коротко о том, как Avio помогает отвечать быстрее и не терять клиентов."
+    return _render_marketing_page(
+        request,
+        template="blog_post.html",
+        title=title,
+        breadcrumb_title="Статья",
+        description=description,
+        path="/blog/avio-launch",
+        extra_structured=[_blog_schema(request, title=title, description=description, path="/blog/avio-launch")],
+    )
+
+
 @router.get("/robots.txt")
 @router.head("/robots.txt")
 async def robots_txt(request: Request) -> Response:
     if not auth_utils.landing_enabled():
         return Response(status_code=404)
-    base = auth_utils.build_email_base_url(request).rstrip("/")
+    base = _CANONICAL_BASE
     sitemap_url = f"{base}/sitemap.xml" if base else "/sitemap.xml"
     lines = [
         "User-agent: *",
@@ -324,7 +502,6 @@ async def robots_txt(request: Request) -> Response:
         "Disallow: /forgot",
         "Disallow: /reset",
         "Disallow: /dashboard",
-        "Disallow: /settings",
         "Disallow: /pub",
         "Disallow: /internal",
         "Disallow: /docs",
@@ -338,10 +515,15 @@ async def robots_txt(request: Request) -> Response:
 async def sitemap_xml(request: Request) -> Response:
     if not auth_utils.landing_enabled():
         return Response(status_code=404)
-    base = auth_utils.build_email_base_url(request).rstrip("/")
-    lastmod = _landing_lastmod()
+    base = _CANONICAL_BASE
     url_items = [
-        {"loc": f"{base}/" if base else "/", "lastmod": lastmod},
+        {"loc": f"{base}/", "lastmod": _landing_lastmod()},
+        {"loc": f"{base}/features", "lastmod": _template_lastmod("features.html")},
+        {"loc": f"{base}/solutions", "lastmod": _template_lastmod("solutions.html")},
+        {"loc": f"{base}/pricing", "lastmod": _template_lastmod("pricing.html")},
+        {"loc": f"{base}/faq", "lastmod": _template_lastmod("faq.html")},
+        {"loc": f"{base}/blog", "lastmod": _template_lastmod("blog.html")},
+        {"loc": f"{base}/blog/avio-launch", "lastmod": _template_lastmod("blog_post.html")},
     ]
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
