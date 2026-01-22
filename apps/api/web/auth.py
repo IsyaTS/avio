@@ -513,19 +513,7 @@ async def marketing_blog(request: Request):
 
 @router.get("/blog/avio-launch")
 async def marketing_blog_post(request: Request):
-    if not auth_utils.landing_enabled():
-        return RedirectResponse(url="/admin")
-    title = "Как Avio ускоряет сделки в Avito и Telegram"
-    description = "Коротко о том, как Avio помогает отвечать быстрее и не терять клиентов."
-    return _render_marketing_page(
-        request,
-        template="blog_post.html",
-        title=title,
-        breadcrumb_title="Статья",
-        description=description,
-        path="/blog/avio-launch",
-        extra_structured=[_blog_schema(request, title=title, description=description, path="/blog/avio-launch")],
-    )
+    return RedirectResponse(url="/blog", status_code=301)
 
 
 @router.get("/about")
@@ -609,7 +597,6 @@ async def sitemap_xml(request: Request) -> Response:
         {"loc": f"{base}/pricing", "lastmod": _template_lastmod("pricing.html")},
         {"loc": f"{base}/faq", "lastmod": _template_lastmod("faq.html")},
         {"loc": f"{base}/blog", "lastmod": _template_lastmod("blog.html")},
-        {"loc": f"{base}/blog/avio-launch", "lastmod": _template_lastmod("blog_post.html")},
         {"loc": f"{base}/about", "lastmod": _template_lastmod("about.html")},
         {"loc": f"{base}/contacts", "lastmod": _template_lastmod("contacts.html")},
         {"loc": f"{base}/policy", "lastmod": _template_lastmod("policy.html")},
