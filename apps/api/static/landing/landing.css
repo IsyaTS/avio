@@ -735,6 +735,72 @@ body.nav-open .nav-overlay {
   box-shadow: var(--shadow);
 }
 
+.inline-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 16px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.inline-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.inline-links a:hover {
+  color: var(--accent-strong);
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 16px;
+  display: grid;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.list li::before {
+  content: "•";
+  color: var(--accent-strong);
+  margin-right: 8px;
+}
+
+.price-line {
+  font-size: 20px;
+  font-weight: 600;
+  margin-top: 16px;
+}
+
+.price-sub {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.final-cta {
+  margin-top: 48px;
+  padding: 32px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--surface-border);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+}
+
+.final-cta h2 {
+  margin-bottom: 8px;
+}
+
+.final-cta p {
+  color: var(--text-muted);
+  margin-bottom: 18px;
+}
+
 .story-block {
   background: var(--surface);
   border-radius: var(--radius-lg);

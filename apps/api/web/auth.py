@@ -47,6 +47,50 @@ _FAQ_ITEMS = [
         "question": "Что бот отправляет в чате?",
         "answer": "Только то, что вы настроите: тексты, каталоги, фото и автоматические напоминания.",
     },
+    {
+        "question": "Подходит ли Avio для Avito?",
+        "answer": "Да, сценарии заточены под захват контакта и перевод в удобный канал.",
+    },
+    {
+        "question": "Работает ли Avio в Telegram?",
+        "answer": "Да, поддерживаем диалоги, файлы и фото прямо в Telegram.",
+    },
+    {
+        "question": "Можно ли задать разные персоны?",
+        "answer": "Да, стиль общения отдельно для Avito и Telegram.",
+    },
+    {
+        "question": "Нужно ли обучать команду?",
+        "answer": "Нет, интерфейс похож на обычный мессенджер.",
+    },
+    {
+        "question": "Как контролировать качество ответов?",
+        "answer": "В кабинете видна история сообщений, статусы и тишина по каждому чату.",
+    },
+    {
+        "question": "Можно ли отключить автоответы вручную?",
+        "answer": "Да, одним кликом менеджер переводит чат в ручной режим.",
+    },
+    {
+        "question": "Есть ли интеграции с CRM?",
+        "answer": "По запросу подключаем CRM и дополнительные интеграции.",
+    },
+    {
+        "question": "Сколько стоит внедрение?",
+        "answer": "Стоимость зависит от тарифа и объёма. Базовый запуск уже включён.",
+    },
+    {
+        "question": "Можно ли отправлять каталоги и фото?",
+        "answer": "Да, контент отправляется автоматически по условиям.",
+    },
+    {
+        "question": "Какая скорость ответа у бота?",
+        "answer": "Ответ в среднем занимает около 5 секунд.",
+    },
+    {
+        "question": "Есть ли доступ к статистике?",
+        "answer": "Да, отображаются метрики диалогов и эффективность сценариев.",
+    },
 ]
 
 
@@ -484,6 +528,48 @@ async def marketing_blog_post(request: Request):
     )
 
 
+@router.get("/about")
+async def marketing_about(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="about.html",
+        title="О компании · Avio",
+        breadcrumb_title="О компании",
+        description="Avio — продуктовая команда, которая помогает бизнесам продавать быстрее в мессенджерах.",
+        path="/about",
+    )
+
+
+@router.get("/contacts")
+async def marketing_contacts(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="contacts.html",
+        title="Контакты · Avio",
+        breadcrumb_title="Контакты",
+        description="Свяжитесь с командой Avio: почта и быстрый канал связи.",
+        path="/contacts",
+    )
+
+
+@router.get("/policy")
+async def marketing_policy(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    return _render_marketing_page(
+        request,
+        template="policy.html",
+        title="Политика · Avio",
+        breadcrumb_title="Политика",
+        description="Политика обработки данных Avio и принципы конфиденциальности.",
+        path="/policy",
+    )
+
+
 @router.get("/robots.txt")
 @router.head("/robots.txt")
 async def robots_txt(request: Request) -> Response:
@@ -524,6 +610,9 @@ async def sitemap_xml(request: Request) -> Response:
         {"loc": f"{base}/faq", "lastmod": _template_lastmod("faq.html")},
         {"loc": f"{base}/blog", "lastmod": _template_lastmod("blog.html")},
         {"loc": f"{base}/blog/avio-launch", "lastmod": _template_lastmod("blog_post.html")},
+        {"loc": f"{base}/about", "lastmod": _template_lastmod("about.html")},
+        {"loc": f"{base}/contacts", "lastmod": _template_lastmod("contacts.html")},
+        {"loc": f"{base}/policy", "lastmod": _template_lastmod("policy.html")},
     ]
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
