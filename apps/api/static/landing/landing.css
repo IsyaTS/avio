@@ -11,6 +11,10 @@ body {
   line-height: 1.6;
 }
 
+html {
+  overflow-x: hidden;
+}
+
 body.nav-open {
   overflow: hidden;
 }
@@ -1134,6 +1138,8 @@ body.has-js [data-reveal].is-visible {
     transform: translateX(100%);
     transition: transform 0.25s ease;
     z-index: 20;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   body.nav-open .nav-panel {
@@ -1157,6 +1163,10 @@ body.has-js [data-reveal].is-visible {
 
   .nav-toggle {
     display: inline-flex;
+  }
+
+  .site-header {
+    padding: 16px 16px;
   }
 }
 
