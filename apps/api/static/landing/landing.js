@@ -160,16 +160,16 @@
     );
     const updateExtra = () => {
       const ready = requiredNames.every((name) => {
-        const input = registerForm.querySelector(`[name=\"${name}\"]`);
-        return input && String(input.value || \"\").trim().length > 0;
+        const input = registerForm.querySelector(`[name="${name}"]`);
+        return input && String(input.value || "").trim().length > 0;
       });
-      registerForm.classList.toggle(\"is-expanded\", ready);
+      registerForm.classList.toggle("is-expanded", ready);
       extraInputs.forEach((field) => {
         field.disabled = !ready;
       });
     };
 
-    registerForm.addEventListener(\"input\", updateExtra);
+    registerForm.addEventListener("input", updateExtra);
     updateExtra();
   }
 })();
