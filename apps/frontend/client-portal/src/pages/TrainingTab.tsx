@@ -21,6 +21,12 @@ type DialogMessage = {
   from_bot?: boolean;
   feedbacked?: boolean;
   isTemp?: boolean;
+  attachments?: Array<{
+    type?: string;
+    url?: string;
+    filename?: string;
+    photo_id?: string;
+  }>;
 };
 
 type SilenceInfo = {
@@ -41,6 +47,14 @@ type PhotoItem = {
   size?: number;
 };
 
+type SuggestionItem = {
+  id?: number;
+  q_text: string;
+  a_text: string;
+  source?: string;
+  count?: number;
+};
+
 type TestMessage = {
   role: 'user' | 'assistant';
   text: string;
@@ -48,6 +62,7 @@ type TestMessage = {
 
 const TrainingTab: React.FC = () => {
   const { api, bootstrap } = useClient();
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [trainingStatus, setTrainingStatus] = useState('');
   const [trainingFile, setTrainingFile] = useState<File | null>(null);
 
@@ -65,6 +80,12 @@ const TrainingTab: React.FC = () => {
   const [testInput, setTestInput] = useState('');
   const [testChannel, setTestChannel] = useState('telegram');
   const [testLoading, setTestLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionsRefreshing, setSuggestionsRefreshing] = useState(false);
+  const [suggestionsSelected, setSuggestionsSelected] = useState<Record<string, boolean>>({});
+  const [tgPairs, setTgPairs] = useState<Array<{ q_text: string; a_text: string }>>([]);
+  const [tgLoading, setTgLoading] = useState(false);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -102,6 +123,26 @@ const TrainingTab: React.FC = () => {
   const feedbackStatsUrl = useMemo(() => bootstrap.urls?.feedback_stats || '/api/feedback/stats', [bootstrap.urls]);
   const photosListUrl = useMemo(() => bootstrap.urls?.photos_list || '/pub/files/photos/list', [bootstrap.urls]);
   const dialogsTestUrl = useMemo(() => bootstrap.urls?.dialogs_test || '/api/dialogs/test', [bootstrap.urls]);
+  const suggestionsUrl = useMemo(
+    () => bootstrap.urls?.training_suggestions || `/client/${api.tenantId}/training/suggestions`,
+    [bootstrap.urls, api.tenantId]
+  );
+  const suggestionsRefreshUrl = useMemo(
+    () => bootstrap.urls?.training_suggestions_refresh || `/client/${api.tenantId}/training/suggestions/refresh`,
+    [bootstrap.urls, api.tenantId]
+  );
+  const suggestionsAcceptUrl = useMemo(
+    () => bootstrap.urls?.training_suggestions_accept || `/client/${api.tenantId}/training/suggestions/accept`,
+    [bootstrap.urls, api.tenantId]
+  );
+  const tgHarvestUrl = useMemo(
+    () => bootstrap.urls?.training_tg_harvest || `/client/${api.tenantId}/training/telegram/harvest`,
+    [bootstrap.urls, api.tenantId]
+  );
+  const tgAcceptUrl = useMemo(
+    () => bootstrap.urls?.training_tg_accept || `/client/${api.tenantId}/training/telegram/accept`,
+    [bootstrap.urls, api.tenantId]
+  );
 
   const channelBadge = (channel?: string) => {
     const value = (channel || '').toLowerCase();
@@ -110,6 +151,12 @@ const TrainingTab: React.FC = () => {
     }
     if (value === 'telegram') {
       return { label: 'telegram', className: 'bg-sky-100 text-sky-700' };
+    }
+    if (value === 'max') {
+      return { label: 'max', className: 'bg-indigo-100 text-indigo-700' };
+    }
+    if (value === 'whatsapp') {
+      return { label: 'whatsapp', className: 'bg-emerald-100 text-emerald-700' };
     }
     return { label: channel || 'channel', className: 'bg-slate-100 text-slate-500' };
   };
@@ -123,7 +170,7 @@ const TrainingTab: React.FC = () => {
       case 'trigger_match':
         return 'Сработал триггер тишины';
       case 'followup_sent':
-        return 'Отправлен фоллоу‑ап';
+        return 'Отправлено отложенное сообщение';
       case 'silence_active':
       default:
         return 'Тишина включена';
@@ -150,9 +197,94 @@ const TrainingTab: React.FC = () => {
     }
   };
 
+  const loadSuggestions = async () => {
+    if (!api.tenantId || !api.key) return;
+    setSuggestionsLoading(true);
+    try {
+      const data = await requestJson<any>(buildUrl(suggestionsUrl, api));
+      const items: SuggestionItem[] = Array.isArray(data?.items) ? data.items : [];
+      setSuggestions(items);
+      setSuggestionsSelected({});
+    } catch (error) {
+      toast.error('Не удалось загрузить предложения');
+    } finally {
+      setSuggestionsLoading(false);
+    }
+  };
+
+  const handleRefreshSuggestions = async () => {
+    if (!api.tenantId || !api.key) return;
+    setSuggestionsRefreshing(true);
+    try {
+      await postJson(buildUrl(suggestionsRefreshUrl, api), {});
+      toast.success('Предложения обновлены');
+      loadSuggestions().catch(() => undefined);
+    } catch (error) {
+      toast.error('Не удалось обновить предложения');
+    } finally {
+      setSuggestionsRefreshing(false);
+    }
+  };
+
+  const handleAcceptSuggestions = async () => {
+    if (!api.tenantId || !api.key) return;
+    const ids = suggestions
+      .filter((item) => item.id && suggestionsSelected[String(item.id)])
+      .map((item) => item.id as number);
+    if (!ids.length) {
+      toast.error('Выберите хотя бы одно предложение');
+      return;
+    }
+    try {
+      await postJson(buildUrl(suggestionsAcceptUrl, api), { ids });
+      toast.success('Предложения применены');
+      loadSuggestions().catch(() => undefined);
+      refreshTrainingStatus().catch(() => undefined);
+    } catch (error) {
+      toast.error('Не удалось применить предложения');
+    }
+  };
+
+  const handleHarvestTelegram = async () => {
+    if (!api.tenantId || !api.key) return;
+    setTgLoading(true);
+    try {
+      const data = await postJson(buildUrl(tgHarvestUrl, api), { limit_dialogs: 50, limit_messages: 800 });
+      const list = Array.isArray(data?.items) ? data.items : [];
+      setTgPairs(list);
+      if (list.length === 0) {
+        toast.info('Пары не найдены');
+      }
+    } catch (error) {
+      toast.error('Не удалось скачать диалоги Telegram');
+    } finally {
+      setTgLoading(false);
+    }
+  };
+
+  const handleAcceptPair = async (pair: { q_text: string; a_text: string }, idx: number) => {
+    if (!api.tenantId || !api.key) return;
+    try {
+      await postJson(buildUrl(tgAcceptUrl, api), { items: [pair] });
+      setTgPairs((prev) => prev.filter((_, i) => i !== idx));
+      toast.success('Сохранено');
+    } catch (error) {
+      toast.error('Не удалось сохранить пару');
+    }
+  };
+
+  const handleRejectPair = (idx: number) => {
+    setTgPairs((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   useEffect(() => {
     if (!api.tenantId || !api.key) return;
     refreshTrainingStatus().catch(() => undefined);
+  }, [api.tenantId, api.key]);
+
+  useEffect(() => {
+    if (!api.tenantId || !api.key) return;
+    loadSuggestions().catch(() => undefined);
   }, [api.tenantId, api.key]);
 
   const handleTrainingUpload = async () => {
@@ -273,7 +405,7 @@ const TrainingTab: React.FC = () => {
       if (activeDialog) {
         fetchMessages(activeDialog).catch(() => undefined);
       }
-    }, 8000);
+    }, 300);
     return () => window.clearInterval(timer);
   }, [api.tenantId, api.key, activeDialog]);
 
@@ -294,6 +426,15 @@ const TrainingTab: React.FC = () => {
     if (!stickToBottomRef.current) return;
     container.scrollTop = container.scrollHeight;
   }, [messages]);
+
+  useEffect(() => {
+    const handler = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail || {};
+      if (detail.url) setLightboxUrl(String(detail.url));
+    };
+    window.addEventListener('avio:lightbox', handler as EventListener);
+    return () => window.removeEventListener('avio:lightbox', handler as EventListener);
+  }, []);
 
   const handleSend = async () => {
     if (!activeDialog) return;
@@ -438,6 +579,100 @@ const TrainingTab: React.FC = () => {
       </div>
 
       <div className="card space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="card-title">Предложения по обучению</div>
+            <div className="card-subtitle">
+              Мы анализируем диалоги и предлагаем ответы на частые вопросы.
+            </div>
+          </div>
+          <button className="btn-secondary" onClick={handleRefreshSuggestions} disabled={suggestionsRefreshing}>
+            {suggestionsRefreshing ? 'Обновляем...' : 'Сформировать предложения'}
+          </button>
+        </div>
+        {suggestionsLoading && <div className="text-sm text-slate-400">Загрузка предложений…</div>}
+        {!suggestionsLoading && suggestions.length === 0 && (
+          <div className="text-sm text-slate-400">Пока нет предложений. Нажмите «Сформировать предложения».</div>
+        )}
+        {!suggestionsLoading && suggestions.length > 0 && (
+          <div className="space-y-3">
+            {suggestions.map((item) => (
+              <label
+                key={item.id || item.q_text}
+                className="flex gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+              >
+                <input
+                  type="checkbox"
+                  checked={item.id ? Boolean(suggestionsSelected[String(item.id)]) : false}
+                  onChange={(e) => {
+                    if (!item.id) return;
+                    setSuggestionsSelected((prev) => ({
+                      ...prev,
+                      [String(item.id)]: e.target.checked,
+                    }));
+                  }}
+                />
+                <div className="space-y-2">
+                  <div className="text-sm font-semibold text-slate-700">Вопрос клиента</div>
+                  <div className="text-sm text-slate-900 whitespace-pre-wrap">{item.q_text}</div>
+                  <div className="text-sm font-semibold text-slate-700">Рекомендуемый ответ</div>
+                  <div className="text-sm text-slate-900 whitespace-pre-wrap">{item.a_text}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-3">
+          <button className="btn" onClick={handleAcceptSuggestions} disabled={suggestions.length === 0}>
+            Применить выбранные
+          </button>
+          <span className="text-sm text-slate-500">
+            После подтверждения ответы будут использоваться как обычные фидбэки.
+          </span>
+        </div>
+      </div>
+
+      <div className="card space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="card-title">Telegram: скачать и проанализировать диалоги</div>
+            <div className="card-subtitle">
+              Мы соберём пары «вопрос → ответ» из истории Telegram, вы сможете подтвердить правильные.
+            </div>
+          </div>
+          <button className="btn-secondary" onClick={handleHarvestTelegram} disabled={tgLoading}>
+            {tgLoading ? 'Скачиваем...' : 'Скачать и проанализировать'}
+          </button>
+        </div>
+        {tgPairs.length === 0 && !tgLoading && (
+          <div className="text-sm text-slate-400">Пока нет найденных пар.</div>
+        )}
+        {tgPairs.length > 0 && (
+          <div className="space-y-3">
+            {tgPairs.map((pair, idx) => (
+              <div
+                key={`${pair.q_text}-${idx}`}
+                className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+              >
+                <div className="text-sm font-semibold text-slate-700">Вопрос клиента</div>
+                <div className="text-sm text-slate-900 whitespace-pre-wrap">{pair.q_text}</div>
+                <div className="text-sm font-semibold text-slate-700">Ответ менеджера</div>
+                <div className="text-sm text-slate-900 whitespace-pre-wrap">{pair.a_text}</div>
+                <div className="flex gap-2">
+                  <button className="btn-secondary" onClick={() => handleAcceptPair(pair, idx)}>
+                    👍 Подходит
+                  </button>
+                  <button className="btn-ghost" onClick={() => handleRejectPair(idx)}>
+                    👎 Не подходит
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <div className="card-title">Диалоги</div>
@@ -536,6 +771,18 @@ const TrainingTab: React.FC = () => {
                     <MessageBubble key={msg.id} message={msg} onFeedback={handleFeedback} />
                   ))}
                 </div>
+                {lightboxUrl && (
+                  <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 p-4"
+                    onClick={() => setLightboxUrl(null)}
+                  >
+                    <img
+                      src={lightboxUrl}
+                      alt="full"
+                      className="max-h-[92vh] max-w-[92vw] rounded-2xl shadow-2xl"
+                    />
+                  </div>
+                )}
                 <div className="border-t border-slate-100 pt-3">
                   <div className="flex flex-col gap-3">
                     <div className="flex gap-3">
@@ -592,6 +839,7 @@ const TrainingTab: React.FC = () => {
             >
               <option value="telegram">Telegram</option>
               <option value="avito">Avito</option>
+              <option value="max">MAX</option>
               <option value="whatsapp">WhatsApp</option>
             </select>
             <button className="btn-ghost" onClick={handleTestClear}>Очистить</button>
@@ -647,10 +895,57 @@ const MessageBubble: React.FC<{
     onFeedback(message, 'dislike', expected.trim());
   };
 
+  const attachments = message.attachments || [];
+  const isImageUrl = (url: string) =>
+    /\\.(png|jpe?g|webp|gif|bmp)$/i.test(url) || url.includes('/pub/files/photos/') || url.includes('/pub/tg/media/');
+  const imageAttachments = attachments.filter(
+    (att) => att.url && (att.type?.includes('photo') || att.type?.includes('image') || isImageUrl(att.url))
+  );
+  const fileAttachments = attachments.filter(
+    (att) => att.url && !imageAttachments.includes(att)
+  );
+
+  const shouldHideText = message.text?.trim() === '[Фото]';
+
   return (
     <div className={`flex ${isOut ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[75%] rounded-2xl px-4 py-3 shadow-subtle ${isOut ? 'bg-slate-900 text-white' : 'bg-slate-50 text-slate-900'}`}>
-        <div className="whitespace-pre-wrap text-sm">{message.text}</div>
+        {imageAttachments.length > 0 && (
+          <div className="mb-2 space-y-2">
+            {imageAttachments.map((att, idx) => (
+              <img
+                key={`${att.url}-${idx}`}
+                src={att.url}
+                alt={att.filename || 'photo'}
+                className="max-h-64 w-full rounded-xl object-cover"
+                loading="lazy"
+                style={{ cursor: 'zoom-in' }}
+                onClick={() => {
+                  if (att.url) {
+                    const evt = new CustomEvent('avio:lightbox', { detail: { url: att.url } });
+                    window.dispatchEvent(evt);
+                  }
+                }}
+              />
+            ))}
+          </div>
+        )}
+        {!shouldHideText && <div className="whitespace-pre-wrap text-sm">{message.text}</div>}
+        {fileAttachments.length > 0 && (
+          <div className="mt-2 space-y-1 text-xs">
+            {fileAttachments.map((att, idx) => (
+              <a
+                key={`${att.url}-${idx}`}
+                href={att.url}
+                target="_blank"
+                rel="noreferrer"
+                className={isOut ? 'text-slate-200 underline' : 'text-slate-600 underline'}
+              >
+                {att.filename || att.url}
+              </a>
+            ))}
+          </div>
+        )}
         <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
           <span>{message.ts ? new Date(message.ts).toLocaleTimeString() : ''}</span>
           <span>{message.status || ''}</span>

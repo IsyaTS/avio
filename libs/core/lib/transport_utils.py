@@ -6,7 +6,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from libs.core.schemas import Attachment, MessageIn, TransportMessage
 
 LOGGER = logging.getLogger("app.transport")
-_CHANNELS = {"telegram", "whatsapp"}
+_CHANNELS = {"telegram", "whatsapp", "max"}
 
 
 def _model_dump(model: Any) -> dict[str, Any]:

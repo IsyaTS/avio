@@ -9,14 +9,24 @@ body {
   color: var(--text);
   overflow-x: hidden;
   line-height: 1.6;
+  position: relative;
+  width: 100%;
+  max-width: 100%;
 }
 
 html {
   overflow-x: hidden;
+  width: 100%;
+  max-width: 100%;
 }
 
 body.nav-open {
   overflow: hidden;
+}
+
+main {
+  width: 100%;
+  overflow-x: clip;
 }
 
 a {

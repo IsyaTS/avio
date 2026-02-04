@@ -218,6 +218,11 @@ class QRStartRequest(TenantForceBody):
     pass
 
 
+class AdminHarvestRequest(TenantBody):
+    limit_dialogs: int = Field(50, ge=1, le=200)
+    limit_messages: int = Field(800, ge=50, le=2000)
+
+
 class StartRequest(TenantForceBody):
     pass
 
@@ -1219,6 +1224,83 @@ def create_app() -> FastAPI:
                 "without_username_count": without_username_count,
                 "usernames": usernames,
             },
+            headers=dict(NO_STORE_HEADERS),
+        )
+
+    @app.post("/tg/qa")
+    async def tg_harvest(request: Request, payload: AdminHarvestRequest):
+        tenant = payload.tenant
+        unauthorized = _enforce_admin_strict(request, "/tg/qa", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
+        client = await manager.get_client(tenant)
+        if client is None:
+            return JSONResponse(
+                {"error": "not_authorized"},
+                status_code=409,
+                headers=dict(NO_STORE_HEADERS),
+            )
+        limit_dialogs = int(payload.limit_dialogs)
+        limit_messages = int(payload.limit_messages)
+
+        def _clean(text: str) -> str:
+            return re.sub(r"\\s+", " ", (text or "").strip())
+
+        def _is_noise(text: str) -> bool:
+            raw = text.strip().casefold()
+            if len(raw) < 6:
+                return True
+            return raw in {"ok", "ок", "спасибо", "спс", "да", "нет", "угу", "хорошо"}
+
+        def _looks_like_phone(text: str) -> bool:
+            digits = re.sub(r"\\D", "", text)
+            return len(digits) >= 10 and len(digits) <= 15 and digits == digits.strip()
+
+        pairs: list[dict[str, str]] = []
+        seen: set[str] = set()
+        dialogs_seen = 0
+        async for dialog in client.iter_dialogs():
+            if dialogs_seen >= limit_dialogs:
+                break
+            if getattr(dialog, "is_group", False) or getattr(dialog, "is_channel", False):
+                continue
+            entity = getattr(dialog, "entity", None)
+            if entity is None:
+                continue
+            dialogs_seen += 1
+            messages: list[Any] = []
+            async for msg in client.iter_messages(entity, limit=limit_messages):
+                if not getattr(msg, "message", None):
+                    continue
+                messages.append(msg)
+            messages.reverse()
+            pending_in: list[str] = []
+            for msg in messages:
+                text = _clean(getattr(msg, "message", "") or "")
+                if not text:
+                    continue
+                if getattr(msg, "out", False):
+                    if pending_in:
+                        answer = text
+                        if not _is_noise(answer):
+                            for question in pending_in:
+                                if _is_noise(question):
+                                    continue
+                                sig = f"{question}\t{answer}"
+                                if sig in seen:
+                                    continue
+                                pairs.append({"q_text": question, "a_text": answer})
+                                seen.add(sig)
+                    pending_in = []
+                else:
+                    if _looks_like_phone(text):
+                        continue
+                    if _is_noise(text):
+                        continue
+                    pending_in.append(text)
+
+        return JSONResponse(
+            {"items": pairs, "meta": {"dialogs": dialogs_seen, "pairs": len(pairs)}},
             headers=dict(NO_STORE_HEADERS),
         )
 

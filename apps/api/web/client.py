@@ -25,8 +25,10 @@ from .ui import render_template
 from libs.core import catalog as catalog_module
 from libs.core import catalog_index
 from libs.core import onboarding_chat
+from libs.core import quickstart as quickstart_module
 from libs.core.training import indexer as training_indexer
 from libs.core.training import exporter as training_exporter
+from libs.core.training import suggestions as training_suggestions
 from libs.core import db as db
 from libs.core.sales_core import ask_llm, build_llm_messages
 from libs.core.response_pipeline import run_response_pipeline
@@ -294,6 +296,14 @@ def _channel_reply_enabled(cfg: Mapping[str, Any], channel: str) -> bool:
         if root_flag is not None:
             return bool(root_flag)
         return True
+    if channel_norm == "max":
+        for key in ("max_reply_enabled", "max_smart_reply_enabled", "max_ai_enabled"):
+            if key in behavior_map:
+                return bool(behavior_map.get(key))
+        root_flag = behavior_map.get("max_reply_enabled")
+        if root_flag is not None:
+            return bool(root_flag)
+        return True
     if channel_norm == "avito":
         return True
     return True
@@ -385,6 +395,52 @@ def _photo_public_url(request: Request, tenant_id: int, key: str, photo_id: str)
         return ""
     joiner = "&" if "?" in base else "?"
     return f"{base}{joiner}tenant={tenant_id}&k={quote_plus(key)}"
+
+
+def _normalize_message_attachments(
+    request: Request,
+    tenant_id: int,
+    key: str,
+    attachments: Any,
+) -> list[dict[str, Any]]:
+    raw = attachments
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = None
+    if isinstance(raw, Mapping):
+        raw = [dict(raw)]
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        entry = dict(item)
+        url = entry.get("url")
+        photo_id = str(entry.get("photo_id") or "").strip()
+        if not url and photo_id:
+            entry["url"] = _photo_public_url(request, tenant_id, key, photo_id)
+        elif isinstance(url, str) and url.startswith("telegram://"):
+            parts = url.replace("telegram://", "").split("/")
+            if len(parts) >= 3:
+                peer_id = parts[1]
+                message_id = parts[2]
+                entry["url"] = C.public_url(
+                    request,
+                    f"/pub/tg/media/{peer_id}/{message_id}?tenant={tenant_id}&k={quote_plus(key)}",
+                )
+        if not entry.get("url"):
+            peer_id = entry.get("peer_id")
+            message_id = entry.get("message_id")
+            if peer_id and message_id:
+                entry["url"] = C.public_url(
+                    request,
+                    f"/pub/tg/media/{peer_id}/{message_id}?tenant={tenant_id}&k={quote_plus(key)}",
+                )
+        normalized.append(entry)
+    return normalized
 
 
 def _safe_path(tenant: int, relative: str | pathlib.Path | None) -> pathlib.Path | None:
@@ -688,6 +744,7 @@ async def client_settings(tenant: int, request: Request):
     personas = {
         "telegram": C.read_persona(tenant, "telegram"),
         "avito": C.read_persona(tenant, "avito"),
+        "max": C.read_persona(tenant, "max"),
     }
 
     passport_raw = cfg.get("passport", {})
@@ -701,6 +758,7 @@ async def client_settings(tenant: int, request: Request):
         "auto_reply_text": behavior_cfg.get("auto_reply_text") or "",
         "avito_smart_reply_enabled": bool(behavior_cfg.get("avito_smart_reply_enabled")),
         "send_catalog_on_first_message": behavior_cfg.get("send_catalog_on_first_message"),
+        "max_reply_enabled": behavior_cfg.get("max_reply_enabled"),
         "auto_photo_enabled": bool(behavior_cfg.get("auto_photo_enabled")),
         "auto_photo_max": behavior_cfg.get("auto_photo_max") or 0,
         "triggers": triggers_raw,
@@ -726,6 +784,8 @@ async def client_settings(tenant: int, request: Request):
         "save_settings": f"/client/{tenant}/settings/save",
         "save_behavior": f"/client/{tenant}/behavior/save",
         "save_persona": f"/client/{tenant}/persona",
+        "quickstart_templates": f"/client/{tenant}/quickstart/templates",
+        "quickstart_apply": f"/client/{tenant}/quickstart/apply",
         "save_followups": f"/client/{tenant}/follow-ups",
         "get_followups": f"/client/{tenant}/follow-ups",
         "upload_catalog": "/pub/catalog/upload",
@@ -747,6 +807,11 @@ async def client_settings(tenant: int, request: Request):
         "tenant_stats": "/api/tenant/stats",
         "feedback_stats": "/api/feedback/stats",
         "feedback": "/api/feedback",
+        "training_suggestions": f"/client/{tenant}/training/suggestions",
+        "training_suggestions_refresh": f"/client/{tenant}/training/suggestions/refresh",
+        "training_suggestions_accept": f"/client/{tenant}/training/suggestions/accept",
+        "training_tg_harvest": f"/client/{tenant}/training/telegram/harvest",
+        "training_tg_accept": f"/client/{tenant}/training/telegram/accept",
     }
 
     webhook_secret = getattr(C.settings, "WEBHOOK_SECRET", "") if hasattr(C, "settings") else ""
@@ -766,7 +831,6 @@ async def client_settings(tenant: int, request: Request):
     form_payload = {
         "brand": passport.get("brand", ""),
         "agent": passport.get("agent_name", ""),
-        "city": passport.get("city", ""),
         "catalog_file": uploaded_display,
     }
 
@@ -774,6 +838,7 @@ async def client_settings(tenant: int, request: Request):
     state_payload["form"] = form_payload
     state_payload["behavior"] = behavior_state
     state_payload["personas"] = personas
+    state_payload["quickstart_templates"] = quickstart_module.list_quickstart_templates()
     client_state_json = json.dumps(state_payload)
 
     asset_version_value = C.asset_version()
@@ -848,11 +913,14 @@ async def save_form(tenant: int, request: Request):
         {
             "brand": payload.get("brand") or passport.get("brand", ""),
             "agent_name": payload.get("agent") or passport.get("agent_name", ""),
-            "city": payload.get("city") or passport.get("city", ""),
         }
     )
 
     passport["currency"] = "₽"
+    try:
+        quickstart_module.refresh_persona_headers(tenant, cfg)
+    except Exception:
+        _log.warning("quickstart_refresh_failed tenant=%s", tenant)
     C.write_tenant_config(tenant, cfg)
     return {"ok": True}
 
@@ -876,7 +944,7 @@ def _sanitize_triggers(payload: Any) -> list[dict[str, Any]]:
                     phrases.append(ph.strip())
         if not phrases:
             continue
-        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp"]
+        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp", "max"]
         channels: list[str] = []
         if isinstance(channels_raw, (list, tuple, set)):
             for ch in channels_raw:
@@ -885,7 +953,7 @@ def _sanitize_triggers(payload: Any) -> list[dict[str, Any]]:
         elif isinstance(channels_raw, str) and channels_raw.strip():
             channels.append(channels_raw.strip().lower())
         if not channels:
-            channels = ["telegram", "avito", "whatsapp"]
+            channels = ["telegram", "avito", "whatsapp", "max"]
         result.append(
             {
                 "phrases": phrases,
@@ -914,6 +982,10 @@ async def save_behavior(tenant: int, request: Request):
     behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
     behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
     behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
+    if payload.get("max_reply_enabled") is not None:
+        behavior["max_reply_enabled"] = bool(payload.get("max_reply_enabled"))
+    if payload.get("telegram_reply_enabled") is not None:
+        behavior["telegram_reply_enabled"] = bool(payload.get("telegram_reply_enabled"))
     if payload.get("send_catalog_on_first_message") is not None:
         behavior["send_catalog_on_first_message"] = bool(payload.get("send_catalog_on_first_message"))
     if payload.get("auto_photo_enabled") is not None:
@@ -975,7 +1047,7 @@ async def save_follow_ups(tenant: int, request: Request):
         rules_raw = []
 
     validated: list[dict[str, object]] = []
-    allowed_channels = {"telegram", "avito", "whatsapp", "any", "*"}
+    allowed_channels = {"telegram", "avito", "whatsapp", "max", "any", "*"}
 
     for rule in rules_raw:
         if not isinstance(rule, dict):
@@ -1032,7 +1104,7 @@ async def list_dialogs_api(request: Request, tenant: int | str | None = None, li
     auth = _resolve_tenant_and_key(request, tenant)
     if isinstance(auth, Response):
         return auth
-    tenant_id, _ = auth
+    tenant_id, key = auth
 
     try:
         limit_val = int(limit)
@@ -1050,7 +1122,7 @@ async def list_dialogs_api(request: Request, tenant: int | str | None = None, li
 
     for entry in dialogs_raw:
         channel_name = (entry.get("channel") or "").strip().lower() or "unknown"
-        if channel_name not in {"telegram", "avito", "whatsapp", "unknown"}:
+        if channel_name not in {"telegram", "avito", "whatsapp", "max", "unknown"}:
             continue
         lead_id = entry.get("id")
         try:
@@ -1107,7 +1179,7 @@ async def get_dialog_messages_api(
     auth = _resolve_tenant_and_key(request, tenant)
     if isinstance(auth, Response):
         return auth
-    tenant_id, _ = auth
+    tenant_id, key = auth
 
     lead_meta = await db.get_lead_dialog_metadata(lead_id)
     if not lead_meta or int(lead_meta.get("tenant_id") or 0) != int(tenant_id):
@@ -1159,6 +1231,12 @@ async def get_dialog_messages_api(
     formatted = []
     for msg in messages:
         msg_id = msg.get("id")
+        attachments = _normalize_message_attachments(
+            request,
+            tenant_id,
+            key or "",
+            msg.get("attachments"),
+        )
         formatted.append(
             {
                 "id": msg_id,
@@ -1168,6 +1246,7 @@ async def get_dialog_messages_api(
                 "status": msg.get("status") or "",
                 "from_bot": bool(msg.get("is_bot")),
                 "feedbacked": bool(msg_id and msg_id in feedback_ids),
+                "attachments": attachments,
             }
         )
 
@@ -1223,7 +1302,7 @@ async def send_dialog_message_api(
         return JSONResponse({"detail": "not_found"}, status_code=404)
 
     channel = (lead_meta.get("channel") or "").strip().lower()
-    if channel not in {"telegram", "avito"}:
+    if channel not in {"telegram", "avito", "max"}:
         return JSONResponse({"detail": "unsupported_channel"}, status_code=400)
 
     telegram_user_id: int | None = None
@@ -1247,6 +1326,7 @@ async def send_dialog_message_api(
             telegram_user_id=telegram_user_id,
             telegram_username=lead_meta.get("telegram_username"),
             title=lead_meta.get("title"),
+            attachments=[attachment] if attachment else None,
         )
     except Exception:
         _dialogs_log.exception("dialog_send_insert_failed tenant=%s lead=%s", tenant_id, lead_id)
@@ -1334,7 +1414,7 @@ async def test_dialog_api(request: Request, tenant: int | str | None = None):
         return JSONResponse({"detail": "empty_text"}, status_code=400)
 
     channel = str(payload.get("channel") or "telegram").strip().lower() or "telegram"
-    if channel not in {"telegram", "avito", "whatsapp"}:
+    if channel not in {"telegram", "avito", "whatsapp", "max"}:
         channel = "telegram"
 
     history_raw = payload.get("history") or []
@@ -1587,10 +1667,40 @@ async def save_persona(tenant: int, request: Request):
     channel = None
     if isinstance(channel_raw, str) and channel_raw.strip():
         candidate = channel_raw.strip().lower()
-        if candidate in {"telegram", "avito"}:
+        if candidate in {"telegram", "avito", "max"}:
             channel = candidate
     C.write_persona(tenant, payload.get("text") or "", channel=channel)
+    if channel is None:
+        cfg = C.read_tenant_config(tenant)
+        if isinstance(cfg, dict):
+            qs = cfg.get("quickstart") if isinstance(cfg.get("quickstart"), dict) else {}
+            if isinstance(qs, dict):
+                qs["auto_persona"] = False
+                cfg["quickstart"] = qs
+                C.write_tenant_config(tenant, cfg)
     return {"ok": True}
+
+
+@router.get("/client/{tenant}/quickstart/templates")
+async def quickstart_templates(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return {"ok": True, "templates": quickstart_module.list_quickstart_templates()}
+
+
+@router.post("/client/{tenant}/quickstart/apply")
+async def quickstart_apply(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = await request.json()
+    try:
+        result = quickstart_module.apply_quickstart(int(tenant), payload if isinstance(payload, dict) else {})
+    except Exception:
+        _log.exception("quickstart_apply_failed tenant=%s", tenant)
+        return JSONResponse({"detail": "quickstart_failed"}, status_code=500)
+    return result
 
 
 @router.post("/client/{tenant}/catalog/upload")
@@ -2394,6 +2504,149 @@ async def training_status(tenant: int, request: Request):
     }
     _log.info(f"{_LOG_PREFIX} status done tenant=%s pairs=%s size=%sB took=%.3fs", tenant, pairs or 0, size_bytes or 0, time.time() - started_at)
     return out
+
+
+@router.get("/client/{tenant}/training/suggestions")
+async def training_suggestions_list(tenant: int, request: Request, limit: int = 20):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    items = await db.list_training_suggestions(int(tenant), limit=limit)
+    return {"ok": True, "items": items}
+
+
+@router.post("/client/{tenant}/training/suggestions/refresh")
+async def training_suggestions_refresh(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    try:
+        days = max(1, int(payload.get("days") or 7))
+    except Exception:
+        days = 7
+    try:
+        min_count = max(2, int(payload.get("min_count") or 5))
+    except Exception:
+        min_count = 5
+    try:
+        max_items = max(5, int(payload.get("max_items") or 20))
+    except Exception:
+        max_items = 20
+    try:
+        suggestions = await training_suggestions.refresh_training_suggestions(
+            int(tenant),
+            days=days,
+            min_count=min_count,
+            max_items=max_items,
+        )
+    except Exception:
+        _log.exception("training_suggestions_refresh_failed tenant=%s", tenant)
+        return JSONResponse({"detail": "suggestions_failed"}, status_code=500)
+    items = [
+        {"q_text": s.q_text, "a_text": s.a_text, "count": s.count}
+        for s in suggestions
+    ]
+    return {"ok": True, "items": items}
+
+
+@router.post("/client/{tenant}/training/suggestions/accept")
+async def training_suggestions_accept(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = await request.json()
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    if not isinstance(ids, list):
+        return JSONResponse({"detail": "invalid_ids"}, status_code=400)
+    await db.activate_training_examples([int(x) for x in ids if str(x).isdigit()])
+    return {"ok": True}
+
+
+def _tgworker_base_url() -> str:
+    cleaned = str(getattr(C.settings, "TGWORKER_BASE_URL", "") or "").strip()
+    return cleaned.rstrip("/") or "http://tgworker:8000"
+
+
+async def _tgworker_request(method: str, path: str, *, json_body: dict[str, Any] | None = None) -> tuple[int, Any]:
+    import httpx
+
+    url = f"{_tgworker_base_url()}{path}"
+    headers = {"X-Admin-Token": C.settings.ADMIN_TOKEN}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.request(method, url, headers=headers, json=json_body)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"error": "invalid_json"}
+        return resp.status_code, data
+
+
+@router.post("/client/{tenant}/training/telegram/harvest")
+async def training_tg_harvest(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    limit_dialogs = int(payload.get("limit_dialogs") or 15)
+    limit_messages = int(payload.get("limit_messages") or 300)
+    if limit_dialogs < 1:
+        limit_dialogs = 15
+    if limit_messages < 50:
+        limit_messages = 300
+    if not C.settings.ADMIN_TOKEN:
+        return JSONResponse({"detail": "tgworker_admin_missing"}, status_code=500)
+    status, data = await _tgworker_request(
+        "POST",
+        "/tg/qa",
+        json_body={
+            "tenant": int(tenant),
+            "limit_dialogs": limit_dialogs,
+            "limit_messages": limit_messages,
+        },
+    )
+    if status >= 400:
+        return JSONResponse(data or {"detail": "tgworker_error"}, status_code=status)
+    return {"ok": True, "items": data.get("items", []), "meta": data.get("meta", {})}
+
+
+@router.post("/client/{tenant}/training/telegram/accept")
+async def training_tg_accept(tenant: int, request: Request):
+    key = _resolve_key(request, request.query_params.get("k"))
+    if not _auth(tenant, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    payload = await request.json()
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return JSONResponse({"detail": "invalid_items"}, status_code=400)
+    saved = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        q_text = _sanitize_training_text(str(item.get("q_text") or ""))
+        a_text = _sanitize_training_text(str(item.get("a_text") or ""))
+        if not q_text or not a_text:
+            continue
+        await db.record_training_example(
+            int(tenant),
+            lead_id=None,
+            message_id=None,
+            source="tg_harvest",
+            source_feedback_id=None,
+            q_text=q_text,
+            a_text=a_text,
+            is_active=True,
+        )
+        saved += 1
+    return {"ok": True, "saved": saved}
 
 
 @router.get("/client/{tenant}/training/dry-run")

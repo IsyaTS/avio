@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS messages (
   tenant_id        INTEGER NOT NULL DEFAULT 0,
   telegram_user_id BIGINT NOT NULL DEFAULT 0,
   is_bot           BOOLEAN NOT NULL DEFAULT FALSE,
+  attachments      JSONB,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

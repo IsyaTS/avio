@@ -7,11 +7,14 @@ CREATE TABLE IF NOT EXISTS contacts (
   avito_login     TEXT,
   telegram_user_id BIGINT,
   telegram_username TEXT,
+  max_user_id     BIGINT UNIQUE,
+  max_username    TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_contacts_telegram_user ON contacts(telegram_user_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_max_user ON contacts(max_user_id);
 
 -- Связка лидов из любых каналов с одним контактом
 CREATE TABLE IF NOT EXISTS lead_contacts (

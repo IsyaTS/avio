@@ -7,6 +7,7 @@ const channelOptions = [
   { value: 'any', label: 'Все' },
   { value: 'telegram', label: 'Telegram' },
   { value: 'avito', label: 'Avito' },
+  { value: 'max', label: 'MAX' },
   { value: 'whatsapp', label: 'WhatsApp' },
 ];
 
@@ -45,7 +46,7 @@ type FollowUpRule = {
 
 const emptyTrigger = (): TriggerRule => ({
   phrases: [],
-  channels: ['telegram', 'avito', 'whatsapp'],
+  channels: ['telegram', 'avito', 'max', 'whatsapp'],
   silence: true,
   notify: false,
 });
@@ -58,6 +59,39 @@ const emptyFollowup = (): FollowUpRule => ({
   text: '',
   trigger_on_answer: false,
 });
+
+const QUICKSTART_FALLBACK = [
+  {
+    id: 'doors',
+    title: 'Двери и металлоконструкции',
+    summary: 'Продажи входных/межкомнатных дверей, монтаж и доп. услуги.',
+    focus: 'Сроки установки, безопасность, гарантия, внешний вид.',
+  },
+  {
+    id: 'renovation',
+    title: 'Ремонт и стройка',
+    summary: 'Ремонт, отделка, строительство, бригады и подряд.',
+    focus: 'Сроки, этапы работ, контроль качества, смета.',
+  },
+  {
+    id: 'furniture',
+    title: 'Мебель и интерьер',
+    summary: 'Кухни, шкафы, мебель на заказ и готовые решения.',
+    focus: 'Размеры, дизайн, сроки изготовления, материалы.',
+  },
+  {
+    id: 'services',
+    title: 'Услуги (универсальный)',
+    summary: 'Подходит для большинства сервисных ниш.',
+    focus: 'Проблема клиента, выгода услуги, скорость отклика.',
+  },
+  {
+    id: 'electronics',
+    title: 'Техника и электроника',
+    summary: 'Продажа техники, комплектов, расходников.',
+    focus: 'Наличие, гарантия, характеристики, цена.',
+  },
+];
 
 const normalizeFactKey = (raw: string, fallback: string) => {
   const cleaned = raw
@@ -74,6 +108,10 @@ const SettingsTab: React.FC = () => {
     () => `client-settings-draft:${api.tenantId || 'unknown'}`,
     [api.tenantId]
   );
+  const quickstartDraftKey = useMemo(
+    () => `client-quickstart-draft:${api.tenantId || 'unknown'}`,
+    [api.tenantId]
+  );
   const [draftInitialized, setDraftInitialized] = useState(false);
   const [hasDraft, setHasDraft] = useState(false);
 
@@ -82,14 +120,30 @@ const SettingsTab: React.FC = () => {
 
   const [brand, setBrand] = useState(passportDefaults.brand || '');
   const [agent, setAgent] = useState(passportDefaults.agent || '');
-  const [city, setCity] = useState(passportDefaults.city || '');
   const [currency, setCurrency] = useState(passportDefaults.currency || '');
   const [tone, setTone] = useState(passportDefaults.tone || '');
 
-  const [personaChannel, setPersonaChannel] = useState<'base' | 'telegram' | 'avito'>('base');
+  const [personaChannel, setPersonaChannel] = useState<'base' | 'telegram' | 'avito' | 'max'>('base');
   const [personaBase, setPersonaBase] = useState('');
   const [personaTelegram, setPersonaTelegram] = useState('');
   const [personaAvito, setPersonaAvito] = useState('');
+  const [personaMax, setPersonaMax] = useState('');
+
+  const quickstartTemplatesInitial = Array.isArray((bootstrap as any).quickstart_templates)
+    ? ((bootstrap as any).quickstart_templates as Array<{ id: string; title: string; summary?: string; focus?: string }>)
+    : QUICKSTART_FALLBACK;
+  const [quickstartTemplates, setQuickstartTemplates] = useState(quickstartTemplatesInitial);
+  const [quickstartTemplate, setQuickstartTemplate] = useState('');
+  const [quickstartOffer, setQuickstartOffer] = useState('');
+  const [quickstartUtp, setQuickstartUtp] = useState('');
+  const [quickstartFaq, setQuickstartFaq] = useState<Array<{ q: string; a: string }>>([
+    { q: '', a: '' },
+  ]);
+  const [quickstartStarters, setQuickstartStarters] = useState<string[]>(['']);
+  const [quickstartScriptSteps, setQuickstartScriptSteps] = useState<string[]>(['']);
+  const [quickstartApplyAll] = useState(true);
+  const [quickstartLoading, setQuickstartLoading] = useState(false);
+  const [quickstartLoadingTemplates, setQuickstartLoadingTemplates] = useState(false);
 
   const [autoReply, setAutoReply] = useState(Boolean(behaviorDefaults.auto_reply));
   const [autoReplyText, setAutoReplyText] = useState(behaviorDefaults.auto_reply_text || '');
@@ -101,6 +155,9 @@ const SettingsTab: React.FC = () => {
   );
   const [telegramReplyEnabled, setTelegramReplyEnabled] = useState(
     behaviorDefaults.telegram_reply_enabled !== false
+  );
+  const [maxReplyEnabled, setMaxReplyEnabled] = useState(
+    behaviorDefaults.max_reply_enabled !== false
   );
   const [sendCatalogTg, setSendCatalogTg] = useState(
     Boolean(behaviorDefaults.send_catalog_on_first_message)
@@ -120,7 +177,7 @@ const SettingsTab: React.FC = () => {
   );
   const initialTriggers = (behaviorDefaults.triggers || []).map((rule) => ({
     phrases: rule.phrases || [],
-    channels: rule.channels || ['telegram', 'avito', 'whatsapp'],
+    channels: rule.channels || ['telegram', 'avito', 'max', 'whatsapp'],
     silence: rule.silence !== false,
     notify: Boolean(rule.notify),
   }));
@@ -151,7 +208,6 @@ const SettingsTab: React.FC = () => {
     const passport = (cfg as Record<string, any>).passport || {};
     if (!brand && passport.brand) setBrand(passport.brand);
     if (!agent && passport.agent_name) setAgent(passport.agent_name);
-    if (!city && passport.city) setCity(passport.city);
     if (!currency && passport.currency) setCurrency(passport.currency);
     if (!tone && passport.tone) setTone(passport.tone);
     if (!personaBase && settings?.persona) setPersonaBase(settings.persona || '');
@@ -162,19 +218,26 @@ const SettingsTab: React.FC = () => {
     if (!personaAvito && typeof personas.avito === 'string') {
       setPersonaAvito(personas.avito || '');
     }
+    if (!personaMax && typeof personas.max === 'string') {
+      setPersonaMax(personas.max || '');
+    }
   }, [
     settingsReady,
     settings,
     brand,
     agent,
-    city,
     currency,
     tone,
     personaBase,
     personaTelegram,
     personaAvito,
+    personaMax,
     hasDraft,
   ]);
+
+  useEffect(() => {
+    if (!settingsReady) return;
+  }, [settingsReady]);
 
   useEffect(() => {
     if (!settings?.persona) return;
@@ -182,6 +245,79 @@ const SettingsTab: React.FC = () => {
       setPersonaBase(settings.persona || '');
     }
   }, [settings, personaBase]);
+
+  useEffect(() => {
+    if (draftInitialized) return;
+    const raw = localStorage.getItem(quickstartDraftKey);
+    if (!raw) {
+      setDraftInitialized(true);
+      return;
+    }
+    try {
+      const draft = JSON.parse(raw) as Record<string, any>;
+      if (Array.isArray(draft.quickstartFaq)) setQuickstartFaq(draft.quickstartFaq);
+      if (Array.isArray(draft.quickstartStarters)) setQuickstartStarters(draft.quickstartStarters);
+      if (Array.isArray(draft.quickstartScriptSteps)) setQuickstartScriptSteps(draft.quickstartScriptSteps);
+      if (typeof draft.quickstartUtp === 'string') setQuickstartUtp(draft.quickstartUtp);
+      if (typeof draft.quickstartOffer === 'string') setQuickstartOffer(draft.quickstartOffer);
+      if (typeof draft.quickstartTemplate === 'string') setQuickstartTemplate(draft.quickstartTemplate);
+      setDraftInitialized(true);
+    } catch {
+      setDraftInitialized(true);
+    }
+  }, [draftInitialized, quickstartDraftKey]);
+
+  useEffect(() => {
+    if (!draftInitialized || !api.tenantId) return;
+    const payload = {
+      quickstartFaq,
+      quickstartStarters,
+      quickstartScriptSteps,
+      quickstartUtp,
+      quickstartOffer,
+      quickstartTemplate,
+    };
+    localStorage.setItem(quickstartDraftKey, JSON.stringify({ ...(payload || {}) }));
+  }, [
+    draftInitialized,
+    quickstartDraftKey,
+    api.tenantId,
+    quickstartFaq,
+    quickstartStarters,
+    quickstartScriptSteps,
+    quickstartUtp,
+    quickstartOffer,
+    quickstartTemplate,
+  ]);
+
+  useEffect(() => {
+    if (!quickstartTemplate && quickstartTemplates.length > 0) {
+      setQuickstartTemplate(quickstartTemplates[0].id);
+    }
+  }, [quickstartTemplate, quickstartTemplates]);
+
+  useEffect(() => {
+    const endpoint = bootstrap.urls?.quickstart_templates || `/client/${api.tenantId}/quickstart/templates`;
+    if (!api.tenantId || !api.key) return;
+    if (quickstartTemplates.length > 0) return;
+    setQuickstartLoadingTemplates(true);
+    requestJson(buildUrl(endpoint, api))
+      .then((data) => {
+        const list = Array.isArray(data?.templates) ? data.templates : [];
+        if (list.length) {
+          setQuickstartTemplates(list);
+        } else if (quickstartTemplates.length === 0) {
+          setQuickstartTemplates(QUICKSTART_FALLBACK);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => setQuickstartLoadingTemplates(false));
+  }, [api.tenantId, api.key, bootstrap.urls, quickstartTemplates.length]);
+
+  const selectedQuickstartTemplate = useMemo(
+    () => quickstartTemplates.find((tpl) => tpl.id === quickstartTemplate),
+    [quickstartTemplates, quickstartTemplate]
+  );
 
   useEffect(() => {
     if (draftInitialized) return;
@@ -194,14 +330,14 @@ const SettingsTab: React.FC = () => {
       const draft = JSON.parse(raw) as Record<string, any>;
       if (typeof draft.brand === 'string') setBrand(draft.brand);
       if (typeof draft.agent === 'string') setAgent(draft.agent);
-      if (typeof draft.city === 'string') setCity(draft.city);
       if (typeof draft.currency === 'string') setCurrency(draft.currency);
       if (typeof draft.tone === 'string') setTone(draft.tone);
       if (typeof draft.personaBase === 'string') setPersonaBase(draft.personaBase);
       if (typeof draft.personaTelegram === 'string') setPersonaTelegram(draft.personaTelegram);
       if (typeof draft.personaAvito === 'string') setPersonaAvito(draft.personaAvito);
+      if (typeof draft.personaMax === 'string') setPersonaMax(draft.personaMax);
       if (typeof draft.personaChannel === 'string') {
-        setPersonaChannel(draft.personaChannel as 'base' | 'telegram' | 'avito');
+        setPersonaChannel(draft.personaChannel as 'base' | 'telegram' | 'avito' | 'max');
       }
       if (typeof draft.autoReply === 'boolean') setAutoReply(draft.autoReply);
       if (typeof draft.autoReplyText === 'string') setAutoReplyText(draft.autoReplyText);
@@ -209,6 +345,9 @@ const SettingsTab: React.FC = () => {
       if (typeof draft.avitoSmartReply === 'boolean') setAvitoSmartReply(draft.avitoSmartReply);
       if (typeof draft.telegramReplyEnabled === 'boolean') {
         setTelegramReplyEnabled(draft.telegramReplyEnabled);
+      }
+      if (typeof draft.maxReplyEnabled === 'boolean') {
+        setMaxReplyEnabled(draft.maxReplyEnabled);
       }
       if (typeof draft.sendCatalogTg === 'boolean') setSendCatalogTg(draft.sendCatalogTg);
       if (typeof draft.autoPhotoEnabled === 'boolean') setAutoPhotoEnabled(draft.autoPhotoEnabled);
@@ -231,18 +370,19 @@ const SettingsTab: React.FC = () => {
     const payload = {
       brand,
       agent,
-      city,
       currency,
       tone,
       personaChannel,
       personaBase,
       personaTelegram,
       personaAvito,
+      personaMax,
       autoReply,
       autoReplyText,
       avitoPhoneTemplate,
       avitoSmartReply,
       telegramReplyEnabled,
+      maxReplyEnabled,
       sendCatalogTg,
       autoPhotoEnabled,
       autoPhotoMax,
@@ -258,18 +398,19 @@ const SettingsTab: React.FC = () => {
     draftKey,
     brand,
     agent,
-    city,
     currency,
     tone,
     personaChannel,
     personaBase,
     personaTelegram,
     personaAvito,
+    personaMax,
     autoReply,
     autoReplyText,
     avitoPhoneTemplate,
     avitoSmartReply,
     telegramReplyEnabled,
+    maxReplyEnabled,
     sendCatalogTg,
     autoPhotoEnabled,
     autoPhotoMax,
@@ -302,7 +443,7 @@ const SettingsTab: React.FC = () => {
           setFollowups(normalized);
         }
       } catch (error) {
-        toast.error('Не удалось загрузить фоллоу-апы');
+        toast.error('Не удалось загрузить отложенные сообщения');
       } finally {
         setFollowupsLoading(false);
       }
@@ -317,7 +458,6 @@ const SettingsTab: React.FC = () => {
       await postJson(buildUrl(endpoint, api), {
         brand,
         agent,
-        city,
         currency,
         tone,
       });
@@ -325,6 +465,54 @@ const SettingsTab: React.FC = () => {
       refreshSettings().catch(() => undefined);
     } catch (error) {
       toast.error('Не удалось сохранить паспорт');
+    }
+  };
+
+  const handleQuickstartApply = async () => {
+    const endpoint = bootstrap.urls?.quickstart_apply || `/client/${api.tenantId}/quickstart/apply`;
+    if (!api.tenantId || !api.key) return;
+    if (!quickstartOffer.trim()) {
+      toast.error('Укажите, что вы продаёте');
+      return;
+    }
+    if (!quickstartUtp.trim()) {
+      toast.error('Укажите УТП');
+      return;
+    }
+    setQuickstartLoading(true);
+    try {
+      const faq = quickstartFaq
+        .map((item) => ({ q: item.q.trim(), a: item.a.trim() }))
+        .filter((item) => item.q && item.a);
+    const starters = quickstartStarters.map((item) => item.trim()).filter((item) => item);
+    const script = quickstartScriptSteps.map((item) => item.trim()).filter((item) => item);
+      const payload = {
+        template: quickstartTemplate,
+        offer: quickstartOffer,
+        utp: quickstartUtp,
+        faq,
+        starters,
+        script,
+        brand,
+        agent,
+        apply_all: quickstartApplyAll,
+      };
+      const result = await postJson(buildUrl(endpoint, api), payload);
+      if (result?.persona) {
+        setPersonaBase(result.persona);
+        setPersonaChannel('base');
+        if (quickstartApplyAll) {
+          setPersonaTelegram(result.persona);
+          setPersonaAvito(result.persona);
+          setPersonaMax(result.persona);
+        }
+      }
+      toast.success('Быстрый старт применён');
+      refreshSettings().catch(() => undefined);
+    } catch (error) {
+      toast.error('Не удалось применить быстрый старт');
+    } finally {
+      setQuickstartLoading(false);
     }
   };
 
@@ -336,6 +524,8 @@ const SettingsTab: React.FC = () => {
         ? personaTelegram
         : personaChannel === 'avito'
         ? personaAvito
+        : personaChannel === 'max'
+        ? personaMax
         : personaBase;
     const channel = personaChannel === 'base' ? undefined : personaChannel;
     try {
@@ -374,6 +564,7 @@ const SettingsTab: React.FC = () => {
       avito_phone_tg_template: avitoPhoneTemplate,
       avito_smart_reply_enabled: avitoSmartReply,
       telegram_reply_enabled: telegramReplyEnabled,
+      max_reply_enabled: maxReplyEnabled,
       send_catalog_on_first_message: sendCatalogTg,
       auto_photo_enabled: autoPhotoEnabled,
       auto_photo_max: autoPhotoMax ? Number(autoPhotoMax) : 0,
@@ -429,12 +620,14 @@ const SettingsTab: React.FC = () => {
     for (let i = 0; i < followups.length; i += 1) {
       const rule = followups[i];
       if (!rule.text || !rule.text.trim()) {
-        toast.error(`Фоллоу-ап #${i + 1}: заполните текст`);
+        toast.error(`Отложенное сообщение #${i + 1}: заполните текст`);
         return;
       }
       const delay = Number(rule.delay_minutes || 0);
       if (!rule.trigger_on_answer && delay <= 0) {
-        toast.error(`Фоллоу-ап #${i + 1}: укажите задержку или включите «сразу после ответа»`);
+        toast.error(
+          `Отложенное сообщение #${i + 1}: укажите задержку или включите «сразу после ответа»`
+        );
         return;
       }
       const condition = Array.isArray(rule.condition) ? rule.condition[0] : rule.condition;
@@ -443,11 +636,11 @@ const SettingsTab: React.FC = () => {
         const op = String((condition as any).op || 'eq').trim();
         const value = (condition as any).value;
         if (!key) {
-          toast.error(`Фоллоу-ап #${i + 1}: укажите факт для условия`);
+          toast.error(`Отложенное сообщение #${i + 1}: укажите факт для условия`);
           return;
         }
         if (!['exists', 'not_exists'].includes(op) && (value == null || String(value).trim() === '')) {
-          toast.error(`Фоллоу-ап #${i + 1}: укажите значение для условия`);
+          toast.error(`Отложенное сообщение #${i + 1}: укажите значение для условия`);
           return;
         }
       }
@@ -455,9 +648,9 @@ const SettingsTab: React.FC = () => {
     try {
       const payload = { rules: followups };
       await postJson(buildUrl(endpoint, api), payload);
-      toast.success('Фоллоу-апы сохранены');
+      toast.success('Отложенные сообщения сохранены');
     } catch (error) {
-      toast.error('Не удалось сохранить фоллоу-апы');
+      toast.error('Не удалось сохранить отложенные сообщения');
     }
   };
 
@@ -466,6 +659,8 @@ const SettingsTab: React.FC = () => {
       ? personaTelegram
       : personaChannel === 'avito'
       ? personaAvito
+      : personaChannel === 'max'
+      ? personaMax
       : personaBase;
 
   const handlePersonaChange = (next: string) => {
@@ -473,6 +668,8 @@ const SettingsTab: React.FC = () => {
       setPersonaTelegram(next);
     } else if (personaChannel === 'avito') {
       setPersonaAvito(next);
+    } else if (personaChannel === 'max') {
+      setPersonaMax(next);
     } else {
       setPersonaBase(next);
     }
@@ -480,38 +677,178 @@ const SettingsTab: React.FC = () => {
 
   return (
     <div className="space-y-8">
-      <div className="grid gap-6 lg:grid-cols-[2fr,1fr]">
-        <div className="card space-y-6">
-          <div>
-            <div className="card-title">Паспорт бренда</div>
-            <div className="card-subtitle">Основные данные бренда и голоса ассистента.</div>
-          </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-slate-600">Бренд</span>
-              <input className="input" value={brand} onChange={(e) => setBrand(e.target.value)} />
-            </label>
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-slate-600">Имя ассистента</span>
-              <input className="input" value={agent} onChange={(e) => setAgent(e.target.value)} />
-            </label>
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-slate-600">Город</span>
-              <input className="input" value={city} onChange={(e) => setCity(e.target.value)} />
-            </label>
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-slate-600">Валюта</span>
-              <input className="input" value={currency} onChange={(e) => setCurrency(e.target.value)} />
-            </label>
-            <label className="space-y-2 md:col-span-2">
-              <span className="text-sm font-medium text-slate-600">Тональность</span>
-              <input className="input" value={tone} onChange={(e) => setTone(e.target.value)} />
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button className="btn" onClick={handleSavePassport}>Сохранить паспорт</button>
+      <div className="card space-y-6">
+        <div>
+          <div className="card-title">Быстрый старт</div>
+          <div className="card-subtitle">
+            Ответьте на 5 вопросов — мы соберём рабочую персону и заполним основные настройки.
           </div>
         </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 md:col-span-2">
+            <span className="text-sm font-medium text-slate-600">Шаблон ниши</span>
+            <select
+              className="input"
+              value={quickstartTemplate}
+              onChange={(e) => setQuickstartTemplate(e.target.value)}
+            >
+              {quickstartTemplates.length === 0 && (
+                <option value="">Шаблоны пока недоступны</option>
+              )}
+              {quickstartTemplates.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>
+                  {tpl.title}
+                </option>
+              ))}
+            </select>
+            {quickstartLoadingTemplates && (
+              <div className="text-xs text-slate-400">Загружаем шаблоны…</div>
+            )}
+            {selectedQuickstartTemplate && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                <div className="font-semibold text-slate-700">{selectedQuickstartTemplate.title}</div>
+                {selectedQuickstartTemplate.summary && (
+                  <div className="mt-1">{selectedQuickstartTemplate.summary}</div>
+                )}
+                {selectedQuickstartTemplate.focus && (
+                  <div className="mt-1 text-slate-500">Фокус: {selectedQuickstartTemplate.focus}</div>
+                )}
+              </div>
+            )}
+          </label>
+          <label className="space-y-2 md:col-span-2">
+            <span className="text-sm font-medium text-slate-600">Что продаёте / чем занимаетесь</span>
+            <input
+              className="input"
+              value={quickstartOffer}
+              onChange={(e) => setQuickstartOffer(e.target.value)}
+              placeholder="Например: входные двери с установкой"
+            />
+          </label>
+          <label className="space-y-2 md:col-span-2">
+            <span className="text-sm font-medium text-slate-600">УТП компании</span>
+            <textarea
+              className="textarea"
+              rows={3}
+              value={quickstartUtp}
+              onChange={(e) => setQuickstartUtp(e.target.value)}
+              placeholder="Например: установка за 48 часов, честная гарантия 3 года"
+            />
+          </label>
+          <div className="space-y-3 md:col-span-2">
+            <div className="text-sm font-medium text-slate-600">Частые вопросы (вопрос → ответ)</div>
+            {quickstartFaq.map((item, idx) => (
+              <div key={idx} className="grid gap-3 md:grid-cols-2">
+                <input
+                  className="input"
+                  value={item.q}
+                  onChange={(e) => {
+                    const next = [...quickstartFaq];
+                    next[idx] = { ...next[idx], q: e.target.value };
+                    setQuickstartFaq(next);
+                  }}
+                  placeholder="Вопрос клиента"
+                />
+                <input
+                  className="input"
+                  value={item.a}
+                  onChange={(e) => {
+                    const next = [...quickstartFaq];
+                    next[idx] = { ...next[idx], a: e.target.value };
+                    setQuickstartFaq(next);
+                  }}
+                  placeholder="Короткий ответ"
+                />
+              </div>
+            ))}
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => setQuickstartFaq((prev) => [...prev, { q: '', a: '' }])}
+              >
+                + Добавить вопрос
+              </button>
+              {quickstartFaq.length > 1 && (
+                <button
+                  className="btn-ghost"
+                  type="button"
+                  onClick={() => setQuickstartFaq((prev) => prev.slice(0, -1))}
+                >
+                  Удалить последний
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="space-y-3 md:col-span-2">
+            <div className="text-sm font-medium text-slate-600">Примеры стартовых сообщений</div>
+            {quickstartStarters.slice(0, 1).map((item, idx) => (
+              <input
+                key={idx}
+                className="input"
+                value={item}
+                onChange={(e) => {
+                  const next = [...quickstartStarters];
+                  next[idx] = e.target.value;
+                  setQuickstartStarters(next);
+                }}
+                placeholder="Например: Здравствуйте! Чем могу помочь?"
+              />
+            ))}
+          </div>
+          <div className="space-y-3 md:col-span-2">
+            <div className="text-sm font-medium text-slate-600">Скрипт диалога (шаги)</div>
+            <div className="space-y-2">
+              {quickstartScriptSteps.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2"
+                >
+                  <div className="text-xs font-semibold text-slate-500 w-10">#{idx + 1}</div>
+                  <input
+                    className="input flex-1"
+                    value={item}
+                    onChange={(e) => {
+                      const next = [...quickstartScriptSteps];
+                      next[idx] = e.target.value;
+                      setQuickstartScriptSteps(next);
+                    }}
+                    placeholder="Например: Уточнить параметры → предложить варианты → следующий шаг"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => setQuickstartScriptSteps((prev) => [...prev, ''])}
+              >
+                + Добавить шаг
+              </button>
+              {quickstartScriptSteps.length > 1 && (
+                <button
+                  className="btn-ghost"
+                  type="button"
+                  onClick={() => setQuickstartScriptSteps((prev) => prev.slice(0, -1))}
+                >
+                  Удалить шаг
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <button className="btn" onClick={handleQuickstartApply} disabled={quickstartLoading}>
+            {quickstartLoading ? 'Применяем...' : 'Применить быстрый старт'}
+          </button>
+          <span className="text-sm text-slate-500">
+            Персона будет сформирована автоматически, затем вы сможете отредактировать её вручную.
+          </span>
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[2fr,1fr]">
         <div className="card space-y-6">
           <div>
             <div className="card-title">Персона</div>
@@ -524,11 +861,14 @@ const SettingsTab: React.FC = () => {
             <select
               className="input w-full max-w-[220px]"
               value={personaChannel}
-              onChange={(e) => setPersonaChannel(e.target.value as 'base' | 'telegram' | 'avito')}
+              onChange={(e) =>
+                setPersonaChannel(e.target.value as 'base' | 'telegram' | 'avito' | 'max')
+              }
             >
               <option value="base">Основная (общая)</option>
               <option value="telegram">Telegram</option>
               <option value="avito">Avito</option>
+              <option value="max">MAX</option>
             </select>
           </div>
           <textarea className="textarea" rows={8} value={personaValue} onChange={(e) => handlePersonaChange(e.target.value)} />
@@ -560,6 +900,14 @@ const SettingsTab: React.FC = () => {
               onChange={(e) => setTelegramReplyEnabled(e.target.checked)}
             />
             <span className="text-sm font-medium text-slate-700">Автоответ Telegram</span>
+          </label>
+          <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
+            <input
+              type="checkbox"
+              checked={maxReplyEnabled}
+              onChange={(e) => setMaxReplyEnabled(e.target.checked)}
+            />
+            <span className="text-sm font-medium text-slate-700">Автоответ MAX</span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 md:col-span-2">
             <input type="checkbox" checked={sendCatalogTg} onChange={(e) => setSendCatalogTg(e.target.checked)} />
@@ -638,7 +986,7 @@ const SettingsTab: React.FC = () => {
                       value={trigger.channels}
                       onChange={(e) => {
                         const values = Array.from(e.target.selectedOptions).map((opt) => opt.value);
-                        updateTrigger(index, { channels: values.length ? values : ['telegram', 'avito', 'whatsapp'] });
+                        updateTrigger(index, { channels: values.length ? values : ['telegram', 'avito', 'max', 'whatsapp'] });
                       }}
                     >
                       {channelOptions.map((option) => (
@@ -684,10 +1032,10 @@ const SettingsTab: React.FC = () => {
 
       <div className="card space-y-6">
         <div>
-          <div className="card-title">Фоллоу-апы</div>
+          <div className="card-title">Отложенные сообщения</div>
           <div className="card-subtitle">Автоматические сообщения после последнего контакта.</div>
           <div className="text-xs text-slate-500">
-            Добавьте вопрос с сохранением ответа, чтобы использовать его в условиях других фоллоу-апов.
+            Добавьте вопрос с сохранением ответа, чтобы использовать этот факт в условиях других правил.
           </div>
         </div>
 
@@ -1158,7 +1506,7 @@ const SettingsTab: React.FC = () => {
 
         <div className="flex flex-wrap gap-3">
           <button className="btn-secondary" onClick={addFollowup}>Добавить правило</button>
-          <button className="btn" onClick={handleSaveFollowups}>Сохранить фоллоу-апы</button>
+          <button className="btn" onClick={handleSaveFollowups}>Сохранить отложенные сообщения</button>
         </div>
       </div>
     </div>

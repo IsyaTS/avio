@@ -325,7 +325,7 @@ def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
     if not isinstance(rule, Mapping):
         return None
     channel = str(rule.get("channel") or "").strip().lower() or "any"
-    if channel not in {"any", "*", "whatsapp", "telegram", "avito"}:
+    if channel not in {"any", "*", "whatsapp", "telegram", "avito", "max"}:
         channel = "any"
     try:
         delay_minutes = int(rule.get("delay_minutes") or 0)
@@ -523,6 +523,23 @@ async def _resolve_target(job: Mapping[str, Any]) -> Tuple[Optional[dict], Optio
             "tenant_id": tenant_id,
             "channel": "avito",
             "ch": "avito",
+            "text": job.get("text") or "",
+            "peer": chat_id,
+            "peer_id": chat_id,
+            "chat_id": chat_id,
+            "origin": "followup",
+        }
+        return payload, None
+    if channel == "max":
+        chat_id = await get_lead_peer(lead_id, channel="max")
+        if not chat_id:
+            return None, "missing_chat"
+        payload = {
+            "lead_id": lead_id,
+            "tenant": tenant_id,
+            "tenant_id": tenant_id,
+            "channel": "max",
+            "ch": "max",
             "text": job.get("text") or "",
             "peer": chat_id,
             "peer_id": chat_id,

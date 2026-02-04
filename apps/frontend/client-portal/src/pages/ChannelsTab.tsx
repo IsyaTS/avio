@@ -25,6 +25,7 @@ const ChannelsTab: React.FC = () => {
         <WhatsAppCard />
         <TelegramCard />
         <AvitoCard />
+        <MaxCard />
         <AmoCRMCard />
       </div>
     </div>
@@ -348,6 +349,103 @@ const AvitoCard: React.FC = () => {
             Отключить
           </button>
         )}
+      </div>
+    </div>
+  );
+};
+
+const MaxCard: React.FC = () => {
+  const { api } = useClient();
+  const [status, setStatus] = useState('Проверяем статус…');
+  const [badge, setBadge] = useState<'ok' | 'warn' | 'err' | 'idle'>('idle');
+  const [connected, setConnected] = useState(false);
+  const [token, setToken] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const fetchStatus = async (quiet = false) => {
+    if (!api.tenantId || !api.key) return;
+    try {
+      const data = await requestJson<Record<string, any>>(buildUrl('/v1/max/status', api, { _: Date.now() }));
+      const isConnected = Boolean(data.connected);
+      setConnected(isConnected);
+      if (isConnected) {
+        setStatus(data.webhook_registered ? 'Подключено' : 'Токен сохранён');
+        setBadge(data.webhook_registered ? 'ok' : 'warn');
+      } else {
+        setStatus('Не подключено');
+        setBadge('warn');
+      }
+    } catch (error) {
+      setStatus('Статус недоступен');
+      setBadge('err');
+      if (!quiet) toast.error('Не удалось получить статус MAX');
+    }
+  };
+
+  useEffect(() => {
+    fetchStatus(true).catch(() => undefined);
+  }, [api.tenantId, api.key]);
+
+  const handleConnect = async () => {
+    if (!token.trim()) {
+      toast.error('Введите токен MAX');
+      return;
+    }
+    setSaving(true);
+    try {
+      await postJson(buildUrl('/v1/max/connect', api), { token: token.trim() });
+      toast.success('MAX подключён');
+      setToken('');
+      fetchStatus(true).catch(() => undefined);
+    } catch (error) {
+      toast.error('Не удалось подключить MAX');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setSaving(true);
+    try {
+      await postJson(buildUrl('/v1/max/disconnect', api), {});
+      toast.success('MAX отключён');
+      fetchStatus(true).catch(() => undefined);
+    } catch (error) {
+      toast.error('Не удалось отключить MAX');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="card-title">MAX</div>
+          <div className="card-subtitle">Официальный бот по токену</div>
+        </div>
+        <StatusBadge state={badge} label={status} />
+      </div>
+      <label className="space-y-2">
+        <span className="text-sm font-medium text-slate-600">Токен бота MAX</span>
+        <input
+          className="input"
+          type="password"
+          value={token}
+          placeholder="Введите токен"
+          onChange={(e) => setToken(e.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap gap-3">
+        <button className="btn" onClick={handleConnect} disabled={saving}>
+          Подключить
+        </button>
+        <button className="btn-secondary" onClick={handleDisconnect} disabled={saving}>
+          Отключить
+        </button>
+      </div>
+      <div className="text-xs text-slate-400">
+        Подключение работает через официальный Bot API MAX. После подключения будет зарегистрирован вебхук.
       </div>
     </div>
   );

@@ -396,8 +396,6 @@ async def handle_catalog_flow(
             "message_id": message_id or str(lead_id),
             "attachments": [attachment_payload] if attachment_payload else [],
         }
-        if attachment_payload:
-            catalog_out["attachment"] = attachment_payload
         if resolved_provider == "telegram":
             if telegram_user_id:
                 catalog_out["telegram_user_id"] = int(telegram_user_id)

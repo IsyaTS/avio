@@ -461,7 +461,7 @@ const CatalogTab: React.FC = () => {
                     <div className="space-y-1 text-xs text-slate-500">
                       <div className="font-semibold text-slate-600">Каналы</div>
                       <div className="flex flex-wrap gap-2">
-                        {['telegram', 'avito'].map((channel) => {
+                        {['telegram', 'avito', 'max'].map((channel) => {
                           const selected = (photo.channels || []).includes(channel);
                           return (
                             <label key={channel} className="flex items-center gap-2 text-xs text-slate-600">

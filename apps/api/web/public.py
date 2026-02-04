@@ -63,6 +63,7 @@ from libs.core.db import (
     upsert_lead,
 )
 from libs.core.integrations import avito
+from libs.core.integrations import max as max_integration
 from libs.core.common import (
     AVITO_BOT_ECHO_TTL_SECONDS,
     HANDOFF_SILENCE_TTL_SECONDS,
@@ -118,6 +119,7 @@ AVITO_STATE_TTL = 600  # seconds
 
 router = APIRouter()
 oauth_router = APIRouter(prefix="/v1/oauth/avito", tags=["avito_oauth"])
+max_router = APIRouter(prefix="/v1/max", tags=["max"])
 
 CATALOG_VIEW_TEMPLATE = "catalog/view.html"
 PHOTO_MAX_BYTES = 24 * 1024 * 1024  # Avito limit (24 MB) sets global cap
@@ -569,6 +571,7 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
                         tenant_id=int(tenant),
                         channel="avito",
                         is_bot=False,
+                        attachments=attachments or None,
                     )
                     logger.info(
                         "avito_outgoing_stored tenant=%s chat_id=%s lead_id=%s msg_id=%s",
@@ -2918,7 +2921,7 @@ async def tg_restart(
     tenant_id, _ = auth
 
     try:
-        upstream = await C.tg_post(
+        upstream = await common.tg_post(
             "/session/restart",
             {"tenant_id": tenant_id},
             timeout=5.0,
@@ -3048,6 +3051,52 @@ async def tg_qr_png(
     return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
+@router.get("/pub/tg/media/{peer_id}/{message_id}")
+async def tg_media(
+    request: Request,
+    peer_id: str,
+    message_id: str,
+    tenant: int | str | None = None,
+    k: str | None = None,
+):
+    route = "/pub/tg/media"
+    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+        request,
+        tenant,
+        k,
+        query_keys=("k",),
+        allow_body=False,
+    )
+    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, validated_key = auth
+    _log_public_tg_request(route, tenant_id, validated_key or "session")
+    try:
+        peer_val = int(str(peer_id))
+        msg_val = int(str(message_id))
+    except Exception:
+        return JSONResponse({"error": "bad_params"}, status_code=400, headers=_no_store_headers())
+
+    try:
+        status_code, response = await _tg_call(
+            "GET",
+            f"/media/{tenant_id}/{peer_val}/{msg_val}",
+            timeout=15.0,
+        )
+    except TgWorkerCallError as exc:
+        _log_tg_proxy(route, tenant_id, 502, None, error=exc.detail)
+        return JSONResponse({"error": "tg_unavailable", "detail": exc.detail}, status_code=502, headers=_no_store_headers())
+
+    body_bytes = bytes(response.content or b"")
+    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
+    content_type = response.headers.get("content-type")
+    if content_type:
+        headers["Content-Type"] = content_type
+    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
+    return Response(content=body_bytes, status_code=status_code, headers=headers)
+
+
 @router.get("/pub/tg/qr.txt")
 async def tg_qr_txt(
     request: Request,
@@ -3143,9 +3192,9 @@ async def tg_logout(
     tenant_id, _ = auth
 
     try:
-        upstream = await C.tg_post(
+        upstream = await common.tg_post(
             "/session/logout",
-            {"tenant_id": tenant_id},
+            {"tenant_id": tenant_id, "force": True},
             timeout=5.0,
         )
     except httpx.HTTPError as exc:
@@ -3691,6 +3740,122 @@ async def avito_oauth_webhook(request: Request, tenant: int | None = None, k: st
     if not success:
         return JSONResponse({"detail": "webhook_register_failed"}, status_code=502)
 
+    return JSONResponse({"ok": True})
+
+
+def _max_webhook_url(request: Request, tenant_id: int, secret: str) -> str:
+    token_param = secret.strip()
+    tail = f"/webhook/max?tenant={int(tenant_id)}"
+    if token_param:
+        tail = f"{tail}&token={token_param}"
+    return common.public_url(request, tail)
+
+
+@max_router.get("/status")
+async def max_status(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    integration = max_integration.get_integration(int(tenant_id)) or {}
+    token = str(integration.get("bot_token") or integration.get("token") or "").strip()
+    secret = str(integration.get("webhook_secret") or "").strip()
+    webhook_url = _max_webhook_url(request, int(tenant_id), secret) if secret else ""
+    return JSONResponse(
+        {
+            "connected": bool(token),
+            "webhook_url": webhook_url,
+            "webhook_secret_set": bool(secret),
+            "webhook_registered": bool(integration.get("webhook_registered")),
+        }
+    )
+
+
+@max_router.post("/connect")
+async def max_connect(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    raw_token = payload.get("token") or payload.get("bot_token") or payload.get("access_token") or ""
+    token = str(raw_token or "").strip()
+    if not token:
+        return JSONResponse({"detail": "token_required"}, status_code=400)
+
+    integration = max_integration.get_integration(int(tenant_id)) or {}
+    secret = str(integration.get("webhook_secret") or "").strip()
+    if not secret:
+        secret = secrets.token_urlsafe(18)
+
+    max_integration.update_integration(
+        int(tenant_id),
+        {
+            "bot_token": token,
+            "webhook_secret": secret,
+            "connected_at": int(time.time()),
+        },
+    )
+
+    webhook_url = _max_webhook_url(request, int(tenant_id), secret)
+    webhook_ok = False
+    try:
+        webhook_ok = await max_integration.ensure_webhook(int(tenant_id), webhook_url)
+    except Exception as exc:
+        logger.warning("max_webhook_register_failed tenant=%s error=%s", tenant_id, exc)
+        webhook_ok = False
+
+    try:
+        max_integration.update_integration(
+            int(tenant_id),
+            {
+                "webhook_registered": bool(webhook_ok),
+                "webhook_registered_at": int(time.time()) if webhook_ok else None,
+            },
+        )
+    except Exception:
+        logger.exception("max_webhook_state_update_failed tenant=%s", tenant_id)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "connected": True,
+            "webhook_url": webhook_url,
+            "webhook_ok": bool(webhook_ok),
+        }
+    )
+
+
+@max_router.post("/disconnect")
+async def max_disconnect(request: Request, tenant: int | None = None, k: str | None = None):
+    auth = await _authorize_public_settings_request(request, tenant, k)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    integration = max_integration.get_integration(int(tenant_id)) or {}
+    secret = str(integration.get("webhook_secret") or "").strip()
+    webhook_url = _max_webhook_url(request, int(tenant_id), secret) if secret else ""
+    if webhook_url:
+        try:
+            await max_integration.delete_webhook(int(tenant_id), webhook_url)
+        except Exception as exc:
+            logger.warning("max_webhook_delete_failed tenant=%s error=%s", tenant_id, exc)
+
+    max_integration.update_integration(
+        int(tenant_id),
+        {
+            "bot_token": None,
+            "token": None,
+            "webhook_registered": False,
+            "webhook_registered_at": None,
+            "webhook_secret": None,
+        },
+    )
     return JSONResponse({"ok": True})
 
 
@@ -4707,3 +4872,4 @@ def catalog_status_public(
 
 
 router.include_router(oauth_router)
+router.include_router(max_router)

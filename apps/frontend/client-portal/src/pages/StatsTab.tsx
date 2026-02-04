@@ -67,7 +67,8 @@ const StatsTab: React.FC = () => {
               {queueStats ? ` из ${queueStats.sampled || 0} просмотренных` : ''}
             </div>
             <div>
-              Запланировано follow-up: <strong>{queueStats ? queueStats.followup_scheduled_len : '—'}</strong>
+              Запланировано отложенных сообщений:{' '}
+              <strong>{queueStats ? queueStats.followup_scheduled_len : '—'}</strong>
             </div>
           </div>
         </div>

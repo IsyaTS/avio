@@ -66,6 +66,7 @@ from libs.core.db import (
     update_contact_phone,
     update_contact_avito_login,
     update_contact_telegram,
+    update_contact_max,
     fetch_pending_training_examples,
     set_training_embedding,
 )
@@ -89,6 +90,7 @@ from libs.core.common import (
     avito_bot_echo_key,
 )
 from libs.core.integrations import avito as avito_integration
+from libs.core.integrations import max as max_integration
 from libs.core.integrations import amocrm as amocrm_integration
 from libs.core.services import amocrm as amocrm_service
 from libs.core.repo import crm_links, crm_outbox
@@ -822,6 +824,27 @@ def _telegram_reply_enabled(tenant_id: int) -> bool:
     return True
 
 
+def _max_reply_enabled(tenant_id: int) -> bool:
+    """Per-tenant gate for MAX auto replies; default enabled."""
+
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = None
+
+    if isinstance(cfg, Mapping):
+        behavior = cfg.get("behavior")
+        if isinstance(behavior, Mapping):
+            for key in ("max_reply_enabled", "max_smart_reply_enabled", "max_ai_enabled"):
+                flag = _coerce_bool_value(behavior.get(key))
+                if flag is not None:
+                    return bool(flag)
+        root_flag = _coerce_bool_value(cfg.get("max_reply_enabled"))
+        if root_flag is not None:
+            return bool(root_flag)
+    return True
+
+
 def _behavior_triggers(tenant_id: int) -> list[dict[str, Any]]:
     try:
         cfg = read_tenant_config(int(tenant_id))
@@ -842,7 +865,7 @@ def _behavior_triggers(tenant_id: int) -> list[dict[str, Any]]:
         phrases = [p.strip() for p in item.get("phrases", []) if isinstance(p, str) and p.strip()]
         if not phrases:
             continue
-        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp"]
+        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp", "max"]
         channels: list[str] = []
         if isinstance(channels_raw, (list, tuple, set)):
             for ch in channels_raw:
@@ -851,7 +874,7 @@ def _behavior_triggers(tenant_id: int) -> list[dict[str, Any]]:
         elif isinstance(channels_raw, str) and channels_raw.strip():
             channels.append(channels_raw.strip().lower())
         if not channels:
-            channels = ["telegram", "avito", "whatsapp"]
+            channels = ["telegram", "avito", "whatsapp", "max"]
         result.append(
             {
                 "phrases": phrases,
@@ -972,6 +995,39 @@ def _build_photo_public_url(tenant_id: int, photo_id: str) -> str:
     if not key:
         return ""
     return f"{base}/pub/files/photos/{photo_id}?tenant={tenant_id}&k={key}"
+
+
+def _collect_outgoing_attachments(item: Mapping[str, Any], tenant_id: int) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    raw_attachment = item.get("attachment")
+    if isinstance(raw_attachment, Mapping):
+        attachments.append(dict(raw_attachment))
+    raw_list = item.get("attachments")
+    if isinstance(raw_list, list):
+        attachments.extend([dict(att) for att in raw_list if isinstance(att, Mapping)])
+    photo_id = str(item.get("photo_id") or "").strip()
+    if photo_id:
+        attachments.append(
+            {
+                "type": "image",
+                "photo_id": photo_id,
+                "url": _build_photo_public_url(tenant_id, photo_id),
+            }
+        )
+    raw_ids = item.get("photo_ids")
+    if isinstance(raw_ids, list):
+        for pid in raw_ids:
+            pid_str = str(pid or "").strip()
+            if not pid_str:
+                continue
+            attachments.append(
+                {
+                    "type": "image",
+                    "photo_id": pid_str,
+                    "url": _build_photo_public_url(tenant_id, pid_str),
+                }
+            )
+    return attachments
 
 
 def _normalize_photo_candidates(tenant_id: int, channel: str) -> list[dict[str, Any]]:
@@ -1476,6 +1532,8 @@ def _resolve_channel(item: Mapping[str, Any]) -> str:
         channel = str(raw_channel).strip().lower()
     if channel:
         return channel
+    if item.get("max_user_id") is not None:
+        return "max"
     if item.get("telegram_user_id") is not None or item.get("peer_id") is not None:
         return "telegram"
     return "whatsapp"
@@ -2565,6 +2623,432 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     )
 
 
+async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
+    tenant_raw = event.get("tenant") or event.get("tenant_id")
+    try:
+        tenant_id = int(tenant_raw) if tenant_raw is not None else 0
+    except Exception:
+        tenant_id = 0
+
+    if tenant_id <= 0:
+        log("event=skip_invalid_tenant channel=max tenant_raw=%s" % tenant_raw)
+        return
+
+    text_raw = event.get("text")
+    text = "" if text_raw is None else str(text_raw)
+    text = text.strip()
+
+    attachments: list[Mapping[str, Any]] = []
+    raw_attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
+    attachments.extend(raw_attachments)
+    single_attachment = event.get("attachment")
+    if isinstance(single_attachment, Mapping):
+        attachments.append(single_attachment)
+    media_field = event.get("media")
+    if isinstance(media_field, list):
+        attachments.extend(item for item in media_field if isinstance(item, Mapping))
+    elif isinstance(media_field, Mapping):
+        attachments.append(media_field)
+    photo_field = event.get("photo")
+    if isinstance(photo_field, list):
+        attachments.extend(item for item in photo_field if isinstance(item, Mapping))
+    elif isinstance(photo_field, Mapping):
+        attachments.append(photo_field)
+    has_photo = _has_photo_attachment(attachments)
+
+    message_id_raw = event.get("message_id") or event.get("id")
+    message_id = str(message_id_raw) if message_id_raw is not None else ""
+
+    max_user_id = _coerce_int(event.get("max_user_id") or event.get("user_id"))
+    peer_raw = event.get("peer") or event.get("chat_id") or event.get("peer_id")
+    peer_value: Optional[str] = None
+    if isinstance(peer_raw, str):
+        peer_value = peer_raw.strip() or None
+    elif peer_raw is not None:
+        peer_value = str(peer_raw).strip() or None
+    if not peer_value and max_user_id is not None:
+        peer_value = str(max_user_id)
+    peer_id = _coerce_int(peer_value)
+
+    username_raw = event.get("max_username") or event.get("username")
+    username = None
+    if username_raw is not None:
+        username = str(username_raw).strip() or None
+    display_name_raw = event.get("display_name") or event.get("name")
+    display_name = None
+    if isinstance(display_name_raw, str):
+        display_name = display_name_raw.strip() or None
+
+    lead_candidate = _coerce_int(event.get("lead_id"))
+    lead_hint = lead_candidate if lead_candidate and lead_candidate > 0 else None
+
+    title_hint: Optional[str] = None
+    normalized_username = normalize_username(username)
+    if display_name:
+        title_hint = display_name
+    elif normalized_username:
+        title_hint = f"max:{normalized_username}"
+    elif max_user_id is not None:
+        title_hint = f"max:id {max_user_id}"
+
+    contact_hint = display_name or normalized_username or username
+
+    resolved_lead_id: Optional[int] = lead_hint
+    if not resolved_lead_id and peer_value:
+        try:
+            lead_lookup = await get_or_create_by_peer(
+                tenant_id=tenant_id,
+                channel="max",
+                peer=peer_value,
+                lead_id_hint=lead_hint,
+            )
+            resolved_lead_id = int(lead_lookup)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("get_or_create_lead_peer").inc()
+            log(
+                "event=inbox_lead_resolve_failed channel=max tenant=%s error=%s"
+                % (tenant_id, exc)
+            )
+            resolved_lead_id = None
+
+    if resolved_lead_id is None and max_user_id is not None:
+        resolved_lead_id = int(max_user_id)
+    if resolved_lead_id is None:
+        resolved_lead_id = int(time.time() * 1000)
+
+    lead_id = int(resolved_lead_id)
+
+    try:
+        await upsert_lead(
+            lead_id,
+            channel="max",
+            tenant_id=tenant_id,
+            peer=peer_value,
+            contact=contact_hint,
+            title=title_hint,
+        )
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("upsert_lead").inc()
+        log(
+            "event=inbox_lead_upsert_failed channel=max tenant=%s error=%s"
+            % (tenant_id, exc)
+        )
+        return
+
+    peer_log_hint = peer_value or (str(peer_id) if peer_id is not None else None)
+    log(
+        f"event=inbox_lead_resolved channel=max tenant={tenant_id} lead_id={lead_id} peer={peer_log_hint or '-'}"
+    )
+
+    manager_outgoing = _looks_like_manager_outgoing(event) or _is_manager_message(event)
+
+    if text and not manager_outgoing:
+        try:
+            await followups.capture_followup_answer(tenant_id, lead_id, text, "max")
+        except Exception as exc:
+            log(
+                "event=followup_capture_warn channel=max tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    if not manager_outgoing:
+        try:
+            await _maybe_amocrm_inbound(
+                tenant_id,
+                lead_id,
+                text,
+                "max",
+                attachments=attachments,
+                message_id=message_id if isinstance(message_id, int) else None,
+            )
+        except Exception as exc:
+            log(
+                "event=amocrm_inbound_failed channel=max tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    try:
+        await followups.schedule_followups(tenant_id, lead_id, "max")
+    except Exception as exc:
+        log(
+            f"event=followup_schedule_warn channel=max tenant={tenant_id} lead_id={lead_id} error={exc}"
+        )
+
+    contact_id = 0
+    try:
+        contact_id = await resolve_or_create_contact(
+            max_user_id=max_user_id,
+            max_username=username,
+        )
+    except Exception as exc:
+        DB_ERRORS_COUNTER.labels("resolve_or_create_contact").inc()
+        log(
+            "event=contact_resolve_failed channel=max tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        contact_id = 0
+
+    if contact_id:
+        try:
+            await link_lead_contact(
+                lead_id,
+                contact_id,
+                channel="max",
+                peer=peer_value or "",
+            )
+            await update_contact_max(contact_id, max_user_id, username)
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("link_lead_contact").inc()
+            log(
+                "event=link_lead_contact_failed channel=max tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    if text:
+        try:
+            await insert_message_in(
+                lead_id,
+                text,
+                status="received",
+                tenant_id=tenant_id,
+            )
+        except Exception as exc:
+            DB_ERRORS_COUNTER.labels("insert_message_in").inc()
+            log(
+                "event=store_incoming_failed channel=max tenant=%s lead_id=%s error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+
+    # Поведение по триггерам (фразы → тишина/уведомление).
+    if text:
+        trigger_rule = _match_behavior_trigger(tenant_id, "max", text)
+        if trigger_rule and trigger_rule.get("silence", True):
+            notify_flag = bool(trigger_rule.get("notify"))
+            await _mark_handoff_silence(
+                tenant_id,
+                lead_id,
+                reason="trigger_match",
+                contact_hint=peer_log_hint or peer_value or contact_hint,
+                username_hint=username,
+                notify=notify_flag,
+            )
+            log(
+                f"event=trigger_match channel=max tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
+            )
+            return
+
+    # Фото-ожидание: если пришло фото/вложение и мы ждали — отвечаем и не ставим тишину.
+    if has_photo or attachments:
+        markers, photo_reply, photo_ttl = _photo_expectation_config(tenant_id)
+        state_key = f"conv:state:{tenant_id}:{lead_id}"
+        waiting_photo = False
+        try:
+            state_val = await r.get(state_key)
+            if isinstance(state_val, str) and state_val == "waiting_photo":
+                waiting_photo = True
+        except Exception:
+            waiting_photo = False
+        if waiting_photo:
+            if photo_reply and photo_reply.strip():
+                out_payload = {
+                    "lead_id": int(lead_id),
+                    "tenant": int(tenant_id),
+                    "tenant_id": int(tenant_id),
+                    "provider": "max",
+                    "ch": "max",
+                    "channel": "max",
+                    "text": photo_reply.strip(),
+                    "attachments": [],
+                    "peer": peer_value or peer_log_hint,
+                    "peer_id": peer_value or peer_log_hint,
+                }
+                try:
+                    await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
+                    log(
+                        f"event=photo_expected_reply_sent tenant={tenant_id} lead_id={lead_id} peer={peer_log_hint or '-'}"
+                    )
+                except Exception as exc:
+                    log(
+                        f"event=photo_expected_reply_failed channel=max tenant={tenant_id} lead_id={lead_id} error={exc}"
+                    )
+            try:
+                await _notify_manager_handoff(
+                    int(tenant_id),
+                    int(lead_id),
+                    reason="photo_received",
+                    contact_hint=peer_log_hint or peer_value or contact_hint,
+                    username_hint=username,
+                )
+            except Exception:
+                pass
+            try:
+                await r.delete(state_key)
+            except Exception:
+                pass
+            return
+
+    if attachments:
+        log(
+            f"event=incoming_attachments channel=max tenant={tenant_id} lead_id={lead_id} count={len(attachments)} has_photo={int(has_photo)}"
+        )
+
+    if has_photo or attachments:
+        await _mark_handoff_silence(
+            tenant_id,
+            lead_id,
+            reason="photo_received",
+            contact_hint=peer_log_hint or peer_value or contact_hint,
+            username_hint=username,
+        )
+        if attachments:
+            await _maybe_amocrm_inbound(tenant_id, lead_id, text, "max", attachments=attachments)
+        log(
+            f"event=handoff_marked channel=max tenant={tenant_id} lead_id={lead_id} reason=photo_received"
+        )
+        return
+
+    if manager_outgoing:
+        await _mark_handoff_silence(
+            tenant_id,
+            lead_id,
+            reason="manager_outgoing",
+            contact_hint=peer_log_hint or peer_value or contact_hint,
+            username_hint=username,
+        )
+        log(
+            f"event=handoff_marked channel=max tenant={tenant_id} lead_id={lead_id} reason=manager_outgoing"
+        )
+        return
+
+    silenced = await _is_handoff_silenced(tenant_id, lead_id)
+    if silenced:
+        log(
+            f"event=smart_reply_silenced channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    if not text:
+        log(
+            f"event=skip_no_text channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    if not _max_reply_enabled(tenant_id):
+        log(
+            f"event=max_reply_disabled channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+    if not smart_reply_enabled(tenant_id):
+        log(
+            f"event=smart_reply_disabled channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    refer_id = contact_id if contact_id and contact_id > 0 else lead_id
+
+    reply = ""
+    reply_text = ""
+    if _response_pipeline_enabled():
+        try:
+            result = await run_response_pipeline(
+                tenant_id=tenant_id,
+                channel="max",
+                user_text=text,
+                contact_id=refer_id if refer_id > 0 else 0,
+                enable_photos=False,
+                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
+                log_fn=log,
+            )
+            reply_text = result.reply_text
+            reply = reply_text
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=max tenant=%s lead_id=%s stage=pipeline error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            reply_text = default_fallback_reply(tenant_id)
+            reply = reply_text
+    else:
+        try:
+            messages = await build_llm_messages(refer_id, text, "max", tenant=tenant_id)
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=max tenant=%s lead_id=%s stage=build_messages error=%s"
+                % (tenant_id, lead_id, exc)
+            )
+            return
+
+        reply = await _ask_llm_with_fallback(
+            messages,
+            tenant_id=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel="max",
+        )
+        reply_text = (reply or "").strip()
+    reply_text = reply_text.strip()
+    _log_smart_reply_diag("max", tenant_id, lead_id, reply)
+    if not reply_text:
+        log(
+            f"event=smart_reply_empty channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        return
+
+    log(
+        f"event=smart_reply_generated channel=max tenant={tenant_id} lead_id={lead_id}"
+    )
+
+    # Если ответ содержит маркеры ожидания фото — ставим state waiting_photo (TTL из behavior).
+    markers, _, photo_ttl = _photo_expectation_config(tenant_id)
+    if markers:
+        lowered = reply_text.lower()
+        for marker in markers:
+            if isinstance(marker, str) and marker.strip() and marker.strip().lower() in lowered:
+                ttl = photo_ttl if photo_ttl > 0 else HANDOFF_SILENCE_TTL_SECONDS
+                state_key = f"conv:state:{tenant_id}:{lead_id}"
+                try:
+                    await r.set(state_key, "waiting_photo", ex=ttl)
+                    log(
+                        f"event=photo_expected_set channel=max tenant={tenant_id} lead_id={lead_id} ttl={ttl} marker={marker}"
+                    )
+                except Exception as exc:
+                    log(
+                        f"event=photo_expected_set_failed channel=max tenant={tenant_id} lead_id={lead_id} error={exc}"
+                    )
+                break
+
+    attachments = await _select_auto_photos(tenant_id, "max", text, reply_text)
+
+    out_payload: Dict[str, Any] = {
+        "lead_id": int(lead_id),
+        "tenant": int(tenant_id),
+        "tenant_id": int(tenant_id),
+        "provider": "max",
+        "ch": "max",
+        "channel": "max",
+        "text": reply_text,
+        "attachments": attachments or [],
+        "peer": peer_value or peer_log_hint,
+        "peer_id": peer_value or peer_log_hint,
+    }
+    if message_id:
+        out_payload["message_id"] = message_id
+    if max_user_id is not None:
+        out_payload["max_user_id"] = max_user_id
+
+    try:
+        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
+    except Exception as exc:
+        log(
+            "event=smart_reply_enqueue_failed channel=max tenant=%s lead_id=%s error=%s"
+            % (tenant_id, lead_id, exc)
+        )
+        return
+
+    log(
+        f"event=smart_reply_enqueued channel=max tenant={tenant_id} lead_id={lead_id}"
+    )
+
+
 async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     tenant_raw = event.get("tenant") or event.get("tenant_id") or os.getenv("TENANT_ID", "1")
     try:
@@ -3382,6 +3866,7 @@ _INCOMING_EVENT_HANDLERS: dict[
     "telegram": _handle_telegram_incoming,
     "whatsapp": _handle_whatsapp_incoming,
     "avito": _handle_avito_incoming,
+    "max": _handle_max_incoming,
 }
 
 
@@ -3924,6 +4409,145 @@ async def send_avito(
     return response.status_code, response.text
 
 
+async def send_max(
+    tenant_id: int,
+    lead_id: int,
+    text: str,
+    *,
+    chat_id: str | int | None = None,
+    user_id: str | int | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+) -> tuple[int, str]:
+    text_value = (text or "").strip()
+    attachments_list = attachments or []
+    if not text_value and not attachments_list:
+        return (0, "empty")
+
+    target_chat = chat_id
+    target_user = user_id
+    if target_chat is None and target_user is None and lead_id > 0:
+        try:
+            target_chat = await get_lead_peer(lead_id, channel="max")
+        except Exception:
+            target_chat = None
+
+    if target_chat is None and target_user is None:
+        log(
+            f"event=send_result status=skipped reason=missing_chat channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        return (0, "missing_chat")
+
+    prepared_attachments: list[dict[str, Any]] = []
+    mode = getattr(max_integration, "MAX_ATTACHMENT_MODE", "url")
+    upload_enabled = bool(getattr(max_integration, "MAX_UPLOAD_ENDPOINT", "") or "")
+
+    for item in attachments_list:
+        if not isinstance(item, Mapping):
+            continue
+        attachment_type = str(item.get("type") or "image").strip().lower() or "image"
+        url = item.get("url") or item.get("public_url")
+        path = item.get("path") or item.get("file_path")
+        filename = (
+            item.get("filename")
+            or item.get("name")
+            or item.get("title")
+            or item.get("path")
+        )
+        mime = item.get("mime") or item.get("mime_type") or item.get("mimetype")
+
+        uploaded = False
+        if mode == "upload" and upload_enabled:
+            content: bytes | None = None
+            headers: Mapping[str, str] | None = None
+            absolute_url = ""
+            if isinstance(path, str) and path.strip():
+                try:
+                    candidate = pathlib.Path(path).expanduser()
+                    if not candidate.is_absolute():
+                        candidate = tenant_dir(int(tenant_id)) / candidate
+                    resolved = candidate.resolve()
+                    if resolved.is_file():
+                        content = resolved.read_bytes()
+                        absolute_url = str(resolved)
+                except Exception:
+                    content = None
+            if content is None and isinstance(url, str) and url.strip():
+                trimmed_url = url.strip()
+                if _is_internal_path(trimmed_url):
+                    content, headers, absolute_url = await _download_internal_attachment(trimmed_url)
+                    if content is not None and not filename:
+                        filename = _resolve_attachment_filename(item, headers, absolute_url)
+                    if content is not None and not mime:
+                        mime = _resolve_attachment_mime(item, headers)
+                else:
+                    content, fetched_name, fetched_mime = await asyncio.to_thread(
+                        _download_file, trimmed_url
+                    )
+                    if content is not None:
+                        if not filename:
+                            filename = fetched_name
+                        if not mime:
+                            mime = fetched_mime
+
+            if content:
+                status, payload, err = await max_integration.upload_file(
+                    tenant=int(tenant_id),
+                    filename=str(filename or "attachment"),
+                    content=content,
+                    mime=str(mime) if mime else None,
+                )
+                if 200 <= status < 300 and isinstance(payload, dict):
+                    file_id = (
+                        payload.get("file_id")
+                        or payload.get("fileId")
+                        or payload.get("id")
+                        or payload.get("fileID")
+                    )
+                    file_url = payload.get("url") or payload.get("link")
+                    attachment_payload = {"type": attachment_type}
+                    if file_id:
+                        attachment_payload["file_id"] = file_id
+                    elif file_url:
+                        attachment_payload["url"] = file_url
+                    else:
+                        attachment_payload["url"] = url or ""
+                    prepared_attachments.append(attachment_payload)
+                    uploaded = True
+                else:
+                    log(
+                        "event=max_upload_failed tenant=%s lead_id=%s status=%s error=%s",
+                        tenant_id,
+                        lead_id,
+                        status,
+                        err or "",
+                    )
+
+        if uploaded:
+            continue
+        if isinstance(url, str) and url.strip():
+            payload = {"type": attachment_type, "url": url.strip()}
+            if filename:
+                payload["name"] = filename
+            if mime:
+                payload["mime"] = mime
+            prepared_attachments.append(payload)
+
+    status_code, body = await max_integration.send_message(
+        int(tenant_id),
+        chat_id=target_chat,
+        user_id=target_user,
+        text=text_value or None,
+        attachments=prepared_attachments or None,
+    )
+
+    if 200 <= status_code < 300:
+        MESSAGE_OUT_COUNTER.labels("max", "success").inc()
+    else:
+        MESSAGE_OUT_COUNTER.labels("max", "error").inc()
+
+    return status_code, body
+
+
 async def _fetch_authorized_status(tenant_id: int) -> Optional[bool]:
     try:
         status_url = f"{TGWORKER_STATUS_URL}?tenant={tenant_id}"
@@ -4002,6 +4626,9 @@ async def send_telegram(
     unauthorized_checked = False
 
     for attempt in range(3):
+        timeout = 15.0
+        if normalized_attachments:
+            timeout = float(os.getenv("TG_SEND_ATTACH_TIMEOUT", "45") or 45.0)
         last_status, last_body = await telegram_transport.send(
             tenant=tenant_id,
             text=text_value,
@@ -4010,7 +4637,7 @@ async def send_telegram(
             meta=meta or None,
             headers=headers,
             lead_id=lead_id,
-            timeout=15.0,
+            timeout=timeout,
         )
         if 200 <= last_status < 300:
             MESSAGE_OUT_COUNTER.labels("telegram", "success").inc()
@@ -4130,6 +4757,8 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     reply_to = item.get("reply_to") if isinstance(item.get("reply_to"), str) else None
     avito_account_id = _coerce_int(item.get("account_id"))
     avito_chat_id_hint = item.get("chat_id") or item.get("peer") or item.get("peer_id")
+    max_user_id = _coerce_int(item.get("max_user_id") or item.get("user_id"))
+    max_chat_id_hint = item.get("chat_id") or item.get("peer") or item.get("peer_id")
 
     if not text and not attachment and not attachments:
         log(
@@ -4155,6 +4784,12 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             f"channel={channel} lead_id={lead_id} outbox_enabled_env={env_hint}"
         )
         return ("skipped", "outbox_disabled", "", 0)
+
+    if channel == "max" and raw_to is None:
+        if peer_value:
+            raw_to = peer_value
+        elif max_user_id is not None:
+            raw_to = max_user_id
 
     if channel != "telegram":
         allowed, whitelist_reason = await _whitelist_allows(
@@ -4346,6 +4981,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                     telegram_username=username,
                     title=title_hint,
                     is_bot=not (_is_manager_message(item) or _is_followup_message(item)),
+                    attachments=_collect_outgoing_attachments(item, tenant) or None,
                 )
             except Exception as exc:
                 DB_ERRORS_COUNTER.labels("insert_message_out").inc()
@@ -4519,7 +5155,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                         log(
                             "event=avito_echo_cache_failed tenant=%s lead_id=%s error=%s"
                             % (tenant, lead_id, exc)
-                        )
+                )
     elif channel == "telegram":
         peer_id = None
         if peer_value:
@@ -4543,6 +5179,18 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             attachments=attachments or None,
             reply_to=reply_to,
             lead_id=actual_lead_id,
+        )
+    elif channel == "max":
+        chat_hint = max_chat_id_hint
+        if chat_hint is not None:
+            chat_hint = str(chat_hint).strip() or None
+        st, body = await send_max(
+            tenant,
+            lead_id,
+            text,
+            chat_id=chat_hint,
+            user_id=max_user_id,
+            attachments=attachments or None,
         )
     else:
         recipient_value = raw_to if isinstance(raw_to, str) and raw_to.strip() else phone
@@ -4712,6 +5360,7 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
 
         if not stored_message_id:
             try:
+                attachments = _collect_outgoing_attachments(item, tenant_id)
                 await insert_message_out(
                     lead_ref,
                     text,
@@ -4722,6 +5371,7 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
                     telegram_user_id=telegram_user_id,
                     telegram_username=username,
                     is_bot=not (manager_message or _is_followup_message(item)),
+                    attachments=attachments or None,
                 )
             except Exception as exc:
                 log(f"[worker] insert_message_out err: {exc}")

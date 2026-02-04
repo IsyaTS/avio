@@ -75,7 +75,7 @@ class Attachment(_AliasModel):
 
 
 class _TransportMessageBase(_AliasModel):
-    channel: str = Field(..., pattern=r"^(telegram|whatsapp)$")
+    channel: str = Field(..., pattern=r"^(telegram|whatsapp|max)$")
     to: Union[int, str]
     text: str | None = Field(default=None)
     attachments: List[Attachment] = Field(default_factory=list)
@@ -147,6 +147,7 @@ class _TransportMessageBase(_AliasModel):
                 "whatsapp": "whatsapp",
                 "telegram": "telegram",
                 "tg": "telegram",
+                "max": "max",
             }
             data["channel"] = channel_aliases.get(normalized, normalized)
 
@@ -183,7 +184,7 @@ class MessageIn(BaseModel):
     """Normalized incoming message event."""
 
     tenant: int = Field(..., ge=1)
-    channel: str = Field(..., pattern=r"^(telegram|whatsapp)$")
+    channel: str = Field(..., pattern=r"^(telegram|whatsapp|max)$")
     from_id: int | str | None = None
     to: int | str | None = None
     text: str | None = None

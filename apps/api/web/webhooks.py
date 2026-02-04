@@ -27,6 +27,7 @@ from libs.core.db import (
 from . import common as C  # type: ignore
 
 from libs.core.integrations import avito
+from libs.core.integrations import max as max_integration
 from libs.core.services import amocrm as amocrm_service
 
 from .ui import templates  # noqa: F401 - ensure templates loaded for compatibility
@@ -422,6 +423,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     telegram_user_id: int | None = None
     telegram_username: str | None = None
     telegram_display_name: str | None = None
+    max_user_id: int | None = None
+    max_username: str | None = None
+    max_display_name: str | None = None
     peer_id: int | None = None
     peer_value: str | None = None
     contact_value: str | None = None
@@ -570,6 +574,54 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     peer_id = int(peer_value)
                 except Exception:
                     peer_id = None
+    elif provider == "max":
+        raw_id = (
+            msg.get("max_user_id")
+            or body.get("max_user_id")
+            or msg.get("user_id")
+            or body.get("user_id")
+        )
+        if raw_id is not None:
+            try:
+                max_user_id = int(raw_id)
+            except Exception:
+                max_user_id = None
+        raw_username = (
+            msg.get("max_username")
+            or body.get("max_username")
+            or msg.get("username")
+            or body.get("username")
+        )
+        if isinstance(raw_username, str):
+            max_username = raw_username.strip() or None
+        else:
+            max_username = None
+        raw_display_name = (
+            msg.get("display_name")
+            or body.get("display_name")
+            or msg.get("name")
+            or body.get("name")
+        )
+        if isinstance(raw_display_name, str):
+            max_display_name = raw_display_name.strip() or None
+        else:
+            max_display_name = None
+        contact_value = max_display_name or max_username or (str(max_user_id) if max_user_id else None)
+        peer_candidate = (
+            msg.get("peer")
+            or body.get("peer")
+            or msg.get("peer_id")
+            or body.get("peer_id")
+            or msg.get("chat_id")
+            or body.get("chat_id")
+        )
+        if peer_candidate is not None:
+            peer_value = str(peer_candidate).strip() or None
+            if peer_value is not None:
+                try:
+                    peer_id = int(peer_value)
+                except Exception:
+                    peer_id = None
     elif provider == "avito":
         chat_candidate = (
             msg.get("chat_id")
@@ -621,6 +673,11 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             lead_id_value = telegram_user_id
         elif peer_id is not None:
             lead_id_value = peer_id
+    elif provider == "max":
+        if max_user_id is not None:
+            lead_id_value = max_user_id
+        elif peer_id is not None:
+            lead_id_value = peer_id
     elif provider == "avito":
         account_hint = avito_account_id if avito_account_id is not None else tenant
         if avito_chat_id:
@@ -639,6 +696,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             peer_for_log = str(peer_id)
         elif telegram_user_id is not None:
             peer_for_log = str(telegram_user_id)
+    elif provider == "max":
+        if peer_value is not None:
+            peer_for_log = peer_value
+        elif peer_id is not None:
+            peer_for_log = str(peer_id)
+        elif max_user_id is not None:
+            peer_for_log = str(max_user_id)
     elif whatsapp_phone:
         peer_for_log = whatsapp_phone
     logger.info(
@@ -683,6 +747,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 upsert_kwargs["title"] = telegram_display_name
             if telegram_display_name:
                 upsert_kwargs["title"] = telegram_display_name
+            if provider == "max":
+                if max_display_name and not upsert_kwargs.get("title"):
+                    upsert_kwargs["title"] = max_display_name
+                if max_display_name:
+                    upsert_kwargs["title"] = max_display_name
+                if max_username and not upsert_kwargs.get("title"):
+                    upsert_kwargs["title"] = max_username
             if provider == "avito":
                 if avito_chat_id:
                     upsert_kwargs["peer"] = avito_chat_id
@@ -709,6 +780,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 avito_login=avito_login,
                 telegram_user_id=telegram_user_id,
                 telegram_username=telegram_username,
+                max_user_id=max_user_id,
+                max_username=max_username,
             )
             if contact_id:
                 await link_lead_contact(
@@ -767,6 +840,11 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "stage=incoming_duplicate ch=avito tenant=%s message_id=%s", tenant, message_id
         )
         return _ok({"skipped": True, "reason": "duplicate"})
+    if provider == "max" and await _is_duplicate("max", tenant, message_id or None):
+        logger.info(
+            "stage=incoming_duplicate ch=max tenant=%s message_id=%s", tenant, message_id
+        )
+        return _ok({"skipped": True, "reason": "duplicate"})
     logger.info(
         "stage=pre_reply_checks ch=%s tenant=%s lead_id=%s msg=%s has_photo=%s attachments=%s text_len=%s",
         channel,
@@ -788,6 +866,12 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         from_addr = str(telegram_user_id or "")
         if telegram_user_id is not None:
             to_addr = str(telegram_user_id)
+        elif peer_id is not None:
+            to_addr = str(peer_id)
+    elif provider == "max":
+        from_addr = str(max_user_id or peer_value or "")
+        if max_user_id is not None:
+            to_addr = str(max_user_id)
         elif peer_id is not None:
             to_addr = str(peer_id)
     elif provider == "avito":
@@ -829,6 +913,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         normalized_event["username"] = telegram_username
     if telegram_display_name:
         normalized_event["display_name"] = telegram_display_name
+    if provider == "max":
+        if max_user_id is not None:
+            normalized_event["max_user_id"] = max_user_id
+        if max_username:
+            normalized_event["max_username"] = max_username
+        if max_display_name:
+            normalized_event["display_name"] = max_display_name
     if peer_id is not None:
         normalized_event["peer_id"] = peer_id
     if provider == "telegram":
@@ -841,6 +932,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             if contact_value:
                 telegram_contact["contact"] = contact_value
             lead_contacts["telegram"] = telegram_contact
+    if provider == "max":
+        if peer_value is None and max_user_id is not None:
+            peer_value = str(max_user_id)
+        if peer_value is not None:
+            normalized_event["peer"] = peer_value
+            lead_contacts = normalized_event.setdefault("lead_contacts", {})
+            max_contact: dict[str, Any] = {"peer": peer_value}
+            if contact_value:
+                max_contact["contact"] = contact_value
+            lead_contacts["max"] = max_contact
     if provider == "avito":
         if avito_chat_id:
             normalized_event["peer"] = avito_chat_id
@@ -887,6 +988,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 await _redis_queue.incrby("metrics:whatsapp:incoming", 1)
             elif channel == "avito":
                 await _redis_queue.incrby("metrics:avito:incoming", 1)
+            elif channel == "max":
+                await _redis_queue.incrby("metrics:max:incoming", 1)
             logger.info(
                 "stage=incoming_enqueued ch=%s tenant=%s message_id=%s",
                 channel,
@@ -1005,21 +1108,25 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             avito_login=avito_login,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
+            max_user_id=max_user_id,
+            max_username=max_username,
         )
         if contact_id:
             await link_lead_contact(
                 lead_id,
                 contact_id,
                 channel=provider,
-                peer=peer_value if provider in {"telegram", "avito"} else None,
+                peer=peer_value if provider in {"telegram", "avito", "max"} else None,
             )
-            if text:
+            incoming_text = text or ("[Фото]" if attachments else "")
+            if incoming_text:
                 message_db_id = await insert_message_in(
                     lead_id,
-                    text,
+                    incoming_text,
                     status="received",
                     tenant_id=tenant,
                     telegram_user_id=telegram_user_id,
+                    attachments=attachments or None,
                 )
                 stored_incoming = True
                 if message_db_id:
@@ -1037,14 +1144,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     except Exception:
         logger.exception("contact_upsert_err tenant=%s lead_id=%s", tenant, lead_id)
 
-    if text and not stored_incoming:
+    incoming_text = text or ("[Фото]" if attachments else "")
+    if incoming_text and not stored_incoming:
         try:
             message_db_id = await insert_message_in(
                 lead_id,
-                text,
+                incoming_text,
                 status="received",
                 tenant_id=tenant,
                 telegram_user_id=telegram_user_id,
+                attachments=attachments or None,
             )
             if message_db_id:
                 normalized_event["_message_db_id"] = message_db_id
@@ -1085,6 +1194,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
             if channel == "telegram":
                 await _redis_queue.incrby("metrics:telegram:incoming", 1)
+            elif channel == "max":
+                await _redis_queue.incrby("metrics:max:incoming", 1)
             logger.info(
                 "stage=incoming_enqueued_photo ch=%s tenant=%s message_id=%s",
                 channel,
@@ -1235,8 +1346,6 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "message_id": message_id or str(lead_id),
             "attachments": [attachment] if attachment else [],
         }
-        if attachment:
-            catalog_out["attachment"] = attachment
         if resolved_provider == "telegram":
             send_catalog_first = True
             raw_send_catalog_flag = behavior.get("send_catalog_on_first_message") if behavior else None
@@ -1466,7 +1575,14 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         try:
             serialized = json.dumps(_json_safe(normalized_event), ensure_ascii=False)
             await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
-            await _redis_queue.incrby("metrics:telegram:incoming", 1)
+            if channel == "telegram":
+                await _redis_queue.incrby("metrics:telegram:incoming", 1)
+            elif channel == "max":
+                await _redis_queue.incrby("metrics:max:incoming", 1)
+            elif channel == "avito":
+                await _redis_queue.incrby("metrics:avito:incoming", 1)
+            elif channel == "whatsapp":
+                await _redis_queue.incrby("metrics:whatsapp:incoming", 1)
             logger.info(
                 "stage=incoming_enqueued_photo ch=%s tenant=%s message_id=%s",
                 channel,
@@ -1857,6 +1973,8 @@ async def telegram_webhook(request: Request):
                     or payload.get("id")
                 )
                 if peer_value and message_id_value:
+                    attachment["peer_id"] = peer_value
+                    attachment["message_id"] = message_id_value
                     attachment["url"] = f"telegram://{tenant}/{peer_value}/{message_id_value}"
             if attachment not in attachments:
                 attachments = list(attachments)
@@ -1864,7 +1982,26 @@ async def telegram_webhook(request: Request):
                 message["attachments"] = attachments
                 payload["attachments"] = attachments
         elif isinstance(message.get("attachments"), list):
-            payload["attachments"] = message["attachments"]
+            message_id_value = (
+                message.get("message_id")
+                or message.get("id")
+                or payload.get("message_id")
+                or payload.get("id")
+            )
+            if peer_value and message_id_value:
+                updated = []
+                for att in attachments:
+                    if not isinstance(att, Mapping):
+                        continue
+                    entry = dict(att)
+                    if entry.get("photo_id") and not entry.get("url"):
+                        entry["peer_id"] = peer_value
+                        entry["message_id"] = message_id_value
+                        entry["url"] = f"telegram://{tenant}/{peer_value}/{message_id_value}"
+                    updated.append(entry)
+                attachments = updated
+                message["attachments"] = attachments
+            payload["attachments"] = attachments
     except Exception:
         logger.exception("telegram_webhook_attach_enrich_failed tenant=%s", tenant)
     # preserve raw transport payload to inspect media (e.g., MessageMediaPhoto) and flags
@@ -1889,6 +2026,99 @@ async def telegram_webhook(request: Request):
         body["message"]["peer"] = peer_value
         body["message"]["peer_id"] = raw_peer_value
 
+    return await process_incoming(body, request)
+
+
+@router.post("/webhook/max")
+async def max_webhook(request: Request):
+    token = _extract_token(request)
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_payload")
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    tenant_raw = request.query_params.get("tenant") or payload.get("tenant") or payload.get("tenant_id")
+    try:
+        tenant = int(tenant_raw) if tenant_raw is not None else 0
+    except Exception:
+        tenant = 0
+    if tenant <= 0:
+        raise HTTPException(status_code=400, detail="invalid_tenant")
+
+    integration = max_integration.get_integration(int(tenant)) or {}
+    secret_expected = str(integration.get("webhook_secret") or "").strip()
+    if secret_expected and token != secret_expected:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    msg_raw = payload.get("message") or payload.get("data") or payload
+    message: dict[str, Any] = dict(msg_raw) if isinstance(msg_raw, Mapping) else {}
+
+    text_value = message.get("text") or message.get("body") or payload.get("text") or ""
+    if not isinstance(text_value, str):
+        text_value = str(text_value)
+    message.setdefault("text", text_value.strip())
+
+    message_id = (
+        message.get("message_id")
+        or message.get("id")
+        or payload.get("message_id")
+        or payload.get("id")
+    )
+    if message_id is not None:
+        message["message_id"] = message_id
+
+    user_id = (
+        message.get("user_id")
+        or message.get("from_id")
+        or (message.get("from") or {}).get("id") if isinstance(message.get("from"), Mapping) else None
+        or payload.get("user_id")
+    )
+    if user_id is not None:
+        message.setdefault("max_user_id", user_id)
+
+    username = (
+        message.get("username")
+        or (message.get("from") or {}).get("username") if isinstance(message.get("from"), Mapping) else None
+        or payload.get("username")
+    )
+    if username:
+        message.setdefault("max_username", username)
+
+    display_name = (
+        message.get("display_name")
+        or message.get("name")
+        or (message.get("from") or {}).get("name") if isinstance(message.get("from"), Mapping) else None
+    )
+    if display_name:
+        message.setdefault("display_name", display_name)
+
+    chat_id = (
+        message.get("chat_id")
+        or (message.get("chat") or {}).get("id") if isinstance(message.get("chat"), Mapping) else None
+        or payload.get("chat_id")
+    )
+    if chat_id is not None and "peer" not in message:
+        message["peer"] = chat_id
+
+    if "attachments" not in message and isinstance(payload.get("attachments"), list):
+        message["attachments"] = payload.get("attachments")
+    if "attachments" not in message and isinstance(message.get("media"), list):
+        message["attachments"] = message.get("media")
+
+    body = {
+        "source": {"type": "max", "tenant": tenant},
+        "message": message,
+        "provider_raw": payload,
+        "max": payload,
+    }
+    for flag_key in ("manager", "out", "outgoing"):
+        if payload.get(flag_key) is not None:
+            body[flag_key] = payload.get(flag_key)
     return await process_incoming(body, request)
 
 

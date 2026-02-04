@@ -829,6 +829,8 @@ async def resolve_or_create_contact(
     avito_login: Optional[str] = None,
     telegram_user_id: Optional[int] = None,
     telegram_username: Optional[str] = None,
+    max_user_id: Optional[int] = None,
+    max_username: Optional[str] = None,
 ) -> int:
     # поиск по приоритету: whatsapp_phone -> avito_user_id -> avito_login
     contact_id: int | None = None
@@ -858,6 +860,10 @@ async def resolve_or_create_contact(
         row = await _fetchrow("SELECT id FROM contacts WHERE telegram_user_id=$1::bigint", telegram_user_id)
         if row:
             contact_id = row["id"]
+    if contact_id is None and max_user_id:
+        row = await _fetchrow("SELECT id FROM contacts WHERE max_user_id=$1::bigint", max_user_id)
+        if row:
+            contact_id = row["id"]
 
     if contact_id is not None:
         if telegram_user_id:
@@ -882,6 +888,28 @@ async def resolve_or_create_contact(
                 contact_id,
                 telegram_username,
             )
+        if max_user_id:
+            await _exec(
+                """
+                UPDATE contacts
+                SET max_user_id = COALESCE(max_user_id, $2::bigint),
+                    updated_at = now()
+                WHERE id = $1;
+                """,
+                contact_id,
+                max_user_id,
+            )
+        if max_username:
+            await _exec(
+                """
+                UPDATE contacts
+                SET max_username = COALESCE(NULLIF($2, ''), max_username),
+                    updated_at = now()
+                WHERE id = $1;
+                """,
+                contact_id,
+                max_username,
+            )
         if phone_norm:
             await _exec(
                 """
@@ -898,8 +926,17 @@ async def resolve_or_create_contact(
 
     row = await _fetchrow(
         """
-        INSERT INTO contacts(phone, whatsapp_phone, avito_user_id, avito_login, telegram_user_id, telegram_username)
-        VALUES($1,$2,$3,$4,$5::bigint,$6)
+        INSERT INTO contacts(
+            phone,
+            whatsapp_phone,
+            avito_user_id,
+            avito_login,
+            telegram_user_id,
+            telegram_username,
+            max_user_id,
+            max_username
+        )
+        VALUES($1,$2,$3,$4,$5::bigint,$6,$7::bigint,$8)
         RETURNING id
     """,
         phone_norm or whatsapp_phone,
@@ -908,6 +945,8 @@ async def resolve_or_create_contact(
         avito_login,
         telegram_user_id,
         telegram_username,
+        max_user_id,
+        max_username,
     )
     # если БД недоступна — вернём фиктивный id, чтобы не падал вызов
     return int(row["id"]) if row and "id" in row else 0
@@ -1088,6 +1127,7 @@ async def insert_message_in(
     provider_msg_id: Optional[str] = None,
     *,
     is_bot: bool = False,
+    attachments: Optional[list[dict[str, Any]]] = None,
 ) -> int:
     if _offline_enabled():
         _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id, is_bot=is_bot)
@@ -1103,8 +1143,8 @@ async def insert_message_in(
         telegram_val = 0
     row = await _fetchrow(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot)
-        VALUES($1::bigint, 0, $2, $3, $4, $5, $6::bigint, $7::boolean)
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot, attachments)
+        VALUES($1::bigint, 0, $2, $3, $4, $5, $6::bigint, $7::boolean, $8::jsonb)
         RETURNING id;
     """,
         lead_id,
@@ -1114,6 +1154,7 @@ async def insert_message_in(
         tenant_val,
         telegram_val,
         bool(is_bot),
+        json.dumps(attachments, ensure_ascii=False) if attachments else None,
     )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
@@ -1172,6 +1213,7 @@ async def insert_message_out(
     *,
     title: Optional[str] = None,
     is_bot: bool = False,
+    attachments: Optional[list[dict[str, Any]]] = None,
 ) -> int:
     upsert_kwargs = {
         "channel": channel or "whatsapp",
@@ -1204,8 +1246,8 @@ async def insert_message_out(
         telegram_val = 0
     row = await _fetchrow(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot)
-        VALUES($1::bigint, 1, $2, $3, $4, $5, $6::bigint, $7::boolean)
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot, attachments)
+        VALUES($1::bigint, 1, $2, $3, $4, $5, $6::bigint, $7::boolean, $8::jsonb)
         RETURNING id;
     """,
         lead_ref,
@@ -1215,6 +1257,7 @@ async def insert_message_out(
         tenant_val,
         telegram_val,
         bool(is_bot),
+        json.dumps(attachments, ensure_ascii=False) if attachments else None,
     )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
@@ -1784,7 +1827,7 @@ async def list_messages_for_lead(
 
     params: list[Any] = [tenant_val, lead_ref]
     sql_parts = [
-        "SELECT id, lead_id, direction, text, status, created_at, is_bot",
+        "SELECT id, lead_id, direction, text, status, created_at, is_bot, attachments",
         "FROM messages",
         "WHERE tenant_id = $1 AND lead_id = $2",
     ]
@@ -1804,6 +1847,43 @@ async def list_messages_for_lead(
                 messages.append(dict(row.items()))
     messages.reverse()  # chronological order
     return messages
+
+
+async def list_recent_messages(
+    tenant_id: int,
+    *,
+    since: Optional[datetime] = None,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    if tenant_val <= 0:
+        return []
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 2000
+    params: list[Any] = [tenant_val]
+    sql_parts = [
+        "SELECT lead_id, direction, is_bot, text, created_at",
+        "FROM messages",
+        "WHERE tenant_id = $1",
+        "AND text IS NOT NULL",
+    ]
+    if since is not None:
+        params.append(since)
+        sql_parts.append(f"AND created_at >= ${len(params)}")
+    params.append(limit_val)
+    sql_parts.append("ORDER BY created_at ASC, id ASC")
+    sql_parts.append(f"LIMIT ${len(params)}")
+    rows = await _fetch(" ".join(sql_parts), *params)
+    results: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            results.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                results.append(dict(row.items()))
+    return results
 
 
 async def list_recent_inbound_texts(
@@ -2002,6 +2082,7 @@ async def record_training_example(
     q_text: str,
     a_text: str,
     is_bad: bool = False,
+    is_active: bool = True,
     embedding_status: str = "pending",
     embedding_model: Optional[str] = None,
     fingerprint: Optional[str] = None,
@@ -2036,7 +2117,6 @@ async def record_training_example(
         WHERE tenant_id = $1
           AND fingerprint = $2
           AND is_bad = FALSE
-          AND is_active = TRUE
         ORDER BY updated_at DESC
         LIMIT 1;
         """,
@@ -2046,18 +2126,19 @@ async def record_training_example(
     if existing and "id" in existing and existing["id"] is not None:
         try:
             existing_id = int(existing["id"])
-            await _exec(
-                """
-                UPDATE training_examples
-                SET updated_at = now(),
-                    a_text = $2,
-                    source = COALESCE($3, source)
-                WHERE id = $1;
-                """,
-                existing_id,
-                a_text,
-                source,
-            )
+            if bool(is_active):
+                await _exec(
+                    """
+                    UPDATE training_examples
+                    SET updated_at = now(),
+                        a_text = $2,
+                        source = COALESCE($3, source)
+                    WHERE id = $1;
+                    """,
+                    existing_id,
+                    a_text,
+                    source,
+                )
             return existing_id
         except Exception:
             pass
@@ -2069,7 +2150,7 @@ async def record_training_example(
             q_text, a_text, fingerprint, is_bad, is_active,
             embedding_status, embedding_model
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING id;
         """,
         tenant_val,
@@ -2081,6 +2162,7 @@ async def record_training_example(
         a_text,
         sig,
         bool(is_bad),
+        bool(is_active),
         embedding_status,
         embedding_model,
     )
@@ -2156,6 +2238,86 @@ async def get_training_examples_for_retrieval(
             if isinstance(row, Mapping):
                 results.append(dict(row.items()))
     return results
+
+
+async def list_training_suggestions(tenant_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    if tenant_val <= 0:
+        return []
+    lim = limit if isinstance(limit, int) and limit > 0 else 20
+    rows = await _fetch(
+        """
+        SELECT id, q_text, a_text, source, updated_at, created_at
+        FROM training_examples
+        WHERE tenant_id = $1
+          AND is_active = FALSE
+          AND is_bad = FALSE
+          AND source LIKE 'auto_suggest%'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $2;
+        """,
+        tenant_val,
+        lim,
+    )
+    results: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            results.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                results.append(dict(row.items()))
+    return results
+
+
+async def delete_training_suggestions(tenant_id: int) -> None:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return
+    if tenant_val <= 0:
+        return
+    await _exec(
+        """
+        DELETE FROM training_examples
+        WHERE tenant_id = $1
+          AND is_active = FALSE
+          AND is_bad = FALSE
+          AND source LIKE 'auto_suggest%';
+        """,
+        tenant_val,
+    )
+
+
+async def activate_training_examples(example_ids: list[int]) -> None:
+    if not example_ids:
+        return
+    ids: list[int] = []
+    for val in example_ids:
+        try:
+            coerced = int(val)
+        except Exception:
+            continue
+        if coerced > 0:
+            ids.append(coerced)
+    if not ids:
+        return
+    await _exec(
+        """
+        UPDATE training_examples
+        SET is_active = TRUE,
+            embedding_status = 'pending',
+            updated_at = now(),
+            source = CASE
+                WHEN source LIKE 'auto_suggest%' THEN 'auto_suggest_approved'
+                ELSE source
+            END
+        WHERE id = ANY($1::bigint[]);
+        """,
+        ids,
+    )
 
 
 async def get_tenant_model(tenant_id: int) -> Optional[Mapping[str, Any]]:
@@ -3241,4 +3403,22 @@ async def update_contact_avito_login(contact_id: int, avito_login: str | None) -
         """,
         contact_id,
         login,
+    )
+
+
+async def update_contact_max(contact_id: int, max_user_id: int | None, max_username: str | None) -> None:
+    """Update contact with MAX identifiers if missing."""
+    if not contact_id:
+        return
+    await _exec(
+        """
+        UPDATE contacts
+        SET max_user_id = COALESCE(max_user_id, $2::bigint),
+            max_username = COALESCE(NULLIF($3, ''), max_username),
+            updated_at = now()
+        WHERE id = $1;
+        """,
+        contact_id,
+        max_user_id,
+        max_username,
     )

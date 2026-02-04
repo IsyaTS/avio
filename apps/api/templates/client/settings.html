@@ -49,6 +49,9 @@
             <code class="code-inline" style="margin-top:4px;">{{ key }}</code>
         </div>
     </div>
+    <div id="image-preview-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(15,23,42,0.8); align-items:center; justify-content:center; padding:16px;" onclick="closeImagePreview()">
+      <img id="image-preview-img" src="" alt="preview" style="max-width:92vw; max-height:92vh; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.35);" />
+    </div>
 </section>
 
 <nav class="tabs" data-role="tabs">
@@ -59,7 +62,7 @@
     <button class="tab" data-tab-target="training">Диалоги и обучение</button>
     <button class="tab" data-tab-target="export">Экспорт переписок</button>
     <button class="tab" data-tab-target="channels">Каналы</button>
-    <button class="tab" data-tab-target="followups">Фоллоу-апы</button>
+    <button class="tab" data-tab-target="followups">Отложенные сообщения</button>
     <button class="tab" data-tab-target="stats">Статистика</button>
     <button class="tab" data-tab-target="dialogs">Диалоги</button>
 </nav>
@@ -787,14 +790,14 @@
 
 <section class="surface stack tab-panel hidden" data-tab-panel="followups" data-testid="client-followups">
     <div class="stack" style="gap: 6px;">
-        <h2 class="section-title" style="font-size:1.35rem;">Фоллоу-апы</h2>
+        <h2 class="section-title" style="font-size:1.35rem;">Отложенные сообщения</h2>
         <p class="section-subtitle">Автоматические сообщения клиентам через заданное время после последнего контакта.</p>
-        <p class="section-subtitle">Подсказка: сохраните ответ клиента в одном фоллоу-апе, чтобы использовать этот факт как условие в других.</p>
+        <p class="section-subtitle">Подсказка: сохраните ответ клиента в одном сообщении, чтобы использовать этот факт как условие в других.</p>
     </div>
     <div class="stack" id="followup-rules" style="gap: 12px;"></div>
     <div style="display:flex; flex-wrap:wrap; gap:12px;">
         <button class="btn btn--secondary" id="followup-add">Добавить правило</button>
-        <button class="btn" id="followup-save">Сохранить фоллоу-апы</button>
+        <button class="btn" id="followup-save">Сохранить отложенные сообщения</button>
         <span id="followup-message" class="status-text"></span>
     </div>
 </section>
@@ -1141,9 +1144,48 @@
         } else {
           bubble.classList.add('is-in');
         }
+        if (Array.isArray(msg.attachments) && msg.attachments.length) {
+          const imageWrap = document.createElement('div');
+          imageWrap.className = 'message-attachments';
+          msg.attachments.forEach((att) => {
+            if (!att || !att.url) return;
+            const url = String(att.url);
+            const isImage = /\\.(png|jpe?g|webp|gif|bmp)$/i.test(url) || url.indexOf('/pub/files/photos/') !== -1 || url.indexOf('/pub/tg/media/') !== -1;
+            if (isImage) {
+              const img = document.createElement('img');
+              img.src = url;
+              img.loading = 'lazy';
+              img.alt = att.filename || 'photo';
+              img.style.maxWidth = '100%';
+              img.style.borderRadius = '10px';
+              img.style.marginBottom = '6px';
+              img.style.cursor = 'zoom-in';
+              img.addEventListener('click', () => openImagePreview(url));
+              imageWrap.appendChild(img);
+            } else {
+              const link = document.createElement('a');
+              link.href = url;
+              link.target = '_blank';
+              link.rel = 'noreferrer';
+              link.textContent = att.filename || url;
+              link.style.display = 'block';
+              link.style.fontSize = '12px';
+              link.style.textDecoration = 'underline';
+              link.style.marginBottom = '4px';
+              imageWrap.appendChild(link);
+            }
+          });
+          if (imageWrap.childNodes.length) {
+            bubble.appendChild(imageWrap);
+          }
+        }
         const textEl = document.createElement('div');
         textEl.className = 'message-text';
-        textEl.textContent = msg.text || '';
+        if (String(msg.text || '').trim() !== '[Фото]') {
+          textEl.textContent = msg.text || '';
+        } else {
+          textEl.textContent = '';
+        }
         const meta = document.createElement('div');
         meta.className = 'message-meta';
         if (msg.ts) {
@@ -1163,6 +1205,22 @@
         messagesNode.appendChild(bubble);
       });
       scrollToBottom();
+    }
+
+    function openImagePreview(url) {
+      const overlay = document.getElementById('image-preview-overlay');
+      const img = document.getElementById('image-preview-img');
+      if (!overlay || !img) return;
+      img.src = url;
+      overlay.style.display = 'flex';
+    }
+
+    function closeImagePreview() {
+      const overlay = document.getElementById('image-preview-overlay');
+      const img = document.getElementById('image-preview-img');
+      if (!overlay || !img) return;
+      img.src = '';
+      overlay.style.display = 'none';
     }
 
     async function loadDialogs() {
@@ -1288,6 +1346,12 @@
     let pollTimer = null;
     function startPolling() {
       if (pollTimer) return;
+      pollTimer = setInterval(() => {
+        loadDialogs();
+        if (currentDialogId) {
+          loadDialogMessages(currentDialogId);
+        }
+      }, 300);
     }
     function stopPolling() {
       if (pollTimer) {

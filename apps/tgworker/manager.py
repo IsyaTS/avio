@@ -2161,7 +2161,7 @@ class TelegramSessionManager:
                             result = self._states.get(tenant, result)
                     except Exception as exc:
                         msg = str(exc).lower()
-                        if "auth_key_unregistered" in msg or "unauthorized" in msg:
+                        if "auth_key_unregistered" in msg or "unauthorized" in msg or isinstance(exc, RPCError):
                             await self._handle_authkey_unregistered(
                                 tenant,
                                 check_client,
@@ -2171,7 +2171,15 @@ class TelegramSessionManager:
                             async with self._lock:
                                 result = self._states.get(tenant, result)
                         else:
-                            LOGGER.exception("stage=status_get_me_failed tenant_id=%s", tenant)
+                            # Treat unknown errors as disconnected to avoid stale "authorized".
+                            await self._handle_authkey_unregistered(
+                                tenant,
+                                check_client,
+                                source="status_poll",
+                                remove_session=True,
+                            )
+                            async with self._lock:
+                                result = self._states.get(tenant, result)
             except AuthKeyUnregisteredError:
                 await self._handle_authkey_unregistered(
                     tenant,
@@ -2181,8 +2189,25 @@ class TelegramSessionManager:
                 )
                 async with self._lock:
                     result = self._states.get(tenant, result)
-            except Exception:
-                LOGGER.exception("stage=status_check_failed tenant_id=%s", tenant)
+            except Exception as exc:
+                if isinstance(exc, RPCError):
+                    await self._handle_authkey_unregistered(
+                        tenant,
+                        check_client,
+                        source="status_poll",
+                        remove_session=True,
+                    )
+                    async with self._lock:
+                        result = self._states.get(tenant, result)
+                else:
+                    await self._handle_authkey_unregistered(
+                        tenant,
+                        check_client,
+                        source="status_poll",
+                        remove_session=True,
+                    )
+                    async with self._lock:
+                        result = self._states.get(tenant, result)
         elif needs_reconnect:
             async with self._lock:
                 state = self._states.get(tenant, result)
