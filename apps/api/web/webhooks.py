@@ -1127,6 +1127,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     tenant_id=tenant,
                     telegram_user_id=telegram_user_id,
                     attachments=attachments or None,
+                    source="incoming",
                 )
                 stored_incoming = True
                 if message_db_id:
@@ -1154,6 +1155,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 tenant_id=tenant,
                 telegram_user_id=telegram_user_id,
                 attachments=attachments or None,
+                source="incoming",
             )
             if message_db_id:
                 normalized_event["_message_db_id"] = message_db_id

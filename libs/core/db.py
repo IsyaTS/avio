@@ -1128,6 +1128,7 @@ async def insert_message_in(
     *,
     is_bot: bool = False,
     attachments: Optional[list[dict[str, Any]]] = None,
+    source: Optional[str] = None,
 ) -> int:
     if _offline_enabled():
         _offline_append_message(lead_id, text, direction=0, tenant_id=tenant_id, is_bot=is_bot)
@@ -1143,8 +1144,8 @@ async def insert_message_in(
         telegram_val = 0
     row = await _fetchrow(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot, attachments)
-        VALUES($1::bigint, 0, $2, $3, $4, $5, $6::bigint, $7::boolean, $8::jsonb)
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot, attachments, source)
+        VALUES($1::bigint, 0, $2, $3, $4, $5, $6::bigint, $7::boolean, $8::jsonb, $9)
         RETURNING id;
     """,
         lead_id,
@@ -1155,6 +1156,7 @@ async def insert_message_in(
         telegram_val,
         bool(is_bot),
         json.dumps(attachments, ensure_ascii=False) if attachments else None,
+        source,
     )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
@@ -1214,6 +1216,7 @@ async def insert_message_out(
     title: Optional[str] = None,
     is_bot: bool = False,
     attachments: Optional[list[dict[str, Any]]] = None,
+    source: Optional[str] = None,
 ) -> int:
     upsert_kwargs = {
         "channel": channel or "whatsapp",
@@ -1246,8 +1249,8 @@ async def insert_message_out(
         telegram_val = 0
     row = await _fetchrow(
         """
-        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot, attachments)
-        VALUES($1::bigint, 1, $2, $3, $4, $5, $6::bigint, $7::boolean, $8::jsonb)
+        INSERT INTO messages(lead_id, direction, text, provider_msg_id, status, tenant_id, telegram_user_id, is_bot, attachments, source)
+        VALUES($1::bigint, 1, $2, $3, $4, $5, $6::bigint, $7::boolean, $8::jsonb, $9)
         RETURNING id;
     """,
         lead_ref,
@@ -1258,6 +1261,7 @@ async def insert_message_out(
         telegram_val,
         bool(is_bot),
         json.dumps(attachments, ensure_ascii=False) if attachments else None,
+        source,
     )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
@@ -1827,7 +1831,7 @@ async def list_messages_for_lead(
 
     params: list[Any] = [tenant_val, lead_ref]
     sql_parts = [
-        "SELECT id, lead_id, direction, text, status, created_at, is_bot, attachments",
+        "SELECT id, lead_id, direction, text, status, created_at, is_bot, attachments, source",
         "FROM messages",
         "WHERE tenant_id = $1 AND lead_id = $2",
     ]
@@ -1884,6 +1888,51 @@ async def list_recent_messages(
             if isinstance(row, Mapping):
                 results.append(dict(row.items()))
     return results
+
+
+async def get_tenant_message_stats(
+    tenant_id: int,
+    *,
+    days: int = 7,
+    limit: int = 20000,
+) -> dict[str, Any]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return {}
+    if tenant_val <= 0:
+        return {}
+    try:
+        days_val = int(days)
+    except Exception:
+        days_val = 7
+    if days_val <= 0:
+        days_val = 7
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 20000
+    limit_val = min(limit_val, 50000)
+
+    rows = await _fetch(
+        """
+        SELECT m.id,
+               m.lead_id,
+               m.direction,
+               m.is_bot,
+               m.source,
+               m.text,
+               m.created_at,
+               l.channel
+        FROM messages m
+        JOIN leads l ON l.id = m.lead_id
+        WHERE m.tenant_id = $1
+          AND m.created_at >= now() - ($2::int || ' days')::interval
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT $3;
+        """,
+        tenant_val,
+        days_val,
+        limit_val,
+    )
+    return {"rows": [dict(row) for row in rows or []], "days": days_val, "limit": limit_val}
 
 
 async def list_recent_inbound_texts(
@@ -2510,6 +2559,62 @@ async def list_feedback_message_ids(tenant_id: int, message_ids: list[int]) -> s
             except Exception:
                 continue
     return found
+
+
+async def list_recent_disliked_feedback(tenant_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+    except Exception:
+        return []
+    if tenant_val <= 0:
+        return []
+    try:
+        limit_val = int(limit)
+    except Exception:
+        limit_val = 50
+    if limit_val <= 0:
+        limit_val = 50
+    limit_val = min(limit_val, 200)
+    rows = await _fetch(
+        """
+        SELECT
+            f.id AS feedback_id,
+            f.message_id,
+            f.lead_id,
+            f.expected_answer,
+            f.comment,
+            f.created_at AS feedback_created_at,
+            m.text AS bot_text,
+            m.created_at AS bot_created_at,
+            (
+                SELECT text
+                FROM messages mi
+                WHERE mi.lead_id = m.lead_id
+                  AND mi.direction = 0
+                  AND mi.created_at <= m.created_at
+                ORDER BY mi.created_at DESC
+                LIMIT 1
+            ) AS user_text
+        FROM message_feedback f
+        JOIN messages m ON m.id = f.message_id
+        WHERE f.tenant_id = $1
+          AND f.rating = 'dislike'
+          AND (f.expected_answer IS NULL OR btrim(f.expected_answer) = '')
+          AND (f.comment IS NULL OR btrim(f.comment) = '')
+        ORDER BY f.created_at DESC
+        LIMIT $2;
+        """,
+        tenant_val,
+        limit_val,
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            out.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                out.append(dict(row.items()))
+    return out
 
 async def find_lead_by_telegram(
     tenant_id: int,

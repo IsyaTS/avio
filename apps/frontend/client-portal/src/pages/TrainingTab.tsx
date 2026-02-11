@@ -27,6 +27,7 @@ type DialogMessage = {
     filename?: string;
     photo_id?: string;
   }>;
+  source?: string;
 };
 
 type SilenceInfo = {
@@ -906,6 +907,18 @@ const MessageBubble: React.FC<{
   );
 
   const shouldHideText = message.text?.trim() === '[Фото]';
+  const sourceLabel = (() => {
+    const raw = (message.source || '').toLowerCase();
+    if (raw === 'followup') return 'Отложенное';
+    if (raw === 'manager') return 'Менеджер';
+    if (raw === 'incoming') return 'Клиент';
+    if (raw === 'bot' || raw === 'llm') return 'Бот';
+    if (raw) return raw;
+    if (message.direction === 0) return 'Клиент';
+    if (message.direction === 1 && message.from_bot) return 'Бот';
+    if (message.direction === 1) return 'Менеджер';
+    return '';
+  })();
 
   return (
     <div className={`flex ${isOut ? 'justify-end' : 'justify-start'}`}>
@@ -948,7 +961,12 @@ const MessageBubble: React.FC<{
         )}
         <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
           <span>{message.ts ? new Date(message.ts).toLocaleTimeString() : ''}</span>
-          <span>{message.status || ''}</span>
+          <span className="flex items-center gap-2">
+            {sourceLabel && (
+              <span className={isOut ? 'text-slate-200' : 'text-slate-500'}>{sourceLabel}</span>
+            )}
+            <span>{message.status || ''}</span>
+          </span>
         </div>
         {canFeedback && (
           <div className="mt-3 space-y-2">

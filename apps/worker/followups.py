@@ -34,6 +34,8 @@ FOLLOWUP_SENT_PREFIX = "followup:sent"
 FOLLOWUP_SCHEDULED_PREFIX = "followup:scheduled"
 FOLLOWUP_FACT_PREFIX = "followup:fact"
 FOLLOWUP_PENDING_PREFIX = "followup:pending"
+FOLLOWUP_OPTOUT_PREFIX = "followup:optout"
+FOLLOWUP_STOP_NOTICE_PREFIX = "followup:stop_notice"
 
 # Loop tuning
 POLL_INTERVAL = max(0.5, float(os.getenv("FOLLOWUP_POLL_INTERVAL", "2.0")))
@@ -45,6 +47,17 @@ FACT_TTL_SECONDS = max(3600, int(os.getenv("FOLLOWUP_FACT_TTL_SECONDS", str(90 *
 CAPTURE_TTL_SECONDS = max(300, int(os.getenv("FOLLOWUP_CAPTURE_TTL_SECONDS", str(14 * 86400))))
 FUZZY_MAX_DISTANCE = max(0, int(os.getenv("FOLLOWUP_FUZZY_MAX_DISTANCE", "1")))
 FACT_KEY_MAX_LEN = 64
+OPTOUT_TTL_SECONDS = max(3600, int(os.getenv("FOLLOWUP_OPTOUT_TTL_SECONDS", str(365 * 86400))))
+
+STOP_TOKENS = {
+    "stop",
+    "стоп",
+    "отписка",
+    "отписаться",
+    "unsubscribe",
+    "стоп.",
+    "стоп!",
+}
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
 log = logging.getLogger("followups")
@@ -215,8 +228,60 @@ def _token_matches(text: str, token: str) -> bool:
     return False
 
 
+def _is_stop_text(text: str) -> bool:
+    cleaned = _normalize_match_text(text or "")
+    if not cleaned.strip():
+        return False
+    for token in STOP_TOKENS:
+        if _token_matches(cleaned, token):
+            return True
+    return False
+
+
 def _fact_key(tenant_id: int, lead_id: int, fact_key: str) -> str:
     return f"{FOLLOWUP_FACT_PREFIX}:{tenant_id}:{lead_id}:{fact_key}"
+
+
+def _optout_key(tenant_id: int, lead_id: int) -> str:
+    return f"{FOLLOWUP_OPTOUT_PREFIX}:{tenant_id}:{lead_id}"
+
+
+def _stop_notice_key(tenant_id: int, lead_id: int) -> str:
+    return f"{FOLLOWUP_STOP_NOTICE_PREFIX}:{tenant_id}:{lead_id}"
+
+
+async def is_opted_out(tenant_id: int, lead_id: int) -> bool:
+    if tenant_id <= 0 or lead_id <= 0:
+        return False
+    try:
+        return bool(await r.get(_optout_key(tenant_id, lead_id)))
+    except Exception:
+        return False
+
+
+async def handle_opt_out(tenant_id: int, lead_id: int, text: str) -> bool:
+    if tenant_id <= 0 or lead_id <= 0:
+        return False
+    if not _is_stop_text(text):
+        return False
+    try:
+        await r.set(_optout_key(tenant_id, lead_id), "1", ex=OPTOUT_TTL_SECONDS)
+    except Exception:
+        pass
+    try:
+        timestamp = int(time.time())
+        await r.set(
+            handoff_silence_key(int(tenant_id), int(lead_id)),
+            str(timestamp),
+            ex=OPTOUT_TTL_SECONDS,
+        )
+        meta_key = handoff_silence_meta_key(int(tenant_id), int(lead_id))
+        if meta_key:
+            payload = {"reason": "opt_out", "ts": timestamp}
+            await r.set(meta_key, json.dumps(payload, ensure_ascii=False), ex=OPTOUT_TTL_SECONDS)
+    except Exception:
+        pass
+    return True
 
 
 def _pending_key(tenant_id: int, lead_id: int) -> str:
@@ -385,6 +450,8 @@ def _load_rules(tenant_id: int) -> List[dict]:
 
 async def schedule_followups(tenant_id: int, lead_id: int, incoming_channel: str) -> None:
     if tenant_id <= 0 or lead_id <= 0:
+        return
+    if await is_opted_out(tenant_id, lead_id):
         return
     rules = _load_rules(tenant_id)
     if not rules:
@@ -579,6 +646,28 @@ async def _mark_sent(job: Mapping[str, Any]) -> None:
         pass
 
 
+async def _maybe_send_stop_notice(job: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+    tenant_id = int(job.get("tenant_id") or 0)
+    lead_id = int(job.get("lead_id") or 0)
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    try:
+        notice_key = _stop_notice_key(tenant_id, lead_id)
+        if await r.get(notice_key):
+            return
+        await r.set(notice_key, "1", ex=SENT_DEDUP_TTL)
+    except Exception:
+        return
+    notice_text = 'Напишите "стоп", чтобы отписаться от рассылки.'
+    followup_payload = dict(payload)
+    followup_payload["text"] = notice_text
+    followup_payload["origin"] = "followup"
+    try:
+        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(followup_payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+
 async def _mute_smart_reply(tenant_id: int, lead_id: int) -> None:
     if tenant_id <= 0 or lead_id <= 0:
         return
@@ -672,6 +761,8 @@ async def _trigger_followups_on_answer(
 ) -> None:
     if tenant_id <= 0 or lead_id <= 0:
         return
+    if await is_opted_out(tenant_id, lead_id):
+        return
     rules = _load_rules(tenant_id)
     if not rules:
         return
@@ -724,6 +815,7 @@ async def _trigger_followups_on_answer(
         except Exception:
             continue
         await _mute_smart_reply(tenant_id, lead_id)
+        await _maybe_send_stop_notice(job_payload, payload)
         capture = rule.get("capture")
         if isinstance(capture, Mapping):
             try:
@@ -748,6 +840,12 @@ async def _trigger_followups_on_answer(
 async def _process_job(job_id: str) -> None:
     job = await _fetch_job(job_id)
     if not job:
+        return
+    if await is_opted_out(int(job.get("tenant_id") or 0), int(job.get("lead_id") or 0)):
+        try:
+            await r.delete(f"{FOLLOWUP_JOB_PREFIX}:{job_id}")
+        except Exception:
+            pass
         return
     if job.get("attempts", 0) >= job.get("max_attempts", 1):
         log.info(
@@ -784,6 +882,7 @@ async def _process_job(job_id: str) -> None:
         await _retry_later(job, f"enqueue_error:{exc}")
         return
     await _mute_smart_reply(int(job.get("tenant_id") or 0), int(job.get("lead_id") or 0))
+    await _maybe_send_stop_notice(job, payload)
     capture = job.get("capture")
     if isinstance(capture, Mapping):
         try:

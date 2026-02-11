@@ -572,6 +572,7 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
                         channel="avito",
                         is_bot=False,
                         attachments=attachments or None,
+                        source="manager",
                     )
                     logger.info(
                         "avito_outgoing_stored tenant=%s chat_id=%s lead_id=%s msg_id=%s",

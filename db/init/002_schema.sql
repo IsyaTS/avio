@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS messages (
   telegram_user_id BIGINT NOT NULL DEFAULT 0,
   is_bot           BOOLEAN NOT NULL DEFAULT FALSE,
   attachments      JSONB,
+  source           TEXT,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

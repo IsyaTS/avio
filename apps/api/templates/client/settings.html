@@ -1191,6 +1191,25 @@
         if (msg.ts) {
           meta.textContent = new Date(msg.ts).toLocaleString();
         }
+        {
+          const src = document.createElement('span');
+          const raw = String(msg.source || '').toLowerCase();
+          let label = raw;
+          if (raw === 'followup') label = 'Отложенное';
+          if (raw === 'manager') label = 'Менеджер';
+          if (raw === 'incoming') label = 'Клиент';
+          if (raw === 'bot' || raw === 'llm') label = 'Бот';
+          if (!label) {
+            if (msg.direction === 0) label = 'Клиент';
+            if (msg.direction === 1 && msg.from_bot) label = 'Бот';
+            if (msg.direction === 1 && !msg.from_bot) label = 'Менеджер';
+          }
+          if (label) {
+            src.textContent = label;
+            src.style.marginLeft = '8px';
+            meta.appendChild(src);
+          }
+        }
         if (msg.status && msg.status !== 'sent') {
           const statusTag = document.createElement('span');
           statusTag.className = 'message-status';

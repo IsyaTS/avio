@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 import asyncio
+import statistics
 from typing import Any, Dict, Optional, Mapping
 from urllib.parse import quote, quote_plus
 
@@ -805,7 +806,9 @@ async def client_settings(tenant: int, request: Request):
         "dialogs_unsilence": "/api/dialogs/{lead_id}/unsilence",
         "dialogs_test": "/api/dialogs/test",
         "tenant_stats": "/api/tenant/stats",
+        "analytics_summary": "/api/analytics/summary",
         "feedback_stats": "/api/feedback/stats",
+        "feedback_quality": "/api/feedback/quality",
         "feedback": "/api/feedback",
         "training_suggestions": f"/client/{tenant}/training/suggestions",
         "training_suggestions_refresh": f"/client/{tenant}/training/suggestions/refresh",
@@ -1247,6 +1250,7 @@ async def get_dialog_messages_api(
                 "from_bot": bool(msg.get("is_bot")),
                 "feedbacked": bool(msg_id and msg_id in feedback_ids),
                 "attachments": attachments,
+                "source": msg.get("source") or "",
             }
         )
 
@@ -1327,6 +1331,7 @@ async def send_dialog_message_api(
             telegram_username=lead_meta.get("telegram_username"),
             title=lead_meta.get("title"),
             attachments=[attachment] if attachment else None,
+            source="manager",
         )
     except Exception:
         _dialogs_log.exception("dialog_send_insert_failed tenant=%s lead=%s", tenant_id, lead_id)
@@ -1529,6 +1534,157 @@ async def tenant_stats_api(request: Request, tenant: int | str | None = None, sa
     }
 
 
+def _normalize_question_text(text: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Zа-яА-Я0-9\\s]", " ", text or "")
+    cleaned = re.sub(r"\\s+", " ", cleaned).strip().lower()
+    return cleaned
+
+
+@router.get("/api/analytics/summary")
+async def analytics_summary_api(
+    request: Request,
+    tenant: int | str | None = None,
+    days: int = 7,
+):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+
+    data = await db.get_tenant_message_stats(int(tenant_id), days=int(days), limit=30000)
+    rows = data.get("rows") if isinstance(data, dict) else []
+    if not rows:
+        return {
+            "ok": True,
+            "period_days": int(days),
+            "messages": {"incoming": 0, "outgoing": 0, "by_day": [], "by_channel": {}},
+            "response_time": {"avg_seconds": 0, "median_seconds": 0, "samples": 0},
+            "outgoing_mix": {"bot": 0, "manager": 0, "followup": 0},
+            "top_questions": [],
+        }
+
+    by_day: dict[str, dict[str, int]] = {}
+    by_channel: dict[str, dict[str, int]] = {}
+    incoming = 0
+    outgoing = 0
+    outgoing_mix = {"bot": 0, "manager": 0, "followup": 0}
+    question_counts: dict[str, int] = {}
+    per_lead: dict[int, list[dict[str, Any]]] = {}
+
+    for row in rows:
+        created = row.get("created_at")
+        day_key = ""
+        if isinstance(created, datetime):
+            day_key = created.date().isoformat()
+        elif isinstance(created, str):
+            try:
+                day_key = datetime.fromisoformat(created).date().isoformat()
+            except Exception:
+                day_key = ""
+        if not day_key:
+            day_key = "unknown"
+        day_bucket = by_day.setdefault(day_key, {"incoming": 0, "outgoing": 0})
+
+        channel = (row.get("channel") or "unknown").lower()
+        channel_bucket = by_channel.setdefault(channel, {"incoming": 0, "outgoing": 0})
+
+        direction = int(row.get("direction") or 0)
+        if direction == 0:
+            incoming += 1
+            day_bucket["incoming"] += 1
+            channel_bucket["incoming"] += 1
+            text = str(row.get("text") or "")
+            norm = _normalize_question_text(text)
+            if len(norm) >= 3:
+                question_counts[norm] = question_counts.get(norm, 0) + 1
+        else:
+            outgoing += 1
+            day_bucket["outgoing"] += 1
+            channel_bucket["outgoing"] += 1
+            src = str(row.get("source") or "").lower()
+            is_bot = bool(row.get("is_bot"))
+            if src == "followup":
+                outgoing_mix["followup"] += 1
+            elif src == "manager" or not is_bot:
+                outgoing_mix["manager"] += 1
+            else:
+                outgoing_mix["bot"] += 1
+
+        try:
+            lead_id = int(row.get("lead_id") or 0)
+        except Exception:
+            lead_id = 0
+        if lead_id > 0:
+            per_lead.setdefault(lead_id, []).append(row)
+
+    response_times: list[float] = []
+    for lead_rows in per_lead.values():
+        lead_rows_sorted = sorted(
+            lead_rows,
+            key=lambda r: (r.get("created_at") or datetime.min, r.get("id") or 0),
+        )
+        for idx, item in enumerate(lead_rows_sorted):
+            if int(item.get("direction") or 0) != 0:
+                continue
+            base_time = item.get("created_at")
+            if not isinstance(base_time, datetime):
+                try:
+                    base_time = datetime.fromisoformat(str(base_time))
+                except Exception:
+                    base_time = None
+            if not base_time:
+                continue
+            next_out: Optional[datetime] = None
+            for nxt in lead_rows_sorted[idx + 1 :]:
+                if int(nxt.get("direction") or 0) != 1:
+                    continue
+                out_time = nxt.get("created_at")
+                if not isinstance(out_time, datetime):
+                    try:
+                        out_time = datetime.fromisoformat(str(out_time))
+                    except Exception:
+                        out_time = None
+                if out_time and out_time >= base_time:
+                    next_out = out_time
+                    break
+            if next_out:
+                delta = (next_out - base_time).total_seconds()
+                if 0 <= delta <= 24 * 3600:
+                    response_times.append(delta)
+
+    avg_seconds = float(sum(response_times) / len(response_times)) if response_times else 0.0
+    median_seconds = float(statistics.median(response_times)) if response_times else 0.0
+
+    top_questions = [
+        {"text": text, "count": count}
+        for text, count in sorted(question_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    ]
+
+    by_day_list = [
+        {"date": day, "incoming": vals["incoming"], "outgoing": vals["outgoing"]}
+        for day, vals in sorted(by_day.items(), key=lambda kv: kv[0])
+        if day != "unknown"
+    ]
+
+    return {
+        "ok": True,
+        "period_days": int(days),
+        "messages": {
+            "incoming": incoming,
+            "outgoing": outgoing,
+            "by_day": by_day_list,
+            "by_channel": by_channel,
+        },
+        "response_time": {
+            "avg_seconds": round(avg_seconds, 1),
+            "median_seconds": round(median_seconds, 1),
+            "samples": len(response_times),
+        },
+        "outgoing_mix": outgoing_mix,
+        "top_questions": top_questions,
+    }
+
+
 @router.post("/api/feedback")
 async def submit_feedback_api(request: Request, tenant: int | str | None = None):
     auth = _resolve_tenant_and_key(request, tenant)
@@ -1641,6 +1797,33 @@ async def feedback_stats_api(request: Request, tenant: int | str | None = None):
 
     counts = await db.get_feedback_counts(tenant_id)
     return {"ok": True, "likes": counts.get("like", 0), "dislikes": counts.get("dislike", 0)}
+
+
+@router.get("/api/feedback/quality")
+async def feedback_quality_api(request: Request, tenant: int | str | None = None):
+    auth = _resolve_tenant_and_key(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant_id, _ = auth
+    try:
+        limit_val = int(request.query_params.get("limit", "50"))
+    except Exception:
+        limit_val = 50
+    rows = await db.list_recent_disliked_feedback(tenant_id, limit=limit_val)
+    items = []
+    for row in rows or []:
+        items.append(
+            {
+                "id": row.get("feedback_id"),
+                "message_id": row.get("message_id"),
+                "lead_id": row.get("lead_id"),
+                "user_text": row.get("user_text") or "",
+                "bot_text": row.get("bot_text") or "",
+                "expected": row.get("expected_answer") or row.get("comment") or "",
+                "created_at": _isoformat(row.get("feedback_created_at")),
+            }
+        )
+    return {"ok": True, "items": items}
 
 
 @router.post("/client/{tenant}/settings/json")

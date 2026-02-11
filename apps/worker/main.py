@@ -2215,6 +2215,13 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
 
     if text and not manager_outgoing:
         try:
+            if await followups.handle_opt_out(tenant_id, lead_id, text):
+                log(
+                    "event=followup_optout channel=telegram tenant=%s lead_id=%s",
+                    tenant_id,
+                    lead_id,
+                )
+                return
             await followups.capture_followup_answer(tenant_id, lead_id, text, "telegram")
         except Exception as exc:
             log(
@@ -2744,6 +2751,13 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
 
     if text and not manager_outgoing:
         try:
+            if await followups.handle_opt_out(tenant_id, lead_id, text):
+                log(
+                    "event=followup_optout channel=max tenant=%s lead_id=%s",
+                    tenant_id,
+                    lead_id,
+                )
+                return
             await followups.capture_followup_answer(tenant_id, lead_id, text, "max")
         except Exception as exc:
             log(
@@ -3162,6 +3176,13 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
 
     if text:
         try:
+            if await followups.handle_opt_out(tenant_id, lead_id, text):
+                log(
+                    "event=followup_optout channel=whatsapp tenant=%s lead_id=%s",
+                    tenant_id,
+                    lead_id,
+                )
+                return
             await followups.capture_followup_answer(tenant_id, lead_id, text, "whatsapp")
         except Exception as exc:
             log(
@@ -3556,6 +3577,13 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
 
     if text:
         try:
+            if await followups.handle_opt_out(tenant_id, lead_id, text):
+                log(
+                    "event=followup_optout channel=avito tenant=%s lead_id=%s",
+                    tenant_id,
+                    lead_id,
+                )
+                return
             await followups.capture_followup_answer(tenant_id, lead_id, text, "avito")
         except Exception as exc:
             log(
@@ -4982,6 +5010,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                     title=title_hint,
                     is_bot=not (_is_manager_message(item) or _is_followup_message(item)),
                     attachments=_collect_outgoing_attachments(item, tenant) or None,
+                    source="followup" if _is_followup_message(item) else ("manager" if _is_manager_message(item) else "bot"),
                 )
             except Exception as exc:
                 DB_ERRORS_COUNTER.labels("insert_message_out").inc()
@@ -5372,6 +5401,7 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
                     telegram_username=username,
                     is_bot=not (manager_message or _is_followup_message(item)),
                     attachments=attachments or None,
+                    source="followup" if _is_followup_message(item) else ("manager" if manager_message else "bot"),
                 )
             except Exception as exc:
                 log(f"[worker] insert_message_out err: {exc}")
