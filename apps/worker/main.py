@@ -5177,6 +5177,30 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         chat_hint = avito_chat_id_hint
         if chat_hint is not None:
             chat_hint = str(chat_hint).strip() or None
+        if not manager_message:
+            echo_text = normalize_echo_text(text or "")
+            echo_variants: list[str] = []
+            if echo_text:
+                echo_variants.append(echo_text)
+            if attachments:
+                echo_variants.append("__image__")
+            if not echo_text and attachments:
+                echo_text = "__image__"
+            if echo_text:
+                chat_key = chat_hint or (str(avito_chat_id_hint).strip() if avito_chat_id_hint else "")
+                if chat_key:
+                    try:
+                        payload = {"text": echo_text, "extra": echo_variants, "ts": int(time.time())}
+                        await r.set(
+                            avito_bot_echo_key(tenant, chat_key),
+                            json.dumps(payload, ensure_ascii=False),
+                            ex=AVITO_BOT_ECHO_TTL_SECONDS,
+                        )
+                    except Exception as exc:
+                        log(
+                            "event=avito_echo_cache_failed_pre tenant=%s lead_id=%s error=%s"
+                            % (tenant, lead_id, exc)
+                        )
         st, body = await send_avito(
             tenant,
             lead_id,
