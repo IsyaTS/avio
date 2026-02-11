@@ -5,6 +5,7 @@ import mimetypes
 import os
 import pathlib
 import re
+from urllib.parse import urlparse
 import time
 import uuid
 import asyncio
@@ -432,6 +433,13 @@ def _normalize_message_attachments(
                     request,
                     f"/pub/tg/media/{peer_id}/{message_id}?tenant={tenant_id}&k={quote_plus(key)}",
                 )
+        elif isinstance(url, str):
+            parsed = urlparse(url)
+            if parsed.netloc in {"app:8000", "app"}:
+                rebuilt = parsed.path or ""
+                if parsed.query:
+                    rebuilt = f"{rebuilt}?{parsed.query}"
+                entry["url"] = C.public_url(request, rebuilt)
         if not entry.get("url"):
             peer_id = entry.get("peer_id")
             message_id = entry.get("message_id")
