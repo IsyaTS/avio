@@ -768,9 +768,14 @@ const TrainingTab: React.FC = () => {
                   {!loadingMessages && messages.length === 0 && (
                     <div className="text-sm text-slate-400">Сообщений нет.</div>
                   )}
-                  {messages.map((msg) => (
-                    <MessageBubble key={msg.id} message={msg} onFeedback={handleFeedback} />
-                  ))}
+                {messages.map((msg) => (
+                  <MessageBubble
+                    key={msg.id}
+                    message={msg}
+                    channel={activeDialog?.channel || null}
+                    onFeedback={handleFeedback}
+                  />
+                ))}
                 </div>
                 {lightboxUrl && (
                   <div
@@ -880,8 +885,9 @@ const TrainingTab: React.FC = () => {
 
 const MessageBubble: React.FC<{
   message: DialogMessage;
+  channel?: string | null;
   onFeedback: (msg: DialogMessage, rating: 'like' | 'dislike', expected?: string) => void;
-}> = ({ message, onFeedback }) => {
+}> = ({ message, channel, onFeedback }) => {
   const [showDislike, setShowDislike] = useState(false);
   const [expected, setExpected] = useState('');
 
@@ -899,9 +905,12 @@ const MessageBubble: React.FC<{
   const attachments = message.attachments || [];
   const isImageUrl = (url: string) =>
     /\\.(png|jpe?g|webp|gif|bmp)$/i.test(url) || url.includes('/pub/files/photos/') || url.includes('/pub/tg/media/');
-  const imageAttachments = attachments.filter(
+  let imageAttachments = attachments.filter(
     (att) => att.url && (att.type?.includes('photo') || att.type?.includes('image') || isImageUrl(att.url))
   );
+  if ((channel || '').toLowerCase() === 'avito' && imageAttachments.length > 1) {
+    imageAttachments = imageAttachments.slice(0, 1);
+  }
   const fileAttachments = attachments.filter(
     (att) => att.url && !imageAttachments.includes(att)
   );
