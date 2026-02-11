@@ -474,6 +474,8 @@ async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request
             voice_id = voice.get("voice_id") or voice.get("id")
             if voice_id:
                 attachments.append({"type": "voice", "url": voice_id})
+    if message_type == "image" and not text:
+        text = "__image__"
 
     message_id = value.get("id") or event.get("event_id") or event.get("id")
     message_id_str = str(message_id) if message_id is not None else None
