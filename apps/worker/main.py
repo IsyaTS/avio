@@ -997,21 +997,43 @@ def _build_photo_public_url(tenant_id: int, photo_id: str) -> str:
     return f"{base}/pub/files/photos/{photo_id}?tenant={tenant_id}&k={key}"
 
 
+def _build_photo_public_path(tenant_id: int, photo_id: str) -> str:
+    key = _tenant_public_key(tenant_id)
+    if not key:
+        return ""
+    return f"/pub/files/photos/{photo_id}?tenant={tenant_id}&k={key}"
+
+
 def _collect_outgoing_attachments(item: Mapping[str, Any], tenant_id: int) -> list[dict[str, Any]]:
     attachments: list[dict[str, Any]] = []
     raw_attachment = item.get("attachment")
     if isinstance(raw_attachment, Mapping):
-        attachments.append(dict(raw_attachment))
+        entry = dict(raw_attachment)
+        if not entry.get("url"):
+            photo_id = str(entry.get("photo_id") or entry.get("id") or "").strip()
+            if photo_id:
+                entry["url"] = _build_photo_public_url(tenant_id, photo_id) or _build_photo_public_path(tenant_id, photo_id)
+        attachments.append(entry)
     raw_list = item.get("attachments")
     if isinstance(raw_list, list):
-        attachments.extend([dict(att) for att in raw_list if isinstance(att, Mapping)])
+        for att in raw_list:
+            if not isinstance(att, Mapping):
+                continue
+            entry = dict(att)
+            if not entry.get("url"):
+                photo_id = str(entry.get("photo_id") or entry.get("id") or "").strip()
+                if photo_id:
+                    entry["url"] = _build_photo_public_url(tenant_id, photo_id) or _build_photo_public_path(tenant_id, photo_id)
+                elif entry.get("path"):
+                    entry["url"] = str(entry.get("path"))
+            attachments.append(entry)
     photo_id = str(item.get("photo_id") or "").strip()
     if photo_id:
         attachments.append(
             {
                 "type": "image",
                 "photo_id": photo_id,
-                "url": _build_photo_public_url(tenant_id, photo_id),
+                "url": _build_photo_public_url(tenant_id, photo_id) or _build_photo_public_path(tenant_id, photo_id),
             }
         )
     raw_ids = item.get("photo_ids")
@@ -1024,7 +1046,7 @@ def _collect_outgoing_attachments(item: Mapping[str, Any], tenant_id: int) -> li
                 {
                     "type": "image",
                     "photo_id": pid_str,
-                    "url": _build_photo_public_url(tenant_id, pid_str),
+                    "url": _build_photo_public_url(tenant_id, pid_str) or _build_photo_public_path(tenant_id, pid_str),
                 }
             )
     return attachments
@@ -1164,6 +1186,8 @@ async def _select_auto_photos(
             url = _build_photo_public_url(tenant_id, photo["id"])
             if channel == "telegram" and not url:
                 continue
+            if not url:
+                url = _build_photo_public_path(tenant_id, photo["id"])
             attachments.append(
                 {
                     "type": "image",
