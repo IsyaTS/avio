@@ -930,7 +930,7 @@ const MessageBubble: React.FC<{
                 key={`${att.url}-${idx}`}
                 src={att.url}
                 alt={att.filename || 'photo'}
-                className="max-h-64 w-full rounded-xl object-cover"
+                className="max-h-48 w-full rounded-xl object-cover"
                 loading="lazy"
                 style={{ cursor: 'zoom-in' }}
                 onClick={() => {
