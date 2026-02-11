@@ -1148,16 +1148,11 @@
         if (Array.isArray(msg.attachments) && msg.attachments.length) {
           const imageWrap = document.createElement('div');
           imageWrap.className = 'message-attachments';
-          let imageCount = 0;
           msg.attachments.forEach((att) => {
             if (!att || !att.url) return;
             const url = String(att.url);
             const isImage = /\\.(png|jpe?g|webp|gif|bmp)$/i.test(url) || url.indexOf('/pub/files/photos/') !== -1 || url.indexOf('/pub/tg/media/') !== -1;
             if (isImage) {
-              if ((currentDialogChannel || '').toLowerCase() === 'avito' && imageCount >= 1) {
-                return;
-              }
-              imageCount += 1;
               const img = document.createElement('img');
               img.src = url;
               img.loading = 'lazy';

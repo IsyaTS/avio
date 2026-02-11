@@ -905,12 +905,9 @@ const MessageBubble: React.FC<{
   const attachments = message.attachments || [];
   const isImageUrl = (url: string) =>
     /\\.(png|jpe?g|webp|gif|bmp)$/i.test(url) || url.includes('/pub/files/photos/') || url.includes('/pub/tg/media/');
-  let imageAttachments = attachments.filter(
+  const imageAttachments = attachments.filter(
     (att) => att.url && (att.type?.includes('photo') || att.type?.includes('image') || isImageUrl(att.url))
   );
-  if ((channel || '').toLowerCase() === 'avito' && imageAttachments.length > 1) {
-    imageAttachments = imageAttachments.slice(0, 1);
-  }
   const fileAttachments = attachments.filter(
     (att) => att.url && !imageAttachments.includes(att)
   );

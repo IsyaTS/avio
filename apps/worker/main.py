@@ -4282,7 +4282,7 @@ async def send_avito(
 ) -> tuple[int, str]:
     text_value = (text or "").strip()
     attachments_list = attachments or []
-    image_attachment: dict[str, Any] | None = None
+    image_attachments: list[dict[str, Any]] = []
     for item in attachments_list:
         if not isinstance(item, Mapping):
             continue
@@ -4294,9 +4294,8 @@ async def send_avito(
             or ""
         ).strip().lower()
         if type_raw in {"image", "photo", "picture"} or mime_raw.startswith("image/"):
-            image_attachment = dict(item)
-            break
-    if not text_value and not image_attachment:
+            image_attachments.append(dict(item))
+    if not text_value and not image_attachments:
         return (0, "empty")
 
     try:
@@ -4369,73 +4368,74 @@ async def send_avito(
 
     response: httpx.Response | None = None
 
-    if image_attachment:
-        attachment_path = None
-        for key in ("path", "relative_path", "file_path"):
-            raw_path = image_attachment.get(key)
-            if isinstance(raw_path, str) and raw_path.strip():
-                attachment_path = raw_path.strip()
-                break
-        image_bytes: bytes | None = None
-        filename = (
-            image_attachment.get("filename")
-            or image_attachment.get("name")
-            or image_attachment.get("title")
-            or "image.jpg"
-        )
-        if attachment_path:
-            try:
-                base_dir = tenant_dir(int(tenant_id))
-                candidate = pathlib.Path(attachment_path)
-                if not candidate.is_absolute():
-                    candidate = base_dir / candidate
-                resolved = candidate.resolve()
-                if str(resolved).startswith(str(base_dir.resolve())) and resolved.is_file():
-                    image_bytes = resolved.read_bytes()
-            except Exception:
-                image_bytes = None
-        if image_bytes is None:
-            url = image_attachment.get("url")
-            if isinstance(url, str) and url.strip():
+    if image_attachments:
+        for image_attachment in image_attachments:
+            attachment_path = None
+            for key in ("path", "relative_path", "file_path"):
+                raw_path = image_attachment.get(key)
+                if isinstance(raw_path, str) and raw_path.strip():
+                    attachment_path = raw_path.strip()
+                    break
+            image_bytes: bytes | None = None
+            filename = (
+                image_attachment.get("filename")
+                or image_attachment.get("name")
+                or image_attachment.get("title")
+                or "image.jpg"
+            )
+            if attachment_path:
                 try:
-                    async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
-                        download = await client.get(url.strip())
-                    if 200 <= download.status_code < 300:
-                        image_bytes = download.content
+                    base_dir = tenant_dir(int(tenant_id))
+                    candidate = pathlib.Path(attachment_path)
+                    if not candidate.is_absolute():
+                        candidate = base_dir / candidate
+                    resolved = candidate.resolve()
+                    if str(resolved).startswith(str(base_dir.resolve())) and resolved.is_file():
+                        image_bytes = resolved.read_bytes()
                 except Exception:
                     image_bytes = None
-        if image_bytes is None:
-            return (0, "image_unavailable")
-        if len(image_bytes) > AVITO_IMAGE_MAX_BYTES:
-            return (0, "image_too_large")
+            if image_bytes is None:
+                url = image_attachment.get("url")
+                if isinstance(url, str) and url.strip():
+                    try:
+                        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+                            download = await client.get(url.strip())
+                        if 200 <= download.status_code < 300:
+                            image_bytes = download.content
+                    except Exception:
+                        image_bytes = None
+            if image_bytes is None:
+                return (0, "image_unavailable")
+            if len(image_bytes) > AVITO_IMAGE_MAX_BYTES:
+                return (0, "image_too_large")
 
-        mime = (
-            image_attachment.get("mime")
-            or image_attachment.get("mime_type")
-            or image_attachment.get("content_type")
-            or mimetypes.guess_type(str(filename))[0]
-            or "application/octet-stream"
-        )
+            mime = (
+                image_attachment.get("mime")
+                or image_attachment.get("mime_type")
+                or image_attachment.get("content_type")
+                or mimetypes.guess_type(str(filename))[0]
+                or "application/octet-stream"
+            )
 
-        upload_response = await _with_refresh(
-            lambda current_token: _upload_image(current_token, image_bytes, str(filename), str(mime))
-        )
-        if not (200 <= upload_response.status_code < 300):
-            return (upload_response.status_code, upload_response.text)
-        try:
-            upload_payload = upload_response.json()
-        except Exception:
-            upload_payload = {}
-        image_id = ""
-        if isinstance(upload_payload, dict):
-            for key in upload_payload.keys():
-                image_id = str(key)
-                break
-        if not image_id:
-            return (0, "image_upload_failed")
-        response = await _with_refresh(lambda current_token: _post_image(current_token, image_id))
-        if not (200 <= response.status_code < 300):
-            return (response.status_code, response.text)
+            upload_response = await _with_refresh(
+                lambda current_token: _upload_image(current_token, image_bytes, str(filename), str(mime))
+            )
+            if not (200 <= upload_response.status_code < 300):
+                return (upload_response.status_code, upload_response.text)
+            try:
+                upload_payload = upload_response.json()
+            except Exception:
+                upload_payload = {}
+            image_id = ""
+            if isinstance(upload_payload, dict):
+                for key in upload_payload.keys():
+                    image_id = str(key)
+                    break
+            if not image_id:
+                return (0, "image_upload_failed")
+            response = await _with_refresh(lambda current_token: _post_image(current_token, image_id))
+            if not (200 <= response.status_code < 300):
+                return (response.status_code, response.text)
 
     if text_value:
         response = await _with_refresh(_post_text)
