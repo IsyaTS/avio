@@ -1082,6 +1082,7 @@ async def save_follow_ups(tenant: int, request: Request):
         trigger_on_answer = bool(rule.get("trigger_on_answer"))
         if delay_minutes <= 0 and not trigger_on_answer:
             continue
+        stop_notice_after = bool(rule.get("stop_notice_after"))
         active = bool(rule.get("active", True))
         condition = rule.get("condition")
         if not isinstance(condition, (dict, list)):
@@ -1099,6 +1100,7 @@ async def save_follow_ups(tenant: int, request: Request):
                 "trigger_on_answer": trigger_on_answer,
                 "condition": condition,
                 "capture": capture,
+                "stop_notice_after": stop_notice_after,
             }
         )
 

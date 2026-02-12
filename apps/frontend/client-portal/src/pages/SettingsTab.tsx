@@ -42,6 +42,7 @@ type FollowUpRule = {
   trigger_on_answer?: boolean;
   condition?: FollowUpCondition | FollowUpCondition[] | null;
   capture?: FollowUpCapture | null;
+  stop_notice_after?: boolean;
 };
 
 const emptyTrigger = (): TriggerRule => ({
@@ -58,6 +59,7 @@ const emptyFollowup = (): FollowUpRule => ({
   active: true,
   text: '',
   trigger_on_answer: false,
+  stop_notice_after: false,
 });
 
 const QUICKSTART_FALLBACK = [
@@ -1197,6 +1199,14 @@ const SettingsTab: React.FC = () => {
                               />
                             </label>
                           </div>
+                          <label className="mt-2 flex items-center gap-2 text-xs text-slate-600">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(rule.stop_notice_after)}
+                              onChange={(e) => updateFollowup(index, { stop_notice_after: e.target.checked })}
+                            />
+                            Показывать сообщение об отписке после этого шага
+                          </label>
                           <div className="text-xs text-slate-400">
                             Задержка считается от первого входящего сообщения, если не включено «сразу после ответа».
                           </div>

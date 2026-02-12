@@ -416,6 +416,7 @@ def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
     if condition_list:
         condition = condition_list[0] if len(condition_list) == 1 else condition_list
     capture = _normalize_capture(rule.get("capture"))
+    stop_notice_after = bool(rule.get("stop_notice_after"))
     normalized = {
         "channel": channel,
         "delay_minutes": delay_minutes if delay_minutes > 0 else 0,
@@ -428,6 +429,8 @@ def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
         normalized["condition"] = condition
     if capture:
         normalized["capture"] = capture
+    if stop_notice_after:
+        normalized["stop_notice_after"] = True
     return normalized
 
 
@@ -484,6 +487,8 @@ async def schedule_followups(tenant_id: int, lead_id: int, incoming_channel: str
             "max_attempts": str(int(rule["max_attempts"])),
             "source_channel": channel_norm or "",
         }
+        if rule.get("stop_notice_after"):
+            job_payload["stop_notice_after"] = "1"
         condition = rule.get("condition")
         if condition:
             job_payload["condition"] = json.dumps(condition, ensure_ascii=False)
@@ -549,6 +554,9 @@ async def _fetch_job(job_id: str) -> Optional[Dict[str, Any]]:
         data["rule_id"] = int(data.get("rule_id") or 0)
     except Exception:
         data["rule_id"] = 0
+    raw_stop_notice = data.get("stop_notice_after")
+    if isinstance(raw_stop_notice, str):
+        data["stop_notice_after"] = raw_stop_notice.strip().lower() in {"1", "true", "yes", "on"}
     for field in ("condition", "capture"):
         raw = data.get(field)
         if isinstance(raw, str) and raw.strip():
@@ -647,6 +655,8 @@ async def _mark_sent(job: Mapping[str, Any]) -> None:
 
 
 async def _maybe_send_stop_notice(job: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+    if not job.get("stop_notice_after"):
+        return
     tenant_id = int(job.get("tenant_id") or 0)
     lead_id = int(job.get("lead_id") or 0)
     if tenant_id <= 0 or lead_id <= 0:
@@ -798,6 +808,8 @@ async def _trigger_followups_on_answer(
             "attempts": 0,
             "condition": condition,
         }
+        if rule.get("stop_notice_after"):
+            job_payload["stop_notice_after"] = True
         allowed = await _condition_allows(job_payload)
         if not allowed:
             continue
