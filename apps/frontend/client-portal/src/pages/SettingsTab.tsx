@@ -884,7 +884,7 @@ const SettingsTab: React.FC = () => {
       <div className="card space-y-6">
         <div>
           <div className="card-title">Поведение и триггеры</div>
-          <div className="card-subtitle">Автоответы Avito, смарт-реплай и правила тишины.</div>
+          <div className="card-subtitle">Автоответы Avito, умный ответ и правила тишины.</div>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
@@ -893,7 +893,7 @@ const SettingsTab: React.FC = () => {
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input type="checkbox" checked={avitoSmartReply} onChange={(e) => setAvitoSmartReply(e.target.checked)} />
-            <span className="text-sm font-medium text-slate-700">Смарт-реплай Avito</span>
+            <span className="text-sm font-medium text-slate-700">Умный ответ Avito</span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input
@@ -901,7 +901,7 @@ const SettingsTab: React.FC = () => {
               checked={telegramReplyEnabled}
               onChange={(e) => setTelegramReplyEnabled(e.target.checked)}
             />
-            <span className="text-sm font-medium text-slate-700">Автоответ Telegram</span>
+            <span className="text-sm font-medium text-slate-700">Умный ответ Telegram</span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input
