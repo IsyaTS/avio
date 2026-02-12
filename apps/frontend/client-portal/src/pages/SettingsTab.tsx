@@ -3,6 +3,18 @@ import toast from 'react-hot-toast';
 import { useClient } from '../context/ClientContext';
 import { buildUrl, postJson, requestJson } from '../lib/api';
 
+const Hint: React.FC<{ text: string }> = ({ text }) => (
+  <span
+    className="group relative inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-200 text-[10px] font-bold text-slate-600 cursor-help"
+    aria-label={text}
+  >
+    !
+    <span className="pointer-events-none absolute bottom-full left-1/2 z-30 hidden w-64 -translate-x-1/2 rounded-lg bg-slate-900 px-2 py-1.5 text-xs text-white shadow-lg group-hover:block">
+      {text}
+    </span>
+  </span>
+);
+
 const channelOptions = [
   { value: 'any', label: 'Все' },
   { value: 'telegram', label: 'Telegram' },
@@ -687,8 +699,11 @@ const SettingsTab: React.FC = () => {
           </div>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Шаблон ниши</span>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                    Шаблон ниши
+                    <Hint text="Быстрый выбор базового шаблона под нишу. Заполняет фокус и ускоряет старт." />
+                  </span>
             <select
               className="input"
               value={quickstartTemplate}
@@ -718,8 +733,11 @@ const SettingsTab: React.FC = () => {
               </div>
             )}
           </label>
-          <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Что продаёте / чем занимаетесь</span>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                    Что продаёте / чем занимаетесь
+                    <Hint text="Коротко опишите продукт или услугу. На основе этого строится тон и примеры ответов." />
+                  </span>
             <input
               className="input"
               value={quickstartOffer}
@@ -727,8 +745,11 @@ const SettingsTab: React.FC = () => {
               placeholder="Например: входные двери с установкой"
             />
           </label>
-          <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">УТП компании</span>
+                <label className="space-y-2 md:col-span-2">
+                  <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                    УТП компании
+                    <Hint text="Главные преимущества: сроки, гарантия, уникальные условия, сервис." />
+                  </span>
             <textarea
               className="textarea"
               rows={3}
@@ -737,8 +758,11 @@ const SettingsTab: React.FC = () => {
               placeholder="Например: установка за 48 часов, честная гарантия 3 года"
             />
           </label>
-          <div className="space-y-3 md:col-span-2">
-            <div className="text-sm font-medium text-slate-600">Частые вопросы (вопрос → ответ)</div>
+                <div className="space-y-3 md:col-span-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                    Частые вопросы (вопрос → ответ)
+                    <Hint text="Добавьте 3–10 частых вопросов клиентов и короткие ответы — бот будет использовать их первым делом." />
+                  </div>
             {quickstartFaq.map((item, idx) => (
               <div key={idx} className="grid gap-3 md:grid-cols-2">
                 <input
@@ -782,8 +806,11 @@ const SettingsTab: React.FC = () => {
               )}
             </div>
           </div>
-          <div className="space-y-3 md:col-span-2">
-            <div className="text-sm font-medium text-slate-600">Примеры стартовых сообщений</div>
+                <div className="space-y-3 md:col-span-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                    Примеры стартовых сообщений
+                    <Hint text="Как бот может начинать диалог. Используется как стильный шаблон." />
+                  </div>
             {quickstartStarters.slice(0, 1).map((item, idx) => (
               <input
                 key={idx}
@@ -798,8 +825,11 @@ const SettingsTab: React.FC = () => {
               />
             ))}
           </div>
-          <div className="space-y-3 md:col-span-2">
-            <div className="text-sm font-medium text-slate-600">Скрипт диалога (шаги)</div>
+                <div className="space-y-3 md:col-span-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                    Скрипт диалога (шаги)
+                    <Hint text="Логика общения: 2–5 шагов (уточнить → предложить → следующий шаг)." />
+                  </div>
             <div className="space-y-2">
               {quickstartScriptSteps.map((item, idx) => (
                 <div
@@ -857,8 +887,9 @@ const SettingsTab: React.FC = () => {
             <div className="card-subtitle">Описание голоса ассистента, цели и стиль общения.</div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+            <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
               Канал персоны
+              <Hint text="Выберите, для какого канала редактируется персона: общая или отдельная." />
             </span>
             <select
               className="input w-full max-w-[220px]"
@@ -873,7 +904,13 @@ const SettingsTab: React.FC = () => {
               <option value="max">MAX</option>
             </select>
           </div>
-          <textarea className="textarea" rows={8} value={personaValue} onChange={(e) => handlePersonaChange(e.target.value)} />
+          <label className="space-y-2">
+            <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Текст персоны
+              <Hint text="Правила и стиль общения. Чем конкретнее, тем точнее ответы." />
+            </span>
+            <textarea className="textarea" rows={8} value={personaValue} onChange={(e) => handlePersonaChange(e.target.value)} />
+          </label>
           <div className="flex flex-wrap gap-3">
             <button className="btn" onClick={handleSavePersona}>Сохранить персону</button>
             <button className="btn-secondary" onClick={handleDownloadConfig}>Скачать JSON конфиг</button>
@@ -889,11 +926,17 @@ const SettingsTab: React.FC = () => {
         <div className="grid gap-4 md:grid-cols-2">
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input type="checkbox" checked={autoReply} onChange={(e) => setAutoReply(e.target.checked)} />
-            <span className="text-sm font-medium text-slate-700">Автоответ Avito</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Автоответ Avito
+              <Hint text="Отправляет короткий автоматический ответ в Avito сразу после входящего сообщения." />
+            </span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input type="checkbox" checked={avitoSmartReply} onChange={(e) => setAvitoSmartReply(e.target.checked)} />
-            <span className="text-sm font-medium text-slate-700">Умный ответ Avito</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Умный ответ Avito
+              <Hint text="Включает полноценные ответы бота в Avito по персоне и обучению." />
+            </span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input
@@ -901,7 +944,10 @@ const SettingsTab: React.FC = () => {
               checked={telegramReplyEnabled}
               onChange={(e) => setTelegramReplyEnabled(e.target.checked)}
             />
-            <span className="text-sm font-medium text-slate-700">Умный ответ Telegram</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Умный ответ Telegram
+              <Hint text="Бот отвечает в Telegram от имени подключённого аккаунта." />
+            </span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input
@@ -909,18 +955,30 @@ const SettingsTab: React.FC = () => {
               checked={maxReplyEnabled}
               onChange={(e) => setMaxReplyEnabled(e.target.checked)}
             />
-            <span className="text-sm font-medium text-slate-700">Автоответ MAX</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Автоответ MAX
+              <Hint text="Включает ответы бота в канале MAX." />
+            </span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 md:col-span-2">
             <input type="checkbox" checked={sendCatalogTg} onChange={(e) => setSendCatalogTg(e.target.checked)} />
-            <span className="text-sm font-medium text-slate-700">Отправлять PDF-каталог первым сообщением (Telegram)</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Отправлять PDF-каталог первым сообщением (Telegram)
+              <Hint text="Если включено, бот отправит PDF сразу после первого сообщения клиента." />
+            </span>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input type="checkbox" checked={autoPhotoEnabled} onChange={(e) => setAutoPhotoEnabled(e.target.checked)} />
-            <span className="text-sm font-medium text-slate-700">Авто‑отправка фото</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Авто‑отправка фото
+              <Hint text="Бот сам прикрепляет фото, если находит подходящие по тегам." />
+            </span>
           </label>
           <label className="space-y-2">
-            <span className="text-sm font-medium text-slate-600">Максимум фото за ответ</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              Максимум фото за ответ
+              <Hint text="Сколько изображений бот может отправить в одном ответе." />
+            </span>
             <input
               className="input"
               type="number"
@@ -930,23 +988,38 @@ const SettingsTab: React.FC = () => {
             />
           </label>
           <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Текст автоответа Avito</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              Текст автоответа Avito
+              <Hint text="Короткое первое сообщение, которое бот отправляет в Avito при включённом автоответе." />
+            </span>
             <textarea className="textarea" rows={3} value={autoReplyText} onChange={(e) => setAutoReplyText(e.target.value)} />
           </label>
           <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Текст для Telegram, если нашли номер в Avito</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              Текст для Telegram, если нашли номер в Avito
+              <Hint text="Сообщение, которое отправится в Telegram, если бот нашёл телефон в Avito." />
+            </span>
             <textarea className="textarea" rows={3} value={avitoPhoneTemplate} onChange={(e) => setAvitoPhoneTemplate(e.target.value)} />
           </label>
           <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Фразы, после которых ждём фото/файл</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              Фразы, после которых ждём фото/файл
+              <Hint text="Если клиент напишет одну из фраз — бот ждёт фото/файл и реагирует специальным ответом." />
+            </span>
             <textarea className="textarea" rows={3} value={photoMarkers} onChange={(e) => setPhotoMarkers(e.target.value)} />
           </label>
           <label className="space-y-2 md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Ответ на фото/файл, если ждали</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              Ответ на фото/файл, если ждали
+              <Hint text="Сообщение, которое отправится после получения ожидаемого фото/файла." />
+            </span>
             <textarea className="textarea" rows={3} value={photoReply} onChange={(e) => setPhotoReply(e.target.value)} />
           </label>
           <label className="space-y-2">
-            <span className="text-sm font-medium text-slate-600">TTL ожидания (сек)</span>
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              TTL ожидания (сек)
+              <Hint text="Сколько секунд бот ждёт фото/файл после триггерной фразы." />
+            </span>
             <input className="input" type="number" value={photoTtl} onChange={(e) => setPhotoTtl(e.target.value)} />
           </label>
         </div>
@@ -965,7 +1038,10 @@ const SettingsTab: React.FC = () => {
               <div key={index} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
                 <div className="grid gap-3 lg:grid-cols-[2fr,1fr]">
                   <label className="space-y-2">
-                    <span className="text-sm font-medium text-slate-600">Фразы</span>
+                    <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                      Фразы
+                      <Hint text="Если клиент напишет одну из фраз, бот замолчит и переключит на менеджера." />
+                    </span>
                     <textarea
                       className="textarea"
                       rows={3}
@@ -981,7 +1057,10 @@ const SettingsTab: React.FC = () => {
                     />
                   </label>
                   <label className="space-y-2">
-                    <span className="text-sm font-medium text-slate-600">Каналы</span>
+                    <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                      Каналы
+                      <Hint text="Где действует это правило тишины: можно выбрать несколько каналов." />
+                    </span>
                     <select
                       className="input"
                       multiple
@@ -1006,7 +1085,10 @@ const SettingsTab: React.FC = () => {
                       checked={trigger.silence}
                       onChange={(e) => updateTrigger(index, { silence: e.target.checked })}
                     />
-                    Тишина
+                    <span className="flex items-center gap-2">
+                      Тишина
+                      <Hint text="Если включено — бот перестаёт отвечать после срабатывания правила." />
+                    </span>
                   </label>
                   <label className="flex items-center gap-2 text-sm text-slate-600">
                     <input
@@ -1014,7 +1096,10 @@ const SettingsTab: React.FC = () => {
                       checked={trigger.notify}
                       onChange={(e) => updateTrigger(index, { notify: e.target.checked })}
                     />
-                    Уведомить менеджера
+                    <span className="flex items-center gap-2">
+                      Уведомить менеджера
+                      <Hint text="Отправит уведомление менеджеру о сработавшем триггере." />
+                    </span>
                   </label>
                   {triggers.length > 1 && (
                     <button className="btn-ghost ml-auto" onClick={() => removeTrigger(index)}>
@@ -1154,7 +1239,10 @@ const SettingsTab: React.FC = () => {
 
                       <div className="mt-4 grid gap-3 md:grid-cols-[1.4fr,1fr]">
                         <label className="space-y-2">
-                          <span className="text-xs uppercase tracking-wide text-slate-400">Сообщение</span>
+                          <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                            Сообщение
+                            <Hint text="Текст отложенного сообщения, который бот отправит клиенту." />
+                          </span>
                           <textarea
                             className="textarea"
                             rows={3}
@@ -1165,7 +1253,10 @@ const SettingsTab: React.FC = () => {
                         <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-3">
                           <div className="text-xs uppercase tracking-wide text-slate-400">Параметры</div>
                           <label className="space-y-2">
-                            <span className="text-xs uppercase tracking-wide text-slate-400">Канал</span>
+                            <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                              Канал
+                              <Hint text="Выберите канал, где будет работать это отложенное сообщение." />
+                            </span>
                             <select
                               className="input"
                               value={rule.channel}
@@ -1180,7 +1271,10 @@ const SettingsTab: React.FC = () => {
                           </label>
                           <div className="grid gap-2 md:grid-cols-2">
                             <label className="space-y-2">
-                              <span className="text-xs uppercase tracking-wide text-slate-400">Задержка (мин)</span>
+                              <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                Задержка (мин)
+                                <Hint text="Через сколько минут после первого сообщения отправить этот шаг." />
+                              </span>
                               <input
                                 className="input"
                                 type="number"
@@ -1190,7 +1284,10 @@ const SettingsTab: React.FC = () => {
                               />
                             </label>
                             <label className="space-y-2">
-                              <span className="text-xs uppercase tracking-wide text-slate-400">Попыток</span>
+                              <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                Попыток
+                                <Hint text="Сколько раз можно попытаться отправить этот шаг, если не удалось." />
+                              </span>
                               <input
                                 className="input"
                                 type="number"
@@ -1205,7 +1302,10 @@ const SettingsTab: React.FC = () => {
                               checked={Boolean(rule.stop_notice_after)}
                               onChange={(e) => updateFollowup(index, { stop_notice_after: e.target.checked })}
                             />
-                            Показывать сообщение об отписке после этого шага
+                            <span className="flex items-center gap-2">
+                              Показывать сообщение об отписке после этого шага
+                              <Hint text="После этого сообщения бот отправит подсказку «Напишите стоп…»." />
+                            </span>
                           </label>
                           <div className="text-[11px] text-slate-400">
                             Если не выбрать ни одного шага, сообщение об отписке отправится после первого отложенного сообщения.
@@ -1219,7 +1319,10 @@ const SettingsTab: React.FC = () => {
                       <div className="mt-4 grid gap-4 md:grid-cols-[1.2fr,1fr]">
                         <div className="rounded-xl border border-slate-200 bg-white p-4">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs uppercase tracking-wide text-slate-400">Условие</span>
+                            <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                              Условие
+                              <Hint text="Позволяет отправлять шаг только если выполнен факт (например, клиент ответил «нет»)." />
+                            </span>
                             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
                               {conditionSummary}
                             </span>
@@ -1264,7 +1367,10 @@ const SettingsTab: React.FC = () => {
                                   });
                                 }}
                               />
-                              Отправить сразу после ответа
+                              <span className="flex items-center gap-2">
+                                Отправить сразу после ответа
+                                <Hint text="Если включено, шаг отправится сразу после ответа клиента, без задержки." />
+                              </span>
                             </label>
                           )}
                           {conditionMode === 'conditional' && (
@@ -1276,7 +1382,10 @@ const SettingsTab: React.FC = () => {
                           {conditionMode === 'conditional' && (
                             <div className="mt-3 space-y-3">
                               <label className="space-y-2">
-                                <span className="text-xs uppercase tracking-wide text-slate-400">Факт</span>
+                                <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                  Факт
+                                  <Hint text="Какой факт должен быть проверен (например, «заказ оформлен»)." />
+                                </span>
                                 <select
                                   className="input"
                                   value={factSelectValue}
@@ -1303,7 +1412,10 @@ const SettingsTab: React.FC = () => {
                               </label>
                               {factSelectValue === '__custom__' && (
                                 <label className="space-y-2">
-                                  <span className="text-xs uppercase tracking-wide text-slate-400">Название факта</span>
+                                  <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                    Название факта
+                                    <Hint text="Свой факт для условия. Пример: «клиент оформил заказ»." />
+                                  </span>
                                   <input
                                     className="input"
                                     value={conditionKey}
@@ -1316,7 +1428,10 @@ const SettingsTab: React.FC = () => {
                                 </label>
                               )}
                               <label className="space-y-2">
-                                <span className="text-xs uppercase tracking-wide text-slate-400">Что должно быть</span>
+                                <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                  Что должно быть
+                                  <Hint text="Задаёт, какое значение факта считается выполнением условия." />
+                                </span>
                                 <select
                                   className="input"
                                   value={preset}
@@ -1353,7 +1468,10 @@ const SettingsTab: React.FC = () => {
                               {showCustomFields && (
                                 <div className="grid gap-3 md:grid-cols-2">
                                   <label className="space-y-2">
-                                    <span className="text-xs uppercase tracking-wide text-slate-400">Оператор</span>
+                                    <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                      Оператор
+                                      <Hint text="Как сравнивать факт: равно, не равно, существует, в списке и т.д." />
+                                    </span>
                                     <select
                                       className="input"
                                       value={conditionOp}
@@ -1372,7 +1490,10 @@ const SettingsTab: React.FC = () => {
                                   </label>
                                   {showConditionValue && (
                                     <label className="space-y-2">
-                                      <span className="text-xs uppercase tracking-wide text-slate-400">Значение</span>
+                                      <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                        Значение
+                                        <Hint text="Значение, с которым сравниваем факт. Для списков — через запятую." />
+                                      </span>
                                       <input
                                         className="input"
                                         placeholder={conditionOp === 'in' || conditionOp === 'not_in' ? 'значения через запятую' : ''}
@@ -1393,7 +1514,10 @@ const SettingsTab: React.FC = () => {
 
                         <div className="rounded-xl border border-slate-200 bg-white p-4">
                           <div className="flex items-center justify-between">
-                            <div className="text-xs uppercase tracking-wide text-slate-400">Факт из ответа</div>
+                            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                              Факт из ответа
+                              <Hint text="Сохраняем факт из ответа клиента, чтобы использовать его в условиях следующих шагов." />
+                            </div>
                             <label className="flex items-center gap-2 text-xs text-slate-600">
                               <input
                                 type="checkbox"
@@ -1413,13 +1537,19 @@ const SettingsTab: React.FC = () => {
                                   }
                                 }}
                               />
-                              Сохранять ответ
+                              <span className="flex items-center gap-2">
+                                Сохранять ответ
+                                <Hint text="Если включено — ответы клиента записываются как факт." />
+                              </span>
                             </label>
                           </div>
                           {captureEnabled ? (
                             <div className="mt-3 space-y-3">
                               <label className="space-y-2">
-                                <span className="text-xs uppercase tracking-wide text-slate-400">Название факта</span>
+                                <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                  Название факта
+                                  <Hint text="Как будет называться сохранённый факт (используется в условиях)." />
+                                </span>
                                 <input
                                   className="input"
                                   placeholder="Например: Заказ оформлен"
@@ -1443,7 +1573,10 @@ const SettingsTab: React.FC = () => {
                                 </summary>
                                 <div className="mt-3 grid gap-3 md:grid-cols-2">
                                   <label className="space-y-2">
-                                    <span className="text-xs uppercase tracking-wide text-slate-400">Ответы "Да"</span>
+                                    <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                      Ответы "Да"
+                                      <Hint text="Перечень вариантов, которые считаются «Да». По одному на строку." />
+                                    </span>
                                     <textarea
                                       className="textarea"
                                       rows={2}
@@ -1458,11 +1591,14 @@ const SettingsTab: React.FC = () => {
                                   }
                                 />
                               </label>
-                              <label className="space-y-2">
-                                <span className="text-xs uppercase tracking-wide text-slate-400">Ответы "Нет"</span>
-                                <textarea
-                                  className="textarea"
-                                  rows={2}
+                                  <label className="space-y-2">
+                                    <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                                      Ответы "Нет"
+                                      <Hint text="Перечень вариантов, которые считаются «Нет»." />
+                                    </span>
+                                    <textarea
+                                      className="textarea"
+                                      rows={2}
                                   value={noText}
                                   onChange={(e) =>
                                     updateFollowup(index, {
@@ -1481,6 +1617,10 @@ const SettingsTab: React.FC = () => {
                                   Технический ключ
                                 </summary>
                                 <div className="mt-3 space-y-2">
+                                  <div className="flex items-center gap-2 text-xs text-slate-400">
+                                    <Hint text="Служебный идентификатор факта. Обычно менять не нужно." />
+                                    <span>Показывать служебный ключ</span>
+                                  </div>
                                   <input
                                     className="input"
                                     value={keyValue || fallbackKey}
