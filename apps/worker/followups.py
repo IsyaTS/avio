@@ -656,7 +656,12 @@ async def _mark_sent(job: Mapping[str, Any]) -> None:
 
 async def _maybe_send_stop_notice(job: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
     if not job.get("stop_notice_after"):
-        return
+        tenant_id = int(job.get("tenant_id") or 0)
+        if tenant_id <= 0:
+            return
+        rules = _load_rules(tenant_id)
+        if any(rule.get("stop_notice_after") for rule in rules):
+            return
     tenant_id = int(job.get("tenant_id") or 0)
     lead_id = int(job.get("lead_id") or 0)
     if tenant_id <= 0 or lead_id <= 0:
