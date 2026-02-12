@@ -88,6 +88,13 @@
 - Avito фото-эхо: при отправке фото бот кэширует echo-маркер (`__image__`) вместе с текстом, а webhook сравнивает входящие события с этим списком. Это предотвращает ложную тишину от исходящих фото.
   - Для входящих событий `type=image` всегда проставляется `text="__image__"` (fallback), чтобы эхо распознавалось даже без текста.
   - При наличии нескольких вложений Avito отправляет каждую картинку отдельно (батч из нескольких фото).
+- Для сброса тишины/отписок/дедуп-меток у лида используются ключи Redis:
+  - `handoff:silence:<tenant>:<lead>`
+  - `handoff:silence:meta:<tenant>:<lead>`
+  - `followup:optout:<tenant>:<lead>`
+  - `followup:stop_notice:<tenant>:<lead>`
+  - `followup:scheduled:<tenant>:<lead>:*`
+  - `followup:sent:<tenant>:<lead>:*`
 
 ## LLM pipeline (единый путь ответа)
 - Общая сборка ответа вынесена в `libs/core/response_pipeline.py`: формирует системный prompt, добавляет историю и вызывает LLM.
