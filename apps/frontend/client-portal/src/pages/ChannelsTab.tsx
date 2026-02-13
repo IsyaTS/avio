@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useClient } from '../context/ClientContext';
 import { buildUrl, postJson, requestJson } from '../lib/api';
+import Hint from '../components/Hint';
 
 const StatusBadge: React.FC<{ state: 'ok' | 'warn' | 'err' | 'idle'; label: string }> = ({
   state,
@@ -109,7 +110,7 @@ const WhatsAppCard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <div className="card-title">WhatsApp</div>
-          <div className="card-subtitle">QR и статус подключения</div>
+          <div className="card-subtitle flex items-center gap-2">QR и статус подключения <Hint text="Сканируйте QR в мобильном WhatsApp, чтобы подключить аккаунт к боту." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
       </div>
@@ -227,7 +228,7 @@ const TelegramCard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <div className="card-title">Telegram</div>
-          <div className="card-subtitle">Подключение через QR или 2FA</div>
+          <div className="card-subtitle flex items-center gap-2">Подключение через QR или 2FA <Hint text="Подключение Telegram через QR, при необходимости вводится пароль двухфакторной защиты." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
       </div>
@@ -333,7 +334,7 @@ const AvitoCard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <div className="card-title">Avito</div>
-          <div className="card-subtitle">OAuth подключение аккаунта</div>
+          <div className="card-subtitle flex items-center gap-2">OAuth подключение аккаунта <Hint text="Авторизует Avito аккаунт и проверяет, что вебхук получает новые сообщения." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
       </div>
@@ -422,12 +423,12 @@ const MaxCard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <div className="card-title">MAX</div>
-          <div className="card-subtitle">Официальный бот по токену</div>
+          <div className="card-subtitle flex items-center gap-2">Официальный бот по токену <Hint text="Канал MAX работает через официальный Bot API и токен бота." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
       </div>
       <label className="space-y-2">
-        <span className="text-sm font-medium text-slate-600">Токен бота MAX</span>
+        <span className="flex items-center gap-2 text-sm font-medium text-slate-600">Токен бота MAX <Hint text="Вставьте токен, выданный в кабинете MAX для вашего бота." /></span>
         <input
           className="input"
           type="password"
@@ -612,7 +613,7 @@ const AmoCRMCard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <div className="card-title">amoCRM</div>
-          <div className="card-subtitle">Подключение аккаунта</div>
+          <div className="card-subtitle flex items-center gap-2">Подключение аккаунта <Hint text="Интеграция amoCRM через OAuth, включая правила автопереходов по стадиям." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
       </div>

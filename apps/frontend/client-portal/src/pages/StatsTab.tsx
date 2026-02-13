@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useClient } from '../context/ClientContext';
 import { buildUrl, requestJson } from '../lib/api';
+import Hint from '../components/Hint';
 
 type FeedbackCounts = { like: number; dislike: number };
 type QualityItem = {
@@ -123,7 +124,7 @@ const StatsTab: React.FC = () => {
     <div className="space-y-6">
       <div className="grid gap-6 md:grid-cols-2">
       <div className="card">
-        <div className="card-title">Фидбэк по ответам</div>
+        <div className="card-title flex items-center gap-2">Фидбэк по ответам <Hint text="Общее количество лайков и дизлайков по ответам бота." /></div>
         <div className="card-subtitle">Сводка лайков и дизлайков</div>
         <div className="mt-4 text-3xl font-semibold text-slate-900">
           {counts ? `${counts.like} 👍 / ${counts.dislike} 👎` : '—'}
@@ -133,7 +134,7 @@ const StatsTab: React.FC = () => {
       <div className="card space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="card-title">Качество обучения</div>
+            <div className="card-title flex items-center gap-2">Качество обучения <Hint text="Список проблемных ответов с возможностью быстро задать правильный вариант." /></div>
             <div className="card-subtitle">Последние неверные ответы и быстрые исправления</div>
           </div>
           <button className="btn-secondary" onClick={refreshQuality} disabled={loadingQuality}>
@@ -177,7 +178,7 @@ const StatsTab: React.FC = () => {
       </div>
         <div className="card space-y-4">
           <div>
-            <div className="card-title">Сообщения за {summary?.period_days || 7} дней</div>
+            <div className="card-title flex items-center gap-2">Сообщения за {summary?.period_days || 7} дней <Hint text="Динамика входящих и исходящих сообщений за выбранный период." /></div>
             <div className="card-subtitle">Входящие/исходящие и распределение по каналам</div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
@@ -207,7 +208,7 @@ const StatsTab: React.FC = () => {
         </div>
         <div className="card space-y-4">
           <div>
-            <div className="card-title">Скорость ответа</div>
+            <div className="card-title flex items-center gap-2">Скорость ответа <Hint text="Среднее и медианное время между сообщением клиента и ответом бота/менеджера." /></div>
             <div className="card-subtitle">Среднее и медиана ответа на входящие сообщения</div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
@@ -224,7 +225,7 @@ const StatsTab: React.FC = () => {
         </div>
         <div className="card space-y-4">
           <div>
-            <div className="card-title">Кто отвечает</div>
+            <div className="card-title flex items-center gap-2">Кто отвечает <Hint text="Распределение исходящих сообщений: бот, менеджер и отложенные сообщения." /></div>
             <div className="card-subtitle">Доля исходящих сообщений по типам</div>
           </div>
           <div className="space-y-3 text-sm text-slate-700">
@@ -248,7 +249,7 @@ const StatsTab: React.FC = () => {
         </div>
         <div className="card space-y-4">
           <div>
-            <div className="card-title">Частые вопросы клиентов</div>
+            <div className="card-title flex items-center gap-2">Частые вопросы клиентов <Hint text="Топ повторяющихся вопросов клиентов для настройки FAQ и персоны." /></div>
             <div className="card-subtitle">Топ вопросов за период</div>
           </div>
           <div className="space-y-2 text-sm text-slate-700">
@@ -265,7 +266,7 @@ const StatsTab: React.FC = () => {
           </div>
         </div>
         <div className="card">
-          <div className="card-title">Очереди</div>
+          <div className="card-title flex items-center gap-2">Очереди <Hint text="Текущее состояние очереди исходящих и количество запланированных отложенных сообщений." /></div>
           <div className="card-subtitle">Сводка по исходящим сообщениям.</div>
           <div className="mt-4 space-y-2 text-sm text-slate-700">
             <div>

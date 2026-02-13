@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useClient } from '../context/ClientContext';
 import { buildUrl, postJson, requestJson } from '../lib/api';
+import Hint from '../components/Hint';
 
 type DialogItem = {
   id: string;
@@ -550,7 +551,7 @@ const TrainingTab: React.FC = () => {
         <div className="card space-y-4">
           <div>
             <div className="card-title">Загрузка диалогов</div>
-            <div className="card-subtitle">Добавьте свои примеры в формате JSONL/JSON/CSV.</div>
+            <div className="card-subtitle flex items-center gap-2">Добавьте свои примеры в формате JSONL/JSON/CSV. <Hint text="Загрузка своих диалогов для дополнительного обучения бота." /></div>
           </div>
           <input
             className="input"
@@ -568,7 +569,7 @@ const TrainingTab: React.FC = () => {
         <div className="card space-y-4">
           <div>
             <div className="card-title">Экспорт переписок</div>
-            <div className="card-subtitle">Скачайте архив диалогов WhatsApp.</div>
+            <div className="card-subtitle flex items-center gap-2">Скачайте архив диалогов WhatsApp. <Hint text="Экспортирует историю сообщений для анализа и последующей загрузки в обучение." /></div>
           </div>
           <div className="grid gap-3 md:grid-cols-3">
             <input id="export-days" className="input" type="number" defaultValue={30} min={0} />
@@ -585,6 +586,7 @@ const TrainingTab: React.FC = () => {
             <div className="card-title">Предложения по обучению</div>
             <div className="card-subtitle">
               Мы анализируем диалоги и предлагаем ответы на частые вопросы.
+              <span className="ml-2 inline-flex align-middle"><Hint text="Сервис предлагает готовые пары вопрос-ответ; вы подтверждаете только полезные." /></span>
             </div>
           </div>
           <button className="btn-secondary" onClick={handleRefreshSuggestions} disabled={suggestionsRefreshing}>
@@ -639,6 +641,7 @@ const TrainingTab: React.FC = () => {
             <div className="card-title">Telegram: скачать и проанализировать диалоги</div>
             <div className="card-subtitle">
               Мы соберём пары «вопрос → ответ» из истории Telegram, вы сможете подтвердить правильные.
+              <span className="ml-2 inline-flex align-middle"><Hint text="Подтверждённые пары сразу попадают в обучение и начинают влиять на ответы." /></span>
             </div>
           </div>
           <button className="btn-secondary" onClick={handleHarvestTelegram} disabled={tgLoading}>
@@ -677,7 +680,7 @@ const TrainingTab: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <div className="card-title">Диалоги</div>
-            <div className="card-subtitle">Единое окно Avito и Telegram.</div>
+            <div className="card-subtitle flex items-center gap-2">Единое окно Avito и Telegram. <Hint text="Здесь видны входящие/исходящие, источник ответа и можно вручную отвечать от менеджера." /></div>
           </div>
           <div className="text-sm text-slate-500">
             {feedbackCounts ? `Лайков: ${feedbackCounts.like} · Дизлайков: ${feedbackCounts.dislike}` : '—'}
@@ -835,7 +838,7 @@ const TrainingTab: React.FC = () => {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="card-title">Тестовый диалог</div>
-            <div className="card-subtitle">Ответы не отправляются в реальные каналы.</div>
+            <div className="card-subtitle flex items-center gap-2">Ответы не отправляются в реальные каналы. <Hint text="Безопасная песочница: проверка персоны и логики без отправки клиентам." /></div>
           </div>
           <div className="flex items-center gap-2">
             <select

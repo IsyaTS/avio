@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useClient } from '../context/ClientContext';
 import { buildUrl, requestJson } from '../lib/api';
+import Hint from '../components/Hint';
 
 type CsvPayload = {
   ok?: boolean;
@@ -356,7 +357,7 @@ const CatalogTab: React.FC = () => {
       <div className="card space-y-4">
         <div>
           <div className="card-title">Каталог</div>
-          <div className="card-subtitle">Поддерживаются CSV, XLSX, PDF</div>
+          <div className="card-subtitle flex items-center gap-2">Поддерживаются CSV, XLSX, PDF <Hint text="Загрузите каталог в любом из форматов, система преобразует его в рабочий CSV." /></div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <input
@@ -379,7 +380,7 @@ const CatalogTab: React.FC = () => {
       <div className="card space-y-4">
         <div>
           <div className="card-title">Фото</div>
-          <div className="card-subtitle">Поддерживаются JPG, PNG, GIF, BMP, HEIC до 24 МБ.</div>
+          <div className="card-subtitle flex items-center gap-2">Поддерживаются JPG, PNG, GIF, BMP, HEIC до 24 МБ. <Hint text="Фото можно связать с тегами и включить авто‑отправку в нужных каналах." /></div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <input
@@ -433,7 +434,7 @@ const CatalogTab: React.FC = () => {
                       {photo.size ? `${Math.round(photo.size / 1024)} KB` : '—'}
                     </div>
                     <label className="space-y-1 text-xs text-slate-500">
-                      <span className="font-semibold text-slate-600">Название</span>
+                      <span className="flex items-center gap-2 font-semibold text-slate-600">Название <Hint text="Внутреннее название фото для удобного поиска в кабинете." /></span>
                       <input
                         className="input"
                         value={photo.title || ''}
@@ -441,7 +442,7 @@ const CatalogTab: React.FC = () => {
                       />
                     </label>
                     <label className="space-y-1 text-xs text-slate-500">
-                      <span className="font-semibold text-slate-600">Теги (через запятую)</span>
+                      <span className="flex items-center gap-2 font-semibold text-slate-600">Теги (через запятую) <Hint text="По этим тегам бот выбирает подходящие фото для автоматической отправки." /></span>
                       <input
                         className="input"
                         value={photoTagInputs[photo.id] ?? (photo.tags || []).join(', ')}
@@ -450,7 +451,7 @@ const CatalogTab: React.FC = () => {
                       />
                     </label>
                     <label className="space-y-1 text-xs text-slate-500">
-                      <span className="font-semibold text-slate-600">Когда использовать</span>
+                      <span className="flex items-center gap-2 font-semibold text-slate-600">Когда использовать <Hint text="Кратко опишите, в каких ситуациях это фото уместно отправлять." /></span>
                       <textarea
                         className="textarea"
                         rows={2}
@@ -459,7 +460,7 @@ const CatalogTab: React.FC = () => {
                       />
                     </label>
                     <div className="space-y-1 text-xs text-slate-500">
-                      <div className="font-semibold text-slate-600">Каналы</div>
+                      <div className="flex items-center gap-2 font-semibold text-slate-600">Каналы <Hint text="Где разрешено использовать фото: Telegram, Avito и/или MAX." /></div>
                       <div className="flex flex-wrap gap-2">
                         {['telegram', 'avito', 'max'].map((channel) => {
                           const selected = (photo.channels || []).includes(channel);
@@ -491,10 +492,10 @@ const CatalogTab: React.FC = () => {
                           checked={Boolean(photo.auto)}
                           onChange={(e) => updatePhotoField(photo.id, { auto: e.target.checked })}
                         />
-                        Авто‑отправка
+                        <span className="flex items-center gap-2">Авто‑отправка <Hint text="Если включено, бот может отправлять это фото автоматически по контексту." /></span>
                       </label>
                       <label className="space-y-1 text-xs text-slate-500">
-                        <span className="font-semibold text-slate-600">Приоритет</span>
+                        <span className="flex items-center gap-2 font-semibold text-slate-600">Приоритет <Hint text="Чем выше число, тем чаще фото выбирается среди похожих вариантов." /></span>
                         <input
                           className="input"
                           type="number"
@@ -550,7 +551,7 @@ const CatalogTab: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <div className="card-title">CSV редактор</div>
-            <div className="card-subtitle">Редактируйте каталог прямо в браузере.</div>
+            <div className="card-subtitle flex items-center gap-2">Редактируйте каталог прямо в браузере. <Hint text="Изменяйте цены и позиции вручную, затем сохраните CSV." /></div>
           </div>
           <div className="flex gap-2">
             <button className="btn-secondary" onClick={refreshCsv}>Обновить</button>
