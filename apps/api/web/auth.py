@@ -25,10 +25,10 @@ _log = logging.getLogger("app.web.auth")
 _NOTIFY_BOT_TOKEN = (os.getenv("NOTIFY_BOT_TOKEN") or "").strip()
 _NOTIFY_BOT_PARSE_MODE = (os.getenv("NOTIFY_BOT_PARSE_MODE") or "HTML").strip()
 _DEFAULT_META_DESCRIPTION = (
-    "Avio подключает Avito и Telegram, отвечает за 5 секунд, отправляет каталоги и "
-    "помогает доводить клиента до сделки без ручной рутины."
+    "Автоответчик для Авито от Avio: отвечает за 5 секунд, отправляет каталог и фото, "
+    "переводит клиента в Telegram и помогает доводить диалог до сделки."
 )
-_DEFAULT_TITLE = "Avio — умные диалоги в Avito и Telegram"
+_DEFAULT_TITLE = "Автоответчик для Авито — Avio"
 _REGISTER_DESCRIPTION = "Создайте аккаунт Avio и запустите умные продажи в мессенджерах."
 _LOGIN_DESCRIPTION = "Войдите в Avio, чтобы управлять каналами и диалогами."
 _FORGOT_DESCRIPTION = "Восстановите доступ к Avio, если забыли пароль."
@@ -127,6 +127,28 @@ def _website_schema() -> dict:
         "@type": "WebSite",
         "name": "Avio",
         "url": _CANONICAL_BASE,
+    }
+
+
+def _software_schema(
+    request: Request,
+    *,
+    page_url: str,
+    page_title: str,
+    description: str,
+) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Avio",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Web",
+        "url": page_url,
+        "description": description,
+        "brand": {"@type": "Organization", "name": "Avio"},
+        "publisher": {"@type": "Organization", "name": "Avio"},
+        "image": _public_static(request, "branding/favicon.png"),
+        "headline": page_title,
     }
 
 
@@ -402,11 +424,22 @@ def _send_reset_email(to_email: str, reset_url: str) -> None:
 async def landing(request: Request):
     if not auth_utils.landing_enabled():
         return RedirectResponse(url="/admin")
+    title = "Автоответчик для Авито — Avio | Ответ за 5 секунд и перевод в Telegram"
+    description = _DEFAULT_META_DESCRIPTION
+    page_url = _canonical_url(request, "/")
     context = _base_context(
         request,
-        "Avio — умные диалоги в Avito и Telegram",
-        description=_DEFAULT_META_DESCRIPTION,
-        structured_data=[_faq_schema(request, _FAQ_ITEMS)],
+        title,
+        description=description,
+        structured_data=[
+            _software_schema(
+                request,
+                page_url=page_url,
+                page_title=title,
+                description=description,
+            ),
+            _faq_schema(request, _FAQ_ITEMS),
+        ],
     )
     context["show_auth_links"] = auth_utils.auth_enabled()
     return render_template("marketing/home.html", context)
@@ -479,6 +512,33 @@ async def marketing_pricing(request: Request):
         breadcrumb_title="Тарифы",
         description="Прозрачные условия и быстрый старт с Avio.",
         path="/pricing",
+    )
+
+
+@router.get("/avtootvetchik-avito")
+async def marketing_avito_autoreply(request: Request):
+    if not auth_utils.landing_enabled():
+        return RedirectResponse(url="/admin")
+    title = "Автоответчик для Авито: ответ за 5 секунд + перевод в Telegram | Avio"
+    description = (
+        "Как работает автоответчик для Авито: быстрые ответы, квалификация лида, отправка "
+        "каталога и фото, перевод в Telegram и контроль менеджера."
+    )
+    return _render_marketing_page(
+        request,
+        template="avtootvetchik-avito.html",
+        title=title,
+        breadcrumb_title="Автоответчик для Авито",
+        description=description,
+        path="/avtootvetchik-avito",
+        extra_structured=[
+            _software_schema(
+                request,
+                page_url=_canonical_url(request, "/avtootvetchik-avito"),
+                page_title=title,
+                description=description,
+            )
+        ],
     )
 
 
@@ -604,6 +664,7 @@ async def sitemap_xml(request: Request) -> Response:
         {"loc": f"{base}/features", "lastmod": _template_lastmod("features.html")},
         {"loc": f"{base}/solutions", "lastmod": _template_lastmod("solutions.html")},
         {"loc": f"{base}/pricing", "lastmod": _template_lastmod("pricing.html")},
+        {"loc": f"{base}/avtootvetchik-avito", "lastmod": _template_lastmod("avtootvetchik-avito.html")},
         {"loc": f"{base}/faq", "lastmod": _template_lastmod("faq.html")},
         {"loc": f"{base}/blog", "lastmod": _template_lastmod("blog.html")},
         {"loc": f"{base}/about", "lastmod": _template_lastmod("about.html")},

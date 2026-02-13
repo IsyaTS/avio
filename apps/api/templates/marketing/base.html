@@ -12,6 +12,10 @@
   {% if og_type %}<meta property="og:type" content="{{ og_type }}" />{% endif %}
   {% if og_image %}<meta property="og:image" content="{{ og_image }}" />{% endif %}
   <meta property="og:site_name" content="Avio" />
+  {% if og_title %}<meta name="twitter:title" content="{{ og_title }}" />{% endif %}
+  {% if og_description %}<meta name="twitter:description" content="{{ og_description }}" />{% endif %}
+  {% if og_image %}<meta name="twitter:image" content="{{ og_image }}" />{% endif %}
+  <meta name="twitter:card" content="summary_large_image" />
   <link rel="icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
   <link rel="shortcut icon" type="image/x-icon" href="{{ static_url(request, 'branding/favicon.ico') }}?v={{ favicon_version }}" />
   <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
@@ -52,6 +56,7 @@
     </a>
     <div class="nav-panel" id="nav-panel">
       <nav class="site-nav" aria-label="Основная навигация">
+        <a class="nav-link" href="/avtootvetchik-avito">Автоответчик для Авито</a>
         <a class="nav-link" href="/features">Возможности</a>
         <a class="nav-link" href="/solutions">Решения</a>
         <a class="nav-link" href="/pricing">Тарифы</a>
@@ -84,6 +89,7 @@
         <span>Платформа умных продаж в мессенджерах</span>
       </div>
       <div class="footer-links">
+        <a href="/avtootvetchik-avito">Автоответчик для Авито</a>
         <a href="/features">Возможности</a>
         <a href="/solutions">Решения</a>
         <a href="/pricing">Тарифы</a>
