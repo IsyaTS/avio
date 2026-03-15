@@ -27,12 +27,10 @@
 {% set client_state_json = (client_state_source if client_state_source is defined else client_state_fallback) | tojson %}
 {% set extra_head %}
 <script id="client-settings-state" type="application/json">{{ client_state_json }}</script>
-{# Добавляем доп. параметр для пробития кэша статики #}
-{% set followups_bust = asset_version ~ '-followups-' ~ (range(1, 999999) | random) %}
-<script src="/static/js/boot.js?v={{ followups_bust }}" defer></script>
-<script src="/static/js/catalog-upload.js?v={{ followups_bust }}" defer></script>
-<script src="/static/js/client-settings.js?v={{ followups_bust }}" defer></script>
-<script src="/static/js/followups-inline.js?v={{ followups_bust }}" defer></script>
+<script src="/static/js/boot.js?v={{ asset_version }}" defer></script>
+<script src="/static/js/catalog-upload.js?v={{ asset_version }}" defer></script>
+<script src="/static/js/client-settings.js?v={{ asset_version }}" defer></script>
+<script src="/static/js/followups-inline.js?v={{ asset_version }}" defer></script>
 {% endset %}
 {% block content %}
 <section class="surface stack" data-testid="client-hero">
@@ -148,6 +146,13 @@
             <input type="checkbox" id="behavior-send-catalog-telegram">
             <span class="label" style="margin:0;">Отправлять PDF-каталог первым сообщением (Telegram)</span>
         </label>
+        <label>
+            <span class="label">Тип мозгов</span>
+            <select id="behavior-brain-mode">
+                <option value="smart">Smart (новые мозги)</option>
+                <option value="classic">Classic (как на проде)</option>
+            </select>
+        </label>
     </div>
 
     <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items: end;">
@@ -201,6 +206,7 @@
     const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
     const avitoSmartReplyToggle = document.getElementById('behavior-avito-smart-reply');
     const sendCatalogTgToggle = document.getElementById('behavior-send-catalog-telegram');
+    const brainModeNode = document.getElementById('behavior-brain-mode');
     const triggerRows = document.getElementById('trigger-rows');
     const addTriggerBtn = document.getElementById('add-trigger');
     const saveBehaviorBtn = document.getElementById('save-behavior');
@@ -355,6 +361,10 @@
     if (avitoPhoneTemplateNode) {
       avitoPhoneTemplateNode.value = behavior.avito_phone_tg_template || '';
     }
+    if (brainModeNode) {
+      const mode = String(behavior.brain_mode || '').toLowerCase();
+      brainModeNode.value = (mode === 'classic' || mode === 'prod' || mode === 'legacy') ? 'classic' : 'smart';
+    }
     if (photoMarkersNode) {
       const markers = Array.isArray(behavior.photo_expected_markers) ? behavior.photo_expected_markers : [];
       photoMarkersNode.value = markers.join('\n');
@@ -387,6 +397,7 @@
         avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
         avito_smart_reply_enabled: avitoSmartReplyToggle ? !!avitoSmartReplyToggle.checked : false,
         send_catalog_on_first_message: sendCatalogTgToggle ? !!sendCatalogTgToggle.checked : true,
+        brain_mode: brainModeNode ? String(brainModeNode.value || 'smart') : 'smart',
         triggers: collectTriggers(),
         photo_expected_markers: photoMarkersNode ? normalizePhrases(photoMarkersNode.value) : [],
         photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',
@@ -496,6 +507,7 @@
         const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
         const avitoSmartReplyToggle = document.getElementById('behavior-avito-smart-reply');
         const sendCatalogTgToggle = document.getElementById('behavior-send-catalog-telegram');
+        const brainModeNode = document.getElementById('behavior-brain-mode');
         const photoMarkersNode = document.getElementById('behavior-photo-markers');
         const photoReplyNode = document.getElementById('behavior-photo-reply');
         const photoTtlNode = document.getElementById('behavior-photo-ttl');
@@ -541,6 +553,7 @@
               avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
               avito_smart_reply_enabled: avitoSmartReplyToggle ? !!avitoSmartReplyToggle.checked : false,
               send_catalog_on_first_message: sendCatalogTgToggle ? !!sendCatalogTgToggle.checked : true,
+              brain_mode: brainModeNode ? String(brainModeNode.value || 'smart') : 'smart',
               photo_expected_markers: photoMarkersNode ? photoMarkersNode.value : '',
               photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',
               photo_expected_ttl: photoTtlNode ? photoTtlNode.value : '',
@@ -623,6 +636,10 @@
           }
           if (sendCatalogTgToggle && typeof behaviorDraft.send_catalog_on_first_message === 'boolean') {
             sendCatalogTgToggle.checked = behaviorDraft.send_catalog_on_first_message;
+          }
+          if (brainModeNode && typeof behaviorDraft.brain_mode === 'string') {
+            const mode = String(behaviorDraft.brain_mode || '').toLowerCase();
+            brainModeNode.value = (mode === 'classic' || mode === 'prod' || mode === 'legacy') ? 'classic' : 'smart';
           }
           if (photoMarkersNode && typeof behaviorDraft.photo_expected_markers === 'string') {
             photoMarkersNode.value = behaviorDraft.photo_expected_markers;

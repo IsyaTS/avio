@@ -9,6 +9,7 @@ import re
 import random
 import uuid
 import io
+import imghdr
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -69,6 +70,12 @@ from .metrics import (
 logger = logging.getLogger("tgworker.api")
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _TELEGRAM_WEBHOOK_PATH = "/webhook/telegram"
+_RESOLVE_ENTITY_AFTER_SEND = (os.getenv("TGWORKER_RESOLVE_ENTITY_AFTER_SEND") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 @dataclass(slots=True)
@@ -83,6 +90,9 @@ class PendingEntry:
     qr_id: str | None = None
     authorized: bool = False
     _expired_recorded: bool = False
+    account_title: str | None = None
+    account_username: str | None = None
+    account_phone: str | None = None
 
     def is_expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= time.time()
@@ -384,6 +394,35 @@ def create_app() -> FastAPI:
             return None
         return f"@{token}"
 
+    def _entity_display_name(entity: Any) -> str | None:
+        first_name = getattr(entity, "first_name", None)
+        last_name = getattr(entity, "last_name", None)
+        parts = [part.strip() for part in (first_name, last_name) if isinstance(part, str) and part.strip()]
+        if parts:
+            combined = " ".join(parts)
+            if combined.strip().lower() not in {"contact", "контакт"}:
+                return combined
+        title = getattr(entity, "title", None)
+        if isinstance(title, str) and title.strip():
+            cleaned = title.strip()
+            if cleaned.lower() not in {"contact", "контакт"}:
+                return cleaned
+        username = getattr(entity, "username", None)
+        if isinstance(username, str) and username.strip():
+            normalized = _normalize_username(username)
+            return normalized or username.strip()
+        return None
+
+    def _image_media_type(data: bytes) -> str:
+        kind = imghdr.what(None, h=data)
+        if kind == "png":
+            return "image/png"
+        if kind == "gif":
+            return "image/gif"
+        if kind == "webp":
+            return "image/webp"
+        return "image/jpeg"
+
     @app.get("/media/{tenant}/{peer_id}/{message_id}")
     async def download_media(
         request: Request,
@@ -431,6 +470,36 @@ def create_app() -> FastAPI:
         if filename:
             headers["Content-Disposition"] = f"attachment; filename={filename}"
         return Response(content=data, media_type=mime or "application/octet-stream", headers=headers)
+
+    @app.get("/avatar/{tenant}/{peer_id}")
+    async def download_avatar(
+        request: Request,
+        tenant: int,
+        peer_id: int,
+    ):
+        unauthorized = _enforce_admin(request, "/avatar", tenant=tenant)
+        if unauthorized is not None:
+            return unauthorized
+        manager = app.state.session_manager
+        client = await manager.get_client(int(tenant))
+        if client is None:
+            return JSONResponse({"error": "not_authorized"}, status_code=409, headers=dict(NO_STORE_HEADERS))
+        try:
+            peer_entity = await client.get_entity(int(peer_id))
+        except Exception:
+            return JSONResponse({"error": "peer_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+        buf = io.BytesIO()
+        try:
+            await client.download_profile_photo(peer_entity, file=buf)
+        except Exception:
+            logger.exception("avatar_download_failed tenant=%s peer=%s", tenant, peer_id)
+            return JSONResponse({"error": "avatar_download_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS))
+        data = buf.getvalue()
+        if not data:
+            return JSONResponse({"error": "avatar_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+        headers = dict(NO_STORE_HEADERS)
+        headers["Content-Type"] = _image_media_type(data)
+        return Response(content=data, media_type=headers["Content-Type"], headers=headers)
 
     async def _run_broadcast_job(
         job_id: str,
@@ -581,6 +650,9 @@ def create_app() -> FastAPI:
             "qr_id": entry.qr_id,
             "expires_at": entry.expires_at_ms,
             "last_error": entry.last_error,
+            "account_title": entry.account_title,
+            "account_username": entry.account_username,
+            "account_phone": entry.account_phone,
         }
         if stats:
             payload.update(
@@ -640,6 +712,9 @@ def create_app() -> FastAPI:
             entry.expires_at = None
 
         entry.last_error = snapshot.last_error or flow.last_error
+        entry.account_title = getattr(snapshot, "account_title", None)
+        entry.account_username = getattr(snapshot, "account_username", None)
+        entry.account_phone = getattr(snapshot, "account_phone", None)
 
         derived_state = _derive_state(snapshot, flow)
 
@@ -1743,6 +1818,26 @@ def create_app() -> FastAPI:
                     response_payload["message_id"] = int(message_id)
                 except (TypeError, ValueError):
                     pass
+            resolved_entity = None
+            if _RESOLVE_ENTITY_AFTER_SEND:
+                try:
+                    candidate_peer = peer_value if isinstance(peer_value, int) else peer_entity
+                    if candidate_peer is not None:
+                        client = await manager.get_client(int(payload.tenant))
+                        if client is not None:
+                            resolved_entity = await client.get_entity(candidate_peer)
+                except Exception:
+                    resolved_entity = None
+            if resolved_entity is not None:
+                resolved_username = getattr(resolved_entity, "username", None)
+                normalized_username = _normalize_username(resolved_username) if isinstance(resolved_username, str) else None
+                if normalized_username:
+                    response_payload["username"] = normalized_username.lstrip("@")
+                display_name = _entity_display_name(resolved_entity)
+                if display_name:
+                    response_payload["display_name"] = display_name
+            if isinstance(peer_value, int):
+                response_payload["avatar_path"] = f"/avatar/{int(payload.tenant)}/{peer_value}"
 
         return JSONResponse(response_payload, headers=headers)
 

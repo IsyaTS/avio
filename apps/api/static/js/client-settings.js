@@ -1,4 +1,4 @@
-window.__client_settings_build = '20240705';
+window.__client_settings_build = '20260223-brain-mode';
 window.__cs_loaded = window.__cs_loaded === true;
 function getLocation() {
   if (typeof globalThis !== 'undefined' && globalThis.location) {

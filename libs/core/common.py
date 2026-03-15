@@ -99,7 +99,7 @@ _FALLBACK_REPLY_DEFAULT = (
 )
 
 
-def default_fallback_reply() -> str:
+def default_fallback_reply(_tenant: int | None = None) -> str:
     """Return configurable fallback reply text used when LLM is unavailable."""
 
     return _FALLBACK_REPLY_DEFAULT

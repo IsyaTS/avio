@@ -57,14 +57,14 @@ def test_provider_webhook_caches_qr(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"ok": True, "queued": False, "event": "qr", "qr_id": "1234567890"}
-    cached_entry = json.loads(dummy.store[f"wa:qr:7:1234567890"])
+    cached_entry = json.loads(dummy.store["wa:qr:7:1234567890"])
     assert cached_entry["tenant"] == 7
     assert cached_entry["qr_id"] == "1234567890"
     assert cached_entry["qr_svg"].startswith("<svg")
     assert cached_entry["provider"] == "whatsapp"
     assert cached_entry["event"] == "qr"
     assert isinstance(cached_entry["updated_at"], int)
-    assert dummy.store[f"wa:qr:last:7"] == "1234567890"
+    assert dummy.store["wa:qr:last:7"] == "1234567890"
 
 
 def test_provider_webhook_messages_incoming(monkeypatch):

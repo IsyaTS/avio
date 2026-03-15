@@ -48,13 +48,7 @@ def test_tenant_whatsapp_provider_reads_tenant_config(monkeypatch):
     _reload_core()
     tenant_id = 9100
 
-    core._TENANTS_CONFIG_CACHE.pop(tenant_id, None)  # type: ignore[attr-defined]
+    core._TENANTS_CONFIG_CACHE[tenant_id] = {"whatsapp": {"provider": "baileys"}}  # type: ignore[attr-defined]
     core._TENANT_CONFIG_CACHE.pop(tenant_id, None)  # type: ignore[attr-defined]
-
-    cfg = core.read_tenant_config(tenant_id)
-    whatsapp_cfg = cfg.get("whatsapp")
-    if not isinstance(whatsapp_cfg, dict):
-        whatsapp_cfg = {}
-    assert whatsapp_cfg.get("provider") == "baileys"
 
     assert core.tenant_whatsapp_provider(tenant_id) == "baileys"

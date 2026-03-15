@@ -4,12 +4,14 @@ import json
 import mimetypes
 import os
 import pathlib
+import random
 import re
 from urllib.parse import urlparse
 import time
 import uuid
 import asyncio
 import statistics
+import urllib.parse
 from typing import Any, Dict, Optional, Mapping
 from urllib.parse import quote, quote_plus
 
@@ -64,6 +66,9 @@ _log = logging.getLogger("training")
 _LOG_PREFIX = "[training]"
 _wa_log = logging.getLogger("wa_export")
 _dialogs_log = logging.getLogger("client.dialogs")
+TG_SLOT_MIN = 1
+TG_SLOT_MAX = 5
+TG_SLOT_MULTIPLIER = 1000
 
 _CLIENT_SETTINGS_JS: str | None = None
 
@@ -80,6 +85,65 @@ if EXPORT_MAX_DAYS <= 0:
 WHATSAPP_LIMIT_DIALOGS_MAX = 2000
 WHATSAPP_PER_LIMIT_MAX = 20000
 DEFAULT_WHATSAPP_BATCH_SIZE = 200
+
+SMART_REPLY_SPLIT_ENABLED = (os.getenv("SMART_REPLY_SPLIT_ENABLED") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+try:
+    SMART_REPLY_SPLIT_MIN_LEN = max(40, int(os.getenv("SMART_REPLY_SPLIT_MIN_LEN", "70")))
+except Exception:
+    SMART_REPLY_SPLIT_MIN_LEN = 70
+try:
+    SMART_REPLY_SPLIT_MAX_LEN = max(
+        SMART_REPLY_SPLIT_MIN_LEN + 20, int(os.getenv("SMART_REPLY_SPLIT_MAX_LEN", "120"))
+    )
+except Exception:
+    SMART_REPLY_SPLIT_MAX_LEN = max(SMART_REPLY_SPLIT_MIN_LEN + 20, 120)
+try:
+    SMART_REPLY_SPLIT_MAX_PARTS = max(2, int(os.getenv("SMART_REPLY_SPLIT_MAX_PARTS", "6")))
+except Exception:
+    SMART_REPLY_SPLIT_MAX_PARTS = 6
+_SMART_REPLY_SPLIT_CHANNELS_RAW = (os.getenv("SMART_REPLY_SPLIT_CHANNELS") or "telegram,avito,whatsapp,max").strip()
+SMART_REPLY_SPLIT_CHANNELS = {
+    part.strip().lower() for part in _SMART_REPLY_SPLIT_CHANNELS_RAW.split(",") if part.strip()
+}
+if not SMART_REPLY_SPLIT_CHANNELS:
+    SMART_REPLY_SPLIT_CHANNELS = {"telegram", "avito", "whatsapp", "max"}
+
+SMART_REPLY_SPLIT_PART_DELAY_ENABLED = (os.getenv("SMART_REPLY_SPLIT_PART_DELAY_ENABLED") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+try:
+    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS = max(
+        0, int(os.getenv("SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS", "5"))
+    )
+except Exception:
+    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS = 5
+try:
+    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS = max(
+        SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+        int(os.getenv("SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS", "10")),
+    )
+except Exception:
+    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS = max(SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS, 10)
+
+try:
+    SMART_REPLY_DELAY_MIN_SECONDS = max(0, int(os.getenv("SMART_REPLY_DELAY_MIN_SECONDS", "40")))
+except Exception:
+    SMART_REPLY_DELAY_MIN_SECONDS = 40
+try:
+    SMART_REPLY_DELAY_MAX_SECONDS = max(
+        SMART_REPLY_DELAY_MIN_SECONDS,
+        int(os.getenv("SMART_REPLY_DELAY_MAX_SECONDS", "120")),
+    )
+except Exception:
+    SMART_REPLY_DELAY_MAX_SECONDS = max(120, SMART_REPLY_DELAY_MIN_SECONDS)
 def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
     try:
         return str(request.url_for("whatsapp_export", tenant=tenant))
@@ -109,6 +173,421 @@ def _load_client_settings_js() -> str:
             pass
         _CLIENT_SETTINGS_JS = ""
     return _CLIENT_SETTINGS_JS
+
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_EOS_MARKER = "<<eos>>"
+_ACK_CAP_NEXT_WORD_RE = re.compile(
+    r"(?iu)\b(ок|понял|принял|услышал|ладно|хорошо)\s+([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{0,40})\b"
+)
+_GREETING_PREFIX_RE = re.compile(
+    r"^\s*(здравствуйте|добрый(?:й|е)|доброго|привет|салам|доброе утро|добрый вечер)\b",
+    re.IGNORECASE,
+)
+_QUESTION_START_RE = re.compile(
+    r"\b(в каком|какой|какая|какие|где|когда|сколько|что|как|подскажите|уточните|нужен ли|нужна ли)\b",
+    re.IGNORECASE,
+)
+_SEGMENT_CONNECTOR_RE = re.compile(
+    r"\s+(?:но|а|если|когда|чтобы|потом|также|при этом|после этого)\s+",
+    re.IGNORECASE,
+)
+_URL_TOKEN_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_TG_HANDLE_RE = re.compile(r"(?<!\w)@[\w\d_]{4,}")
+_PHONE_TOKEN_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\-\s()]{8,}\d)(?!\d)")
+
+
+def _punct_style_segment(text: str, comma_index: int) -> tuple[str, int]:
+    out_chars: list[str] = []
+    idx = int(comma_index or 0)
+    eos_pending = False
+    for ch in text:
+        if ch in {".", "!"}:
+            if not eos_pending:
+                out_chars.append(_EOS_MARKER)
+                eos_pending = True
+            continue
+        if ch == ",":
+            idx += 1
+            if idx % 2 == 0:
+                continue
+        if not ch.isspace():
+            eos_pending = False
+        out_chars.append(ch)
+    return "".join(out_chars), idx
+
+
+def _lowercase_after_removed_sentence_endings(text: str) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return ""
+    if _EOS_MARKER not in candidate:
+        return candidate
+    parts = candidate.split(_EOS_MARKER)
+    merged = parts[0].rstrip()
+    for part in parts[1:]:
+        chunk = part.lstrip()
+        if chunk:
+            first = chunk[0]
+            if first.isalpha():
+                chunk = first.lower() + chunk[1:]
+        if merged and chunk:
+            merged = f"{merged} {chunk}"
+        elif chunk:
+            merged = chunk
+    return merged.strip()
+
+
+def _lowercase_after_acknowledgement(text: str) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return ""
+
+    def _repl(match: re.Match[str]) -> str:
+        head = match.group(1)
+        word = match.group(2)
+        if not word:
+            return match.group(0)
+        return f"{head} {word[0].lower()}{word[1:]}"
+
+    return _ACK_CAP_NEXT_WORD_RE.sub(_repl, candidate)
+
+
+def _apply_custom_punctuation_style(text: str) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return ""
+    parts: list[str] = []
+    pos = 0
+    comma_idx = 0
+    for match in _URL_RE.finditer(candidate):
+        if match.start() > pos:
+            segment, comma_idx = _punct_style_segment(candidate[pos : match.start()], comma_idx)
+            parts.append(segment)
+        parts.append(match.group(0))
+        pos = match.end()
+    if pos < len(candidate):
+        tail, comma_idx = _punct_style_segment(candidate[pos:], comma_idx)
+        parts.append(tail)
+    styled = "".join(parts)
+    styled = re.sub(r"[ \t]{2,}", " ", styled)
+    styled = re.sub(r"[ \t]+\n", "\n", styled)
+    styled = re.sub(r"\n{3,}", "\n\n", styled)
+    styled = re.sub(r"\s+([,?])", r"\1", styled)
+    styled = re.sub(r",{2,}", ",", styled)
+    styled = re.sub(r"\?{2,}", "?", styled)
+    styled = _lowercase_after_removed_sentence_endings(styled)
+    styled = _lowercase_after_acknowledgement(styled)
+    return styled.strip()
+
+
+def _extract_standalone_tokens(text: str) -> list[str]:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return []
+    tokens: list[tuple[int, int, str]] = []
+    for rx in (_URL_TOKEN_RE, _TG_HANDLE_RE, _PHONE_TOKEN_RE):
+        for match in rx.finditer(candidate):
+            token = str(match.group(0) or "").strip()
+            if token:
+                tokens.append((match.start(), match.end(), token))
+    if not tokens:
+        return [candidate]
+    tokens.sort(key=lambda item: (item[0], item[1]))
+    merged: list[tuple[int, int, str]] = []
+    for start, end, token in tokens:
+        if merged and start < merged[-1][1]:
+            continue
+        merged.append((start, end, token))
+    out: list[str] = []
+    cursor = 0
+    for start, end, token in merged:
+        prefix = candidate[cursor:start].strip(" ,")
+        if prefix:
+            out.append(prefix)
+        out.append(token)
+        cursor = end
+    tail = candidate[cursor:].strip(" ,")
+    if tail:
+        out.append(tail)
+    return [item for item in out if item]
+
+
+def _split_long_segment_by_words(text: str, max_len: int) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_len:
+        return [clean]
+    words = clean.split(" ")
+    out: list[str] = []
+    current = ""
+    for word in words:
+        if not word:
+            continue
+        candidate = f"{current} {word}".strip() if current else word
+        if current and len(candidate) > max_len:
+            if re.match(r"^\d", word) and len(candidate) <= max_len + 14:
+                current = candidate
+                continue
+            out.append(current.strip())
+            current = word
+        else:
+            current = candidate
+    if current.strip():
+        out.append(current.strip())
+    if len(out) >= 2 and len(out[-1]) < 12:
+        combined = f"{out[-2]} {out[-1]}".strip()
+        if len(combined) <= max_len + 20:
+            out[-2] = combined
+            out.pop()
+    return [part for part in out if part]
+
+
+def _split_long_segment_by_connectors(text: str, max_len: int) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_len:
+        return [clean]
+
+    out: list[str] = []
+    remaining = clean
+    min_cut = max(48, int(max_len * 0.5))
+    while len(remaining) > max_len:
+        window = remaining[: max_len + 1]
+        split_pos = -1
+        for match in _SEGMENT_CONNECTOR_RE.finditer(window):
+            if match.start() >= min_cut:
+                split_pos = int(match.start())
+        if split_pos <= 0:
+            break
+        head = remaining[:split_pos].strip(" ,")
+        if len(head) < min_cut:
+            break
+        if head:
+            out.append(head)
+        remaining = remaining[split_pos:].strip(" ,")
+        if not remaining:
+            break
+    if remaining:
+        out.append(remaining)
+    return [part for part in out if part]
+
+
+def _split_greeting_question_combo(text: str) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return [clean] if clean else []
+    if not _GREETING_PREFIX_RE.search(clean):
+        return [clean]
+    match = _QUESTION_START_RE.search(clean)
+    if not match:
+        return [clean]
+    split_at = int(match.start())
+    if split_at <= 6:
+        return [clean]
+    head = clean[:split_at].strip(" ,")
+    tail = clean[split_at:].strip(" ,")
+    if not head or not tail:
+        return [clean]
+    if len(head) > 56:
+        return [clean]
+    if "?" not in clean and len(tail) < 10:
+        return [clean]
+    return [head, tail]
+
+
+def _merge_short_split_parts(parts: list[str], max_len: int) -> list[str]:
+    if not parts:
+        return []
+    def _is_atomic_contact_or_link(chunk: str) -> bool:
+        raw = re.sub(r"\s+", " ", str(chunk or "")).strip(" ,")
+        if not raw:
+            return False
+        if re.fullmatch(r"https?://\S+", raw, flags=re.IGNORECASE):
+            return True
+        if re.fullmatch(r"@[\w\d_]{4,}", raw):
+            return True
+        if re.fullmatch(r"(?:\+?\d[\d\-\s()]{8,}\d)", raw):
+            return True
+        return False
+    merged: list[str] = []
+    min_part = max(36, int(max_len * 0.33))
+    for part in parts:
+        candidate = re.sub(r"\s+", " ", str(part or "")).strip(" ,")
+        if not candidate:
+            continue
+        if _is_atomic_contact_or_link(candidate):
+            merged.append(candidate)
+            continue
+        if merged and len(candidate) < min_part:
+            prev = merged[-1]
+            if _is_atomic_contact_or_link(prev):
+                merged.append(candidate)
+                continue
+            if _GREETING_PREFIX_RE.match(prev) and _QUESTION_START_RE.match(candidate):
+                merged.append(candidate)
+                continue
+            combined = f"{merged[-1]} {candidate}".strip()
+            if len(combined) <= max_len + 6:
+                merged[-1] = combined
+                continue
+        merged.append(candidate)
+    if len(merged) >= 2 and len(merged[0]) < min_part:
+        if not (_GREETING_PREFIX_RE.match(merged[0]) and _QUESTION_START_RE.match(merged[1])):
+            combined = f"{merged[0]} {merged[1]}".strip()
+            if len(combined) <= max_len + 6:
+                merged[1] = combined
+                merged = merged[1:]
+
+    tail_connectors = ("и", "но", "а", "или", "если", "чтобы", "потом", "также")
+    idx = 0
+    while idx < len(merged) - 1:
+        last_word = merged[idx].split(" ")[-1].lower()
+        if last_word in tail_connectors:
+            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
+            if len(combined) <= max_len + 6:
+                merged[idx] = combined
+                del merged[idx + 1]
+                continue
+        if re.search(r'[»"]\s*$', merged[idx]) and re.match(r"^\d", merged[idx + 1]):
+            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
+            if len(combined) <= max_len + 20:
+                merged[idx] = combined
+                del merged[idx + 1]
+                continue
+        if "—" in merged[idx] and re.match(r"^\d", merged[idx + 1]):
+            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
+            if len(combined) <= max_len + 20:
+                merged[idx] = combined
+                del merged[idx + 1]
+                continue
+        idx += 1
+    return merged
+
+
+def _split_long_segment(text: str, max_len: int) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_len:
+        return [clean]
+
+    comma_parts = [part.strip() for part in clean.split(",") if part.strip()]
+    if len(comma_parts) > 1 and any(len(part) < 8 for part in comma_parts):
+        conn_parts = _split_long_segment_by_connectors(clean, max_len)
+        out_parts: list[str] = []
+        for part in conn_parts:
+            out_parts.extend(_split_long_segment_by_words(part, max_len))
+        normalized = [part for part in out_parts if part]
+        if len(normalized) >= 2:
+            return normalized
+    if len(comma_parts) <= 1:
+        dash_parts = [part.strip() for part in re.split(r"\s*[—–;]\s*", clean) if part.strip()]
+        if len(dash_parts) > 1:
+            expanded: list[str] = []
+            for part in dash_parts:
+                expanded.extend(_split_long_segment_by_connectors(part, max_len))
+            out_parts: list[str] = []
+            for part in expanded:
+                out_parts.extend(_split_long_segment_by_words(part, max_len))
+            return [part for part in out_parts if part]
+        conn_parts = _split_long_segment_by_connectors(clean, max_len)
+        out_parts: list[str] = []
+        for part in conn_parts:
+            out_parts.extend(_split_long_segment_by_words(part, max_len))
+        return [part for part in out_parts if part]
+
+    out: list[str] = []
+    current = ""
+    for idx, part in enumerate(comma_parts):
+        suffix = "," if idx < len(comma_parts) - 1 else ""
+        piece = f"{part}{suffix}".strip()
+        candidate = f"{current} {piece}".strip() if current else piece
+        if current and len(candidate) > max_len:
+            out.extend(_split_long_segment_by_words(current, max_len))
+            current = piece
+        else:
+            current = candidate
+    if current.strip():
+        out.extend(_split_long_segment_by_words(current, max_len))
+    return [part.strip() for part in out if part.strip()]
+
+
+def _split_reply_for_test_send(reply_text: str, channel: str) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(reply_text or "")).strip()
+    if not clean:
+        return []
+    ch = str(channel or "").strip().lower()
+    if not SMART_REPLY_SPLIT_ENABLED or ch not in SMART_REPLY_SPLIT_CHANNELS:
+        return [clean]
+    greeting_combo = _split_greeting_question_combo(clean)
+    has_multi_questions = clean.count("?") > 1
+    has_paragraphs = "\n\n" in clean
+    if (
+        len(clean) < SMART_REPLY_SPLIT_MIN_LEN
+        and len(greeting_combo) <= 1
+        and not has_multi_questions
+        and not has_paragraphs
+    ):
+        return [clean]
+
+    parts: list[str] = []
+    blocks = [blk.strip() for blk in re.split(r"\n{2,}", clean) if blk.strip()]
+    if not blocks:
+        blocks = [clean]
+
+    for block in blocks:
+        greeting_split = _split_greeting_question_combo(block)
+        for segment in greeting_split:
+            seg = segment.strip()
+            if not seg:
+                continue
+            dash_chunks = [part.strip() for part in re.split(r"\s*[—–;]\s*", seg) if part.strip()]
+            if not dash_chunks:
+                dash_chunks = [seg]
+            q_chunks: list[str] = []
+            for dash_chunk in dash_chunks:
+                q_chunks.extend([q.strip() for q in re.findall(r"[^?]+(?:\?|$)", dash_chunk) if q.strip()])
+            if not q_chunks:
+                q_chunks = [seg]
+            for chunk in q_chunks:
+                parts.extend(_split_long_segment(chunk, SMART_REPLY_SPLIT_MAX_LEN))
+
+    deduped: list[str] = []
+    prev_norm = ""
+    for part in parts:
+        line = re.sub(r"\s+", " ", part).strip(" ,")
+        if not line:
+            continue
+        if re.fullmatch(r"[.!,;:()\-\s]+", line):
+            continue
+        norm = line.casefold()
+        if norm == prev_norm:
+            continue
+        deduped.append(line)
+        prev_norm = norm
+    if not deduped:
+        return [clean]
+    tokenized: list[str] = []
+    for part in deduped:
+        tokenized.extend(_extract_standalone_tokens(part))
+    deduped = tokenized or deduped
+    deduped = _merge_short_split_parts(deduped, SMART_REPLY_SPLIT_MAX_LEN)
+    if len(deduped) <= SMART_REPLY_SPLIT_MAX_PARTS:
+        return deduped
+    head = deduped[: SMART_REPLY_SPLIT_MAX_PARTS - 1]
+    tail = " ".join(deduped[SMART_REPLY_SPLIT_MAX_PARTS - 1 :]).strip()
+    if tail:
+        head.append(tail)
+    return [part for part in head if part]
+
+
+def _delay_seconds_value(min_seconds: int, max_seconds: int) -> float:
+    if max_seconds <= min_seconds:
+        return float(min_seconds)
+    return float(random.randint(min_seconds, max_seconds))
 
 
 class WhatsAppExportPayload(BaseModel):
@@ -275,6 +754,87 @@ def _isoformat(value: Any) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def _parse_tg_slot_from_source(source: Any) -> int | None:
+    text = str(source or "").strip().lower()
+    if not text:
+        return None
+    patterns = [
+        r"tg_slot[:=](\d+)",
+        r"telegram[:_](\d+)",
+        r"slot[:=](\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        try:
+            slot = int(match.group(1))
+        except Exception:
+            continue
+        if TG_SLOT_MIN <= slot <= TG_SLOT_MAX:
+            return slot
+    return None
+
+
+def _tg_slot_tenant(tenant_id: int, slot: int) -> int:
+    if slot <= 1:
+        return int(tenant_id)
+    return int(tenant_id) * TG_SLOT_MULTIPLIER + int(slot)
+
+
+def _load_telegram_slot_profiles(tenant_id: int) -> list[dict[str, Any]]:
+    cfg = C.read_tenant_config(int(tenant_id)) or {}
+    telegram_cfg = cfg.get("telegram") if isinstance(cfg, Mapping) else {}
+    if not isinstance(telegram_cfg, Mapping):
+        telegram_cfg = {}
+    slot_count_raw = telegram_cfg.get("slot_count")
+    try:
+        slot_count = int(slot_count_raw)
+    except Exception:
+        slot_count = 1
+    slot_count = max(TG_SLOT_MIN, min(TG_SLOT_MAX, slot_count))
+    slot_enabled_cfg = telegram_cfg.get("slot_enabled")
+    enabled_map: dict[int, bool] = {}
+    if isinstance(slot_enabled_cfg, Mapping):
+        for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
+            raw = slot_enabled_cfg.get(str(slot), slot_enabled_cfg.get(slot))
+            enabled_map[slot] = bool(raw is not False)
+    else:
+        for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
+            enabled_map[slot] = True
+
+    profiles: list[dict[str, Any]] = []
+    for slot in range(TG_SLOT_MIN, slot_count + 1):
+        if not enabled_map.get(slot, True):
+            continue
+        virtual_tenant = _tg_slot_tenant(int(tenant_id), slot)
+        path = f"/status?{urllib.parse.urlencode({'tenant': virtual_tenant})}"
+        code, body, _ = C.tg_http("GET", path, timeout=5.0)
+        if code < 200 or code >= 300:
+            continue
+        try:
+            payload = json.loads(body.decode("utf-8", errors="ignore"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, Mapping) or not bool(payload.get("authorized")):
+            continue
+        account_title = str(payload.get("account_title") or "").strip()
+        account_username = str(payload.get("account_username") or "").strip()
+        account_phone = str(payload.get("account_phone") or "").strip()
+        label = account_title or (f"@{account_username}" if account_username else "") or (f"+{account_phone}" if account_phone else "")
+        if not label:
+            label = f"Telegram #{slot}"
+        profiles.append(
+            {
+                "slot": slot,
+                "label": label,
+                "username": account_username or None,
+                "phone": account_phone or None,
+            }
+        )
+    return profiles
 
 
 def _ts_iso(ts: int | None) -> str | None:
@@ -763,6 +1323,12 @@ async def client_settings(tenant: int, request: Request):
     behavior_cfg = behavior_raw if isinstance(behavior_raw, dict) else {}
     triggers_raw = behavior_cfg.get("triggers") if isinstance(behavior_cfg.get("triggers"), list) else []
     behavior_state = {
+        "brain_mode": (
+            "classic"
+            if str(behavior_cfg.get("brain_mode") or "").strip().lower() in {"classic", "prod", "legacy"}
+            or bool(behavior_cfg.get("human_reply_mode"))
+            else "smart"
+        ),
         "auto_reply": bool(behavior_cfg.get("auto_reply")),
         "auto_reply_text": behavior_cfg.get("auto_reply_text") or "",
         "avito_smart_reply_enabled": bool(behavior_cfg.get("avito_smart_reply_enabled")),
@@ -876,7 +1442,14 @@ async def client_settings(tenant: int, request: Request):
         "asset_version": asset_version_value,
         "behavior": behavior_state,
     }
-    response = render_template("client/spa.html", context)
+    use_legacy_settings = (os.getenv("TESTING") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    template_name = "client/settings.html" if use_legacy_settings else "client/spa.html"
+    response = render_template(template_name, context)
     response.headers["Cache-Control"] = "no-store"
     if key:
         try:
@@ -993,6 +1566,12 @@ async def save_behavior(tenant: int, request: Request):
     behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
     behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
     behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
+    requested_brain_mode = str(payload.get("brain_mode") or "").strip().lower()
+    if requested_brain_mode not in {"smart", "classic"}:
+        requested_brain_mode = "smart"
+    behavior["brain_mode"] = requested_brain_mode
+    # Backward compatibility with older checks in core.
+    behavior["human_reply_mode"] = requested_brain_mode == "classic"
     if payload.get("max_reply_enabled") is not None:
         behavior["max_reply_enabled"] = bool(payload.get("max_reply_enabled"))
     if payload.get("telegram_reply_enabled") is not None:
@@ -1053,6 +1632,13 @@ async def save_follow_ups(tenant: int, request: Request):
         payload = await request.json()
     except Exception:
         payload = {}
+    tg_slot_raw = payload.get("tg_slot")
+    try:
+        tg_slot = int(tg_slot_raw)
+    except Exception:
+        tg_slot = 1
+    if tg_slot < TG_SLOT_MIN or tg_slot > TG_SLOT_MAX:
+        tg_slot = TG_SLOT_MIN
     rules_raw = payload.get("rules")
     if not isinstance(rules_raw, list):
         rules_raw = []
@@ -1250,6 +1836,7 @@ async def get_dialog_messages_api(
             key or "",
             msg.get("attachments"),
         )
+        msg_slot = _parse_tg_slot_from_source(msg.get("source"))
         formatted.append(
             {
                 "id": msg_id,
@@ -1261,10 +1848,21 @@ async def get_dialog_messages_api(
                 "feedbacked": bool(msg_id and msg_id in feedback_ids),
                 "attachments": attachments,
                 "source": msg.get("source") or "",
+                "tg_slot": msg_slot,
             }
         )
 
     silence = _load_silence_status(tenant_id, lead_id, lead_meta.get("channel") or "")
+    telegram_accounts: list[dict[str, Any]] = []
+    selected_tg_slot: int | None = None
+    if (lead_meta.get("channel") or "").strip().lower() == "telegram":
+        telegram_accounts = _load_telegram_slot_profiles(tenant_id)
+        try:
+            redis_client = C.redis_client()
+            raw_slot = redis_client.get(f"tg:lead_slot:{int(tenant_id)}:{int(lead_id)}")
+            selected_tg_slot = int(raw_slot) if raw_slot is not None else None
+        except Exception:
+            selected_tg_slot = None
 
     return {
         "ok": True,
@@ -1272,6 +1870,8 @@ async def get_dialog_messages_api(
         "channel": lead_meta.get("channel"),
         "title": lead_meta.get("title") or lead_meta.get("contact"),
         "messages": formatted,
+        "telegram_accounts": telegram_accounts,
+        "selected_tg_slot": selected_tg_slot,
         "silence": silence,
     }
 
@@ -1341,7 +1941,7 @@ async def send_dialog_message_api(
             telegram_username=lead_meta.get("telegram_username"),
             title=lead_meta.get("title"),
             attachments=[attachment] if attachment else None,
-            source="manager",
+            source=f"manager:tg_slot:{tg_slot}" if channel == "telegram" else "manager",
         )
     except Exception:
         _dialogs_log.exception("dialog_send_insert_failed tenant=%s lead=%s", tenant_id, lead_id)
@@ -1367,6 +1967,7 @@ async def send_dialog_message_api(
     if telegram_user_id:
         queue_item["telegram_user_id"] = telegram_user_id
         queue_item["peer"] = telegram_user_id
+        queue_item["tg_slot"] = tg_slot
     elif lead_meta.get("peer"):
         queue_item["peer"] = lead_meta.get("peer")
     if lead_meta.get("contact"):
@@ -1431,6 +2032,8 @@ async def test_dialog_api(request: Request, tenant: int | str | None = None):
     channel = str(payload.get("channel") or "telegram").strip().lower() or "telegram"
     if channel not in {"telegram", "avito", "whatsapp", "max"}:
         channel = "telegram"
+    delay_enabled = bool(payload.get("delay_enabled", True))
+    force_delay = bool(payload.get("force_delay", False))
 
     history_raw = payload.get("history") or []
     history: list[dict[str, str]] = []
@@ -1445,20 +2048,75 @@ async def test_dialog_api(request: Request, tenant: int | str | None = None):
             if not content:
                 continue
             history.append({"role": role, "content": content})
+    had_assistant_before = any(item.get("role") == "assistant" for item in history)
+    emulate_channels = bool(payload.get("emulate_channels", True))
+
+    contact_id_raw = payload.get("contact_id")
+    try:
+        contact_id = int(contact_id_raw if contact_id_raw is not None else 0)
+    except Exception:
+        contact_id = 0
+    if contact_id < 0:
+        contact_id = 0
+
+    lead_id_raw = payload.get("lead_id")
+    try:
+        lead_id = int(lead_id_raw if lead_id_raw is not None else 0)
+    except Exception:
+        lead_id = 0
+    if lead_id < 0:
+        lead_id = 0
+    if contact_id <= 0 and lead_id > 0:
+        try:
+            resolved_contact = await db.get_contact_id_by_lead(int(lead_id))
+            contact_id = int(resolved_contact or 0)
+        except Exception:
+            contact_id = 0
 
     try:
         result = await run_response_pipeline(
             tenant_id=tenant_id,
             channel=channel,
             user_text=text,
-            history=history,
-            contact_id=0,
+            history=[] if emulate_channels else history,
+            contact_id=contact_id,
             enable_photos=False,
         )
         reply_text = result.reply_text
     except Exception:
-        reply_text = default_fallback_reply(tenant_id)
-    return {"ok": True, "reply": reply_text}
+        reply_text = default_fallback_reply()
+    reply_text = _apply_custom_punctuation_style(str(reply_text or "").strip())
+
+    reply_parts = _split_reply_for_test_send(reply_text, channel)
+    if not reply_parts:
+        reply_parts = [default_fallback_reply()]
+
+    timeline: list[dict[str, Any]] = []
+    at_ms = 0
+    if delay_enabled and (had_assistant_before or force_delay):
+        at_ms += int(_delay_seconds_value(SMART_REPLY_DELAY_MIN_SECONDS, SMART_REPLY_DELAY_MAX_SECONDS) * 1000)
+    for idx, part in enumerate(reply_parts):
+        if (
+            delay_enabled
+            and idx > 0
+            and SMART_REPLY_SPLIT_PART_DELAY_ENABLED
+            and channel in SMART_REPLY_SPLIT_CHANNELS
+            and SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS > 0
+        ):
+            at_ms += int(
+                _delay_seconds_value(
+                    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+                    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS,
+                )
+                * 1000
+            )
+        timeline.append({"text": str(part or "").strip(), "at_ms": at_ms})
+    return {
+        "ok": True,
+        "reply": (timeline[0]["text"] if timeline else ""),
+        "replies": timeline,
+        "delay_enabled": delay_enabled,
+    }
 
 
 @router.post("/api/dialogs/{lead_id}/unsilence")

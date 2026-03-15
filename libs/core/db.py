@@ -1,4 +1,4 @@
-import os, hashlib, json, time, logging, pathlib, threading, re
+import os, hashlib, json, time, logging, pathlib, threading, re, asyncio
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple, AsyncIterator
 from collections.abc import Mapping
@@ -105,7 +105,20 @@ async def _ensure_pool() -> Any:
     """Ленивое создание пула. Вернёт None, если БД не настроена или недоступна."""
     global _pool
     if _pool is not None:
-        return _pool
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        pool_loop = getattr(_pool, "_loop", None)
+        pool_stale = bool(pool_loop and getattr(pool_loop, "is_closed", lambda: False)())
+        pool_foreign = bool(pool_loop and current_loop and pool_loop is not current_loop)
+        if not pool_stale and not pool_foreign:
+            return _pool
+        try:
+            await _pool.close()
+        except Exception:
+            pass
+        _pool = None
     if asyncpg is None or not DATABASE_URL:
         return None
     try:
@@ -834,6 +847,9 @@ async def resolve_or_create_contact(
 ) -> int:
     # поиск по приоритету: whatsapp_phone -> avito_user_id -> avito_login
     contact_id: int | None = None
+    telegram_username_norm = (telegram_username or "").strip() or None
+    max_username_norm = (max_username or "").strip() or None
+    avito_login_norm = (avito_login or "").strip() or None
     phone_norm = None
     if phone:
         try:
@@ -852,8 +868,8 @@ async def resolve_or_create_contact(
         row = await _fetchrow("SELECT id FROM contacts WHERE avito_user_id=$1", avito_user_id)
         if row:
             contact_id = row["id"]
-    if contact_id is None and avito_login:
-        row = await _fetchrow("SELECT id FROM contacts WHERE avito_login=$1 LIMIT 1", avito_login)
+    if contact_id is None and avito_login_norm:
+        row = await _fetchrow("SELECT id FROM contacts WHERE avito_login=$1 LIMIT 1", avito_login_norm)
         if row:
             contact_id = row["id"]
     if contact_id is None and telegram_user_id:
@@ -877,7 +893,7 @@ async def resolve_or_create_contact(
                 contact_id,
                 telegram_user_id,
             )
-        if telegram_username:
+        if telegram_username_norm:
             await _exec(
                 """
                 UPDATE contacts
@@ -886,7 +902,7 @@ async def resolve_or_create_contact(
                 WHERE id = $1;
                 """,
                 contact_id,
-                telegram_username,
+                telegram_username_norm,
             )
         if max_user_id:
             await _exec(
@@ -899,7 +915,7 @@ async def resolve_or_create_contact(
                 contact_id,
                 max_user_id,
             )
-        if max_username:
+        if max_username_norm:
             await _exec(
                 """
                 UPDATE contacts
@@ -908,7 +924,7 @@ async def resolve_or_create_contact(
                 WHERE id = $1;
                 """,
                 contact_id,
-                max_username,
+                max_username_norm,
             )
         if phone_norm:
             await _exec(
@@ -923,6 +939,20 @@ async def resolve_or_create_contact(
                 phone_norm,
             )
         return int(contact_id)
+
+    if not any(
+        (
+            phone_norm,
+            whatsapp_phone,
+            avito_user_id,
+            avito_login_norm,
+            telegram_user_id,
+            telegram_username_norm,
+            max_user_id,
+            max_username_norm,
+        )
+    ):
+        return 0
 
     row = await _fetchrow(
         """
@@ -942,11 +972,11 @@ async def resolve_or_create_contact(
         phone_norm or whatsapp_phone,
         whatsapp_phone or phone_norm,
         avito_user_id,
-        avito_login,
+        avito_login_norm,
         telegram_user_id,
-        telegram_username,
+        telegram_username_norm,
         max_user_id,
-        max_username,
+        max_username_norm,
     )
     # если БД недоступна — вернём фиктивный id, чтобы не падал вызов
     return int(row["id"]) if row and "id" in row else 0
@@ -1731,17 +1761,25 @@ async def get_lead_dialog_metadata(lead_id: int) -> Optional[Mapping[str, Any]]:
 
     row = await _fetchrow(
         """
-        SELECT id,
-               tenant_id,
-               channel,
-               peer,
-               contact,
-               title,
-               source_real_id,
-               telegram_user_id,
-               telegram_username
+        SELECT leads.id,
+               leads.tenant_id,
+               leads.channel,
+               leads.peer,
+               leads.contact,
+               leads.title,
+               leads.source_real_id,
+               leads.telegram_user_id,
+               leads.telegram_username,
+               lc.contact_id,
+               c.phone,
+               c.whatsapp_phone,
+               c.avito_login,
+               c.avito_user_id,
+               c.telegram_username AS contact_telegram_username
         FROM leads
-        WHERE id = $1::bigint
+        LEFT JOIN lead_contacts lc ON lc.lead_id = leads.id
+        LEFT JOIN contacts c ON c.id = lc.contact_id
+        WHERE leads.id = $1::bigint
         LIMIT 1;
         """,
         lead_ref,
@@ -1978,6 +2016,76 @@ async def list_recent_inbound_texts(
         texts.append(str(value))
     texts.reverse()
     return texts
+
+
+async def list_recent_stage_router_texts(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    limit: int = 8,
+) -> list[str]:
+    try:
+        tenant_val = int(tenant_id)
+        lead_val = int(lead_id)
+    except Exception:
+        return []
+    if tenant_val <= 0 or lead_val <= 0:
+        return []
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 8
+    rows = await _fetch(
+        """
+        SELECT direction, source, text
+        FROM messages
+        WHERE tenant_id = $1
+          AND lead_id = $2
+          AND text IS NOT NULL
+          AND btrim(text) <> ''
+          AND (
+              direction = 0
+              OR lower(coalesce(source, '')) = 'manager'
+              OR lower(coalesce(source, '')) LIKE 'manager:%'
+              OR lower(coalesce(source, '')) = 'bot'
+              OR lower(coalesce(source, '')) LIKE 'bot:%'
+          )
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3
+        """,
+        tenant_val,
+        lead_val,
+        limit_val,
+    )
+    items: list[str] = []
+    for row in rows or []:
+        if not row:
+            continue
+        if isinstance(row, Mapping):
+            text_val = row.get("text")
+            direction_val = row.get("direction")
+            source_val = row.get("source")
+        else:
+            try:
+                text_val = row[2]
+                direction_val = row[0]
+                source_val = row[1]
+            except Exception:
+                continue
+        text = str(text_val or "").strip()
+        if not text:
+            continue
+        try:
+            direction_int = int(direction_val)
+        except Exception:
+            direction_int = 0
+        source_norm = str(source_val or "").strip().lower()
+        if direction_int == 0:
+            role = "client"
+        elif source_norm == "manager" or source_norm.startswith("manager:"):
+            role = "manager"
+        else:
+            role = "bot"
+        items.append(f"{role}: {text}")
+    items.reverse()
+    return items
 
 
 async def create_message_feedback(

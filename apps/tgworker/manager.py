@@ -6,6 +6,7 @@ import contextlib
 import io
 import logging
 import math
+import mimetypes
 import os
 import secrets
 import sys
@@ -16,6 +17,7 @@ from datetime import date, datetime, time as time_type, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import json
@@ -27,6 +29,7 @@ import qrcode
 from fastapi.encoders import jsonable_encoder
 from prometheus_client import Counter, Gauge
 from libs.core.lib.transport_utils import message_in_asdict
+from libs.core.message_envelope import detect_message_kind, normalize_attachment_type, sanitize_display_name
 from libs.core.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
 from libs.core.schemas import Attachment, MessageIn
 from libs.constants import ADMIN_TENANT_ID
@@ -94,6 +97,18 @@ def _resolve_session_dir() -> Path:
     return path
 
 
+def _state_account_title(username: str | None, phone: str | None, account_id: int | None) -> str | None:
+    uname = str(username or "").strip()
+    pval = str(phone or "").strip()
+    if uname:
+        return f"@{uname}"
+    if pval:
+        return f"+{pval}"
+    if account_id:
+        return str(account_id)
+    return None
+
+
 SESSION_DIR = _resolve_session_dir()
 LEGACY_DIR = Path("/app/data/tg-sessions")
 
@@ -106,6 +121,72 @@ QR_LOGIN_TIMEOUT = 120.0
 NEEDS_2FA_TTL = 90.0
 PASSWORD_FLOOD_BACKOFF = 60.0
 INCOMING_DEDUP_TTL = 300.0
+
+try:
+    ATTACHMENT_FETCH_TIMEOUT = float(os.getenv("TG_ATTACHMENT_FETCH_TIMEOUT", "45") or "45")
+except ValueError:
+    ATTACHMENT_FETCH_TIMEOUT = 45.0
+if ATTACHMENT_FETCH_TIMEOUT < 1.0:
+    ATTACHMENT_FETCH_TIMEOUT = 1.0
+
+try:
+    ATTACHMENT_FETCH_RETRIES = int(os.getenv("TG_ATTACHMENT_FETCH_RETRIES", "3") or "3")
+except ValueError:
+    ATTACHMENT_FETCH_RETRIES = 3
+if ATTACHMENT_FETCH_RETRIES < 1:
+    ATTACHMENT_FETCH_RETRIES = 1
+
+try:
+    ATTACHMENT_FETCH_RETRY_DELAY = float(os.getenv("TG_ATTACHMENT_FETCH_RETRY_DELAY", "0.8") or "0.8")
+except ValueError:
+    ATTACHMENT_FETCH_RETRY_DELAY = 0.8
+if ATTACHMENT_FETCH_RETRY_DELAY < 0.0:
+    ATTACHMENT_FETCH_RETRY_DELAY = 0.0
+
+
+TENANTS_DIR = Path((os.getenv("TENANTS_DIR") or "/data/tenants").strip())
+
+
+def _try_read_internal_attachment(url: str, tenant: int) -> tuple[bytes | None, str | None, str | None]:
+    raw_url = str(url or "").strip()
+    if not raw_url:
+        return None, None, None
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None, None, None
+    path = str(parsed.path or "").strip()
+    parts = [part for part in path.split("/") if part]
+    # Expected: /internal/tenant/{tenant}/catalog-file?path=uploads/catalog.pdf&token=...
+    if len(parts) < 4:
+        return None, None, None
+    if parts[0] != "internal" or parts[1] != "tenant" or parts[3] != "catalog-file":
+        return None, None, None
+    try:
+        tenant_from_url = int(parts[2])
+    except Exception:
+        return None, None, None
+    if int(tenant_from_url) != int(tenant):
+        return None, None, None
+    query = parse_qs(parsed.query or "", keep_blank_values=False)
+    raw_rel = (query.get("path") or [""])[0]
+    rel = str(raw_rel or "").strip().lstrip("/")
+    if not rel:
+        return None, None, None
+    tenant_root = (TENANTS_DIR / str(int(tenant))).resolve()
+    candidate = (tenant_root / rel).resolve()
+    try:
+        candidate.relative_to(tenant_root)
+    except Exception:
+        return None, None, None
+    if not candidate.is_file():
+        return None, None, None
+    try:
+        data = candidate.read_bytes()
+    except Exception:
+        return None, None, None
+    mime = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+    return data, candidate.name, mime
 
 
 SESSIONS_AUTHORIZED = Gauge(
@@ -221,6 +302,10 @@ class SessionState:
     twofa_pending: bool = False
     twofa_since: Optional[float] = None
     twofa_backoff_until: Optional[float] = None
+    account_id: Optional[int] = None
+    account_username: Optional[str] = None
+    account_phone: Optional[str] = None
+    account_title: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -1603,7 +1688,13 @@ class TelegramSessionManager:
             peer=str(peer_id) if peer_id is not None else None,
             peer_id=int(peer_id) if isinstance(peer_id, int) else None,
         )
-        await self._send_webhook(normalized, extra={"manager": True, "out": True})
+        await self._send_webhook(
+            normalized,
+            extra={
+                "manager": True,
+                "out": True,
+            },
+        )
 
     async def _handle_new_message(self, tenant: int, client: TelegramClient, event: events.NewMessage.Event) -> None:
         is_private = bool(getattr(event, "is_private", False))
@@ -1659,6 +1750,7 @@ class TelegramSessionManager:
                 display_name = " ".join(part for part in [first_name, last_name] if isinstance(part, str) and part.strip())
             else:
                 display_name = None
+            display_name = sanitize_display_name(display_name)
 
             sender_id = getattr(message, "sender_id", None)
             if sender_id is None:
@@ -1749,7 +1841,11 @@ class TelegramSessionManager:
                 )
                 await self._send_webhook(
                     normalized_out,
-                    extra={"manager": True, "out": True, "origin": "telegram:manager"},
+                    extra={
+                        "manager": True,
+                        "out": True,
+                        "origin": "telegram:manager",
+                    },
                 )
                 LOGGER.info(
                     "tg_diag:webhook_outgoing tenant_id=%s msg_id=%s payload_manager=%s",
@@ -1785,7 +1881,11 @@ class TelegramSessionManager:
                     )
                     await self._send_webhook(
                         normalized_out,
-                        extra={"manager": True, "out": True, "origin": "telegram:manager"},
+                        extra={
+                            "manager": True,
+                            "out": True,
+                            "origin": "telegram:manager",
+                        },
                     )
                 finally:
                     return
@@ -1802,8 +1902,8 @@ class TelegramSessionManager:
             if message.media:
                 att_type = message.media.__class__.__name__
                 file_obj = getattr(message, "file", None)
-                name = getattr(file_obj, "name", None)
-                mime = getattr(file_obj, "mime_type", None)
+                raw_name = getattr(file_obj, "name", None)
+                raw_mime = getattr(file_obj, "mime_type", None)
                 size = getattr(file_obj, "size", None)
                 fallback_id = getattr(message, "id", None)
                 if peer_id is not None:
@@ -1811,8 +1911,27 @@ class TelegramSessionManager:
                 else:
                     url = f"telegram://{tenant}/{fallback_id or 0}"
                 try:
+                    normalized_type = normalize_attachment_type(att_type, raw_mime, raw_name)
+                    name = str(
+                        raw_name
+                        or {
+                            "image": "image.jpg",
+                            "video": "video.mp4",
+                            "voice": "voice.ogg",
+                            "file": "file",
+                        }.get(normalized_type, "file")
+                    ).strip()
+                    mime = str(
+                        raw_mime
+                        or {
+                            "image": "image/jpeg",
+                            "video": "video/mp4",
+                            "voice": "audio/ogg",
+                            "file": "application/octet-stream",
+                        }.get(normalized_type, "application/octet-stream")
+                    ).strip()
                     attachments.append(
-                        Attachment(type=att_type, url=url, name=name, mime=mime, size=size)
+                        Attachment(type=normalized_type, url=url, name=name, mime=mime, size=size)
                     )
                 except Exception:
                     LOGGER.debug(
@@ -1893,11 +2012,26 @@ class TelegramSessionManager:
                 peer=peer_value,
                 peer_id=peer_id_value,
             )
+            attachment_payload = [
+                att.model_dump() if hasattr(att, "model_dump") else att.dict()
+                for att in attachments
+            ]
+            message_kind = detect_message_kind(text_value, attachment_payload)
             extra_payload = dict(extra)
             if manager_like_incoming:
                 extra_payload.setdefault("manager", True)
                 extra_payload.setdefault("out", True)
                 extra_payload.setdefault("origin", "telegram:manager")
+                extra_payload.setdefault("author_kind", "manager")
+                extra_payload.setdefault("direction", "outgoing")
+                extra_payload.setdefault("trigger_bot", False)
+            else:
+                extra_payload.setdefault("author_kind", "lead")
+                extra_payload.setdefault("direction", "incoming")
+                extra_payload.setdefault("trigger_bot", True)
+            extra_payload.setdefault("source_channel", "telegram")
+            extra_payload.setdefault("dialog_channel", "telegram")
+            extra_payload.setdefault("message_kind", message_kind)
             delivered = await self._send_webhook(normalized, extra=extra_payload)
             if delivered:
                 self._delivered_incoming += 1
@@ -2027,7 +2161,7 @@ class TelegramSessionManager:
                     )
                     await asyncio.sleep(min(2.0 * (attempt + 1), 6.0))
                     continue
-                except httpx.HTTPError as exc:
+                except httpx.HTTPError:
                     EVENT_ERRORS.labels("webhook").inc()
                     SEND_FAIL_COUNTER.labels("telegram", "http_error").inc()
                     LOGGER.exception(
@@ -2149,7 +2283,21 @@ class TelegramSessionManager:
                         result = self._states.get(tenant, result)
                 else:
                     try:
-                        await check_client.get_me()
+                        me = await check_client.get_me()
+                        try:
+                            account_id = int(getattr(me, "id", 0) or 0) or None
+                        except Exception:
+                            account_id = None
+                        username = str(getattr(me, "username", "") or "").strip() or None
+                        phone = str(getattr(me, "phone", "") or "").strip() or None
+                        title = _state_account_title(username, phone, account_id)
+                        async with self._lock:
+                            state = self._states.get(tenant, result)
+                            state.account_id = account_id
+                            state.account_username = username
+                            state.account_phone = phone
+                            state.account_title = title
+                            result = state
                     except AuthKeyUnregisteredError:
                         await self._handle_authkey_unregistered(
                             tenant,
@@ -2461,21 +2609,39 @@ class TelegramSessionManager:
 
         try:
             if attachments_list:
-                async with httpx.AsyncClient(timeout=15.0) as session:
+                async with httpx.AsyncClient(timeout=ATTACHMENT_FETCH_TIMEOUT) as session:
                     for attachment in attachments_list:
                         url = attachment.get("url") if isinstance(attachment, dict) else None
                         if not url:
                             continue
+                        data: bytes | None = None
+                        local_name: str | None = None
+                        local_mime: str | None = None
+                        local_data, local_name, local_mime = _try_read_internal_attachment(str(url), int(tenant))
+                        if local_data is not None:
+                            data = local_data
+                        else:
+                            last_fetch_error: Exception | None = None
+                            for attempt in range(1, ATTACHMENT_FETCH_RETRIES + 1):
+                                try:
+                                    resp = await session.get(url)
+                                    resp.raise_for_status()
+                                    data = resp.content
+                                    break
+                                except httpx.HTTPError as exc:
+                                    last_fetch_error = exc
+                                    if attempt < ATTACHMENT_FETCH_RETRIES and ATTACHMENT_FETCH_RETRY_DELAY > 0:
+                                        await asyncio.sleep(ATTACHMENT_FETCH_RETRY_DELAY * attempt)
                         try:
-                            resp = await session.get(url)
-                            resp.raise_for_status()
-                            data = resp.content
-                        except httpx.HTTPError as exc:
+                            if data is None:
+                                raise last_fetch_error or RuntimeError("attachment_fetch_failed")
+                        except Exception as exc:
                             EVENT_ERRORS.labels("attachment_fetch").inc()
                             LOGGER.error(
-                                "stage=send_fetch_fail tenant_id=%s url=%s error=%s",
+                                "stage=send_fetch_fail tenant_id=%s url=%s attempts=%s error=%s",
                                 tenant,
                                 url,
+                                ATTACHMENT_FETCH_RETRIES,
                                 exc,
                             )
                             continue
@@ -2488,13 +2654,33 @@ class TelegramSessionManager:
                                 or attachment.get("title")
                                 or attachment.get("url")
                             )
+                            attachment_type = str(attachment.get("type") or "").strip().lower()
+                            attachment_mime = str(
+                                attachment.get("mime")
+                                or attachment.get("mime_type")
+                                or ""
+                            ).strip().lower()
                         else:
                             filename_hint = None
+                            attachment_type = ""
+                            attachment_mime = ""
                         filename = None
                         if isinstance(filename_hint, str) and filename_hint.strip():
                             filename = Path(filename_hint).name
                             if not filename:
                                 filename = None
+                        if not filename and local_name:
+                            filename = local_name
+                        is_voice_note = attachment_type == "voice" or (
+                            attachment_type == "audio" and attachment_mime in {"audio/ogg", "audio/opus"}
+                        )
+                        if is_voice_note and not filename:
+                            filename = "voice.ogg"
+                        if is_voice_note and isinstance(filename, str) and "." not in filename:
+                            guessed_ext = mimetypes.guess_extension(attachment_mime or "audio/ogg") or ".ogg"
+                            filename = f"{filename}{guessed_ext}"
+                        if local_mime and not attachment_mime:
+                            attachment_mime = local_mime
                         caption_text = caption if isinstance(caption, str) else None
                         if text and not sent_text:
                             caption_text = text
@@ -2514,6 +2700,7 @@ class TelegramSessionManager:
                             file=file_payload,
                             caption=caption_text or "",
                             reply_to=reply_to_id,
+                            voice_note=is_voice_note,
                         )
                         message_value, peer_value = _extract_identity(result)
                         if message_value is not None:
@@ -2638,7 +2825,7 @@ class TelegramSessionManager:
             contact = InputPhoneContact(
                 client_id=random.randint(1, 2**31 - 1),
                 phone=phone,
-                first_name=".",
+                first_name="Contact",
                 last_name="",
             )
             # Older Telethon versions do not support the ``replace`` argument.

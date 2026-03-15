@@ -42,6 +42,14 @@ from libs.core.common import (
     smart_reply_enabled,
 )
 from libs.core.metrics import DB_ERRORS_COUNTER, WEBHOOK_PROVIDER_COUNTER
+from libs.core.message_envelope import (
+    build_envelope,
+    content_fingerprint,
+    detect_message_kind,
+    normalize_attachments,
+    sanitize_display_name,
+    text_or_placeholder,
+)
 from libs.core.repo import provider_tokens as provider_tokens_repo
 
 
@@ -78,11 +86,70 @@ settings = core.settings  # type: ignore[attr-defined]
 _redis_queue = settings.r
 _catalog_sent_cache: dict[Tuple[int, str], float] = {}
 _WA_JID_CACHE_TTL = 60 * 60 * 24 * 30  # 30 days
+_TG_SLOT_MULTIPLIER = 1000
+_TG_SLOT_MIN = 1
+_TG_SLOT_MAX = 5
+
+
+def _decode_tg_slot_tenant(raw_tenant: int) -> tuple[int, int]:
+    if raw_tenant <= 0:
+        return 0, _TG_SLOT_MIN
+    base = raw_tenant // _TG_SLOT_MULTIPLIER
+    remainder = raw_tenant % _TG_SLOT_MULTIPLIER
+    if base > 0 and _TG_SLOT_MIN <= remainder <= _TG_SLOT_MAX:
+        return base, remainder
+    return raw_tenant, _TG_SLOT_MIN
+
+
+def _extract_tg_slot(message: Mapping[str, Any], payload: Mapping[str, Any]) -> int:
+    for source in (message.get("tg_slot"), payload.get("tg_slot"), payload.get("slot")):
+        try:
+            slot = int(source)
+        except Exception:
+            continue
+        if _TG_SLOT_MIN <= slot <= _TG_SLOT_MAX:
+            return slot
+    return _TG_SLOT_MIN
 
 
 def _catalog_cache_redis_key(cache_key: tuple[int, str]) -> str:
     tenant, identifier = cache_key
     return f"catalog:sent:{tenant}:{identifier}"
+
+
+def _catalog_message_dedup_redis_key(
+    *,
+    tenant: int,
+    provider: str,
+    lead_id: int,
+    message_id: str,
+) -> str:
+    provider_norm = (provider or "").strip().lower() or "unknown"
+    mid_norm = (message_id or "").strip() or str(lead_id)
+    return f"catalog:msgdedup:{tenant}:{provider_norm}:{lead_id}:{mid_norm}"
+
+
+async def _catalog_message_mark_once(
+    *,
+    tenant: int,
+    provider: str,
+    lead_id: int,
+    message_id: str,
+    ttl_seconds: int = 1800,
+) -> bool:
+    key = _catalog_message_dedup_redis_key(
+        tenant=int(tenant),
+        provider=str(provider or ""),
+        lead_id=int(lead_id),
+        message_id=str(message_id or ""),
+    )
+    try:
+        created = await _redis_queue.set(key, "1", ex=max(60, int(ttl_seconds)), nx=True)
+    except Exception:
+        logger.debug("catalog_dedup_set_failed key=%s", key, exc_info=True)
+        # Do not block catalog flow if Redis transiently fails.
+        return True
+    return bool(created)
 
 
 async def _catalog_was_recently_sent(cache_key: tuple[int, str] | None) -> bool:
@@ -239,6 +306,78 @@ def _coerce_int(value: Any) -> int | None:
         return None
 
 
+def _is_avito_system_message(
+    text: str,
+    message: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> bool:
+    for candidate in (
+        message.get("is_system"),
+        message.get("system"),
+        message.get("system_message"),
+        payload.get("is_system"),
+        payload.get("system"),
+        payload.get("system_message"),
+    ):
+        if candidate in (True, 1, "1", "true", "True", "yes", "on"):
+            return True
+    for candidate in (
+        message.get("type"),
+        message.get("kind"),
+        message.get("message_type"),
+        payload.get("type"),
+        payload.get("kind"),
+        payload.get("message_type"),
+    ):
+        raw = str(candidate or "").strip().lower()
+        if raw in {"system", "service"}:
+            return True
+    normalized = str(text or "").strip().lower()
+    return normalized.startswith("[системное сообщение]")
+
+
+def _has_contact_identifiers(
+    *,
+    phone: str | None = None,
+    whatsapp_phone: str | None = None,
+    avito_user_id: int | None = None,
+    avito_login: str | None = None,
+    telegram_user_id: int | None = None,
+    telegram_username: str | None = None,
+    max_user_id: int | None = None,
+    max_username: str | None = None,
+) -> bool:
+    if phone and str(phone).strip():
+        return True
+    if whatsapp_phone and str(whatsapp_phone).strip():
+        return True
+    if avito_user_id is not None:
+        try:
+            if int(avito_user_id) != 0:
+                return True
+        except Exception:
+            pass
+    if avito_login and str(avito_login).strip():
+        return True
+    if telegram_user_id is not None:
+        try:
+            if int(telegram_user_id) != 0:
+                return True
+        except Exception:
+            pass
+    if telegram_username and str(telegram_username).strip():
+        return True
+    if max_user_id is not None:
+        try:
+            if int(max_user_id) != 0:
+                return True
+        except Exception:
+            pass
+    if max_username and str(max_username).strip():
+        return True
+    return False
+
+
 def _ok(data: dict | None = None, status: int = 200) -> JSONResponse:
     payload = {"ok": True}
     if data:
@@ -278,7 +417,12 @@ def _resolve_catalog_attachment(
     from urllib.parse import quote
 
     url = f"{base}?path={quote(str(relative_path), safe='/')}"
-    token = getattr(C, "WA_INTERNAL_TOKEN", "") or ""
+    token = (
+        getattr(C, "WA_INTERNAL_TOKEN", "")
+        or getattr(C, "INTERNAL_SYNC_TOKEN", "")
+        or getattr(C, "WEBHOOK_SECRET", "")
+        or ""
+    )
     if token:
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}token={quote(token)}"
@@ -342,6 +486,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     tenant = tenant_candidate
 
     msg = body.get("message") or {}
+    payload = body.get("payload") if isinstance(body.get("payload"), Mapping) else {}
     manager_flag = False
     out_flag = False
     # Respect top-level manager/out flags coming from transports (e.g., tgworker).
@@ -432,6 +577,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     avito_user_id: int | None = None
     avito_login: str | None = None
     avito_chat_id: str | None = None
+    avito_system_message = False
     avito_account_id = _coerce_int(body.get("account_id") or src.get("account_id"))
     attachments: list[dict[str, Any]] = []
     lead_id_value: int | None = None
@@ -486,6 +632,9 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 attachments = forced
                 msg["attachments"] = attachments
                 body["attachments"] = attachments
+    attachments = normalize_attachments(attachments)
+    msg["attachments"] = attachments
+    body["attachments"] = attachments
     has_photo = _has_photo_attachment(attachments)
     logger.debug(
         "webhook_photo_probe provider=%s tenant=%s lead_hint=%s has_photo_initial=%s attachments_len=%s provider_raw_keys=%s",
@@ -547,10 +696,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         else:
             telegram_username = None
         raw_display_name = msg.get("display_name") or body.get("display_name")
-        if isinstance(raw_display_name, str):
-            telegram_display_name = raw_display_name.strip() or None
-        else:
-            telegram_display_name = None
+        telegram_display_name = sanitize_display_name(raw_display_name)
         contact_value = telegram_display_name or telegram_username
         if is_manager_telegram(telegram_user_id):
             manager_flag = True
@@ -603,7 +749,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             or body.get("name")
         )
         if isinstance(raw_display_name, str):
-            max_display_name = raw_display_name.strip() or None
+            max_display_name = sanitize_display_name(raw_display_name)
         else:
             max_display_name = None
         contact_value = max_display_name or max_username or (str(max_user_id) if max_user_id else None)
@@ -623,6 +769,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 except Exception:
                     peer_id = None
     elif provider == "avito":
+        avito_system_message = _is_avito_system_message(text, msg, payload)
         chat_candidate = (
             msg.get("chat_id")
             or body.get("chat_id")
@@ -650,12 +797,11 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         login_candidate = (
             author_info.get("login")
             or author_info.get("username")
-            or author_info.get("name")
             or msg.get("author_login")
             or body.get("avito_login")
         )
         if isinstance(login_candidate, str):
-            login_candidate = login_candidate.strip()
+            login_candidate = sanitize_display_name(login_candidate.strip())
         avito_login = login_candidate or None
         contact_value = avito_login or (str(avito_user_id) if avito_user_id else None)
     else:
@@ -739,8 +885,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 "telegram_username": telegram_username,
                 "peer_id": peer_id,
                 "peer": peer_value,
-                "contact": contact_value,
             }
+            if not (provider == "avito" and avito_system_message):
+                upsert_kwargs["contact"] = contact_value
+            else:
+                logger.info(
+                    "avito_system_message_skip_metadata_update tenant=%s lead_id=%s message_id=%s",
+                    tenant,
+                    lead_id,
+                    message_id or "",
+                )
             if telegram_user_id is not None:
                 upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
             if telegram_display_name and not upsert_kwargs.get("title"):
@@ -759,7 +913,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     upsert_kwargs["peer"] = avito_chat_id
                 if avito_account_id is not None:
                     upsert_kwargs["source_real_id"] = avito_account_id
-                if avito_login and not upsert_kwargs.get("title"):
+                if avito_login and not upsert_kwargs.get("title") and not avito_system_message:
                     upsert_kwargs["title"] = f"Avito · {avito_login}"
             resolved_lead = await upsert_lead(
                 lead_id,
@@ -774,7 +928,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             logger.exception("lead_upsert_err:db_error tenant=%s lead_id=%s manager_message_upsert_fail", tenant, lead_id)
 
         try:
-            contact_id = await resolve_or_create_contact(
+            if _has_contact_identifiers(
                 whatsapp_phone=whatsapp_phone or None,
                 avito_user_id=avito_user_id,
                 avito_login=avito_login,
@@ -782,7 +936,18 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 telegram_username=telegram_username,
                 max_user_id=max_user_id,
                 max_username=max_username,
-            )
+            ):
+                contact_id = await resolve_or_create_contact(
+                    whatsapp_phone=whatsapp_phone or None,
+                    avito_user_id=avito_user_id,
+                    avito_login=avito_login,
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=telegram_username,
+                    max_user_id=max_user_id,
+                    max_username=max_username,
+                )
+            else:
+                contact_id = 0
             if contact_id:
                 await link_lead_contact(
                     lead_id,
@@ -793,11 +958,23 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         except Exception:
             logger.debug("manager_contact_link_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
 
-        if text:
+        skip_amocrm_echo = False
+        if provider == "telegram" and text:
             try:
+                echo_key = "amocrm:manager:echo:%s:%s:%s" % (
+                    int(tenant),
+                    int(lead_id),
+                    content_fingerprint(text, attachments),
+                )
+                skip_amocrm_echo = bool(await _redis_queue.get(echo_key))
+            except Exception:
+                skip_amocrm_echo = False
+        if (text or attachments) and not skip_amocrm_echo:
+            try:
+                stored_text = text_or_placeholder(text, attachments)
                 await insert_message_out(
                     lead_id,
-                    text,
+                    stored_text,
                     provider_msg_id=message_id,
                     status="sent",
                     tenant_id=tenant,
@@ -810,13 +987,15 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             except Exception:
                 logger.exception("manager_message_store_failed tenant=%s lead_id=%s", tenant, lead_id)
         try:
-            await amocrm_service.amocrm_on_outbound_message(
-                int(tenant),
-                int(lead_id),
-                text=text or "",
-                channel=provider or "whatsapp",
-                attachments=attachments,
-            )
+            if not skip_amocrm_echo:
+                await amocrm_service.amocrm_on_outbound_message(
+                    int(tenant),
+                    int(lead_id),
+                    text=text or "",
+                    channel=provider or "whatsapp",
+                    attachments=attachments,
+                    source_role="manager",
+                )
         except Exception as exc:
             logger.warning(
                 "amocrm_outbound_failed tenant=%s lead_id=%s error=%s",
@@ -830,17 +1009,18 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if not text and not has_photo and provider != "telegram":
         return _ok({"skipped": True, "reason": "no_text"})
 
-    if provider == "telegram" and await _is_duplicate("telegram", tenant, message_id or None):
+    incoming_fp = content_fingerprint(text, attachments)
+    if provider == "telegram" and await _is_duplicate("telegram", tenant, message_id or None, fingerprint=incoming_fp):
         logger.info(
             "stage=incoming_duplicate ch=telegram tenant=%s message_id=%s", tenant, message_id
         )
         return _ok({"skipped": True, "reason": "duplicate"})
-    if provider == "avito" and await _is_duplicate("avito", tenant, message_id or None):
+    if provider == "avito" and await _is_duplicate("avito", tenant, message_id or None, fingerprint=incoming_fp):
         logger.info(
             "stage=incoming_duplicate ch=avito tenant=%s message_id=%s", tenant, message_id
         )
         return _ok({"skipped": True, "reason": "duplicate"})
-    if provider == "max" and await _is_duplicate("max", tenant, message_id or None):
+    if provider == "max" and await _is_duplicate("max", tenant, message_id or None, fingerprint=incoming_fp):
         logger.info(
             "stage=incoming_duplicate ch=max tenant=%s message_id=%s", tenant, message_id
         )
@@ -886,18 +1066,25 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         )
         to_addr = _digits(to_candidate)
 
-    normalized_event: Dict[str, Any] = {
-        "event": "messages.incoming",
-        "ch": channel,
-        "tenant": tenant,
-        "lead_id": lead_id,
-        "message_id": message_id or str(lead_id),
-        "from": from_addr,
-        "to": to_addr,
-        "text": text,
-        "attachments": attachments,
-        "ts": ts_ms,
-    }
+    normalized_event: Dict[str, Any] = build_envelope(
+        tenant_id=int(tenant),
+        lead_id=int(lead_id),
+        source_channel=channel,
+        dialog_channel=channel,
+        direction="incoming",
+        author_kind="lead",
+        provider_message_id=message_id or str(lead_id),
+        text=text,
+        attachments=attachments,
+        trigger_bot=not manager_flag,
+        peer=peer_value,
+        extra={
+            "event": "messages.incoming",
+            "from": from_addr,
+            "to": to_addr,
+            "ts": ts_ms,
+        },
+    )
     # Preserve manager/out flags for downstream workers.
     if manager_flag:
         normalized_event["manager"] = True
@@ -923,6 +1110,8 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     if peer_id is not None:
         normalized_event["peer_id"] = peer_id
     if provider == "telegram":
+        tg_slot = _extract_tg_slot(msg, body)
+        normalized_event["tg_slot"] = tg_slot
         if peer_value is None and telegram_user_id is not None:
             peer_value = str(telegram_user_id)
         if peer_value is not None:
@@ -1023,6 +1212,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "attachments": attachments or [],
         }
         if resolved_provider == "telegram":
+            out["tg_slot"] = _extract_tg_slot(msg, body)
             if telegram_user_id:
                 out["telegram_user_id"] = int(telegram_user_id)
             if peer_value:
@@ -1052,8 +1242,16 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             "title": telegram_display_name,
             "peer_id": peer_id,
             "peer": peer_value,
-            "contact": contact_value,
         }
+        if not (provider == "avito" and avito_system_message):
+            upsert_kwargs["contact"] = contact_value
+        else:
+            logger.info(
+                "avito_system_message_skip_metadata_update tenant=%s lead_id=%s message_id=%s",
+                tenant,
+                lead_id,
+                message_id or "",
+            )
         if telegram_user_id is not None:
             upsert_kwargs["telegram_user_id"] = int(telegram_user_id)
         if provider == "avito":
@@ -1061,7 +1259,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 upsert_kwargs["peer"] = avito_chat_id
             if avito_account_id is not None:
                 upsert_kwargs["source_real_id"] = avito_account_id
-            if avito_login and not upsert_kwargs.get("title"):
+            if avito_login and not upsert_kwargs.get("title") and not avito_system_message:
                 upsert_kwargs["title"] = f"Avito · {avito_login}"
         resolved_lead = await upsert_lead(
             lead_id,
@@ -1102,7 +1300,32 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
         )
 
     try:
-        contact_id = await resolve_or_create_contact(
+        telegram_phone: str | None = None
+        if provider == "telegram":
+            try:
+                if lead_id:
+                    phone_candidate = await _redis_queue.get(f"cache:lead_phone:{tenant}:{lead_id}")
+                    if phone_candidate:
+                        telegram_phone = (
+                            phone_candidate.decode()
+                            if isinstance(phone_candidate, (bytes, bytearray))
+                            else str(phone_candidate).strip()
+                        )
+            except Exception:
+                telegram_phone = None
+            if not telegram_phone and peer_value:
+                try:
+                    phone_candidate = await _redis_queue.get(f"cache:avito_phone:{tenant}:{peer_value}")
+                    if phone_candidate:
+                        telegram_phone = (
+                            phone_candidate.decode()
+                            if isinstance(phone_candidate, (bytes, bytearray))
+                            else str(phone_candidate).strip()
+                        )
+                except Exception:
+                    telegram_phone = None
+        if _has_contact_identifiers(
+            phone=telegram_phone or None,
             whatsapp_phone=whatsapp_phone or None,
             avito_user_id=avito_user_id,
             avito_login=avito_login,
@@ -1110,7 +1333,19 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             telegram_username=telegram_username,
             max_user_id=max_user_id,
             max_username=max_username,
-        )
+        ):
+            contact_id = await resolve_or_create_contact(
+                phone=telegram_phone or None,
+                whatsapp_phone=whatsapp_phone or None,
+                avito_user_id=avito_user_id,
+                avito_login=avito_login,
+                telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
+                max_user_id=max_user_id,
+                max_username=max_username,
+            )
+        else:
+            contact_id = 0
         if contact_id:
             await link_lead_contact(
                 lead_id,
@@ -1118,8 +1353,12 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 channel=provider,
                 peer=peer_value if provider in {"telegram", "avito", "max"} else None,
             )
-            incoming_text = text or ("[Фото]" if attachments else "")
+            incoming_text = text_or_placeholder(text, attachments)
             if incoming_text:
+                incoming_source = "incoming"
+                if provider == "telegram":
+                    slot_value = _extract_tg_slot(msg, body)
+                    incoming_source = f"incoming:tg_slot:{slot_value}"
                 message_db_id = await insert_message_in(
                     lead_id,
                     incoming_text,
@@ -1127,7 +1366,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                     tenant_id=tenant,
                     telegram_user_id=telegram_user_id,
                     attachments=attachments or None,
-                    source="incoming",
+                    source=incoming_source,
                 )
                 stored_incoming = True
                 if message_db_id:
@@ -1145,9 +1384,13 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
     except Exception:
         logger.exception("contact_upsert_err tenant=%s lead_id=%s", tenant, lead_id)
 
-    incoming_text = text or ("[Фото]" if attachments else "")
+    incoming_text = text_or_placeholder(text, attachments)
     if incoming_text and not stored_incoming:
         try:
+            incoming_source = "incoming"
+            if provider == "telegram":
+                slot_value = _extract_tg_slot(msg, body)
+                incoming_source = f"incoming:tg_slot:{slot_value}"
             message_db_id = await insert_message_in(
                 lead_id,
                 incoming_text,
@@ -1155,7 +1398,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 tenant_id=tenant,
                 telegram_user_id=telegram_user_id,
                 attachments=attachments or None,
-                source="incoming",
+                source=incoming_source,
             )
             if message_db_id:
                 normalized_event["_message_db_id"] = message_db_id
@@ -1181,35 +1424,7 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
                 )
         except Exception:
             logger.debug("handoff_flag_set_failed tenant=%s lead_id=%s", tenant, lead_id, exc_info=True)
-        try:
-            logger.info(
-                "event=handoff_enqueue_has_photo ch=%s tenant=%s lead_id=%s attachments=%s keys=%s",
-                channel,
-                tenant,
-                lead_id,
-                len(attachments),
-                list(normalized_event.keys()),
-            )
-            payload = dict(normalized_event)
-            payload["handoff"] = True
-            serialized = json.dumps(_json_safe(payload), ensure_ascii=False)
-            await _redis_queue.lpush(INCOMING_QUEUE_KEY, serialized)
-            if channel == "telegram":
-                await _redis_queue.incrby("metrics:telegram:incoming", 1)
-            elif channel == "max":
-                await _redis_queue.incrby("metrics:max:incoming", 1)
-            logger.info(
-                "stage=incoming_enqueued_photo ch=%s tenant=%s message_id=%s",
-                channel,
-                tenant,
-                payload.get("message_id") or "",
-            )
-        except Exception:
-            logger.exception(
-                "stage=incoming_enqueue_photo_failed ch=%s tenant=%s", channel, tenant
-            )
-            raise HTTPException(status_code=500, detail="queue_error")
-        return _ok({"queued": True, "leadId": lead_id, "smartReply": False, "handoff": True, "reason": "photo_received"})
+        normalized_event["handoff"] = True
 
     refer_id = contact_id or lead_id
 
@@ -1371,15 +1586,37 @@ async def process_incoming(body: dict, request: Request | None = None) -> JSONRe
             _assign_whatsapp_to_jid(catalog_out, resolved_provider, sender_jid_value)
 
         if should_send_catalog:
-            await _redis_queue.lpush(OUTBOX_QUEUE_KEY, json.dumps(catalog_out, ensure_ascii=False))
-            await _mark_catalog_sent(cache_key)
-            try:
-                core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
-            except Exception:
-                pass
-            catalog_sent_now = True
+            dedup_ok = await _catalog_message_mark_once(
+                tenant=int(tenant),
+                provider=str(resolved_provider or ""),
+                lead_id=int(lead_id),
+                message_id=str(message_id or lead_id),
+            )
+            if dedup_ok:
+                # Catalog is a direct user request in most cases; push with high priority
+                # to avoid waiting behind delayed split messages in outbox.
+                serialized_catalog_out = json.dumps(catalog_out, ensure_ascii=False)
+                queue_push_high = getattr(_redis_queue, "rpush", None)
+                if callable(queue_push_high):
+                    await queue_push_high(OUTBOX_QUEUE_KEY, serialized_catalog_out)
+                else:
+                    await _redis_queue.lpush(OUTBOX_QUEUE_KEY, serialized_catalog_out)
+                await _mark_catalog_sent(cache_key)
+                try:
+                    core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
+                except Exception:
+                    pass
+                catalog_sent_now = True
+            else:
+                logger.info(
+                    "catalog_flow_dedup_skip tenant=%s provider=%s lead_id=%s message_id=%s",
+                    tenant,
+                    resolved_provider,
+                    lead_id,
+                    message_id or lead_id,
+                )
 
-    if catalog_sent_now and not text:
+    if catalog_sent_now and (forced_catalog or not text):
         await _enqueue_incoming_event()
         return _ok({"queued": True, "leadId": lead_id})
 
@@ -1932,6 +2169,7 @@ async def telegram_webhook(request: Request):
         tenant = int(tenant_raw) if tenant_raw is not None else 0
     except Exception:
         tenant = 0
+    tenant, tg_slot = _decode_tg_slot_tenant(tenant)
     if tenant <= 0:
         raise HTTPException(status_code=400, detail="invalid_tenant")
     raw_peer_value = (
@@ -1946,6 +2184,7 @@ async def telegram_webhook(request: Request):
         peer_value = None
     raw_msg = payload.get("message")
     message: dict[str, Any] = dict(raw_msg) if isinstance(raw_msg, Mapping) else {}
+    message.setdefault("tg_slot", tg_slot)
     # ensure text and common fields are present even if tgworker put them on the root level
     message.setdefault("text", (payload.get("text") or "").strip())
     if "telegram_user_id" not in message:
@@ -1956,54 +2195,47 @@ async def telegram_webhook(request: Request):
         message["media"] = payload.get("media")
     if "attachments" not in message and isinstance(payload.get("attachments"), list):
         message["attachments"] = payload.get("attachments")
-    # Enrich attachments from provider_raw.media (e.g., MessageMediaPhoto) so worker sees photos.
     try:
         provider_raw = payload.get("provider_raw") if isinstance(payload.get("provider_raw"), dict) else {}
-        media_obj = message.get("media") if isinstance(message.get("media"), dict) else provider_raw.get("media") if isinstance(provider_raw, dict) else None
-        attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
-        if media_obj and isinstance(media_obj, Mapping):
-            media_type = str(media_obj.get("_") or media_obj.get("type") or "").strip()
-            attachment: dict[str, Any] = {"type": media_type or "photo"}
+        raw_attachments: list[dict[str, Any]] = []
+        attachments_payload = message.get("attachments")
+        if isinstance(attachments_payload, list):
+            raw_attachments.extend(dict(item) for item in attachments_payload if isinstance(item, Mapping))
+        message_id_value = (
+            message.get("message_id")
+            or message.get("id")
+            or payload.get("message_id")
+            or payload.get("id")
+        )
+        media_candidates: list[Mapping[str, Any]] = []
+        for candidate in (
+            message.get("media"),
+            message.get("photo"),
+            provider_raw.get("media") if isinstance(provider_raw, Mapping) else None,
+            provider_raw.get("photo") if isinstance(provider_raw, Mapping) else None,
+        ):
+            if isinstance(candidate, Mapping):
+                media_candidates.append(candidate)
+            elif isinstance(candidate, list):
+                media_candidates.extend(item for item in candidate if isinstance(item, Mapping))
+        for media_obj in media_candidates:
+            media_type = str(media_obj.get("_") or media_obj.get("type") or "").strip() or "photo"
+            attachment: dict[str, Any] = {"type": media_type}
             photo_obj = media_obj.get("photo") if isinstance(media_obj.get("photo"), Mapping) else None
-            photo_id = photo_obj.get("id") if isinstance(photo_obj, Mapping) else None
-            if photo_id:
+            photo_id = media_obj.get("id") or (photo_obj.get("id") if isinstance(photo_obj, Mapping) else None)
+            if photo_id and peer_value and message_id_value:
+                attachment["url"] = f"telegram://{tenant}/{peer_value}/{message_id_value}"
                 attachment["photo_id"] = photo_id
-                message_id_value = (
-                    message.get("message_id")
-                    or message.get("id")
-                    or payload.get("message_id")
-                    or payload.get("id")
-                )
-                if peer_value and message_id_value:
-                    attachment["peer_id"] = peer_value
-                    attachment["message_id"] = message_id_value
-                    attachment["url"] = f"telegram://{tenant}/{peer_value}/{message_id_value}"
-            if attachment not in attachments:
-                attachments = list(attachments)
-                attachments.append(attachment)
-                message["attachments"] = attachments
-                payload["attachments"] = attachments
-        elif isinstance(message.get("attachments"), list):
-            message_id_value = (
-                message.get("message_id")
-                or message.get("id")
-                or payload.get("message_id")
-                or payload.get("id")
-            )
-            if peer_value and message_id_value:
-                updated = []
-                for att in attachments:
-                    if not isinstance(att, Mapping):
-                        continue
-                    entry = dict(att)
-                    if entry.get("photo_id") and not entry.get("url"):
-                        entry["peer_id"] = peer_value
-                        entry["message_id"] = message_id_value
-                        entry["url"] = f"telegram://{tenant}/{peer_value}/{message_id_value}"
-                    updated.append(entry)
-                attachments = updated
-                message["attachments"] = attachments
-            payload["attachments"] = attachments
+                attachment["peer_id"] = peer_value
+                attachment["message_id"] = message_id_value
+            raw_attachments.append(attachment)
+        normalized_attachments = normalize_attachments(raw_attachments)
+        message["attachments"] = normalized_attachments
+        payload["attachments"] = normalized_attachments
+        message["message_kind"] = detect_message_kind(
+            message.get("text") or payload.get("text") or "",
+            normalized_attachments,
+        )
     except Exception:
         logger.exception("telegram_webhook_attach_enrich_failed tenant=%s", tenant)
     # preserve raw transport payload to inspect media (e.g., MessageMediaPhoto) and flags
@@ -2291,10 +2523,17 @@ async def webhook_provider_compat(request: Request) -> JSONResponse:
 __all__ = ["router", "process_incoming", "provider_webhook"]
 
 
-async def _is_duplicate(provider: str, tenant: int, message_id: str | None) -> bool:
-    if not message_id:
+async def _is_duplicate(
+    provider: str,
+    tenant: int,
+    message_id: str | None,
+    *,
+    fingerprint: str | None = None,
+) -> bool:
+    key_suffix = str(message_id or "").strip() or str(fingerprint or "").strip()
+    if not key_suffix:
         return False
-    key = f"incoming:{provider}:{tenant}:{message_id}"
+    key = f"incoming:{provider}:{tenant}:{key_suffix}"
     try:
         created = await _redis_queue.setnx(key, int(time.time()))
         if not created:

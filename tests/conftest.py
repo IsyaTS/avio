@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import asyncio
+import inspect
 from pathlib import Path
 try:  # Ensure trio exposes MultiError for anyio's legacy expectations
     import trio  # type: ignore
@@ -44,3 +46,20 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("PUBLIC_KEY", "test-public-key")
 os.environ.setdefault("TESTING", "1")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "asyncio: run coroutine test via asyncio event loop")
+
+
+def pytest_pyfunc_call(pyfuncitem):
+    if "asyncio" not in pyfuncitem.keywords:
+        return None
+    if pyfuncitem.config.pluginmanager.hasplugin("asyncio"):
+        return None
+    test_fn = pyfuncitem.obj
+    if not inspect.iscoroutinefunction(test_fn):
+        return None
+    kwargs = {name: pyfuncitem.funcargs[name] for name in pyfuncitem._fixtureinfo.argnames}
+    asyncio.run(test_fn(**kwargs))
+    return True

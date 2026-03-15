@@ -30,7 +30,7 @@ services:
     environment:
       TENANTS_DIR: /data/tenants
       TG_SESSIONS_DIR: /app/tg-sessions
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/postgres}
       WORKER_BASE_URL: http://tgworker:8000
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       WAWEB_BASE_URL: http://waweb:9001
@@ -71,7 +71,7 @@ services:
       WORKER_BASE_URL: http://tgworker:8000
       TG_SESSIONS_DIR: /app/tg-sessions
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/postgres}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: 1
       OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-*}
@@ -199,6 +199,5 @@ services:
 
 volumes:
   pg-data:
-  redis-data:
   caddy-data:
   caddy-config:

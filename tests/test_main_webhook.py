@@ -327,7 +327,8 @@ def test_webhook_returns_pdf_attachment(monkeypatch, tmp_path):
     attachments = queued.get("attachments") or []
     assert not attachments, "catalog responses now use a public link instead of inline pdf"
     catalog_text = queued.get("text", "")
-    assert catalog_text.startswith("Каталог: http://")
+    assert catalog_text.startswith("Каталог: ")
+    assert "/pub/catalog/file/" in catalog_text
 
 
 def test_webhook_does_not_send_catalog_on_avito(monkeypatch, tmp_path):
@@ -468,6 +469,14 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "build_llm_messages", stub_build_llm_messages)
     monkeypatch.setattr(main, "ask_llm", stub_ask_llm)
     monkeypatch.setattr(main.settings, "WEBHOOK_SECRET", "", raising=False)
+    monkeypatch.setattr(main, "upsert_lead", lambda *args, **kwargs: asyncio.sleep(0, result=lead_id))
+    monkeypatch.setattr(main, "resolve_or_create_contact", lambda **kwargs: asyncio.sleep(0, result=0))
+    monkeypatch.setattr(main, "link_lead_contact", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(main, "insert_message_in", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(main._webhooks_mod, "upsert_lead", lambda *args, **kwargs: asyncio.sleep(0, result=lead_id), raising=False)
+    monkeypatch.setattr(main._webhooks_mod, "resolve_or_create_contact", lambda **kwargs: asyncio.sleep(0, result=0), raising=False)
+    monkeypatch.setattr(main._webhooks_mod, "link_lead_contact", lambda *args, **kwargs: asyncio.sleep(0), raising=False)
+    monkeypatch.setattr(main._webhooks_mod, "insert_message_in", lambda *args, **kwargs: asyncio.sleep(0), raising=False)
 
     payload = {
         "source": {"type": "whatsapp", "tenant": tenant},
@@ -481,7 +490,8 @@ def test_webhook_skips_pdf_after_first_send(monkeypatch, tmp_path):
     outgoing_first = [entry for entry in queue.pushed if entry[0] == "outbox:send"]
     assert len(outgoing_first) == 1
     first_payload = outgoing_first[0][1]
-    assert first_payload["text"].startswith("Каталог: http://")
+    assert first_payload["text"].startswith("Каталог: ")
+    assert "/pub/catalog/file/" in first_payload["text"]
     assert not (first_payload.get("attachments") or [])
     assert calls == {"build": 0, "ask": 0}
 

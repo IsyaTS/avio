@@ -20,6 +20,7 @@ export type ClientUrls = Record<string, string | undefined> & {
 };
 
 export type BootstrapBehavior = {
+  brain_mode?: 'smart' | 'classic' | 'prod' | 'legacy';
   auto_reply?: boolean;
   auto_reply_text?: string;
   avito_phone_tg_template?: string;

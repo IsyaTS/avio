@@ -165,6 +165,13 @@ const SettingsTab: React.FC = () => {
   const [sendCatalogTg, setSendCatalogTg] = useState(
     Boolean(behaviorDefaults.send_catalog_on_first_message)
   );
+  const [brainMode, setBrainMode] = useState<'smart' | 'classic'>(
+    String(behaviorDefaults.brain_mode || '').toLowerCase() === 'classic' ||
+      String(behaviorDefaults.brain_mode || '').toLowerCase() === 'prod' ||
+      String(behaviorDefaults.brain_mode || '').toLowerCase() === 'legacy'
+      ? 'classic'
+      : 'smart'
+  );
   const [autoPhotoEnabled, setAutoPhotoEnabled] = useState(
     Boolean(behaviorDefaults.auto_photo_enabled)
   );
@@ -353,6 +360,10 @@ const SettingsTab: React.FC = () => {
         setMaxReplyEnabled(draft.maxReplyEnabled);
       }
       if (typeof draft.sendCatalogTg === 'boolean') setSendCatalogTg(draft.sendCatalogTg);
+      if (typeof draft.brainMode === 'string') {
+        const mode = String(draft.brainMode).toLowerCase();
+        setBrainMode(mode === 'classic' || mode === 'prod' || mode === 'legacy' ? 'classic' : 'smart');
+      }
       if (typeof draft.autoPhotoEnabled === 'boolean') setAutoPhotoEnabled(draft.autoPhotoEnabled);
       if (typeof draft.autoPhotoMax === 'string') setAutoPhotoMax(draft.autoPhotoMax);
       if (typeof draft.photoMarkers === 'string') setPhotoMarkers(draft.photoMarkers);
@@ -387,6 +398,7 @@ const SettingsTab: React.FC = () => {
       telegramReplyEnabled,
       maxReplyEnabled,
       sendCatalogTg,
+      brainMode,
       autoPhotoEnabled,
       autoPhotoMax,
       photoMarkers,
@@ -415,6 +427,7 @@ const SettingsTab: React.FC = () => {
     telegramReplyEnabled,
     maxReplyEnabled,
     sendCatalogTg,
+    brainMode,
     autoPhotoEnabled,
     autoPhotoMax,
     photoMarkers,
@@ -569,6 +582,7 @@ const SettingsTab: React.FC = () => {
       telegram_reply_enabled: telegramReplyEnabled,
       max_reply_enabled: maxReplyEnabled,
       send_catalog_on_first_message: sendCatalogTg,
+      brain_mode: brainMode,
       auto_photo_enabled: autoPhotoEnabled,
       auto_photo_max: autoPhotoMax ? Number(autoPhotoMax) : 0,
       triggers,
@@ -955,6 +969,20 @@ const SettingsTab: React.FC = () => {
               Отправлять PDF-каталог первым сообщением (Telegram)
               <Hint text="Если включено, бот отправит PDF сразу после первого сообщения клиента." />
             </span>
+          </label>
+          <label className="space-y-2">
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+              Тип мозгов
+              <Hint text="Smart — новый режим ответов. Classic — поведение как на проде." />
+            </span>
+            <select
+              className="input"
+              value={brainMode}
+              onChange={(e) => setBrainMode((e.target.value === 'classic' ? 'classic' : 'smart'))}
+            >
+              <option value="smart">Smart</option>
+              <option value="classic">Classic</option>
+            </select>
           </label>
           <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3">
             <input type="checkbox" checked={autoPhotoEnabled} onChange={(e) => setAutoPhotoEnabled(e.target.checked)} />

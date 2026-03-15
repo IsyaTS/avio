@@ -164,6 +164,8 @@ def _resolve_catalog_attachment(
             or getattr(settings, "WA_INTERNAL_TOKEN", "")
             or getattr(core, "INTERNAL_SYNC_TOKEN", "")
             or getattr(settings, "INTERNAL_SYNC_TOKEN", "")
+            or getattr(core, "WEBHOOK_SECRET", "")
+            or getattr(settings, "WEBHOOK_SECRET", "")
             or ""
         )
     if token:

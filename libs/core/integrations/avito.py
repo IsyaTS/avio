@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from typing import Any, Mapping, Optional, Tuple, Sequence
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -113,6 +113,8 @@ def _coerce_int(value: Any) -> Optional[int]:
 _ACCOUNT_TENANT_CACHE: dict[int, int] = {}
 _CHAT_ACCOUNT_CACHE: dict[str, tuple[float, int, int]] = {}
 _CHAT_ACCOUNT_TTL_SECONDS = 300
+_CHAT_PROFILE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CHAT_PROFILE_TTL_SECONDS = 3600
 
 
 def _cache_account_mapping(tenant: int, account_id: Any) -> None:
@@ -193,6 +195,152 @@ def stable_lead_id(account_id: Any, chat_id: Any) -> int:
     digest = hashlib.sha1(base.encode("utf-8")).hexdigest()
     # Use upper 60 bits to stay within signed BIGINT range
     return int(digest[:15], 16) or int(digest[15:30], 16) or 1
+
+
+def _coerce_chat_profile_avatar(user: Mapping[str, Any]) -> str:
+    profile = user.get("public_user_profile")
+    if not isinstance(profile, Mapping):
+        return ""
+    avatar = profile.get("avatar")
+    if not isinstance(avatar, Mapping):
+        return ""
+    images = avatar.get("images")
+    if isinstance(images, Mapping):
+        for key in ("128x128", "96x96", "96x64", "72x72", "64x64", "48x48", "36x36", "24x24"):
+            value = images.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for value in images.values():
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    value = avatar.get("default")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ""
+
+
+def _extract_chat_participant_profile(
+    payload: Mapping[str, Any],
+    *,
+    author_id: int | None,
+    account_id: int | None,
+) -> dict[str, Any]:
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return {}
+
+    def user_id_value(user: Mapping[str, Any]) -> int | None:
+        return _coerce_int(
+            user.get("id")
+            or user.get("user_id")
+            or (user.get("public_user_profile") or {}).get("user_id")
+        )
+
+    def choose_user() -> Mapping[str, Any] | None:
+        if author_id is not None:
+            for user in users:
+                if isinstance(user, Mapping) and user_id_value(user) == author_id:
+                    return user
+        for user in users:
+            if not isinstance(user, Mapping):
+                continue
+            uid = user_id_value(user)
+            if account_id is not None and uid == account_id:
+                continue
+            return user
+        return None
+
+    user = choose_user()
+    if not isinstance(user, Mapping):
+        return {}
+    profile = user.get("public_user_profile")
+    if not isinstance(profile, Mapping):
+        profile = {}
+    name = str(user.get("name") or user.get("username") or user.get("login") or "").strip()
+    avatar = _coerce_chat_profile_avatar(user)
+    profile_url = str(profile.get("url") or "").strip()
+    return {
+        "user_id": user_id_value(user),
+        "name": name,
+        "avatar": avatar,
+        "profile_url": profile_url,
+    }
+
+
+async def resolve_chat_participant_profile(
+    tenant: int,
+    *,
+    account_id: int | None,
+    chat_id: str,
+    author_id: int | None = None,
+) -> dict[str, Any]:
+    chat_text = str(chat_id or "").strip()
+    if not chat_text:
+        return {}
+    account_val = _coerce_int(account_id)
+    cache_key = f"{int(tenant)}:{account_val or 0}:{chat_text}:{author_id or 0}"
+    now = time.time()
+    cached = _CHAT_PROFILE_CACHE.get(cache_key)
+    if cached and now - cached[0] <= _CHAT_PROFILE_TTL_SECONDS:
+        return dict(cached[1])
+
+    try:
+        token, integration = await ensure_access_token(int(tenant))
+    except Exception:
+        logger.exception("avito_chat_profile_token_failed tenant=%s", tenant)
+        return {}
+
+    if account_val is None:
+        account_val = _coerce_int(integration.get("account_id"))
+    if account_val is None:
+        return {}
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=OAUTH_TIMEOUT) as client:
+        direct_url = f"https://api.avito.ru/messenger/v2/accounts/{account_val}/chats/{quote(chat_text, safe='')}"
+        try:
+            response = await client.get(direct_url, headers=headers)
+        except httpx.HTTPError:
+            response = None
+        if response is not None and response.status_code == 200:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            info = _extract_chat_participant_profile(payload, author_id=author_id, account_id=account_val)
+            if info:
+                _CHAT_PROFILE_CACHE[cache_key] = (now, dict(info))
+                return dict(info)
+
+        for offset in (0, 100, 200, 300, 400):
+            list_url = f"https://api.avito.ru/messenger/v2/accounts/{account_val}/chats?limit=100&offset={offset}"
+            try:
+                response = await client.get(list_url, headers=headers)
+            except httpx.HTTPError:
+                continue
+            if response.status_code != 200:
+                continue
+            try:
+                payload = response.json()
+            except Exception:
+                continue
+            chats = payload.get("chats")
+            if not isinstance(chats, list):
+                continue
+            found = False
+            for item in chats:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("id") or "").strip() != chat_text:
+                    continue
+                found = True
+                info = _extract_chat_participant_profile(item, author_id=author_id, account_id=account_val)
+                if info:
+                    _CHAT_PROFILE_CACHE[cache_key] = (now, dict(info))
+                    return dict(info)
+            if len(chats) < 100 and not found:
+                break
+    return {}
 
 
 async def _chat_exists(token: str, account_id: int, chat_id: str) -> bool:
@@ -629,3 +777,89 @@ async def delete_webhook(tenant: int, url: str) -> bool:
         response.text,
     )
     return False
+
+
+async def get_voice_files(
+    tenant: int,
+    voice_ids: Sequence[str],
+    *,
+    account_id: int | None = None,
+) -> dict[str, str]:
+    """Resolve temporary download URLs for Avito voice messages."""
+
+    ids = [str(item or "").strip() for item in voice_ids if str(item or "").strip()]
+    if not ids:
+        return {}
+
+    token, integration = await ensure_access_token(int(tenant))
+    account_val = _coerce_int(account_id if account_id is not None else integration.get("account_id"))
+    if account_val is None:
+        raise AvitoOAuthError("Avito account id is missing for getVoiceFiles")
+
+    async def _request(current_token: str) -> httpx.Response:
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Accept": "application/json",
+        }
+        params = [("voice_ids", item) for item in ids]
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_val}/getVoiceFiles"
+        async with httpx.AsyncClient(timeout=OAUTH_TIMEOUT) as client:
+            return await client.get(url, headers=headers, params=params)
+
+    response = await _request(token)
+    if response.status_code == 401 and integration.get("refresh_token"):
+        refreshed = await _refresh_access_token(int(tenant), integration)
+        refreshed_token = str(refreshed.get("access_token") or "").strip()
+        if refreshed_token:
+            response = await _request(refreshed_token)
+
+    if response.status_code >= 400:
+        logger.info(
+            "avito_get_voice_files_failed tenant=%s account_id=%s status=%s body=%s",
+            tenant,
+            account_val,
+            response.status_code,
+            response.text,
+        )
+        return {}
+
+    try:
+        payload = response.json()
+    except Exception:
+        return {}
+
+    raw_urls = payload.get("voices_urls") if isinstance(payload, Mapping) else None
+    if not isinstance(raw_urls, Mapping):
+        return {}
+
+    result: dict[str, str] = {}
+    for key, value in raw_urls.items():
+        voice_key = str(key or "").strip()
+        voice_url = str(value or "").strip()
+        if voice_key and voice_url:
+            result[voice_key] = voice_url
+    return result
+
+
+async def resolve_voice_url(
+    tenant: int,
+    voice_id: str,
+    *,
+    account_id: int | None = None,
+) -> str:
+    """Return a single temporary URL for Avito voice_id."""
+
+    voice_key = str(voice_id or "").strip()
+    if not voice_key:
+        return ""
+    mapping = await get_voice_files(int(tenant), [voice_key], account_id=account_id)
+    if not mapping:
+        return ""
+    direct = str(mapping.get(voice_key) or "").strip()
+    if direct:
+        return direct
+    for candidate in mapping.values():
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""

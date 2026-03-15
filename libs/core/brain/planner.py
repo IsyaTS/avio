@@ -85,19 +85,24 @@ async def generate_sales_reply(
     plan = _parse_plan_response(_get_message_content(plan_response))
 
     final_prompt = _build_reply_prompt(messages, plan)
-    final_response = await _call_chat_completion_safe(
-        openai_module,
-        model,
-        final_prompt,
-        timeout,
-        temperature=0.7,
-        max_tokens=260,
-        top_p=0.9,
-        frequency_penalty=0.2,
-        presence_penalty=0.05,
-    )
+    variants: List[str] = []
+    for _ in range(1):
+        final_response = await _call_chat_completion_safe(
+            openai_module,
+            model,
+            final_prompt,
+            timeout,
+            temperature=1.0,
+            max_tokens=100,
+            top_p=0.9,
+            frequency_penalty=0.2,
+            presence_penalty=0.05,
+        )
+        variant = (_get_message_content(final_response) or "").strip()
+        if variant:
+            variants.append(variant)
 
-    reply = (_get_message_content(final_response) or "").strip()
+    reply = _merge_variants(variants).strip()
     if not reply:
         raise PlannerError("empty reply")
 
@@ -115,20 +120,23 @@ async def _call_chat_completion(
     top_p: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
+    n: Optional[int] = None,
 ) -> Any:
     """Invoke the OpenAI chat completion API in a thread executor."""
 
-    return await asyncio.to_thread(
-        openai_module.chat.completions.create,
-        model=model,
-        messages=list(messages),
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-        top_p=top_p if top_p is not None else 1.0,
-        frequency_penalty=frequency_penalty if frequency_penalty is not None else 0.0,
-        presence_penalty=presence_penalty if presence_penalty is not None else 0.0,
-    )
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": list(messages),
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "timeout": timeout,
+        "top_p": top_p if top_p is not None else 1.0,
+        "frequency_penalty": frequency_penalty if frequency_penalty is not None else 0.0,
+        "presence_penalty": presence_penalty if presence_penalty is not None else 0.0,
+    }
+    if n is not None and n > 1:
+        kwargs["n"] = int(n)
+    return await asyncio.to_thread(openai_module.chat.completions.create, **kwargs)
 
 
 async def _call_chat_completion_safe(
@@ -142,6 +150,7 @@ async def _call_chat_completion_safe(
     top_p: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
     presence_penalty: Optional[float] = None,
+    n: Optional[int] = None,
 ) -> Any:
     """
     Invoke `_call_chat_completion`, gracefully handling test doubles that do not accept
@@ -159,6 +168,7 @@ async def _call_chat_completion_safe(
             top_p=top_p,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
+            n=n,
         )
     except TypeError as exc:
         # Test stubs may not accept OpenAI-specific kwargs; retry with the minimal subset.
@@ -274,6 +284,30 @@ def _get_message_content(response: Any) -> str:
             return response["choices"][0]["message"]["content"]  # type: ignore[index]
         except Exception:
             return ""
+
+
+def _get_message_variants(response: Any) -> List[str]:
+    variants: List[str] = []
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list):
+        return variants
+    for choice in choices:
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        text = str(content or "").strip()
+        if text:
+            variants.append(text)
+    return variants
+
+
+def _merge_variants(variants: List[str]) -> str:
+    cleaned = [item.strip() for item in variants if item and item.strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    lines = [f"Вариант {idx}: {text}" for idx, text in enumerate(cleaned, start=1)]
+    return "\n\n".join(lines)
 
 
 # Late import to avoid circular dependency

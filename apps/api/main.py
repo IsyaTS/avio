@@ -55,9 +55,17 @@ def _load_web_module_from_source(module_name: str, full_name: str) -> ModuleType
     module_path = pathlib.Path(__file__).resolve().parent / "web" / f"{module_name}.py"
     loader = importlib.machinery.SourceFileLoader(full_name, str(module_path))
     spec = importlib.util.spec_from_loader(full_name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    sys.modules[full_name] = module
+    existing = sys.modules.get(full_name)
+    if existing is not None:
+        module = existing
+        module.__loader__ = loader
+        module.__spec__ = spec
+        module.__file__ = str(module_path)
+        loader.exec_module(module)
+    else:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[full_name] = module
+        loader.exec_module(module)
     parent_pkg = sys.modules.get("apps.api.web")
     if parent_pkg is not None:
         setattr(parent_pkg, module_name, module)
@@ -396,7 +404,7 @@ def _transport_client(channel: str, provider: str | None = None) -> httpx.AsyncC
     wa_header_value = admin_token or ""
     if client is None or client.is_closed:
         headers: dict[str, str] = {}
-        timeout = httpx.Timeout(12.0)
+        timeout = httpx.Timeout(20.0)
         if key == "telegram" and admin_token:
             headers["X-Admin-Token"] = admin_token
         if key == "whatsapp":
@@ -840,6 +848,10 @@ async def send_transport_message(request: Request, message: TransportMessage) ->
             "json": payload,
             "timeout": httpx.Timeout(12.0),
         }
+        if channel == "telegram":
+            attachments_payload = payload.get("attachments")
+            has_attachments = isinstance(attachments_payload, list) and len(attachments_payload) > 0
+            request_kwargs["timeout"] = httpx.Timeout(90.0 if has_attachments else 25.0)
         if channel == "whatsapp":
             timeout_value = 300.0 if (wa_provider or "waweb") != "baileys" else 60.0
             request_kwargs["timeout"] = httpx.Timeout(timeout_value)

@@ -72,7 +72,10 @@ def test_resolve_catalog_attachment_uses_request_url(sandbox):
     attachment, caption = main._resolve_catalog_attachment(cfg, tenant, request)
 
     assert attachment is not None
-    assert attachment["url"] == "http://testserver/internal/tenant/2/catalog-file?path=uploads/catalog.pdf"
+    assert attachment["url"].startswith(
+        "http://testserver/internal/tenant/2/catalog-file?path=uploads/catalog.pdf"
+    )
+    assert "&token=" in attachment["url"]
     assert caption.startswith("Каталог в PDF")
 
 
@@ -159,6 +162,12 @@ def test_internal_catalog_file_requires_authorized_header(sandbox):
     client = TestClient(main.app)
     url = f"/internal/tenant/{tenant}/catalog-file"
     params = {"path": "uploads/catalog.pdf"}
+    internal_token = (
+        getattr(main.C, "WA_INTERNAL_TOKEN", "")
+        or getattr(main.C, "INTERNAL_SYNC_TOKEN", "")
+        or getattr(main.C, "WEBHOOK_SECRET", "")
+        or ""
+    )
 
     assert client.head(url, params=params).status_code == 403
 
@@ -174,18 +183,12 @@ def test_internal_catalog_file_requires_authorized_header(sandbox):
         client.head(url, params=params, headers={"Authorization": "Bearer test-admin-token"}).status_code
         == 200
     )
-    assert (
-        client.head(url, params=params, headers={"X-Auth-Token": "test-wa-token"}).status_code
-        == 200
-    )
-    assert (
-        client.head(url, params=params, headers={"X-Internal-Token": "test-wa-token"}).status_code
-        == 200
-    )
+    assert client.head(url, params=params, headers={"X-Auth-Token": internal_token}).status_code == 200
+    assert client.head(url, params=params, headers={"X-Internal-Token": internal_token}).status_code == 200
     assert (
         client.head(
             url,
-            params={"path": "uploads/catalog.pdf", "token": "test-wa-token"},
+            params={"path": "uploads/catalog.pdf", "token": internal_token},
         ).status_code
         == 200
     )

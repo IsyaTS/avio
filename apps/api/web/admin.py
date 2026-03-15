@@ -70,8 +70,10 @@ def login(request: Request, token: str | None = None):
                 status_code = 429
             elif token == admin_token:
                 resp = RedirectResponse(url="/admin", status_code=303)
-                # In dev (http) secure cookies are not stored, so only mark secure when using https.
-                secure_flag = request.url.scheme == "https"
+                secure_flag = True
+                allow_insecure = (os.getenv("ADMIN_COOKIE_ALLOW_INSECURE") or "").strip().lower()
+                if allow_insecure in {"1", "true", "yes", "on"} and request.url.scheme != "https":
+                    secure_flag = False
                 resp.set_cookie(
                     ADMIN_COOKIE,
                     admin_token,

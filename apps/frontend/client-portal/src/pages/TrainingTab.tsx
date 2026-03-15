@@ -29,7 +29,9 @@ type DialogMessage = {
     photo_id?: string;
   }>;
   source?: string;
+  tg_slot?: number | null;
 };
+type TelegramAccount = { slot: number; label: string; username?: string | null; phone?: string | null };
 
 type SilenceInfo = {
   active: boolean;
@@ -62,6 +64,13 @@ type TestMessage = {
   text: string;
 };
 
+type TestReplyPart = {
+  text: string;
+  at_ms?: number;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, Math.max(0, ms)));
+
 const TrainingTab: React.FC = () => {
   const { api, bootstrap } = useClient();
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -71,6 +80,9 @@ const TrainingTab: React.FC = () => {
   const [dialogs, setDialogs] = useState<DialogItem[]>([]);
   const [activeDialog, setActiveDialog] = useState<DialogItem | null>(null);
   const [messages, setMessages] = useState<DialogMessage[]>([]);
+  const [allMessages, setAllMessages] = useState<DialogMessage[]>([]);
+  const [telegramAccounts, setTelegramAccounts] = useState<TelegramAccount[]>([]);
+  const [selectedTelegramSlot, setSelectedTelegramSlot] = useState<number | null>(null);
   const [silenceInfo, setSilenceInfo] = useState<SilenceInfo | null>(null);
   const [loadingDialogs, setLoadingDialogs] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -81,6 +93,7 @@ const TrainingTab: React.FC = () => {
   const [testMessages, setTestMessages] = useState<TestMessage[]>([]);
   const [testInput, setTestInput] = useState('');
   const [testChannel, setTestChannel] = useState('telegram');
+  const [testDelayEnabled, setTestDelayEnabled] = useState(true);
   const [testLoading, setTestLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
@@ -349,8 +362,28 @@ const TrainingTab: React.FC = () => {
         limit: 50,
         _: Date.now(),
       });
-      const data = await requestJson<{ messages: DialogMessage[]; silence?: SilenceInfo }>(url);
-      setMessages(data.messages || []);
+      const data = await requestJson<{
+        messages: DialogMessage[];
+        silence?: SilenceInfo;
+        telegram_accounts?: TelegramAccount[];
+        selected_tg_slot?: number | null;
+      }>(url);
+      const incomingMessages = data.messages || [];
+      setAllMessages(incomingMessages);
+      setMessages(incomingMessages);
+      const accounts = Array.isArray(data.telegram_accounts) ? data.telegram_accounts : [];
+      setTelegramAccounts(accounts);
+      const preferredSlot = typeof data.selected_tg_slot === 'number' ? data.selected_tg_slot : null;
+      setSelectedTelegramSlot((prev) => {
+        const available = new Set(accounts.map((account) => account.slot));
+        if (prev && available.has(prev)) {
+          return prev;
+        }
+        if (preferredSlot && available.has(preferredSlot)) {
+          return preferredSlot;
+        }
+        return accounts.length > 0 ? accounts[0].slot : null;
+      });
       setSilenceInfo(data.silence || null);
     } catch (error) {
       toast.error('Не удалось загрузить сообщения');
@@ -358,6 +391,23 @@ const TrainingTab: React.FC = () => {
       setLoadingMessages(false);
     }
   };
+
+  useEffect(() => {
+    if (!activeDialog || activeDialog.channel !== 'telegram') {
+      setMessages(allMessages);
+      return;
+    }
+    if (!selectedTelegramSlot) {
+      setMessages(allMessages);
+      return;
+    }
+    setMessages(
+      allMessages.filter((msg) => {
+        if (typeof msg.tg_slot !== 'number') return true;
+        return msg.tg_slot === selectedTelegramSlot;
+      })
+    );
+  }, [allMessages, selectedTelegramSlot, activeDialog]);
 
   const handleUnsilence = async () => {
     if (!activeDialog) return;
@@ -398,6 +448,10 @@ const TrainingTab: React.FC = () => {
   useEffect(() => {
     setSelectedPhoto('');
     setSilenceInfo(null);
+    if (!activeDialog || activeDialog.channel !== 'telegram') {
+      setTelegramAccounts([]);
+      setSelectedTelegramSlot(null);
+    }
   }, [activeDialog?.id]);
 
   useEffect(() => {
@@ -458,6 +512,7 @@ const TrainingTab: React.FC = () => {
       await postJson(buildUrl(dialogsSendUrl.replace('{lead_id}', String(activeDialog.id)), api), {
         text: trimmed,
         photo_id: selectedPhoto || undefined,
+        tg_slot: activeDialog.channel === 'telegram' ? selectedTelegramSlot || undefined : undefined,
       });
       fetchMessages(activeDialog).catch(() => undefined);
     } catch (error) {
@@ -527,12 +582,28 @@ const TrainingTab: React.FC = () => {
         text,
         channel: testChannel,
         history,
+        delay_enabled: testDelayEnabled,
+        force_delay: testDelayEnabled,
+        emulate_channels: true,
       });
-      const replyText = String(data?.reply || '').trim();
-      setTestMessages((prev) => [
-        ...prev,
-        { role: 'assistant', text: replyText || 'Ответ не получен' },
-      ]);
+      const rawParts: TestReplyPart[] = Array.isArray(data?.replies) ? data.replies : [];
+      if (rawParts.length > 0) {
+        let prevAt = 0;
+        for (const item of rawParts) {
+          const textPart = String(item?.text || '').trim();
+          if (!textPart) continue;
+          const atMs = Math.max(0, Number(item?.at_ms || 0));
+          const waitMs = Math.max(0, atMs - prevAt);
+          prevAt = atMs;
+          if (waitMs > 0) {
+            await sleep(waitMs);
+          }
+          setTestMessages((prev) => [...prev, { role: 'assistant', text: textPart }]);
+        }
+      } else {
+        const replyText = String(data?.reply || '').trim();
+        setTestMessages((prev) => [...prev, { role: 'assistant', text: replyText || 'Ответ не получен' }]);
+      }
     } catch (error) {
       toast.error('Не удалось получить ответ');
     } finally {
@@ -736,6 +807,22 @@ const TrainingTab: React.FC = () => {
                         </span>
                       );
                     })()}
+                    {activeDialog.channel === 'telegram' && telegramAccounts.length > 0 && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="text-xs text-slate-500">Аккаунт:</span>
+                        <select
+                          className="input max-w-xs"
+                          value={selectedTelegramSlot ?? ''}
+                          onChange={(e) => setSelectedTelegramSlot(Number(e.target.value) || null)}
+                        >
+                          {telegramAccounts.map((account) => (
+                            <option key={account.slot} value={account.slot}>
+                              {account.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                     {silenceInfo && (silenceInfo.active || silenceInfo.auto_reply_enabled === false) && (
                       <div className="mt-1 text-xs text-amber-600">
                         {silenceInfo.active
@@ -851,6 +938,14 @@ const TrainingTab: React.FC = () => {
               <option value="max">MAX</option>
               <option value="whatsapp">WhatsApp</option>
             </select>
+            <label className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={testDelayEnabled}
+                onChange={(e) => setTestDelayEnabled(e.target.checked)}
+              />
+              Задержка ответа
+            </label>
             <button className="btn-ghost" onClick={handleTestClear}>Очистить</button>
           </div>
         </div>

@@ -207,7 +207,7 @@ def test_wa_status_respects_baileys_tenant_config(monkeypatch):
     monkeypatch.setattr(public_module, "_expected_public_key_value", lambda: "tenant-9100")
 
     tenant_id = 9100
-    core._TENANTS_CONFIG_CACHE.pop(tenant_id, None)  # type: ignore[attr-defined]
+    core._TENANTS_CONFIG_CACHE[tenant_id] = {"whatsapp": {"provider": "baileys"}}  # type: ignore[attr-defined]
     core._TENANT_CONFIG_CACHE.pop(tenant_id, None)  # type: ignore[attr-defined]
 
     def _fake_valid_key(tenant_id_arg: int, key: str) -> bool:

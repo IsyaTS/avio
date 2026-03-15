@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
+from libs.core.message_envelope import sanitize_display_name
 from libs.core.schemas import Attachment, MessageIn, TransportMessage
 
 LOGGER = logging.getLogger("app.transport")
@@ -127,8 +128,7 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
     if isinstance(username_value, str):
         username_value = username_value.strip() or None
     display_name_value = message.display_name if message.display_name is not None else data.get("display_name")
-    if isinstance(display_name_value, str):
-        display_name_value = display_name_value.strip() or None
+    display_name_value = sanitize_display_name(display_name_value)
 
     peer_id_value = message.peer_id
     if peer_id_value is None:

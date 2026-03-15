@@ -1,25 +1,32 @@
-# Ignore VCS and local environment files
+# VCS and local env
 .git
 .gitignore
 .env
 .env.*
 !.env.example
-.venv/
-app/.venv/
+.env_recovery/
 
-# Ignore local runtime artifacts that should not be copied into the image
-app/tenants/
-data/tenants/*/uploads/
-data/tenants/*/exports/
-data/tenants/*/recordings/
-data/redis/
-tmp_extract/
-tgworker/sessions/
-waweb/node_modules/
-wabaileys/node_modules/
+# Python local artifacts
+.venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# runtime data
+# Runtime and local state
 data/
+tg-sessions/
+tmp_extract/
 **/wa_state/
+
+# JS dependencies
+node_modules/
+apps/frontend/client-portal/node_modules/
+apps/waweb/node_modules/
+apps/wabaileys/node_modules/
+
+# Editor and OS
+.idea/
+.vscode/
+.DS_Store

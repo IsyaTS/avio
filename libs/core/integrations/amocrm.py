@@ -324,7 +324,18 @@ class AmoCRMClient:
                     headers=headers,
                 )
         if response.status_code >= 400:
-            raise AmoCRMError(f"amocrm_http_error:{response.status_code}")
+            detail = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, Mapping):
+                    detail = json.dumps(payload, ensure_ascii=False)
+                else:
+                    detail = str(payload)
+            except Exception:
+                detail = (response.text or "").strip()
+            detail = detail[:500].replace("\n", " ")
+            suffix = f":{detail}" if detail else ""
+            raise AmoCRMError(f"amocrm_http_error:{response.status_code}{suffix}")
         if response.status_code == 204:
             return {}
         try:
@@ -335,8 +346,40 @@ class AmoCRMClient:
     async def get_pipelines(self) -> Mapping[str, Any]:
         return await self._request("GET", "/api/v4/leads/pipelines")
 
-    async def get_pipeline_stages(self, pipeline_id: int) -> Mapping[str, Any]:
-        return await self._request("GET", f"/api/v4/leads/pipelines/{int(pipeline_id)}")
+    async def get_pipeline_stages(
+        self,
+        pipeline_id: int,
+        *,
+        with_descriptions: bool = False,
+    ) -> Mapping[str, Any]:
+        pipeline_id_val = int(pipeline_id)
+        if not with_descriptions:
+            return await self._request(
+                "GET",
+                f"/api/v4/leads/pipelines/{pipeline_id_val}",
+            )
+
+        # Amo can return richer stage descriptions via the /statuses endpoint.
+        # We fetch both and then embed statuses into the pipeline payload shape
+        # expected by current callers.
+        pipeline_payload = await self._request(
+            "GET",
+            f"/api/v4/leads/pipelines/{pipeline_id_val}",
+        )
+        statuses_payload = await self._request(
+            "GET",
+            f"/api/v4/leads/pipelines/{pipeline_id_val}/statuses",
+            params={"with": "descriptions"},
+        )
+        statuses_embedded = statuses_payload.get("_embedded") if isinstance(statuses_payload, Mapping) else None
+        statuses = statuses_embedded.get("statuses") if isinstance(statuses_embedded, Mapping) else None
+        if isinstance(statuses, list):
+            payload_copy = dict(pipeline_payload) if isinstance(pipeline_payload, Mapping) else {}
+            embedded_copy = dict(payload_copy.get("_embedded") or {})
+            embedded_copy["statuses"] = statuses
+            payload_copy["_embedded"] = embedded_copy
+            return payload_copy
+        return pipeline_payload if isinstance(pipeline_payload, Mapping) else {}
 
     async def get_lead_custom_fields(self) -> Mapping[str, Any]:
         return await self._request("GET", "/api/v4/leads/custom_fields")
@@ -354,9 +397,42 @@ class AmoCRMClient:
                 return None
         return None
 
-    async def get_account(self, *, with_drive_url: bool = False) -> Mapping[str, Any]:
-        params = {"with": "drive_url"} if with_drive_url else None
+    async def get_account(
+        self,
+        *,
+        with_drive_url: bool = False,
+        with_amojo_id: bool = False,
+    ) -> Mapping[str, Any]:
+        with_parts: list[str] = []
+        if with_drive_url:
+            with_parts.append("drive_url")
+        if with_amojo_id:
+            with_parts.append("amojo_id")
+        params = {"with": ",".join(with_parts)} if with_parts else None
         return await self._request("GET", "/api/v4/account", params=params)
+
+    async def get_contact(
+        self,
+        contact_id: int,
+        *,
+        with_leads: bool = False,
+    ) -> Mapping[str, Any]:
+        params = {"with": "leads"} if with_leads else None
+        return await self._request("GET", f"/api/v4/contacts/{int(contact_id)}", params=params)
+
+    async def get_lead(self, lead_id: int) -> Mapping[str, Any]:
+        return await self._request("GET", f"/api/v4/leads/{int(lead_id)}")
+
+    async def search_contacts(self, query: str) -> list[Mapping[str, Any]]:
+        query_value = str(query or "").strip()
+        if not query_value:
+            return []
+        payload = await self._request("GET", "/api/v4/contacts", params={"query": query_value})
+        embedded = payload.get("_embedded") if isinstance(payload, Mapping) else None
+        contacts = embedded.get("contacts") if isinstance(embedded, Mapping) else None
+        if not isinstance(contacts, list):
+            return []
+        return [item for item in contacts if isinstance(item, Mapping)]
 
     async def upsert_contact(self, *, phone: str | None, name: str | None) -> int | None:
         contact_id = None
@@ -366,7 +442,21 @@ class AmoCRMClient:
             embedded = data.get("_embedded") if isinstance(data, Mapping) else None
             contacts = embedded.get("contacts") if isinstance(embedded, Mapping) else None
             if isinstance(contacts, list) and contacts:
-                contact_id = contacts[0].get("id")
+                for item in contacts:
+                    if not isinstance(item, Mapping):
+                        continue
+                    candidate = item.get("id")
+                    try:
+                        candidate_id = int(candidate)
+                    except Exception:
+                        continue
+                    try:
+                        probe = await self.get_contact(candidate_id)
+                    except Exception:
+                        continue
+                    if isinstance(probe, Mapping) and probe:
+                        contact_id = candidate_id
+                        break
         if contact_id:
             try:
                 return int(contact_id)
@@ -428,23 +518,39 @@ class AmoCRMClient:
         self,
         lead_id: int,
         *,
+        name: str | None = None,
         custom_fields: list[dict[str, Any]],
     ) -> None:
-        if not custom_fields:
+        if name and not custom_fields:
+            await self._request("PATCH", f"/api/v4/leads/{int(lead_id)}", json_body={"name": str(name).strip()})
             return
-        payload = [{"id": int(lead_id), "custom_fields_values": custom_fields}]
-        await self._request("PATCH", "/api/v4/leads", json_body=payload)
+        payload: dict[str, Any] = {"id": int(lead_id)}
+        if name:
+            payload["name"] = str(name).strip()
+        if custom_fields:
+            payload["custom_fields_values"] = custom_fields
+        if len(payload) == 1:
+            return
+        await self._request("PATCH", "/api/v4/leads", json_body=[payload])
 
     async def update_contact_fields(
         self,
         contact_id: int,
         *,
+        name: str | None = None,
         custom_fields: list[dict[str, Any]],
     ) -> None:
-        if not custom_fields:
+        if name and not custom_fields:
+            await self._request("PATCH", f"/api/v4/contacts/{int(contact_id)}", json_body={"name": str(name).strip()})
             return
-        payload = [{"id": int(contact_id), "custom_fields_values": custom_fields}]
-        await self._request("PATCH", "/api/v4/contacts", json_body=payload)
+        payload: dict[str, Any] = {"id": int(contact_id)}
+        if name:
+            payload["name"] = str(name).strip()
+        if custom_fields:
+            payload["custom_fields_values"] = custom_fields
+        if len(payload) == 1:
+            return
+        await self._request("PATCH", "/api/v4/contacts", json_body=[payload])
 
     async def get_lead_contact_id(self, lead_id: int) -> int | None:
         payload = await self._request("GET", f"/api/v4/leads/{int(lead_id)}")
@@ -457,6 +563,18 @@ class AmoCRMClient:
             except Exception:
                 return None
         return None
+
+    async def link_contact_chat(self, contact_id: int, chat_id: str) -> None:
+        chat_id_value = str(chat_id or "").strip()
+        if not contact_id or not chat_id_value:
+            return
+        payload = [
+            {
+                "contact_id": int(contact_id),
+                "chat_id": chat_id_value,
+            }
+        ]
+        await self._request("POST", "/api/v4/contacts/chats", json_body=payload)
 
     async def move_lead_stage(
         self,
@@ -476,6 +594,12 @@ class AmoCRMClient:
             "params": {"text": text},
         }
         await self._request("POST", f"/api/v4/leads/{int(lead_id)}/notes", json_body=[note])
+
+    async def delete_lead(self, lead_id: int) -> None:
+        await self._request("DELETE", f"/api/v4/leads/{int(lead_id)}")
+
+    async def delete_contact(self, contact_id: int) -> None:
+        await self._request("DELETE", f"/api/v4/contacts/{int(contact_id)}")
 
     async def _resolve_drive_url(self) -> str:
         payload = await self.get_account(with_drive_url=True)

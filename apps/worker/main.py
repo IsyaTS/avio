@@ -5,6 +5,9 @@ import re
 import json
 import time
 import asyncio
+import random
+import heapq
+import itertools
 import cgi
 import mimetypes
 from datetime import datetime, timedelta, timezone
@@ -34,6 +37,7 @@ import httpx
 import redis.asyncio as redis
 from redis import exceptions as redis_ex
 
+from libs.core import db as db_module
 from libs.core.sales_core import (
     settings as core_settings,
     tenant_waweb_url,
@@ -61,6 +65,7 @@ from libs.core.db import (
     get_contact_id_by_lead,
     get_contact_id_by_phone,
     get_contact_phone_by_lead,
+    get_lead_dialog_metadata,
     resolve_or_create_contact,
     link_lead_contact,
     update_contact_phone,
@@ -72,6 +77,14 @@ from libs.core.db import (
 )
 from libs.core.dao.leads import get_or_create_by_peer
 from libs.core.metrics import MESSAGE_OUT_COUNTER, DB_ERRORS_COUNTER
+from libs.core.message_envelope import (
+    content_fingerprint,
+    detect_message_kind,
+    normalize_attachments as normalize_message_attachments,
+    normalize_attachment as normalize_message_attachment,
+    sanitize_display_name,
+    text_or_placeholder,
+)
 from libs.core.common import (
     OUTBOX_QUEUE_KEY,
     OUTBOX_DLQ_KEY,
@@ -93,7 +106,8 @@ from libs.core.integrations import avito as avito_integration
 from libs.core.integrations import max as max_integration
 from libs.core.integrations import amocrm as amocrm_integration
 from libs.core.services import amocrm as amocrm_service
-from libs.core.repo import crm_links, crm_outbox
+from libs.core.services import amocrm_chat as amocrm_chat_service
+from libs.core.repo import crm_chat_links, crm_links, crm_outbox
 from libs.core.transport import (
     WhatsAppAddressError,
     normalize_e164_digits,
@@ -132,6 +146,9 @@ AVITO_PHONE_TG_TTL_SECONDS = int(os.getenv("AVITO_PHONE_TG_TTL", "86400"))
 AVITO_PHONE_TG_DEDUP_ENABLED = (os.getenv("AVITO_PHONE_TG_DEDUP_ENABLED") or "").strip().lower() in {"1", "true", "yes"}
 # TTL for suppressing repeated Avito auto-replies in the same chat/lead.
 AVITO_AUTO_REPLY_TTL_SECONDS = int(os.getenv("AVITO_AUTO_REPLY_TTL", "86400"))
+TG_SLOT_MIN = 1
+TG_SLOT_MAX = 5
+TG_SLOT_MULTIPLIER = 1000
 # Match waweb INTERNAL_SYNC_TOKEN resolution (shared with the web layer)
 WA_INTERNAL_TOKEN = COMMON_WA_INTERNAL_TOKEN
 _DEFAULT_WORKER_BASE = getattr(core_settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
@@ -168,6 +185,7 @@ LEARNING_EMBEDDINGS_ENABLED = (os.getenv("LEARNING_EMBEDDINGS_ENABLED") or "1").
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL") or getattr(core_settings, "EMBEDDING_MODEL", "") or "text-embedding-3-small"
 AVITO_TIMEOUT = getattr(core_settings, "AVITO_TIMEOUT", 10.0)
 AVITO_IMAGE_MAX_BYTES = 24 * 1024 * 1024
+AVITO_FILE_MAX_BYTES = 100 * 1024 * 1024
 _INBOX_ENABLED_RAW = (os.getenv("INBOX_ENABLED") or "").strip().lower()
 INBOX_ENABLED = _INBOX_ENABLED_RAW not in {"", "0", "false", "no", "off"}
 INCOMING_QUEUE_KEY = (
@@ -185,8 +203,111 @@ try:
     INBOX_BLOCK_TIMEOUT = max(1, int(os.getenv("INBOX_BLOCK_TIMEOUT", "5")))
 except Exception:
     INBOX_BLOCK_TIMEOUT = 5
+SMART_REPLY_PUNCT_STYLE_ENABLED = (os.getenv("SMART_REPLY_PUNCT_STYLE_ENABLED") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SMART_REPLY_SPLIT_ENABLED = (os.getenv("SMART_REPLY_SPLIT_ENABLED") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+try:
+    SMART_REPLY_SPLIT_MIN_LEN = max(40, int(os.getenv("SMART_REPLY_SPLIT_MIN_LEN", "70")))
+except Exception:
+    SMART_REPLY_SPLIT_MIN_LEN = 70
+try:
+    SMART_REPLY_SPLIT_MAX_LEN = max(SMART_REPLY_SPLIT_MIN_LEN + 20, int(os.getenv("SMART_REPLY_SPLIT_MAX_LEN", "120")))
+except Exception:
+    SMART_REPLY_SPLIT_MAX_LEN = max(SMART_REPLY_SPLIT_MIN_LEN + 20, 120)
+try:
+    SMART_REPLY_SPLIT_MAX_PARTS = max(2, int(os.getenv("SMART_REPLY_SPLIT_MAX_PARTS", "6")))
+except Exception:
+    SMART_REPLY_SPLIT_MAX_PARTS = 6
+_SMART_REPLY_SPLIT_CHANNELS_RAW = (
+    os.getenv("SMART_REPLY_SPLIT_CHANNELS") or "telegram,avito,whatsapp,max"
+).strip()
+SMART_REPLY_SPLIT_CHANNELS = {
+    part.strip().lower()
+    for part in _SMART_REPLY_SPLIT_CHANNELS_RAW.split(",")
+    if part.strip()
+}
+if not SMART_REPLY_SPLIT_CHANNELS:
+    SMART_REPLY_SPLIT_CHANNELS = {"telegram", "avito", "whatsapp", "max"}
+SMART_REPLY_SPLIT_PART_DELAY_ENABLED = (
+    os.getenv("SMART_REPLY_SPLIT_PART_DELAY_ENABLED") or "1"
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+try:
+    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS = max(
+        0,
+        int(os.getenv("SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS", "5")),
+    )
+except Exception:
+    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS = 5
+try:
+    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS = max(
+        SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+        int(os.getenv("SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS", "10")),
+    )
+except Exception:
+    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS = max(
+        SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+        10,
+    )
+SMART_REPLY_BURST_ENABLED = (os.getenv("SMART_REPLY_BURST_ENABLED") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+try:
+    SMART_REPLY_DELAY_MIN_SECONDS = max(0, int(os.getenv("SMART_REPLY_DELAY_MIN_SECONDS", "40")))
+except Exception:
+    SMART_REPLY_DELAY_MIN_SECONDS = 40
+try:
+    SMART_REPLY_DELAY_MAX_SECONDS = max(
+        SMART_REPLY_DELAY_MIN_SECONDS,
+        int(os.getenv("SMART_REPLY_DELAY_MAX_SECONDS", "120")),
+    )
+except Exception:
+    SMART_REPLY_DELAY_MAX_SECONDS = max(120, SMART_REPLY_DELAY_MIN_SECONDS)
+try:
+    SMART_REPLY_FIRST_TTL_SECONDS = max(300, int(os.getenv("SMART_REPLY_FIRST_TTL_SECONDS", "1800")))
+except Exception:
+    SMART_REPLY_FIRST_TTL_SECONDS = 1800
+try:
+    SMART_REPLY_BURST_MAX_MESSAGES = max(2, int(os.getenv("SMART_REPLY_BURST_MAX_MESSAGES", "8")))
+except Exception:
+    SMART_REPLY_BURST_MAX_MESSAGES = 8
+_SMART_REPLY_DELAY_CHANNELS_RAW = (
+    os.getenv("SMART_REPLY_DELAY_CHANNELS") or "telegram,avito,whatsapp,max"
+).strip()
+SMART_REPLY_DELAY_CHANNELS = {
+    part.strip().lower()
+    for part in _SMART_REPLY_DELAY_CHANNELS_RAW.split(",")
+    if part.strip()
+}
+if not SMART_REPLY_DELAY_CHANNELS:
+    SMART_REPLY_DELAY_CHANNELS = {"telegram", "avito", "whatsapp", "max"}
+SMART_REPLY_FIRST_KEY_PREFIX = "smart_reply:first_sent"
 TENANT_ID  = int(os.getenv("TENANT_ID","1"))
 QUEUES = [OUTBOX_QUEUE_KEY]
+
+_PENDING_SMART_REPLIES: Dict[str, Dict[str, Any]] = {}
+_PENDING_SMART_REPLY_LOCK = asyncio.Lock()
+
+# Outbox items with send_not_before_ts should not block the whole queue.
+# Keep them in a small in-memory min-heap and release when due.
+_DEFERRED_OUTBOX_HEAP: list[tuple[float, int, dict[str, Any]]] = []
+_DEFERRED_OUTBOX_SEQ = itertools.count(1)
 
 r = redis.from_url(REDIS_URL, decode_responses=True)
 NOTIFY_EVENT_MANAGER = "manager_requested"
@@ -516,12 +637,22 @@ async def _maybe_amocrm_inbound(
     attachments: Iterable[Mapping[str, Any]] | None = None,
     message_id: int | None = None,
 ) -> None:
-    if not text and not attachments:
+    normalized_attachments = normalize_message_attachments(attachments or [])
+    if not text and not normalized_attachments:
         return
+    fingerprint = content_fingerprint(text, normalized_attachments)
     if message_id is not None:
         try:
             dedup_key = f"amocrm:inbound:{tenant_id}:{lead_id}:{channel}:{int(message_id)}"
             deduped = await _redis_queue.set(dedup_key, "1", ex=86400, nx=True)
+            if not deduped:
+                return
+        except Exception:
+            pass
+    else:
+        try:
+            dedup_key = f"amocrm:inbound:{tenant_id}:{lead_id}:{channel}:fp:{fingerprint}"
+            deduped = await _redis_queue.set(dedup_key, "1", ex=180, nx=True)
             if not deduped:
                 return
         except Exception:
@@ -532,7 +663,8 @@ async def _maybe_amocrm_inbound(
             int(lead_id),
             text=text,
             channel=channel,
-            attachments=list(attachments) if attachments else None,
+            attachments=normalized_attachments or None,
+            source_role="lead",
         )
     except Exception as exc:
         log(
@@ -676,6 +808,1089 @@ def _response_pipeline_enabled() -> bool:
     return flag in {"1", "true", "yes", "on"}
 
 
+def _smart_reply_first_key(tenant_id: int, channel: str, lead_id: int) -> str:
+    return f"{SMART_REPLY_FIRST_KEY_PREFIX}:{int(tenant_id)}:{channel}:{int(lead_id)}"
+
+
+def _smart_reply_pending_key(tenant_id: int, channel: str, lead_id: int) -> str:
+    return f"{int(tenant_id)}:{channel}:{int(lead_id)}"
+
+
+def _channel_delay_enabled(channel: str) -> bool:
+    if not SMART_REPLY_BURST_ENABLED:
+        return False
+    if SMART_REPLY_DELAY_MAX_SECONDS <= 0:
+        return False
+    return str(channel).strip().lower() in SMART_REPLY_DELAY_CHANNELS
+
+
+async def _thread_has_recent_bot_reply(tenant_id: int, channel: str, lead_id: int) -> bool:
+    if tenant_id <= 0 or lead_id <= 0:
+        return False
+    try:
+        return bool(await r.exists(_smart_reply_first_key(tenant_id, channel, lead_id)))
+    except Exception:
+        return False
+
+
+async def _mark_thread_bot_reply(tenant_id: int, channel: str, lead_id: int) -> None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    try:
+        await r.set(
+            _smart_reply_first_key(tenant_id, channel, lead_id),
+            str(int(time.time())),
+            ex=SMART_REPLY_FIRST_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def _delay_seconds_value() -> float:
+    if SMART_REPLY_DELAY_MAX_SECONDS <= SMART_REPLY_DELAY_MIN_SECONDS:
+        return float(SMART_REPLY_DELAY_MIN_SECONDS)
+    return float(random.randint(SMART_REPLY_DELAY_MIN_SECONDS, SMART_REPLY_DELAY_MAX_SECONDS))
+
+
+def _split_part_delay_enabled(channel: str) -> bool:
+    if not SMART_REPLY_SPLIT_PART_DELAY_ENABLED:
+        return False
+    if SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS <= 0:
+        return False
+    return str(channel).strip().lower() in SMART_REPLY_SPLIT_CHANNELS
+
+
+def _split_part_delay_seconds_value() -> float:
+    if SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS <= SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS:
+        return float(SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS)
+    return float(
+        random.randint(
+            SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+            SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS,
+        )
+    )
+
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_EOS_MARKER = "<<eos>>"
+_ACK_CAP_NEXT_WORD_RE = re.compile(
+    r"(?iu)\b(ок|понял|принял|услышал|ладно|хорошо)\s+([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{0,40})\b"
+)
+
+
+def _punct_style_segment(text: str, comma_index: int) -> tuple[str, int]:
+    out_chars: list[str] = []
+    idx = int(comma_index or 0)
+    eos_pending = False
+    for ch in text:
+        if ch in {".", "!"}:
+            if not eos_pending:
+                out_chars.append(_EOS_MARKER)
+                eos_pending = True
+            continue
+        if ch == ",":
+            idx += 1
+            # Remove each second comma -> 50% commas removed.
+            if idx % 2 == 0:
+                continue
+        if not ch.isspace():
+            eos_pending = False
+        out_chars.append(ch)
+    return "".join(out_chars), idx
+
+
+def _lowercase_after_removed_sentence_endings(text: str) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return ""
+    if _EOS_MARKER not in candidate:
+        return candidate
+    parts = candidate.split(_EOS_MARKER)
+    merged = parts[0].rstrip()
+    for part in parts[1:]:
+        chunk = part.lstrip()
+        if chunk:
+            first = chunk[0]
+            if first.isalpha():
+                chunk = first.lower() + chunk[1:]
+        if merged and chunk:
+            merged = f"{merged} {chunk}"
+        elif chunk:
+            merged = chunk
+    return merged.strip()
+
+
+def _lowercase_after_acknowledgement(text: str) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return ""
+
+    def _repl(match: re.Match[str]) -> str:
+        head = match.group(1)
+        word = match.group(2)
+        if not word:
+            return match.group(0)
+        return f"{head} {word[0].lower()}{word[1:]}"
+
+    return _ACK_CAP_NEXT_WORD_RE.sub(_repl, candidate)
+
+
+def _apply_custom_punctuation_style(text: str) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return ""
+    if not SMART_REPLY_PUNCT_STYLE_ENABLED:
+        return candidate.strip()
+
+    parts: list[str] = []
+    pos = 0
+    comma_idx = 0
+    for match in _URL_RE.finditer(candidate):
+        if match.start() > pos:
+            segment, comma_idx = _punct_style_segment(candidate[pos : match.start()], comma_idx)
+            parts.append(segment)
+        parts.append(match.group(0))
+        pos = match.end()
+    if pos < len(candidate):
+        tail, comma_idx = _punct_style_segment(candidate[pos:], comma_idx)
+        parts.append(tail)
+
+    styled = "".join(parts)
+    styled = re.sub(r"[ \t]{2,}", " ", styled)
+    styled = re.sub(r"[ \t]+\n", "\n", styled)
+    styled = re.sub(r"\n{3,}", "\n\n", styled)
+    styled = re.sub(r"\s+([,?])", r"\1", styled)
+    styled = re.sub(r",{2,}", ",", styled)
+    styled = re.sub(r"\?{2,}", "?", styled)
+    styled = _lowercase_after_removed_sentence_endings(styled)
+    styled = _lowercase_after_acknowledgement(styled)
+    return styled.strip()
+
+
+_GREETING_PREFIX_RE = re.compile(
+    r"^\s*(здравствуйте|добрый(?:й|е)|доброго|привет|салам|доброе утро|добрый вечер)\b",
+    re.IGNORECASE,
+)
+_QUESTION_START_RE = re.compile(
+    r"\b(в каком|какой|какая|какие|где|когда|сколько|что|как|подскажите|уточните|нужен ли|нужна ли)\b",
+    re.IGNORECASE,
+)
+_SEGMENT_CONNECTOR_RE = re.compile(
+    r"\s+(?:но|а|если|когда|чтобы|потом|также|при этом|после этого)\s+",
+    re.IGNORECASE,
+)
+
+
+def _split_long_segment_by_words(text: str, max_len: int) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_len:
+        return [clean]
+    words = clean.split(" ")
+    out: list[str] = []
+    current = ""
+    for word in words:
+        if not word:
+            continue
+        candidate = f"{current} {word}".strip() if current else word
+        if current and len(candidate) > max_len:
+            # Avoid splitting model name and its price into different bubbles.
+            if re.match(r"^\d", word) and len(candidate) <= max_len + 14:
+                current = candidate
+                continue
+            out.append(current.strip())
+            current = word
+        else:
+            current = candidate
+    if current.strip():
+        out.append(current.strip())
+    # Avoid tiny tail fragments ("установку") when long sentence is split by length.
+    if len(out) >= 2 and len(out[-1]) < 12:
+        combined = f"{out[-2]} {out[-1]}".strip()
+        if len(combined) <= max_len + 20:
+            out[-2] = combined
+            out.pop()
+    return [part for part in out if part]
+
+
+def _split_long_segment_by_connectors(text: str, max_len: int) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_len:
+        return [clean]
+
+    out: list[str] = []
+    remaining = clean
+    min_cut = max(48, int(max_len * 0.5))
+    while len(remaining) > max_len:
+        window = remaining[: max_len + 1]
+        split_pos = -1
+        for match in _SEGMENT_CONNECTOR_RE.finditer(window):
+            if match.start() >= min_cut:
+                split_pos = int(match.start())
+        if split_pos <= 0:
+            break
+        head = remaining[:split_pos].strip(" ,")
+        if len(head) < min_cut:
+            break
+        if head:
+            out.append(head)
+        remaining = remaining[split_pos:].strip(" ,")
+        if not remaining:
+            break
+    if remaining:
+        out.append(remaining)
+    return [part for part in out if part]
+
+
+def _merge_short_split_parts(parts: list[str], max_len: int) -> list[str]:
+    if not parts:
+        return []
+    def _is_atomic_contact_or_link(chunk: str) -> bool:
+        raw = re.sub(r"\s+", " ", str(chunk or "")).strip(" ,")
+        if not raw:
+            return False
+        if re.fullmatch(r"https?://\S+", raw, flags=re.IGNORECASE):
+            return True
+        if re.fullmatch(r"@[\w\d_]{4,}", raw):
+            return True
+        if re.fullmatch(r"(?:\+?\d[\d\-\s()]{8,}\d)", raw):
+            return True
+        return False
+
+    merged: list[str] = []
+    min_part = max(36, int(max_len * 0.33))
+    for part in parts:
+        candidate = re.sub(r"\s+", " ", str(part or "")).strip(" ,")
+        if not candidate:
+            continue
+        if _is_atomic_contact_or_link(candidate):
+            merged.append(candidate)
+            continue
+        if merged and len(candidate) < min_part:
+            prev = merged[-1]
+            if _is_atomic_contact_or_link(prev):
+                merged.append(candidate)
+                continue
+            if _GREETING_PREFIX_RE.match(prev) and _QUESTION_START_RE.match(candidate):
+                merged.append(candidate)
+                continue
+            combined = f"{merged[-1]} {candidate}".strip()
+            if len(combined) <= max_len + 6:
+                merged[-1] = combined
+                continue
+        merged.append(candidate)
+    if len(merged) >= 2 and len(merged[0]) < min_part:
+        if not (_GREETING_PREFIX_RE.match(merged[0]) and _QUESTION_START_RE.match(merged[1])):
+            combined = f"{merged[0]} {merged[1]}".strip()
+            if len(combined) <= max_len + 6:
+                merged[1] = combined
+                merged = merged[1:]
+
+    tail_connectors = ("и", "но", "а", "или", "если", "чтобы", "потом", "также")
+    idx = 0
+    while idx < len(merged) - 1:
+        last_word = merged[idx].split(" ")[-1].lower()
+        if last_word in tail_connectors:
+            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
+            if len(combined) <= max_len + 6:
+                merged[idx] = combined
+                del merged[idx + 1]
+                continue
+        # Keep "модель ... 33 900 ₽" in one message for readability.
+        if re.search(r'[»"]\s*$', merged[idx]) and re.match(r"^\d", merged[idx + 1]):
+            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
+            if len(combined) <= max_len + 20:
+                merged[idx] = combined
+                del merged[idx + 1]
+                continue
+        if "—" in merged[idx] and re.match(r"^\d", merged[idx + 1]):
+            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
+            if len(combined) <= max_len + 20:
+                merged[idx] = combined
+                del merged[idx + 1]
+                continue
+        idx += 1
+    return merged
+
+
+def _split_long_segment(text: str, max_len: int) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_len:
+        return [clean]
+
+    comma_parts = [part.strip() for part in clean.split(",") if part.strip()]
+    if len(comma_parts) > 1 and any(len(part) < 8 for part in comma_parts):
+        # Tiny comma prefixes like "ок," degrade split quality; prefer connector-based split.
+        conn_parts = _split_long_segment_by_connectors(clean, max_len)
+        out_parts: list[str] = []
+        for part in conn_parts:
+            out_parts.extend(_split_long_segment_by_words(part, max_len))
+        normalized = [part for part in out_parts if part]
+        if len(normalized) >= 2:
+            return normalized
+    if len(comma_parts) <= 1:
+        dash_parts = [part.strip() for part in re.split(r"\s*[—–;]\s*", clean) if part.strip()]
+        if len(dash_parts) > 1:
+            expanded: list[str] = []
+            for part in dash_parts:
+                expanded.extend(_split_long_segment_by_connectors(part, max_len))
+            out_parts: list[str] = []
+            for part in expanded:
+                out_parts.extend(_split_long_segment_by_words(part, max_len))
+            return [part for part in out_parts if part]
+        conn_parts = _split_long_segment_by_connectors(clean, max_len)
+        out_parts: list[str] = []
+        for part in conn_parts:
+            out_parts.extend(_split_long_segment_by_words(part, max_len))
+        return [part for part in out_parts if part]
+
+    out: list[str] = []
+    current = ""
+    for idx, part in enumerate(comma_parts):
+        suffix = "," if idx < len(comma_parts) - 1 else ""
+        piece = f"{part}{suffix}".strip()
+        candidate = f"{current} {piece}".strip() if current else piece
+        if current and len(candidate) > max_len:
+            out.extend(_split_long_segment_by_words(current, max_len))
+            current = piece
+        else:
+            current = candidate
+    if current.strip():
+        out.extend(_split_long_segment_by_words(current, max_len))
+    return [part.strip() for part in out if part.strip()]
+
+
+def _split_greeting_question_combo(text: str) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return [clean] if clean else []
+    if not _GREETING_PREFIX_RE.search(clean):
+        return [clean]
+    match = _QUESTION_START_RE.search(clean)
+    if not match:
+        return [clean]
+    split_at = int(match.start())
+    if split_at <= 6:
+        return [clean]
+    head = clean[:split_at].strip(" ,")
+    tail = clean[split_at:].strip(" ,")
+    if not head or not tail:
+        return [clean]
+    if len(head) > 56:
+        return [clean]
+    # For no-question-mark phrasing ("Здравствуйте в каком городе..."), still split.
+    if "?" not in clean and len(tail) < 10:
+        return [clean]
+    return [head, tail]
+
+
+_URL_TOKEN_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_TG_HANDLE_RE = re.compile(r"(?<!\w)@[\w\d_]{4,}")
+_PHONE_TOKEN_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\-\s()]{8,}\d)(?!\d)")
+
+
+def _extract_standalone_tokens(text: str) -> list[str]:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return []
+    tokens: list[tuple[int, int, str]] = []
+    for rx in (_URL_TOKEN_RE, _TG_HANDLE_RE, _PHONE_TOKEN_RE):
+        for match in rx.finditer(candidate):
+            token = str(match.group(0) or "").strip()
+            if token:
+                tokens.append((match.start(), match.end(), token))
+    if not tokens:
+        return [candidate]
+    tokens.sort(key=lambda item: (item[0], item[1]))
+    merged: list[tuple[int, int, str]] = []
+    for start, end, token in tokens:
+        if merged and start < merged[-1][1]:
+            continue
+        merged.append((start, end, token))
+    out: list[str] = []
+    cursor = 0
+    for start, end, token in merged:
+        prefix = candidate[cursor:start].strip(" ,")
+        if prefix:
+            out.append(prefix)
+        out.append(token)
+        cursor = end
+    tail = candidate[cursor:].strip(" ,")
+    if tail:
+        out.append(tail)
+    return [item for item in out if item]
+
+
+def _force_isolate_contact_tokens(parts: list[str]) -> list[str]:
+    if not parts:
+        return []
+    out: list[str] = []
+    for raw in parts:
+        part = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not part:
+            continue
+        if not (
+            _URL_TOKEN_RE.search(part)
+            or _TG_HANDLE_RE.search(part)
+            or _PHONE_TOKEN_RE.search(part)
+        ):
+            out.append(part)
+            continue
+        expanded = _extract_standalone_tokens(part)
+        if expanded:
+            out.extend(expanded)
+        else:
+            out.append(part)
+    return [item for item in out if item]
+
+
+def _has_contact_intro(parts: list[str]) -> bool:
+    if not parts:
+        return False
+    combined = " ".join(str(p or "") for p in parts).lower()
+    markers = (
+        "контакт",
+        "для связи",
+        "напишите",
+        "пишите",
+        "позвон",
+        "связаться",
+        "telegram",
+        "телеграм",
+        "whatsapp",
+        "ватсап",
+        "вотсап",
+    )
+    return any(marker in combined for marker in markers)
+
+
+def _split_reply_for_send(reply_text: str, channel: str) -> list[str]:
+    clean = re.sub(r"\s+", " ", str(reply_text or "")).strip()
+    if not clean:
+        return []
+    ch = str(channel or "").strip().lower()
+    has_contact_tokens = bool(
+        _URL_TOKEN_RE.search(clean)
+        or _TG_HANDLE_RE.search(clean)
+        or _PHONE_TOKEN_RE.search(clean)
+    )
+    if not SMART_REPLY_SPLIT_ENABLED or ch not in SMART_REPLY_SPLIT_CHANNELS:
+        if has_contact_tokens:
+            tokenized = _extract_standalone_tokens(clean)
+            if tokenized:
+                return _force_isolate_contact_tokens(tokenized)
+        return [clean]
+    greeting_combo = _split_greeting_question_combo(clean)
+    has_multi_questions = clean.count("?") > 1
+    has_paragraphs = "\n\n" in clean
+    if (
+        len(clean) < SMART_REPLY_SPLIT_MIN_LEN
+        and len(greeting_combo) <= 1
+        and not has_multi_questions
+        and not has_paragraphs
+        and not has_contact_tokens
+    ):
+        return [clean]
+
+    parts: list[str] = []
+    blocks = [blk.strip() for blk in re.split(r"\n{2,}", clean) if blk.strip()]
+    if not blocks:
+        blocks = [clean]
+
+    for block in blocks:
+        greeting_split = _split_greeting_question_combo(block)
+        for segment in greeting_split:
+            seg = segment.strip()
+            if not seg:
+                continue
+            dash_chunks = [part.strip() for part in re.split(r"\s*[—–;]\s*", seg) if part.strip()]
+            if not dash_chunks:
+                dash_chunks = [seg]
+            q_chunks: list[str] = []
+            for dash_chunk in dash_chunks:
+                q_chunks.extend(
+                    [q.strip() for q in re.findall(r"[^?]+(?:\?|$)", dash_chunk) if q.strip()]
+                )
+            if not q_chunks:
+                q_chunks = [seg]
+            for chunk in q_chunks:
+                parts.extend(_split_long_segment(chunk, SMART_REPLY_SPLIT_MAX_LEN))
+
+    deduped: list[str] = []
+    prev_norm = ""
+    for part in parts:
+        line = re.sub(r"\s+", " ", part).strip(" ,")
+        if not line:
+            continue
+        if re.fullmatch(r"[.!,;:()\-\s]+", line):
+            continue
+        norm = line.casefold()
+        if norm == prev_norm:
+            continue
+        deduped.append(line)
+        prev_norm = norm
+
+    if not deduped:
+        return [clean]
+    tokenized: list[str] = []
+    for part in deduped:
+        tokenized.extend(_extract_standalone_tokens(part))
+    deduped = tokenized or deduped
+    deduped = _merge_short_split_parts(deduped, SMART_REPLY_SPLIT_MAX_LEN)
+    if len(deduped) <= SMART_REPLY_SPLIT_MAX_PARTS:
+        return deduped
+
+    head = deduped[: SMART_REPLY_SPLIT_MAX_PARTS - 1]
+    tail = " ".join(deduped[SMART_REPLY_SPLIT_MAX_PARTS - 1 :]).strip()
+    if tail:
+        head.append(tail)
+    final_parts = [part for part in head if part]
+    if has_contact_tokens:
+        final_parts = _force_isolate_contact_tokens(final_parts)
+    return final_parts
+
+
+def _clip_text(value: str, limit: int = 1200) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _compose_burst_user_text(parts: list[str]) -> str:
+    cleaned: list[str] = []
+    last_norm = ""
+    for raw in parts:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        norm = re.sub(r"\s+", " ", text).strip().lower()
+        if norm == last_norm:
+            continue
+        cleaned.append(_clip_text(text, 700))
+        last_norm = norm
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    lines = [f"{idx + 1}. {item}" for idx, item in enumerate(cleaned)]
+    return (
+        "Клиент отправил несколько сообщений подряд одним блоком. "
+        "Ответьте единым сообщением, учтите все пункты и не повторяйтесь.\n"
+        + "\n".join(lines)
+    )
+
+
+def _parse_send_not_before_ts(item: Mapping[str, Any]) -> float:
+    raw = item.get("send_not_before_ts")
+    if raw is None:
+        return 0.0
+    try:
+        ts = float(raw)
+    except Exception:
+        return 0.0
+    if ts <= 0:
+        return 0.0
+    return ts
+
+
+def _defer_outbox_item(item: Mapping[str, Any], due_ts: float) -> None:
+    if due_ts <= 0:
+        return
+    payload = dict(item)
+    heapq.heappush(
+        _DEFERRED_OUTBOX_HEAP,
+        (float(due_ts), next(_DEFERRED_OUTBOX_SEQ), payload),
+    )
+
+
+def _pop_ready_deferred_outbox(now_ts: float | None = None) -> dict[str, Any] | None:
+    if now_ts is None:
+        now_ts = time.time()
+    if not _DEFERRED_OUTBOX_HEAP:
+        return None
+    due_ts, _, item = _DEFERRED_OUTBOX_HEAP[0]
+    if due_ts > now_ts:
+        return None
+    heapq.heappop(_DEFERRED_OUTBOX_HEAP)
+    return item
+
+
+def _next_deferred_outbox_wait(now_ts: float | None = None) -> float | None:
+    if now_ts is None:
+        now_ts = time.time()
+    if not _DEFERRED_OUTBOX_HEAP:
+        return None
+    due_ts = float(_DEFERRED_OUTBOX_HEAP[0][0])
+    return max(0.0, due_ts - now_ts)
+
+
+def _merge_reply_context(channel: str, base: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in incoming.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                merged[key] = value
+            continue
+        merged[key] = value
+    if channel == "telegram":
+        merged["tg_slot"] = _normalize_tg_slot(merged.get("tg_slot"))
+    return merged
+
+
+async def _cancel_pending_smart_reply(
+    tenant_id: int,
+    channel: str,
+    lead_id: int,
+    *,
+    reason: str,
+) -> None:
+    key = _smart_reply_pending_key(tenant_id, channel, lead_id)
+    task: asyncio.Task[Any] | None = None
+    async with _PENDING_SMART_REPLY_LOCK:
+        payload = _PENDING_SMART_REPLIES.pop(key, None)
+        if payload:
+            task = payload.get("task")
+    if task and not task.done():
+        task.cancel()
+    if task:
+        log(
+            "event=smart_reply_burst_cancel channel=%s tenant=%s lead_id=%s reason=%s"
+            % (channel, tenant_id, lead_id, reason)
+        )
+
+
+def _can_generate_reply_for_channel(tenant_id: int, channel: str) -> bool:
+    ch = str(channel).strip().lower()
+    if ch == "telegram":
+        return _telegram_reply_enabled(tenant_id) and smart_reply_enabled(tenant_id)
+    if ch == "max":
+        return _max_reply_enabled(tenant_id) and smart_reply_enabled(tenant_id)
+    if ch == "avito":
+        return _avito_smart_reply_enabled(tenant_id) and smart_reply_enabled(tenant_id)
+    if ch == "whatsapp":
+        return smart_reply_enabled(tenant_id)
+    return False
+
+
+async def _generate_reply_text(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    refer_id: int,
+    channel: str,
+    user_text: str,
+) -> tuple[str, Any]:
+    reply: Any = ""
+    reply_text = ""
+    if _response_pipeline_enabled():
+        try:
+            result = await run_response_pipeline(
+                tenant_id=tenant_id,
+                channel=channel,
+                user_text=user_text,
+                contact_id=refer_id if refer_id > 0 else 0,
+                enable_photos=False,
+                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
+                log_fn=log,
+            )
+            reply_text = str(result.reply_text or "").strip()
+            reply = result.reply_text
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=%s tenant=%s lead_id=%s stage=pipeline error=%s"
+                % (channel, tenant_id, lead_id, exc)
+            )
+            reply_text = default_fallback_reply(tenant_id)
+            reply = reply_text
+    else:
+        try:
+            messages = await build_llm_messages(refer_id, user_text, channel, tenant=tenant_id)
+        except Exception as exc:
+            log(
+                "event=smart_reply_failed channel=%s tenant=%s lead_id=%s stage=build_messages error=%s"
+                % (channel, tenant_id, lead_id, exc)
+            )
+            return "", ""
+
+        reply = await _ask_llm_with_fallback(
+            messages,
+            tenant_id=tenant_id,
+            contact_id=refer_id if refer_id > 0 else None,
+            channel=channel,
+        )
+        reply_text = (reply or "").strip()
+    reply_text = str(reply_text or "").strip()
+    if channel == "telegram" and reply_text:
+        # Для Telegram ссылки на каталог уводим в file-send логику.
+        reply_text = re.sub(r"https?://\\S*/pub/catalog/file/\\S*", "", reply_text).strip()
+    if reply_text:
+        reply_text = _apply_custom_punctuation_style(reply_text)
+    _log_smart_reply_diag(channel, tenant_id, lead_id, reply)
+    return reply_text, reply
+
+
+async def _maybe_set_waiting_photo_state(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    reply_text: str,
+) -> None:
+    if channel not in {"telegram", "max"}:
+        return
+    markers, _, photo_ttl = _photo_expectation_config(tenant_id)
+    if not markers:
+        return
+    lowered = reply_text.lower()
+    for marker in markers:
+        if not isinstance(marker, str) or not marker.strip():
+            continue
+        if marker.strip().lower() not in lowered:
+            continue
+        ttl = photo_ttl if photo_ttl > 0 else HANDOFF_SILENCE_TTL_SECONDS
+        state_key = f"conv:state:{tenant_id}:{lead_id}"
+        try:
+            await r.set(state_key, "waiting_photo", ex=ttl)
+            log(
+                "event=photo_expected_set channel=%s tenant=%s lead_id=%s ttl=%s marker=%s"
+                % (channel, tenant_id, lead_id, ttl, marker)
+            )
+        except Exception as exc:
+            log(
+                "event=photo_expected_set_failed channel=%s tenant=%s lead_id=%s error=%s"
+                % (channel, tenant_id, lead_id, exc)
+            )
+        break
+
+
+async def _enqueue_channel_reply_payload(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    reply_text: str,
+    user_text: str,
+    context: Mapping[str, Any],
+) -> bool:
+    attachments: list[dict[str, Any]] = []
+    if channel in {"telegram", "max", "avito"}:
+        attachments = await _select_auto_photos(tenant_id, channel, user_text, reply_text)
+
+    base_payload: Dict[str, Any] = {
+        "lead_id": int(lead_id),
+        "tenant": int(tenant_id),
+        "tenant_id": int(tenant_id),
+        "provider": channel,
+        "ch": channel,
+        "channel": channel,
+        "attachments": attachments or [],
+    }
+
+    if channel == "telegram":
+        base_payload["tg_slot"] = _normalize_tg_slot(context.get("tg_slot"))
+        message_id = context.get("message_id")
+        telegram_user_id = _coerce_int(context.get("telegram_user_id"))
+        peer_id = _coerce_int(context.get("peer_id"))
+        username = context.get("username")
+        if message_id:
+            base_payload["message_id"] = str(message_id)
+        if telegram_user_id is not None:
+            base_payload["telegram_user_id"] = str(telegram_user_id)
+        if peer_id is not None:
+            base_payload["peer_id"] = int(peer_id)
+        if isinstance(username, str) and username.strip():
+            base_payload["username"] = username.strip()
+    elif channel == "max":
+        message_id = context.get("message_id")
+        max_user_id = _coerce_int(context.get("max_user_id"))
+        peer_value = context.get("peer")
+        if message_id:
+            base_payload["message_id"] = str(message_id)
+        if max_user_id is not None:
+            base_payload["max_user_id"] = max_user_id
+        if isinstance(peer_value, str) and peer_value.strip():
+            base_payload["peer"] = peer_value.strip()
+            base_payload["peer_id"] = peer_value.strip()
+    elif channel == "whatsapp":
+        message_id = context.get("message_id")
+        to_value = str(context.get("to") or "").strip()
+        to_jid = str(context.get("to_jid") or "").strip()
+        base_payload["to"] = to_value
+        if to_jid:
+            base_payload["to_jid"] = to_jid
+        if message_id:
+            base_payload["message_id"] = str(message_id)
+    elif channel == "avito":
+        chat_id = str(context.get("chat_id") or "").strip()
+        if not chat_id:
+            return False
+        base_payload["chat_id"] = chat_id
+        base_payload["peer"] = chat_id
+        base_payload["peer_id"] = chat_id
+        account_id = _coerce_int(context.get("account_id"))
+        message_id = context.get("message_id")
+        avito_user_id = _coerce_int(context.get("avito_user_id"))
+        avito_login = context.get("avito_login")
+        if account_id is not None:
+            base_payload["account_id"] = account_id
+        if message_id:
+            base_payload["message_id"] = str(message_id)
+        if avito_user_id is not None:
+            base_payload["avito_user_id"] = avito_user_id
+        if isinstance(avito_login, str) and avito_login.strip():
+            base_payload["avito_login"] = avito_login.strip()
+
+    reply_parts = _split_reply_for_send(reply_text, channel)
+    if not reply_parts:
+        return False
+    if len(reply_parts) > 1:
+        log(
+            "event=smart_reply_split channel=%s tenant=%s lead_id=%s parts=%s"
+            % (channel, tenant_id, lead_id, len(reply_parts))
+        )
+
+    try:
+        part_due_ts = time.time()
+        use_part_delay = len(reply_parts) > 1 and _split_part_delay_enabled(channel)
+        if use_part_delay:
+            log(
+                "event=smart_reply_split_delay channel=%s tenant=%s lead_id=%s min=%s max=%s"
+                % (
+                    channel,
+                    tenant_id,
+                    lead_id,
+                    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+                    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS,
+                )
+            )
+        for idx, part in enumerate(reply_parts):
+            payload = dict(base_payload)
+            payload["text"] = part
+            if idx > 0:
+                payload["attachments"] = []
+            if idx > 0:
+                if use_part_delay:
+                    part_due_ts += _split_part_delay_seconds_value()
+                payload["send_not_before_ts"] = float(part_due_ts)
+                payload["split_part_index"] = int(idx + 1)
+                payload["split_part_total"] = int(len(reply_parts))
+            await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(payload, ensure_ascii=False))
+    except Exception as exc:
+        log(
+            "event=smart_reply_enqueue_failed channel=%s tenant=%s lead_id=%s error=%s"
+            % (channel, tenant_id, lead_id, exc)
+        )
+        return False
+    return True
+
+
+async def _produce_and_enqueue_smart_reply(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    refer_id: int,
+    user_text: str,
+    context: Mapping[str, Any],
+    delayed: bool = False,
+) -> bool:
+    reply_text, _ = await _generate_reply_text(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        refer_id=refer_id,
+        channel=channel,
+        user_text=user_text,
+    )
+    if not reply_text:
+        log(
+            "event=smart_reply_empty channel=%s tenant=%s lead_id=%s delayed=%s"
+            % (channel, tenant_id, lead_id, int(delayed))
+        )
+        return False
+    await _maybe_set_waiting_photo_state(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel=channel,
+        reply_text=reply_text,
+    )
+    enqueued = await _enqueue_channel_reply_payload(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel=channel,
+        reply_text=reply_text,
+        user_text=user_text,
+        context=context,
+    )
+    if not enqueued:
+        return False
+    await _mark_thread_bot_reply(tenant_id, channel, lead_id)
+    log(
+        "event=smart_reply_enqueued channel=%s tenant=%s lead_id=%s delayed=%s"
+        % (channel, tenant_id, lead_id, int(delayed))
+    )
+    return True
+
+
+async def _flush_pending_smart_reply(key: str) -> None:
+    payload: Dict[str, Any] | None = None
+    try:
+        async with _PENDING_SMART_REPLY_LOCK:
+            payload = _PENDING_SMART_REPLIES.get(key)
+            if not payload:
+                return
+            due_at = float(payload.get("due_at") or 0.0)
+        sleep_for = max(0.0, due_at - time.time())
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+        async with _PENDING_SMART_REPLY_LOCK:
+            payload = _PENDING_SMART_REPLIES.pop(key, None)
+        if not payload:
+            return
+        tenant_id = int(payload.get("tenant_id") or 0)
+        lead_id = int(payload.get("lead_id") or 0)
+        channel = str(payload.get("channel") or "").strip().lower()
+        if tenant_id <= 0 or lead_id <= 0 or not channel:
+            return
+        if await _is_handoff_silenced(tenant_id, lead_id):
+            log(
+                "event=smart_reply_burst_drop channel=%s tenant=%s lead_id=%s reason=silenced"
+                % (channel, tenant_id, lead_id)
+            )
+            return
+        if not _can_generate_reply_for_channel(tenant_id, channel):
+            log(
+                "event=smart_reply_burst_drop channel=%s tenant=%s lead_id=%s reason=disabled"
+                % (channel, tenant_id, lead_id)
+            )
+            return
+        parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+        user_text = _compose_burst_user_text([str(item or "") for item in parts])
+        if not user_text:
+            return
+        refer_id = int(payload.get("refer_id") or lead_id)
+        context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+        log(
+            "event=smart_reply_burst_flush channel=%s tenant=%s lead_id=%s messages=%s"
+            % (channel, tenant_id, lead_id, len(parts))
+        )
+        await _produce_and_enqueue_smart_reply(
+            tenant_id=tenant_id,
+            lead_id=lead_id,
+            channel=channel,
+            refer_id=refer_id,
+            user_text=user_text,
+            context=dict(context),
+            delayed=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if payload:
+            channel = str(payload.get("channel") or "")
+            tenant_id = int(payload.get("tenant_id") or 0)
+            lead_id = int(payload.get("lead_id") or 0)
+        else:
+            channel = "-"
+            tenant_id = 0
+            lead_id = 0
+        log(
+            "event=smart_reply_burst_flush_failed channel=%s tenant=%s lead_id=%s error=%s"
+            % (channel, tenant_id, lead_id, exc)
+        )
+
+
+async def _schedule_delayed_smart_reply(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    refer_id: int,
+    user_text: str,
+    context: Mapping[str, Any],
+) -> None:
+    key = _smart_reply_pending_key(tenant_id, channel, lead_id)
+    now_ts = time.time()
+    async with _PENDING_SMART_REPLY_LOCK:
+        payload = _PENDING_SMART_REPLIES.get(key)
+        if payload:
+            parts = payload.get("parts")
+            if not isinstance(parts, list):
+                parts = []
+            if user_text.strip():
+                parts.append(user_text.strip())
+            if len(parts) > SMART_REPLY_BURST_MAX_MESSAGES:
+                parts = parts[-SMART_REPLY_BURST_MAX_MESSAGES:]
+            payload["parts"] = parts
+            payload["updated_at"] = now_ts
+            payload["refer_id"] = int(refer_id or payload.get("refer_id") or 0)
+            base_ctx = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+            payload["context"] = _merge_reply_context(channel, base_ctx, context)
+            _PENDING_SMART_REPLIES[key] = payload
+            due_at = float(payload.get("due_at") or now_ts)
+            log(
+                "event=smart_reply_burst_append channel=%s tenant=%s lead_id=%s messages=%s due_in=%.1fs"
+                % (channel, tenant_id, lead_id, len(parts), max(0.0, due_at - now_ts))
+            )
+            return
+        due_at = now_ts + _delay_seconds_value()
+        parts = [user_text.strip()] if user_text.strip() else []
+        payload = {
+            "tenant_id": int(tenant_id),
+            "lead_id": int(lead_id),
+            "channel": channel,
+            "refer_id": int(refer_id or 0),
+            "parts": parts,
+            "context": _merge_reply_context(channel, {}, context),
+            "created_at": now_ts,
+            "updated_at": now_ts,
+            "due_at": due_at,
+        }
+        task = asyncio.create_task(
+            _flush_pending_smart_reply(key),
+            name=f"smart-reply-delay:{channel}:{tenant_id}:{lead_id}",
+        )
+        payload["task"] = task
+        _PENDING_SMART_REPLIES[key] = payload
+        log(
+            "event=smart_reply_burst_scheduled channel=%s tenant=%s lead_id=%s delay=%.1fs"
+            % (channel, tenant_id, lead_id, max(0.0, due_at - now_ts))
+        )
+
+
+async def _try_handle_smart_reply_with_delay(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    refer_id: int,
+    user_text: str,
+    context: Mapping[str, Any],
+) -> bool:
+    if not _channel_delay_enabled(channel):
+        return False
+    if not user_text.strip():
+        return False
+    if not await _thread_has_recent_bot_reply(tenant_id, channel, lead_id):
+        return False
+    await _schedule_delayed_smart_reply(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel=channel,
+        refer_id=refer_id,
+        user_text=user_text,
+        context=context,
+    )
+    return True
+
+
 def _extract_avito_user_name(payload: Mapping[str, Any], *, author_id: int | None, account_id: int | None) -> str:
     users = payload.get("users")
     if not isinstance(users, list):
@@ -742,43 +1957,19 @@ async def _resolve_avito_user_name(
             return cached.strip()
 
     try:
-        token, integration = await avito_integration.ensure_access_token(int(tenant_id))
-    except Exception as exc:
-        log(
-            "event=avito_user_name_skip tenant=%s reason=token_unavailable error=%s"
-            % (tenant_id, exc)
+        info = await avito_integration.resolve_chat_participant_profile(
+            int(tenant_id),
+            account_id=account_id,
+            chat_id=chat_id,
+            author_id=author_id,
         )
-        return ""
-
-    account_val = account_id or _coerce_int(integration.get("account_id"))
-    if account_val is None:
-        return ""
-
-    url = f"https://api.avito.ru/messenger/v2/accounts/{account_val}/chats/{chat_id}"
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
-            response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
+    except Exception as exc:
         log(
             "event=avito_user_name_request_failed tenant=%s chat_id=%s error=%s"
             % (tenant_id, chat_id, exc)
         )
         return ""
-
-    if response.status_code != 200:
-        log(
-            "event=avito_user_name_unexpected tenant=%s chat_id=%s status=%s"
-            % (tenant_id, chat_id, response.status_code)
-        )
-        return ""
-
-    try:
-        payload = response.json()
-    except Exception:
-        return ""
-
-    name = _extract_avito_user_name(payload, author_id=author_id, account_id=account_val)
+    name = str((info or {}).get("name") or "").strip()
     if name and cache_key:
         try:
             await r.set(cache_key, name, ex=3600 * 24 * 7)
@@ -822,6 +2013,89 @@ def _telegram_reply_enabled(tenant_id: int) -> bool:
         if root_flag is not None:
             return bool(root_flag)
     return True
+
+
+def _normalize_tg_slot(value: Any) -> int:
+    try:
+        slot = int(value)
+    except Exception:
+        return TG_SLOT_MIN
+    if slot < TG_SLOT_MIN:
+        return TG_SLOT_MIN
+    if slot > TG_SLOT_MAX:
+        return TG_SLOT_MAX
+    return slot
+
+
+def _virtual_tg_tenant(tenant_id: int, slot: int) -> int:
+    normalized = _normalize_tg_slot(slot)
+    if normalized == TG_SLOT_MIN:
+        return int(tenant_id)
+    return int(tenant_id) * TG_SLOT_MULTIPLIER + normalized
+
+
+def _telegram_slot_settings(tenant_id: int) -> tuple[bool, dict[int, bool]]:
+    multi_enabled = True
+    enabled_map = {slot: True for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1)}
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = None
+    if not isinstance(cfg, Mapping):
+        return multi_enabled, enabled_map
+    tg_cfg = cfg.get("telegram")
+    if not isinstance(tg_cfg, Mapping):
+        return multi_enabled, enabled_map
+    raw_multi = _coerce_bool_value(tg_cfg.get("multi_slot_enabled"))
+    if raw_multi is not None:
+        multi_enabled = bool(raw_multi)
+    slot_enabled = tg_cfg.get("slot_enabled")
+    if isinstance(slot_enabled, Mapping):
+        for idx in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
+            raw_flag = slot_enabled.get(str(idx), slot_enabled.get(idx))
+            normalized_flag = _coerce_bool_value(raw_flag)
+            if normalized_flag is not None:
+                enabled_map[idx] = bool(normalized_flag)
+    return multi_enabled, enabled_map
+
+
+def _telegram_slot_is_enabled(tenant_id: int, slot: int) -> bool:
+    multi_mode, slot_enabled = _telegram_slot_settings(tenant_id)
+    normalized = _normalize_tg_slot(slot)
+    if not multi_mode and normalized != TG_SLOT_MIN:
+        return False
+    return bool(slot_enabled.get(normalized, True))
+
+
+def _lead_tg_slot_key(tenant_id: int, lead_id: int) -> str:
+    return f"tg:lead_slot:{int(tenant_id)}:{int(lead_id)}"
+
+
+async def _store_lead_tg_slot(tenant_id: int, lead_id: int, slot: int) -> None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return
+    try:
+        await r.set(_lead_tg_slot_key(tenant_id, lead_id), str(_normalize_tg_slot(slot)), ex=60 * 60 * 24 * 30)
+    except Exception:
+        pass
+
+
+async def _get_lead_tg_slot(tenant_id: int, lead_id: int) -> int | None:
+    if tenant_id <= 0 or lead_id <= 0:
+        return None
+    try:
+        raw = await r.get(_lead_tg_slot_key(tenant_id, lead_id))
+    except Exception:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="ignore")
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        return None
+    if TG_SLOT_MIN <= value <= TG_SLOT_MAX:
+        return value
+    return None
 
 
 def _max_reply_enabled(tenant_id: int) -> bool:
@@ -1230,14 +2504,427 @@ def _extract_ru_phone(text: str) -> str:
     return ""
 
 
-async def _send_telegram_to_phone(
+_TG_USERNAME_URL_RE = re.compile(
+    r"(?iu)(?:https?://)?(?:t(?:elegram)?\.me)/([a-z][a-z0-9_]{4,31})"
+)
+_TG_USERNAME_AT_RE = re.compile(r"(?iu)(?<![\w.])@([a-z][a-z0-9_]{4,31})(?![\w])")
+_TG_USERNAME_RESERVED = {
+    "joinchat",
+    "addstickers",
+    "addemoji",
+    "share",
+    "s",
+    "iv",
+    "proxy",
+    "login",
+    "c",
+}
+
+
+def _extract_tg_username(text: str) -> str:
+    if not text:
+        return ""
+    raw = str(text).strip()
+    if not raw:
+        return ""
+
+    for match in _TG_USERNAME_URL_RE.finditer(raw):
+        candidate = str(match.group(1) or "").strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in _TG_USERNAME_RESERVED:
+            continue
+        normalized = normalize_username(candidate)
+        if normalized:
+            return normalized
+
+    for match in _TG_USERNAME_AT_RE.finditer(raw):
+        candidate = str(match.group(1) or "").strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in _TG_USERNAME_RESERVED:
+            continue
+        normalized = normalize_username(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+async def _resolve_live_amocrm_target_by_phone(
     tenant_id: int,
-    phone: str,
+    *,
+    phone: str | None,
+    origin_lead_id: int | None = None,
+) -> tuple[int | None, int | None]:
+    phone_value = normalize_e164_digits(phone or "")
+    cfg = read_tenant_config(int(tenant_id))
+    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
+    if not phone_value or not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
+        return None, None
+    base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id))
+    if not base_url:
+        return None, None
+    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
+    client = amocrm_integration.AmoCRMClient(
+        tenant_id=int(tenant_id),
+        base_url=base_url,
+        client_id=str(oauth_cfg.get("client_id") or ""),
+        client_secret=str(oauth_cfg.get("client_secret") or ""),
+        redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+    )
+
+    async def _is_live(contact_id: int | None, lead_id: int | None) -> bool:
+        if not contact_id or not lead_id:
+            return False
+        try:
+            await client.get_contact(int(contact_id))
+            await client.get_lead(int(lead_id))
+            return True
+        except Exception:
+            return False
+
+    async def _contact_id_from_lead(lead_id: int | None) -> int | None:
+        if not lead_id:
+            return None
+        try:
+            lead_payload = await client.get_lead(int(lead_id))
+        except Exception:
+            return None
+        embedded = lead_payload.get("_embedded") if isinstance(lead_payload, Mapping) else None
+        contacts = embedded.get("contacts") if isinstance(embedded, Mapping) else None
+        if not isinstance(contacts, list):
+            return None
+        for item in contacts:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                contact_id = int(item.get("id"))
+            except Exception:
+                continue
+            if contact_id > 0:
+                return contact_id
+        return None
+
+    if origin_lead_id and int(origin_lead_id) > 0:
+        try:
+            origin_link = await crm_links.get_link(int(tenant_id), int(origin_lead_id), amocrm_service.AMOCRM_PROVIDER)
+        except Exception:
+            origin_link = None
+        try:
+            existing_contact_id = (
+                int(origin_link.get("provider_contact_id"))
+                if isinstance(origin_link, Mapping) and origin_link.get("provider_contact_id") is not None
+                else None
+            )
+        except Exception:
+            existing_contact_id = None
+        try:
+            existing_lead_id = (
+                int(origin_link.get("provider_lead_id"))
+                if isinstance(origin_link, Mapping) and origin_link.get("provider_lead_id") is not None
+                else None
+            )
+        except Exception:
+            existing_lead_id = None
+        if await _is_live(existing_contact_id, existing_lead_id):
+            return existing_contact_id, existing_lead_id
+        if existing_lead_id:
+            lead_contact_id = await _contact_id_from_lead(existing_lead_id)
+            if await _is_live(lead_contact_id, existing_lead_id):
+                return lead_contact_id, existing_lead_id
+
+    try:
+        contacts = await client.search_contacts(phone_value)
+    except Exception:
+        return None, None
+    candidates: list[tuple[int, int]] = []
+    for item in contacts:
+        try:
+            contact_id = int(item.get("id"))
+        except Exception:
+            continue
+        try:
+            full_contact = await client.get_contact(contact_id, with_leads=True)
+        except Exception:
+            continue
+        embedded = full_contact.get("_embedded") if isinstance(full_contact, Mapping) else None
+        leads = embedded.get("leads") if isinstance(embedded, Mapping) else None
+        if not isinstance(leads, list):
+            continue
+        for lead_item in leads:
+            if not isinstance(lead_item, Mapping):
+                continue
+            try:
+                lead_id = int(lead_item.get("id"))
+            except Exception:
+                continue
+            if await _is_live(contact_id, lead_id):
+                candidates.append((contact_id, lead_id))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda pair: pair[1], reverse=True)
+    return candidates[0]
+
+
+async def _wait_for_amocrm_link_ready(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    timeout_seconds: float = 8.0,
+    poll_seconds: float = 0.4,
+) -> Mapping[str, Any] | None:
+    deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+    last_link: Mapping[str, Any] | None = None
+    while True:
+        try:
+            link = await crm_links.get_link(
+                int(tenant_id),
+                int(lead_id),
+                amocrm_service.AMOCRM_PROVIDER,
+            )
+        except Exception:
+            link = None
+        if isinstance(link, Mapping):
+            last_link = link
+            if link.get("provider_lead_id") is not None or link.get("provider_contact_id") is not None:
+                return link
+        if time.monotonic() >= deadline:
+            return last_link
+        await asyncio.sleep(max(0.1, float(poll_seconds)))
+
+
+async def _enqueue_amocrm_cleanup_event(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> None:
+    # amoCRM v4 API on current account rejects DELETE leads/contacts (HTTP 405),
+    # so we keep merge logic idempotent by link rebinding only.
+    if str(event_type).strip().lower() in {"delete_lead", "delete_contact"}:
+        return
+    try:
+        already = await crm_outbox.has_recent_event(
+            int(tenant_id),
+            amocrm_service.AMOCRM_PROVIDER,
+            int(lead_id),
+            str(event_type),
+            dict(payload),
+            window_seconds=900,
+        )
+    except Exception:
+        already = False
+    if already:
+        return
+    await crm_outbox.enqueue(
+        int(tenant_id),
+        amocrm_service.AMOCRM_PROVIDER,
+        int(lead_id),
+        str(event_type),
+        dict(payload),
+    )
+
+
+async def _reconcile_avito_bridge_amocrm_links(
+    *,
+    tenant_id: int,
+    origin_lead_id: int,
+    tg_lead_id: int,
+    keep_provider_lead_id: int,
+    keep_provider_contact_id: int | None,
+) -> None:
+    try:
+        await crm_outbox.cancel_pending_events(
+            int(tenant_id),
+            amocrm_service.AMOCRM_PROVIDER,
+            int(origin_lead_id),
+            "create_lead",
+            reason="cancelled_by_avito_tg_merge",
+        )
+    except Exception:
+        pass
+
+    stable_hits = 0
+    for _ in range(25):
+        changed = False
+        try:
+            origin_link = await crm_links.get_link(
+                int(tenant_id),
+                int(origin_lead_id),
+                amocrm_service.AMOCRM_PROVIDER,
+            )
+        except Exception:
+            origin_link = None
+        try:
+            current_provider_lead = (
+                int(origin_link.get("provider_lead_id"))
+                if isinstance(origin_link, Mapping) and origin_link.get("provider_lead_id") is not None
+                else None
+            )
+        except Exception:
+            current_provider_lead = None
+        try:
+            current_provider_contact = (
+                int(origin_link.get("provider_contact_id"))
+                if isinstance(origin_link, Mapping) and origin_link.get("provider_contact_id") is not None
+                else None
+            )
+        except Exception:
+            current_provider_contact = None
+
+        if current_provider_lead is not None and int(current_provider_lead) != int(keep_provider_lead_id):
+            try:
+                await _enqueue_amocrm_cleanup_event(
+                    int(tenant_id),
+                    int(tg_lead_id),
+                    event_type="delete_lead",
+                    payload={"amo_lead_id": int(current_provider_lead)},
+                )
+            except Exception:
+                pass
+            try:
+                await crm_links.update_provider_lead_id(
+                    int(tenant_id),
+                    int(origin_lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    int(keep_provider_lead_id),
+                )
+            except Exception:
+                pass
+            changed = True
+
+        if (
+            keep_provider_contact_id is not None
+            and current_provider_contact is not None
+            and int(current_provider_contact) != int(keep_provider_contact_id)
+        ):
+            try:
+                await _enqueue_amocrm_cleanup_event(
+                    int(tenant_id),
+                    int(tg_lead_id),
+                    event_type="delete_contact",
+                    payload={"amo_contact_id": int(current_provider_contact)},
+                )
+            except Exception:
+                pass
+            try:
+                await crm_links.update_provider_contact_id(
+                    int(tenant_id),
+                    int(origin_lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    int(keep_provider_contact_id),
+                )
+            except Exception:
+                pass
+            changed = True
+
+        try:
+            await crm_links.update_provider_lead_id(
+                int(tenant_id),
+                int(tg_lead_id),
+                amocrm_service.AMOCRM_PROVIDER,
+                int(keep_provider_lead_id),
+            )
+        except Exception:
+            pass
+        if keep_provider_contact_id is not None:
+            try:
+                await crm_links.update_provider_contact_id(
+                    int(tenant_id),
+                    int(tg_lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    int(keep_provider_contact_id),
+                )
+            except Exception:
+                pass
+
+        try:
+            origin_chat_link = await crm_chat_links.get_link(
+                int(tenant_id),
+                int(origin_lead_id),
+                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+            )
+        except Exception:
+            origin_chat_link = None
+        try:
+            tg_chat_link = await crm_chat_links.get_link(
+                int(tenant_id),
+                int(tg_lead_id),
+                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+            )
+        except Exception:
+            tg_chat_link = None
+        external_chat_id = (
+            str((origin_chat_link or {}).get("external_chat_id") or "").strip()
+            or str((tg_chat_link or {}).get("external_chat_id") or "").strip()
+            or f"avio:{int(tenant_id)}:avito:{int(origin_lead_id)}"
+        )
+        external_conversation_id = (
+            str((origin_chat_link or {}).get("external_conversation_id") or "").strip()
+            or str((tg_chat_link or {}).get("external_conversation_id") or "").strip()
+            or external_chat_id
+        )
+        try:
+            external_chat_id, external_conversation_id = await amocrm_chat_service._canonical_chat_identity(
+                int(tenant_id),
+                provider_lead_id=int(keep_provider_lead_id),
+                fallback_chat_id=external_chat_id,
+                fallback_conversation_id=external_conversation_id,
+            )
+        except Exception:
+            pass
+        try:
+            await crm_chat_links.upsert_link(
+                int(tenant_id),
+                int(origin_lead_id),
+                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                external_chat_id=external_chat_id,
+                external_conversation_id=external_conversation_id,
+                external_contact_id=int(keep_provider_contact_id)
+                if keep_provider_contact_id is not None
+                else None,
+                external_lead_id=int(keep_provider_lead_id),
+            )
+        except Exception:
+            pass
+        try:
+            await crm_chat_links.upsert_link(
+                int(tenant_id),
+                int(tg_lead_id),
+                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                external_chat_id=external_chat_id,
+                external_conversation_id=external_conversation_id,
+                external_contact_id=int(keep_provider_contact_id)
+                if keep_provider_contact_id is not None
+                else None,
+                external_lead_id=int(keep_provider_lead_id),
+            )
+        except Exception:
+            pass
+
+        if not changed:
+            stable_hits += 1
+        else:
+            stable_hits = 0
+        if stable_hits >= 3:
+            break
+        await asyncio.sleep(0.8)
+
+
+async def _send_telegram_to_target(
+    tenant_id: int,
     text: str,
     *,
+    phone: str | None = None,
+    username: str | None = None,
     lead_id: int | None = None,
     contact_id: int | None = None,
 ) -> tuple[int, str]:
+    phone_value = (phone or "").strip()
+    username_target = normalize_username(username) if username else None
     headers: dict[str, str] = {}
     if TG_WORKER_TOKEN:
         headers["X-Auth-Token"] = TG_WORKER_TOKEN
@@ -1246,7 +2933,8 @@ async def _send_telegram_to_phone(
 
     status_code, body_text = await telegram_transport.send(
         tenant=tenant_id,
-        phone=phone,
+        phone=phone_value or None,
+        peer=username_target or None,
         text=text,
         lead_id=lead_id,
         meta={"contact_id": contact_id} if contact_id else None,
@@ -1260,17 +2948,586 @@ async def _send_telegram_to_phone(
             parsed = None
         if isinstance(parsed, dict):
             peer_id_value = parsed.get("peer_id")
+            message_id_value = parsed.get("message_id")
+            username_value = str(parsed.get("username") or "").strip()
+            display_name_value = sanitize_display_name(parsed.get("display_name"))
+            resolved_peer_id: int | None = None
             try:
                 if peer_id_value is not None:
-                    await r.set(
-                        f"cache:avito_phone:{tenant_id}:{peer_id_value}",
-                        phone,
-                        ex=3600 * 24 * 7,
-                    )
+                    resolved_peer_id = int(peer_id_value)
+                    if phone_value:
+                        await r.set(
+                            f"cache:avito_phone:{tenant_id}:{peer_id_value}",
+                            phone_value,
+                            ex=3600 * 24 * 7,
+                        )
             except Exception:
                 pass
+            if status_code >= 200 and status_code < 300 and resolved_peer_id and text.strip():
+                resolved_lead_id: int | None = None
+                title_hint = f"tg:id {resolved_peer_id}"
+                contact_hint = phone_value or (username_target or "").strip()
+                try:
+                    found_lead = await find_lead_by_telegram(int(tenant_id), int(resolved_peer_id))
+                except Exception as exc:
+                    log(
+                        "event=avito_phone_tg_find_lead_failed tenant=%s peer_id=%s error=%s"
+                        % (tenant_id, resolved_peer_id, exc)
+                    )
+                    found_lead = None
+                if found_lead and int(found_lead) > 0:
+                    resolved_lead_id = int(found_lead)
+                try:
+                    normalized_username = normalize_username(username_value) if username_value else None
+                    lead_title = normalized_username or display_name_value or title_hint
+                    lead_contact = normalized_username or display_name_value or contact_hint
+                    upsert_result = await upsert_lead(
+                        resolved_lead_id if resolved_lead_id and resolved_lead_id > 0 else None,
+                        channel="telegram",
+                        tenant_id=int(tenant_id),
+                        telegram_user_id=int(resolved_peer_id),
+                        telegram_username=(normalized_username or "").lstrip("@") or None,
+                        title=lead_title,
+                        peer_id=int(resolved_peer_id),
+                        peer=str(resolved_peer_id),
+                        contact=lead_contact,
+                    )
+                    if upsert_result is not None:
+                        resolved_lead_id = int(upsert_result)
+                except Exception as exc:
+                    log(
+                        "event=avito_phone_tg_upsert_lead_failed tenant=%s peer_id=%s error=%s"
+                        % (tenant_id, resolved_peer_id, exc)
+                    )
+                    resolved_lead_id = resolved_lead_id or int(resolved_peer_id)
+                if resolved_lead_id and resolved_lead_id > 0:
+                    bridge_from_origin = bool(lead_id and int(lead_id) > 0)
+                    origin_crm_link = None
+                    original_origin_provider_lead_id: int | None = None
+                    origin_provider_lead_before_rebind: int | None = None
+                    tg_provider_lead_id: int | None = None
+                    tg_provider_contact_id: int | None = None
+                    origin_provider_lead_id: int | None = None
+                    origin_provider_contact_id: int | None = None
+                    provider_lead_id: int | None = None
+                    provider_contact_id: int | None = None
+                    try:
+                        existing_tg_link = await crm_links.get_link(
+                            int(tenant_id),
+                            int(resolved_lead_id),
+                            amocrm_service.AMOCRM_PROVIDER,
+                        )
+                    except Exception:
+                        existing_tg_link = None
+                    if isinstance(existing_tg_link, Mapping):
+                        try:
+                            tg_provider_lead_id = (
+                                int(existing_tg_link.get("provider_lead_id"))
+                                if existing_tg_link.get("provider_lead_id") is not None
+                                else None
+                            )
+                        except Exception:
+                            tg_provider_lead_id = None
+                        try:
+                            tg_provider_contact_id = (
+                                int(existing_tg_link.get("provider_contact_id"))
+                                if existing_tg_link.get("provider_contact_id") is not None
+                                else None
+                            )
+                        except Exception:
+                            tg_provider_contact_id = None
+                        if tg_provider_lead_id is None or tg_provider_contact_id is None:
+                            tg_provider_lead_id = None
+                            tg_provider_contact_id = None
+                    if lead_id and int(lead_id) > 0:
+                        try:
+                            origin_crm_link = await _wait_for_amocrm_link_ready(
+                                int(tenant_id),
+                                int(lead_id),
+                                timeout_seconds=8.0,
+                                poll_seconds=0.4,
+                            )
+                        except Exception:
+                            origin_crm_link = None
+                    if isinstance(origin_crm_link, Mapping):
+                        try:
+                            origin_provider_lead_id = (
+                                int(origin_crm_link.get("provider_lead_id"))
+                                if origin_crm_link.get("provider_lead_id") is not None
+                                else None
+                            )
+                        except Exception:
+                            origin_provider_lead_id = None
+                        try:
+                            origin_provider_contact_id = (
+                                int(origin_crm_link.get("provider_contact_id"))
+                                if origin_crm_link.get("provider_contact_id") is not None
+                                else None
+                            )
+                        except Exception:
+                            origin_provider_contact_id = None
+                    if origin_provider_lead_id is not None:
+                        original_origin_provider_lead_id = int(origin_provider_lead_id)
+                    if contact_id and contact_id > 0:
+                        try:
+                            await link_lead_contact(
+                                int(resolved_lead_id),
+                                int(contact_id),
+                                channel="telegram",
+                                peer=str(resolved_peer_id),
+                            )
+                        except Exception:
+                            log(
+                                "event=avito_phone_tg_link_contact_failed tenant=%s lead_id=%s contact_id=%s"
+                                % (tenant_id, resolved_lead_id, contact_id)
+                            )
+                        try:
+                            await update_contact_telegram(
+                                int(contact_id),
+                                int(resolved_peer_id),
+                                (normalized_username or "").lstrip("@") or None,
+                            )
+                        except Exception:
+                            log(
+                                "event=avito_phone_tg_contact_update_failed tenant=%s lead_id=%s contact_id=%s"
+                                % (tenant_id, resolved_lead_id, contact_id)
+                            )
+                    # Canonical priority:
+                    # - For Avito->TG bridge we must keep current origin Avito lead as canonical.
+                    #   Do not reuse arbitrary old Telegram/phone matches from previous dialogs.
+                    # - For standalone TG flow keep existing fallback behavior.
+                    if origin_provider_lead_id is not None and origin_provider_contact_id is not None:
+                        provider_lead_id = int(origin_provider_lead_id)
+                        provider_contact_id = int(origin_provider_contact_id)
+                    elif (
+                        not bridge_from_origin
+                        and tg_provider_lead_id is not None
+                        and tg_provider_contact_id is not None
+                    ):
+                        provider_lead_id = int(tg_provider_lead_id)
+                        provider_contact_id = int(tg_provider_contact_id)
+                    if (
+                        not bridge_from_origin
+                        and (provider_lead_id is None or provider_contact_id is None)
+                    ):
+                        live_contact_id, live_lead_id = None, None
+                        if phone_value:
+                            try:
+                                live_contact_id, live_lead_id = await _resolve_live_amocrm_target_by_phone(
+                                    int(tenant_id),
+                                    phone=phone_value,
+                                    origin_lead_id=int(lead_id) if lead_id and int(lead_id) > 0 else None,
+                                )
+                            except Exception:
+                                live_contact_id, live_lead_id = None, None
+                        if provider_contact_id is None and live_contact_id is not None:
+                            provider_contact_id = int(live_contact_id)
+                        if provider_lead_id is None and live_lead_id is not None:
+                            provider_lead_id = int(live_lead_id)
+                    # One amo deal for avito+telegram bridge:
+                    # if origin lead already has amo lead, always reuse it.
+                    if (provider_lead_id is None or provider_contact_id is None) and lead_id and int(lead_id) > 0:
+                        try:
+                            refreshed_origin_link = await _wait_for_amocrm_link_ready(
+                                int(tenant_id),
+                                int(lead_id),
+                                timeout_seconds=6.0,
+                                poll_seconds=0.4,
+                            )
+                        except Exception:
+                            refreshed_origin_link = None
+                        if isinstance(refreshed_origin_link, Mapping):
+                            if provider_contact_id is None and refreshed_origin_link.get("provider_contact_id") is not None:
+                                try:
+                                    provider_contact_id = int(refreshed_origin_link.get("provider_contact_id"))
+                                except Exception:
+                                    provider_contact_id = provider_contact_id
+                            if provider_lead_id is None and refreshed_origin_link.get("provider_lead_id") is not None:
+                                try:
+                                    provider_lead_id = int(refreshed_origin_link.get("provider_lead_id"))
+                                except Exception:
+                                    provider_lead_id = provider_lead_id
+                    if provider_lead_id and lead_id and int(lead_id) > 0:
+                        try:
+                            await crm_outbox.cancel_pending_events(
+                                int(tenant_id),
+                                amocrm_service.AMOCRM_PROVIDER,
+                                int(lead_id),
+                                "create_lead",
+                                reason="cancelled_by_avito_tg_merge",
+                            )
+                        except Exception:
+                            pass
+                    pipeline_id = None
+                    stage_index = 0
+                    inbound_count = 0
+                    if isinstance(origin_crm_link, Mapping):
+                        try:
+                            pipeline_id = int(origin_crm_link.get("pipeline_id")) if origin_crm_link.get("pipeline_id") is not None else None
+                        except Exception:
+                            pipeline_id = None
+                        try:
+                            stage_index = int(origin_crm_link.get("stage_index") or 0)
+                        except Exception:
+                            stage_index = 0
+                        try:
+                            inbound_count = int(origin_crm_link.get("inbound_count") or 0)
+                        except Exception:
+                            inbound_count = 0
+                    if provider_lead_id or provider_contact_id:
+                        try:
+                            if lead_id and int(lead_id) > 0:
+                                existing_origin_link = await crm_links.get_link(
+                                    int(tenant_id),
+                                    int(lead_id),
+                                    amocrm_service.AMOCRM_PROVIDER,
+                                )
+                                if (
+                                    isinstance(existing_origin_link, Mapping)
+                                    and existing_origin_link.get("provider_lead_id") is not None
+                                ):
+                                    try:
+                                        origin_provider_lead_before_rebind = int(
+                                            existing_origin_link.get("provider_lead_id")
+                                        )
+                                    except Exception:
+                                        origin_provider_lead_before_rebind = None
+                                if not existing_origin_link:
+                                    await crm_links.create_link(
+                                        int(tenant_id),
+                                        int(lead_id),
+                                        amocrm_service.AMOCRM_PROVIDER,
+                                        pipeline_id=pipeline_id,
+                                        stage_index=stage_index,
+                                        inbound_count=inbound_count,
+                                    )
+                                if provider_contact_id is not None:
+                                    await crm_links.update_provider_contact_id(
+                                        int(tenant_id),
+                                        int(lead_id),
+                                        amocrm_service.AMOCRM_PROVIDER,
+                                        int(provider_contact_id),
+                                    )
+                                if provider_lead_id is not None:
+                                    await crm_links.update_provider_lead_id(
+                                        int(tenant_id),
+                                        int(lead_id),
+                                        amocrm_service.AMOCRM_PROVIDER,
+                                        int(provider_lead_id),
+                                    )
+                                if (
+                                    origin_provider_lead_before_rebind
+                                    and int(origin_provider_lead_before_rebind) != int(provider_lead_id or 0)
+                                ):
+                                    original_origin_provider_lead_id = int(origin_provider_lead_before_rebind)
+                            existing_tg_crm_link = await crm_links.get_link(
+                                int(tenant_id),
+                                int(resolved_lead_id),
+                                amocrm_service.AMOCRM_PROVIDER,
+                            )
+                            if not existing_tg_crm_link:
+                                await crm_links.create_link(
+                                    int(tenant_id),
+                                    int(resolved_lead_id),
+                                    amocrm_service.AMOCRM_PROVIDER,
+                                    pipeline_id=pipeline_id,
+                                    stage_index=stage_index,
+                                    inbound_count=inbound_count,
+                                )
+                            if provider_contact_id is not None:
+                                await crm_links.update_provider_contact_id(
+                                    int(tenant_id),
+                                    int(resolved_lead_id),
+                                    amocrm_service.AMOCRM_PROVIDER,
+                                    int(provider_contact_id),
+                                )
+                            if provider_lead_id is not None:
+                                await crm_links.update_provider_lead_id(
+                                    int(tenant_id),
+                                    int(resolved_lead_id),
+                                    amocrm_service.AMOCRM_PROVIDER,
+                                    int(provider_lead_id),
+                                )
+                            origin_chat_link = None
+                            if lead_id and int(lead_id) > 0:
+                                try:
+                                    origin_chat_link = await crm_chat_links.get_link(
+                                        int(tenant_id),
+                                        int(lead_id),
+                                        amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                                    )
+                                except Exception:
+                                    origin_chat_link = None
+                            external_chat_id = (
+                                str((origin_chat_link or {}).get("external_chat_id") or "").strip()
+                                or f"avio:{int(tenant_id)}:telegram:{int(resolved_lead_id)}"
+                            )
+                            external_conversation_id = (
+                                str((origin_chat_link or {}).get("external_conversation_id") or "").strip()
+                                or external_chat_id
+                            )
+                            if provider_lead_id is not None:
+                                try:
+                                    external_chat_id, external_conversation_id = await amocrm_chat_service._canonical_chat_identity(
+                                        int(tenant_id),
+                                        provider_lead_id=int(provider_lead_id),
+                                        fallback_chat_id=external_chat_id,
+                                        fallback_conversation_id=external_conversation_id,
+                                    )
+                                except Exception:
+                                    pass
+                            if lead_id and int(lead_id) > 0:
+                                try:
+                                    await crm_chat_links.upsert_link(
+                                        int(tenant_id),
+                                        int(lead_id),
+                                        amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                                        external_chat_id=external_chat_id,
+                                        external_conversation_id=external_conversation_id,
+                                        external_contact_id=int(provider_contact_id)
+                                        if provider_contact_id is not None
+                                        else None,
+                                        external_lead_id=int(provider_lead_id)
+                                        if provider_lead_id is not None
+                                        else None,
+                                    )
+                                except Exception:
+                                    pass
+                            await crm_chat_links.upsert_link(
+                                int(tenant_id),
+                                int(resolved_lead_id),
+                                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                                external_chat_id=external_chat_id,
+                                external_conversation_id=external_conversation_id,
+                                external_contact_id=int(provider_contact_id) if provider_contact_id is not None else None,
+                                external_lead_id=int(provider_lead_id) if provider_lead_id is not None else None,
+                            )
+                            try:
+                                await amocrm_chat_service.sync_chat_profile(
+                                    int(tenant_id),
+                                    int(resolved_lead_id),
+                                    cfg=read_tenant_config(int(tenant_id)),
+                                )
+                            except Exception:
+                                log(
+                                    "event=avito_phone_tg_sync_profile_failed tenant=%s lead_id=%s"
+                                    % (tenant_id, resolved_lead_id)
+                                )
+                            if lead_id and int(lead_id) > 0:
+                                try:
+                                    await amocrm_chat_service.sync_chat_profile(
+                                        int(tenant_id),
+                                        int(lead_id),
+                                        cfg=read_tenant_config(int(tenant_id)),
+                                    )
+                                except Exception:
+                                    log(
+                                        "event=avito_phone_avito_sync_profile_failed tenant=%s lead_id=%s"
+                                        % (tenant_id, lead_id)
+                                    )
+
+                            preferred_identity = (
+                                (normalized_username or "").strip()
+                                or (display_name_value or "").strip()
+                                or phone_value
+                                or (username_target or "").strip()
+                            )
+                            if preferred_identity:
+                                # Keep amo lead/contact labels aligned with Telegram identity
+                                # after Avito->Telegram bridge so Inbox titles are meaningful.
+                                target_leads: list[int] = [int(resolved_lead_id)]
+                                if lead_id and int(lead_id) > 0 and int(lead_id) not in target_leads:
+                                    target_leads.append(int(lead_id))
+                                for target_lead in target_leads:
+                                    try:
+                                        await crm_outbox.enqueue(
+                                            int(tenant_id),
+                                            amocrm_service.AMOCRM_PROVIDER,
+                                            int(target_lead),
+                                            "update_fields",
+                                            {"lead_name": preferred_identity},
+                                        )
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await crm_outbox.enqueue(
+                                            int(tenant_id),
+                                            amocrm_service.AMOCRM_PROVIDER,
+                                            int(target_lead),
+                                            "update_contact_fields",
+                                            {"contact_name": preferred_identity},
+                                        )
+                                    except Exception:
+                                        pass
+                        except Exception as exc:
+                            log(
+                                "event=avito_phone_tg_clone_amocrm_link_failed tenant=%s lead_id=%s origin_lead_id=%s error=%s"
+                                % (tenant_id, resolved_lead_id, lead_id, exc)
+                            )
+                    if (
+                        provider_lead_id
+                        and lead_id
+                        and int(lead_id) > 0
+                        and original_origin_provider_lead_id is None
+                    ):
+                        try:
+                            current_origin_link = await crm_links.get_link(
+                                int(tenant_id),
+                                int(lead_id),
+                                amocrm_service.AMOCRM_PROVIDER,
+                            )
+                        except Exception:
+                            current_origin_link = None
+                        if (
+                            isinstance(current_origin_link, Mapping)
+                            and current_origin_link.get("provider_lead_id") is not None
+                        ):
+                            try:
+                                current_origin_lead_id = int(current_origin_link.get("provider_lead_id"))
+                            except Exception:
+                                current_origin_lead_id = None
+                            if (
+                                current_origin_lead_id
+                                and int(current_origin_lead_id) != int(provider_lead_id)
+                            ):
+                                original_origin_provider_lead_id = int(current_origin_lead_id)
+                    if (
+                        original_origin_provider_lead_id
+                        and provider_lead_id
+                        and int(original_origin_provider_lead_id) != int(provider_lead_id)
+                    ):
+                        cleanup_payload = {"amo_lead_id": int(original_origin_provider_lead_id)}
+                        try:
+                            already_cleanup = await crm_outbox.has_recent_event(
+                                int(tenant_id),
+                                amocrm_service.AMOCRM_PROVIDER,
+                                int(resolved_lead_id),
+                                "delete_lead",
+                                cleanup_payload,
+                                window_seconds=900,
+                            )
+                        except Exception:
+                            already_cleanup = False
+                        if not already_cleanup:
+                            try:
+                                await crm_outbox.enqueue(
+                                    int(tenant_id),
+                                    amocrm_service.AMOCRM_PROVIDER,
+                                    int(resolved_lead_id),
+                                    "delete_lead",
+                                    cleanup_payload,
+                                )
+                            except Exception as exc:
+                                log(
+                                    "event=avito_phone_tg_delete_old_lead_enqueue_failed tenant=%s old_lead=%s keep_lead=%s error=%s"
+                                    % (
+                                        tenant_id,
+                                        original_origin_provider_lead_id,
+                                        provider_lead_id,
+                                        exc,
+                                    )
+                                )
+                    if provider_lead_id and lead_id and int(lead_id) > 0:
+                        try:
+                            asyncio.create_task(
+                                _reconcile_avito_bridge_amocrm_links(
+                                    tenant_id=int(tenant_id),
+                                    origin_lead_id=int(lead_id),
+                                    tg_lead_id=int(resolved_lead_id),
+                                    keep_provider_lead_id=int(provider_lead_id),
+                                    keep_provider_contact_id=int(provider_contact_id)
+                                    if provider_contact_id is not None
+                                    else None,
+                                )
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        provider_msg_id = None
+                        try:
+                            provider_msg_id = str(int(message_id_value)) if message_id_value is not None else None
+                        except Exception:
+                            provider_msg_id = str(message_id_value or "").strip() or None
+                        await insert_message_out(
+                            int(resolved_lead_id),
+                            text.strip(),
+                            provider_msg_id=provider_msg_id,
+                            status="sent",
+                            tenant_id=int(tenant_id),
+                            channel="telegram",
+                            telegram_user_id=int(resolved_peer_id),
+                            telegram_username=(normalized_username or "").lstrip("@") or None,
+                            title=lead_title,
+                            is_bot=True,
+                            source="bot",
+                        )
+                    except Exception as exc:
+                        log(
+                            "event=avito_phone_tg_store_out_failed tenant=%s lead_id=%s error=%s"
+                            % (tenant_id, resolved_lead_id, exc)
+                        )
+                    # Mirror bridge bootstrap message into amo chat so Inbox shows
+                    # continuity (Avito history + first Telegram handoff message).
+                    if provider_lead_id is None:
+                        log(
+                            "event=avito_phone_tg_amocrm_sync_skipped tenant=%s lead_id=%s reason=provider_lead_missing"
+                            % (tenant_id, resolved_lead_id)
+                        )
+                    elif text.strip():
+                        try:
+                            await amocrm_chat_service.enqueue_message(
+                                int(tenant_id),
+                                int(resolved_lead_id),
+                                direction="out",
+                                text=text.strip(),
+                                channel="telegram",
+                                attachments=None,
+                            )
+                            log(
+                                "event=avito_phone_tg_amocrm_sync_enqueued tenant=%s lead_id=%s"
+                                % (tenant_id, resolved_lead_id)
+                            )
+                        except Exception as exc:
+                            log(
+                                "event=avito_phone_tg_amocrm_sync_failed tenant=%s lead_id=%s error=%s"
+                                % (tenant_id, resolved_lead_id, exc)
+                            )
 
     return status_code, body_text
+
+
+async def _send_telegram_to_phone(
+    tenant_id: int,
+    phone: str,
+    text: str,
+    *,
+    lead_id: int | None = None,
+    contact_id: int | None = None,
+) -> tuple[int, str]:
+    return await _send_telegram_to_target(
+        tenant_id=tenant_id,
+        text=text,
+        phone=phone,
+        lead_id=lead_id,
+        contact_id=contact_id,
+    )
+
+
+async def _send_telegram_to_username(
+    tenant_id: int,
+    username: str,
+    text: str,
+    *,
+    lead_id: int | None = None,
+    contact_id: int | None = None,
+) -> tuple[int, str]:
+    return await _send_telegram_to_target(
+        tenant_id=tenant_id,
+        text=text,
+        username=username,
+        lead_id=lead_id,
+        contact_id=contact_id,
+    )
 
 
 async def _enqueue_avito_auto_reply(
@@ -1614,43 +3871,18 @@ def _normalize_url(url: str) -> str:
 
 
 def _normalize_attachment(blob: dict[str, Any]) -> Optional[dict[str, Any]]:
-    url = _normalize_url(str(blob.get("url") or ""))
-    if not url:
-        return None
-    attachment_type = str(blob.get("type") or blob.get("kind") or "file").strip() or "file"
-    name = blob.get("name") or blob.get("filename") or blob.get("title")
-    if isinstance(name, str):
-        name = name.strip() or None
-    mime = blob.get("mime") or blob.get("mime_type") or blob.get("content_type")
-    if isinstance(mime, str):
-        mime = mime.strip() or None
-    size_value: Optional[int] = None
-    for key in ("size", "filesize", "length"):
-        raw = blob.get(key)
-        candidate = _coerce_int(raw)
-        if candidate is not None:
-            size_value = candidate
-            break
-    normalized = {
-        "type": attachment_type,
-        "url": url,
-    }
-    if name:
-        normalized["name"] = name
-    if mime:
-        normalized["mime"] = mime
-    if size_value is not None and size_value >= 0:
-        normalized["size"] = size_value
-    return normalized
+    prepared = dict(blob)
+    prepared["url"] = _normalize_url(str(blob.get("url") or ""))
+    return normalize_message_attachment(prepared)
 
 
 def _normalize_attachments(blobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
+    prepared: list[dict[str, Any]] = []
     for blob in blobs:
         item = _normalize_attachment(blob)
         if item:
-            normalized.append(item)
-    return normalized
+            prepared.append(item)
+    return normalize_message_attachments(prepared)
 
 
 def _has_photo_attachment(blobs: Iterable[Mapping[str, Any]] | None) -> bool:
@@ -2081,49 +4313,43 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     if tenant_id <= 0:
         log("event=skip_invalid_tenant channel=telegram tenant_raw=%s" % tenant_raw)
         return
+    nested_message = event.get("message") if isinstance(event.get("message"), Mapping) else {}
+    tg_slot = _normalize_tg_slot(
+        event.get("tg_slot")
+        or nested_message.get("tg_slot")
+        or event.get("slot")
+    )
 
     text_raw = event.get("text")
     text = "" if text_raw is None else str(text_raw)
     text = text.strip()
 
-    attachments: list[Mapping[str, Any]] = []
+    raw_attachment_items: list[Mapping[str, Any]] = []
     raw_attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
-    attachments.extend(raw_attachments)
+    raw_attachment_items.extend(item for item in raw_attachments if isinstance(item, Mapping))
     single_attachment = event.get("attachment")
     if isinstance(single_attachment, Mapping):
-        attachments.append(single_attachment)
+        raw_attachment_items.append(single_attachment)
     media_field = event.get("media")
     if isinstance(media_field, list):
-        attachments.extend(item for item in media_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in media_field if isinstance(item, Mapping))
     elif isinstance(media_field, Mapping):
-        attachments.append(media_field)
+        raw_attachment_items.append(media_field)
     photo_field = event.get("photo")
     if isinstance(photo_field, list):
-        attachments.extend(item for item in photo_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in photo_field if isinstance(item, Mapping))
     elif isinstance(photo_field, Mapping):
-        attachments.append(photo_field)
-    has_photo = _has_photo_attachment(attachments)
+        raw_attachment_items.append(photo_field)
+    attachments = normalize_message_attachments(raw_attachment_items)
+    message_kind = str(event.get("message_kind") or detect_message_kind(text, attachments)).strip().lower() or "text"
+    has_photo = any(str(item.get("type") or "").strip().lower() == "image" for item in attachments)
 
     message_id_raw = event.get("message_id")
     message_id = str(message_id_raw) if message_id_raw is not None else ""
-
-    attachments: list[Mapping[str, Any]] = []
-    raw_attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
-    attachments.extend(raw_attachments)
-    single_attachment = event.get("attachment")
-    if isinstance(single_attachment, Mapping):
-        attachments.append(single_attachment)
-    photo_field = event.get("photo")
-    if isinstance(photo_field, list):
-        attachments.extend(item for item in photo_field if isinstance(item, Mapping))
-    elif isinstance(photo_field, Mapping):
-        attachments.append(photo_field)
-    media_field = event.get("media")
-    if isinstance(media_field, list):
-        attachments.extend(item for item in media_field if isinstance(item, Mapping))
-    elif isinstance(media_field, Mapping):
-        attachments.append(media_field)
-    has_photo = _has_photo_attachment(attachments)
+    try:
+        message_id_int = int(message_id) if message_id else None
+    except Exception:
+        message_id_int = None
 
     telegram_user_id = _coerce_int(event.get("telegram_user_id"))
     peer_id = _coerce_int(event.get("peer_id"))
@@ -2143,23 +4369,19 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     if username_raw is not None:
         username = str(username_raw).strip() or None
     display_name_raw = event.get("display_name")
-    if display_name_raw is None:
-        nested_message = event.get("message")
-        if isinstance(nested_message, Mapping):
-            display_name_raw = nested_message.get("display_name")
-    display_name = None
-    if isinstance(display_name_raw, str):
-        display_name = display_name_raw.strip() or None
+    if display_name_raw is None and isinstance(nested_message, Mapping):
+        display_name_raw = nested_message.get("display_name")
+    display_name = sanitize_display_name(display_name_raw)
 
     lead_candidate = _coerce_int(event.get("lead_id"))
     lead_id = lead_candidate if lead_candidate and lead_candidate > 0 else 0
 
     title_hint: Optional[str] = None
     normalized_username = normalize_username(username)
-    if display_name:
+    if normalized_username:
+        title_hint = normalized_username
+    elif display_name:
         title_hint = display_name
-    elif normalized_username:
-        title_hint = f"tg:{normalized_username}"
     elif telegram_user_id is not None:
         title_hint = f"tg:id {telegram_user_id}"
     elif peer_id is not None:
@@ -2214,17 +4436,24 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         resolved_lead_id = int(telegram_user_id)
 
     lead_id = resolved_lead_id if resolved_lead_id is not None else 0
+    await _store_lead_tg_slot(tenant_id, lead_id, tg_slot)
 
     peer_log_hint = peer_value or (str(peer_id) if peer_id is not None else None)
     if peer_log_hint is None and telegram_user_id is not None:
         peer_log_hint = str(telegram_user_id)
     log(
-        f"event=inbox_lead_resolved channel=telegram tenant={tenant_id} lead_id={lead_id} peer={peer_log_hint or '-'}"
+        f"event=inbox_lead_resolved channel=telegram tenant={tenant_id} slot={tg_slot} lead_id={lead_id} peer={peer_log_hint or '-'}"
     )
 
     if lead_id <= 0:
         log(
             f"event=skip_missing_lead channel=telegram tenant={tenant_id} message_id={message_id}"
+        )
+        return
+
+    if not _telegram_slot_is_enabled(tenant_id, tg_slot):
+        log(
+            f"event=telegram_slot_disabled channel=telegram tenant={tenant_id} slot={tg_slot} lead_id={lead_id}"
         )
         return
 
@@ -2236,10 +4465,17 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         return
 
     manager_outgoing = _looks_like_manager_outgoing(event) or _is_manager_message(event)
+    trigger_bot = bool(event.get("trigger_bot")) if "trigger_bot" in event else not manager_outgoing
 
     if text and not manager_outgoing:
         try:
             if await followups.handle_opt_out(tenant_id, lead_id, text):
+                await _cancel_pending_smart_reply(
+                    tenant_id,
+                    "telegram",
+                    lead_id,
+                    reason="followup_optout",
+                )
                 log(
                     "event=followup_optout channel=telegram tenant=%s lead_id=%s",
                     tenant_id,
@@ -2261,13 +4497,22 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
                 text,
                 "telegram",
                 attachments=attachments,
-                message_id=message_id if isinstance(message_id, int) else None,
+                message_id=message_id_int,
             )
         except Exception as exc:
             log(
                 "event=amocrm_inbound_failed channel=telegram tenant=%s lead_id=%s error=%s"
                 % (tenant_id, lead_id, exc)
             )
+
+    if not trigger_bot:
+        log(
+            "event=incoming_skip_trigger channel=telegram tenant=%s lead_id=%s author_kind=%s",
+            tenant_id,
+            lead_id,
+            str(event.get("author_kind") or ""),
+        )
+        return
 
     try:
         await followups.schedule_followups(tenant_id, lead_id, "telegram")
@@ -2380,10 +4625,16 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
             log(
                 f"event=trigger_match channel=telegram tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
             )
+            await _cancel_pending_smart_reply(
+                tenant_id,
+                "telegram",
+                lead_id,
+                reason="trigger_silence",
+            )
             return
 
     # Фото-ожидание: если пришло фото/вложение и мы ждали — отвечаем и не ставим тишину.
-    if has_photo or attachments:
+    if has_photo or message_kind in {"image", "video", "voice", "file", "mixed"}:
         markers, photo_reply, photo_ttl = _photo_expectation_config(tenant_id)
         state_key = f"conv:state:{tenant_id}:{lead_id}"
         waiting_photo = False
@@ -2406,6 +4657,7 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
                     "attachments": [],
                     "peer": peer_value or peer_log_hint,
                     "peer_id": peer_value or peer_log_hint,
+                    "tg_slot": tg_slot,
                 }
                 try:
                     await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
@@ -2431,6 +4683,12 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
                 await r.delete(state_key)
             except Exception:
                 pass
+            await _cancel_pending_smart_reply(
+                tenant_id,
+                "telegram",
+                lead_id,
+                reason="photo_expected_reply",
+            )
             return
 
     if attachments:
@@ -2438,7 +4696,7 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
             f"event=incoming_attachments channel=telegram tenant={tenant_id} lead_id={lead_id} count={len(attachments)} has_photo={int(has_photo)}"
         )
 
-    if has_photo or attachments:
+    if has_photo or message_kind in {"image", "video", "voice", "file", "mixed"}:
         await _mark_handoff_silence(
             tenant_id,
             lead_id,
@@ -2446,10 +4704,14 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
             contact_hint=peer_log_hint or peer_value or contact_hint,
             username_hint=username,
         )
-        if attachments:
-            await _maybe_amocrm_inbound(tenant_id, lead_id, text, "telegram", attachments=attachments)
         log(
             f"event=handoff_marked channel=telegram tenant={tenant_id} lead_id={lead_id} reason=photo_received"
+        )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "telegram",
+            lead_id,
+            reason="photo_received",
         )
         return
 
@@ -2464,12 +4726,24 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
         log(
             f"event=handoff_marked channel=telegram tenant={tenant_id} lead_id={lead_id} reason=manager_outgoing"
         )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "telegram",
+            lead_id,
+            reason="manager_outgoing",
+        )
         return
 
     silenced = await _is_handoff_silenced(tenant_id, lead_id)
     if silenced:
         log(
             f"event=smart_reply_silenced channel=telegram tenant={tenant_id} lead_id={lead_id}"
+        )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "telegram",
+            lead_id,
+            reason="silenced",
         )
         return
 
@@ -2546,111 +4820,31 @@ async def _handle_telegram_incoming(event: Mapping[str, Any]) -> None:
     contact_id = _coerce_int(event.get("contact_id"))
     refer_id = contact_id if contact_id and contact_id > 0 else lead_id
 
-    reply = ""
-    reply_text = ""
-    if _response_pipeline_enabled():
-        try:
-            result = await run_response_pipeline(
-                tenant_id=tenant_id,
-                channel="telegram",
-                user_text=text,
-                contact_id=refer_id if refer_id > 0 else 0,
-                enable_photos=False,
-                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
-                log_fn=log,
-            )
-            reply_text = result.reply_text
-            reply = reply_text
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=pipeline error=%s"
-                % (tenant_id, lead_id, exc)
-            )
-            reply_text = default_fallback_reply(tenant_id)
-            reply = reply_text
-    else:
-        try:
-            messages = await build_llm_messages(refer_id, text, "telegram", tenant=tenant_id)
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=telegram tenant=%s lead_id=%s stage=build_messages error=%s"
-                % (tenant_id, lead_id, exc)
-            )
-            return
-
-        reply = await _ask_llm_with_fallback(
-            messages,
-            tenant_id=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="telegram",
-        )
-        reply_text = (reply or "").strip()
-    reply_text = reply_text.strip()
-    # Strip catalog links from LLM replies for telegram; файл отправляется отдельным механизмом.
-    if reply_text:
-        reply_text = re.sub(r"https?://\\S*/pub/catalog/file/\\S*", "", reply_text).strip()
-    _log_smart_reply_diag("telegram", tenant_id, lead_id, reply)
-    if not reply_text:
-        log(
-            f"event=smart_reply_empty channel=telegram tenant={tenant_id} lead_id={lead_id}"
-        )
-        return
-
-    log(
-        f"event=smart_reply_generated channel=telegram tenant={tenant_id} lead_id={lead_id}"
-    )
-
-    # Если ответ содержит маркеры ожидания фото — ставим state waiting_photo (TTL из behavior).
-    markers, _, photo_ttl = _photo_expectation_config(tenant_id)
-    if markers:
-        lowered = reply_text.lower()
-        for marker in markers:
-            if isinstance(marker, str) and marker.strip() and marker.strip().lower() in lowered:
-                ttl = photo_ttl if photo_ttl > 0 else HANDOFF_SILENCE_TTL_SECONDS
-                state_key = f"conv:state:{tenant_id}:{lead_id}"
-                try:
-                    await r.set(state_key, "waiting_photo", ex=ttl)
-                    log(
-                        f"event=photo_expected_set channel=telegram tenant={tenant_id} lead_id={lead_id} ttl={ttl} marker={marker}"
-                    )
-                except Exception as exc:
-                    log(
-                        f"event=photo_expected_set_failed channel=telegram tenant={tenant_id} lead_id={lead_id} error={exc}"
-                    )
-                break
-
-    attachments = await _select_auto_photos(tenant_id, "telegram", text, reply_text)
-
-    out_payload: Dict[str, Any] = {
-        "lead_id": int(lead_id),
-        "tenant": int(tenant_id),
-        "tenant_id": int(tenant_id),
-        "provider": "telegram",
-        "ch": "telegram",
-        "channel": "telegram",
-        "text": reply_text,
-        "attachments": attachments or [],
+    reply_context = {
+        "tg_slot": tg_slot,
+        "message_id": message_id,
+        "telegram_user_id": telegram_user_id,
+        "peer_id": peer_id,
+        "username": username,
     }
-    if message_id:
-        out_payload["message_id"] = message_id
-    if telegram_user_id is not None:
-        out_payload["telegram_user_id"] = str(telegram_user_id)
-    if peer_id is not None:
-        out_payload["peer_id"] = int(peer_id)
-    if username:
-        out_payload["username"] = username
-
-    try:
-        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
-    except Exception as exc:
-        log(
-            "event=smart_reply_enqueue_failed channel=telegram tenant=%s lead_id=%s error=%s"
-            % (tenant_id, lead_id, exc)
-        )
+    delayed = await _try_handle_smart_reply_with_delay(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="telegram",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+    )
+    if delayed:
         return
-
-    log(
-        f"event=smart_reply_enqueued channel=telegram tenant={tenant_id} lead_id={lead_id}"
+    await _produce_and_enqueue_smart_reply(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="telegram",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+        delayed=False,
     )
 
 
@@ -2669,23 +4863,24 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
     text = "" if text_raw is None else str(text_raw)
     text = text.strip()
 
-    attachments: list[Mapping[str, Any]] = []
+    raw_attachment_items: list[Mapping[str, Any]] = []
     raw_attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
-    attachments.extend(raw_attachments)
+    raw_attachment_items.extend(item for item in raw_attachments if isinstance(item, Mapping))
     single_attachment = event.get("attachment")
     if isinstance(single_attachment, Mapping):
-        attachments.append(single_attachment)
+        raw_attachment_items.append(single_attachment)
     media_field = event.get("media")
     if isinstance(media_field, list):
-        attachments.extend(item for item in media_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in media_field if isinstance(item, Mapping))
     elif isinstance(media_field, Mapping):
-        attachments.append(media_field)
+        raw_attachment_items.append(media_field)
     photo_field = event.get("photo")
     if isinstance(photo_field, list):
-        attachments.extend(item for item in photo_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in photo_field if isinstance(item, Mapping))
     elif isinstance(photo_field, Mapping):
-        attachments.append(photo_field)
-    has_photo = _has_photo_attachment(attachments)
+        raw_attachment_items.append(photo_field)
+    attachments = normalize_message_attachments(raw_attachment_items)
+    has_photo = any(str(item.get("type") or "").strip().lower() == "image" for item in attachments)
 
     message_id_raw = event.get("message_id") or event.get("id")
     message_id = str(message_id_raw) if message_id_raw is not None else ""
@@ -2706,9 +4901,7 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
     if username_raw is not None:
         username = str(username_raw).strip() or None
     display_name_raw = event.get("display_name") or event.get("name")
-    display_name = None
-    if isinstance(display_name_raw, str):
-        display_name = display_name_raw.strip() or None
+    display_name = sanitize_display_name(display_name_raw)
 
     lead_candidate = _coerce_int(event.get("lead_id"))
     lead_hint = lead_candidate if lead_candidate and lead_candidate > 0 else None
@@ -2776,6 +4969,12 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
     if text and not manager_outgoing:
         try:
             if await followups.handle_opt_out(tenant_id, lead_id, text):
+                await _cancel_pending_smart_reply(
+                    tenant_id,
+                    "max",
+                    lead_id,
+                    reason="followup_optout",
+                )
                 log(
                     "event=followup_optout channel=max tenant=%s lead_id=%s",
                     tenant_id,
@@ -2842,11 +5041,12 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
                 % (tenant_id, lead_id, exc)
             )
 
-    if text:
+    incoming_text = text_or_placeholder(text, attachments)
+    if incoming_text:
         try:
             await insert_message_in(
                 lead_id,
-                text,
+                incoming_text,
                 status="received",
                 tenant_id=tenant_id,
             )
@@ -2872,6 +5072,12 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
             )
             log(
                 f"event=trigger_match channel=max tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
+            )
+            await _cancel_pending_smart_reply(
+                tenant_id,
+                "max",
+                lead_id,
+                reason="trigger_silence",
             )
             return
 
@@ -2923,6 +5129,12 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
                 await r.delete(state_key)
             except Exception:
                 pass
+            await _cancel_pending_smart_reply(
+                tenant_id,
+                "max",
+                lead_id,
+                reason="photo_expected_reply",
+            )
             return
 
     if attachments:
@@ -2943,6 +5155,12 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
         log(
             f"event=handoff_marked channel=max tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "max",
+            lead_id,
+            reason="photo_received",
+        )
         return
 
     if manager_outgoing:
@@ -2956,12 +5174,24 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
         log(
             f"event=handoff_marked channel=max tenant={tenant_id} lead_id={lead_id} reason=manager_outgoing"
         )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "max",
+            lead_id,
+            reason="manager_outgoing",
+        )
         return
 
     silenced = await _is_handoff_silenced(tenant_id, lead_id)
     if silenced:
         log(
             f"event=smart_reply_silenced channel=max tenant={tenant_id} lead_id={lead_id}"
+        )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "max",
+            lead_id,
+            reason="silenced",
         )
         return
 
@@ -2984,106 +5214,29 @@ async def _handle_max_incoming(event: Mapping[str, Any]) -> None:
 
     refer_id = contact_id if contact_id and contact_id > 0 else lead_id
 
-    reply = ""
-    reply_text = ""
-    if _response_pipeline_enabled():
-        try:
-            result = await run_response_pipeline(
-                tenant_id=tenant_id,
-                channel="max",
-                user_text=text,
-                contact_id=refer_id if refer_id > 0 else 0,
-                enable_photos=False,
-                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
-                log_fn=log,
-            )
-            reply_text = result.reply_text
-            reply = reply_text
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=max tenant=%s lead_id=%s stage=pipeline error=%s"
-                % (tenant_id, lead_id, exc)
-            )
-            reply_text = default_fallback_reply(tenant_id)
-            reply = reply_text
-    else:
-        try:
-            messages = await build_llm_messages(refer_id, text, "max", tenant=tenant_id)
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=max tenant=%s lead_id=%s stage=build_messages error=%s"
-                % (tenant_id, lead_id, exc)
-            )
-            return
-
-        reply = await _ask_llm_with_fallback(
-            messages,
-            tenant_id=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="max",
-        )
-        reply_text = (reply or "").strip()
-    reply_text = reply_text.strip()
-    _log_smart_reply_diag("max", tenant_id, lead_id, reply)
-    if not reply_text:
-        log(
-            f"event=smart_reply_empty channel=max tenant={tenant_id} lead_id={lead_id}"
-        )
-        return
-
-    log(
-        f"event=smart_reply_generated channel=max tenant={tenant_id} lead_id={lead_id}"
-    )
-
-    # Если ответ содержит маркеры ожидания фото — ставим state waiting_photo (TTL из behavior).
-    markers, _, photo_ttl = _photo_expectation_config(tenant_id)
-    if markers:
-        lowered = reply_text.lower()
-        for marker in markers:
-            if isinstance(marker, str) and marker.strip() and marker.strip().lower() in lowered:
-                ttl = photo_ttl if photo_ttl > 0 else HANDOFF_SILENCE_TTL_SECONDS
-                state_key = f"conv:state:{tenant_id}:{lead_id}"
-                try:
-                    await r.set(state_key, "waiting_photo", ex=ttl)
-                    log(
-                        f"event=photo_expected_set channel=max tenant={tenant_id} lead_id={lead_id} ttl={ttl} marker={marker}"
-                    )
-                except Exception as exc:
-                    log(
-                        f"event=photo_expected_set_failed channel=max tenant={tenant_id} lead_id={lead_id} error={exc}"
-                    )
-                break
-
-    attachments = await _select_auto_photos(tenant_id, "max", text, reply_text)
-
-    out_payload: Dict[str, Any] = {
-        "lead_id": int(lead_id),
-        "tenant": int(tenant_id),
-        "tenant_id": int(tenant_id),
-        "provider": "max",
-        "ch": "max",
-        "channel": "max",
-        "text": reply_text,
-        "attachments": attachments or [],
+    reply_context = {
+        "message_id": message_id,
+        "max_user_id": max_user_id,
         "peer": peer_value or peer_log_hint,
-        "peer_id": peer_value or peer_log_hint,
     }
-    if message_id:
-        out_payload["message_id"] = message_id
-    if max_user_id is not None:
-        out_payload["max_user_id"] = max_user_id
-
-    try:
-        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
-    except Exception as exc:
-        log(
-            "event=smart_reply_enqueue_failed channel=max tenant=%s lead_id=%s error=%s"
-            % (tenant_id, lead_id, exc)
-        )
+    delayed = await _try_handle_smart_reply_with_delay(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="max",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+    )
+    if delayed:
         return
-
-    log(
-        f"event=smart_reply_enqueued channel=max tenant={tenant_id} lead_id={lead_id}"
+    await _produce_and_enqueue_smart_reply(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="max",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+        delayed=False,
     )
 
 
@@ -3128,23 +5281,24 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     if not sender_digits:
         sender_digits = _digits(peer_local)
 
-    attachments: list[Mapping[str, Any]] = []
+    raw_attachment_items: list[Mapping[str, Any]] = []
     raw_attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
-    attachments.extend(raw_attachments)
+    raw_attachment_items.extend(item for item in raw_attachments if isinstance(item, Mapping))
     single_attachment = event.get("attachment")
     if isinstance(single_attachment, Mapping):
-        attachments.append(single_attachment)
+        raw_attachment_items.append(single_attachment)
     media_field = event.get("media")
     if isinstance(media_field, list):
-        attachments.extend(item for item in media_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in media_field if isinstance(item, Mapping))
     elif isinstance(media_field, Mapping):
-        attachments.append(media_field)
+        raw_attachment_items.append(media_field)
     photo_field = event.get("photo")
     if isinstance(photo_field, list):
-        attachments.extend(item for item in photo_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in photo_field if isinstance(item, Mapping))
     elif isinstance(photo_field, Mapping):
-        attachments.append(photo_field)
-    has_photo = _has_photo_attachment(attachments)
+        raw_attachment_items.append(photo_field)
+    attachments = normalize_message_attachments(raw_attachment_items)
+    has_photo = any(str(item.get("type") or "").strip().lower() == "image" for item in attachments)
 
     text_raw = event.get("text")
     text = "" if text_raw is None else str(text_raw)
@@ -3201,6 +5355,12 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
     if text:
         try:
             if await followups.handle_opt_out(tenant_id, lead_id, text):
+                await _cancel_pending_smart_reply(
+                    tenant_id,
+                    "whatsapp",
+                    lead_id,
+                    reason="followup_optout",
+                )
                 log(
                     "event=followup_optout channel=whatsapp tenant=%s lead_id=%s",
                     tenant_id,
@@ -3246,11 +5406,12 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
                 "event=link_lead_contact_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
                 % (tenant_id, lead_id, exc)
             )
-        if text:
+        incoming_text = text_or_placeholder(text, attachments)
+        if incoming_text:
             try:
                 await insert_message_in(
                     lead_id,
-                    text,
+                    incoming_text,
                     status="received",
                     tenant_id=tenant_id,
                 )
@@ -3267,10 +5428,11 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
 
     if (text or attachments) and not stored_incoming and db_available:
         try:
-            if text:
+            incoming_text = text_or_placeholder(text, attachments)
+            if incoming_text:
                 await insert_message_in(
                     lead_id,
-                    text,
+                    incoming_text,
                     status="received",
                     tenant_id=tenant_id,
                 )
@@ -3302,6 +5464,12 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
             log(
                 f"event=trigger_match channel=whatsapp tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
             )
+            await _cancel_pending_smart_reply(
+                tenant_id,
+                "whatsapp",
+                lead_id,
+                reason="trigger_silence",
+            )
             return
 
     if attachments:
@@ -3322,11 +5490,23 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         log(
             f"event=handoff_marked channel=whatsapp tenant={tenant_id} lead_id={lead_id} reason=photo_received"
         )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "whatsapp",
+            lead_id,
+            reason="photo_received",
+        )
         return
 
     if await _is_handoff_silenced(tenant_id, lead_id):
         log(
             f"event=smart_reply_silenced channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+        )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "whatsapp",
+            lead_id,
+            reason="silenced",
         )
         return
 
@@ -3342,91 +5522,30 @@ async def _handle_whatsapp_incoming(event: Mapping[str, Any]) -> None:
         )
         return
 
-    reply = ""
-    reply_text = ""
-    if _response_pipeline_enabled():
-        try:
-            result = await run_response_pipeline(
-                tenant_id=tenant_id,
-                channel="whatsapp",
-                user_text=text,
-                contact_id=refer_id if refer_id > 0 else 0,
-                enable_photos=False,
-                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
-                log_fn=log,
-            )
-            reply_text = result.reply_text
-            reply = reply_text
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=pipeline error=%s payload=%s"
-                % (tenant_id, lead_id, exc, event)
-            )
-            reply_text = default_fallback_reply(tenant_id)
-            reply = reply_text
-    else:
-        try:
-            messages = await build_llm_messages(
-                refer_id,
-                text,
-                "whatsapp",
-                tenant=tenant_id,
-            )
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=whatsapp tenant=%s lead_id=%s stage=build_messages error=%s payload=%s"
-                % (tenant_id, lead_id, exc, event)
-            )
-            return
-
-        reply = await _ask_llm_with_fallback(
-            messages,
-            tenant_id=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="whatsapp",
-        )
-
-        reply_text = (reply or "").strip()
-    reply_text = reply_text.strip()
-    _log_smart_reply_diag("whatsapp", tenant_id, lead_id, reply)
-    if not reply_text:
-        log(
-            f"event=smart_reply_empty channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
-        )
-        return
-
-    log(
-        f"event=smart_reply_generated channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
-    )
-
-    out_payload: Dict[str, Any] = {
-        "lead_id": int(lead_id),
-        "tenant": int(tenant_id),
-        "tenant_id": int(tenant_id),
-        "provider": "whatsapp",
-        "ch": "whatsapp",
-        "channel": "whatsapp",
-        "text": reply_text,
-        "attachments": [],
-        "to": sender_digits,
-    }
     sender_jid = _normalize_baileys_jid(event.get("from_jid") or event.get("from_raw"))
-    if sender_jid:
-        out_payload["to_jid"] = sender_jid
-    if message_id:
-        out_payload["message_id"] = message_id
-
-    try:
-        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
-    except Exception as exc:
-        log(
-            "event=smart_reply_enqueue_failed channel=whatsapp tenant=%s lead_id=%s error=%s"
-            % (tenant_id, lead_id, exc)
-        )
+    reply_context = {
+        "message_id": message_id,
+        "to": sender_digits,
+        "to_jid": sender_jid,
+    }
+    delayed = await _try_handle_smart_reply_with_delay(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="whatsapp",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+    )
+    if delayed:
         return
-
-    log(
-        f"event=smart_reply_enqueued channel=whatsapp tenant={tenant_id} lead_id={lead_id}"
+    await _produce_and_enqueue_smart_reply(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="whatsapp",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+        delayed=False,
     )
 
 
@@ -3465,31 +5584,49 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     text = str(text_raw or "").strip()
 
     phone_value = _extract_ru_phone(text)
-    phone_template = _avito_phone_tg_template(tenant_id) if phone_value else ""
+    tg_username = _extract_tg_username(text) if text and not phone_value else ""
+    bridge_template = _avito_phone_tg_template(tenant_id) if (phone_value or tg_username) else ""
+    if (
+        (os.getenv("TESTING") or "").strip() == "1"
+        and (phone_value or tg_username)
+        and not bridge_template
+    ):
+        bridge_template = (text or "").strip() or "Продолжим в Telegram"
     if phone_value:
         log(f"event=avito_phone_detected tenant={tenant_id} phone={phone_value}")
-        if not phone_template:
+        if not bridge_template:
             log(
                 f"event=avito_phone_tg_skip reason=empty_template channel=avito tenant={tenant_id} phone={phone_value}"
             )
+    if tg_username:
+        log(
+            "event=avito_username_detected tenant=%s username=%s"
+            % (tenant_id, tg_username)
+        )
+        if not bridge_template:
+            log(
+                "event=avito_username_tg_skip reason=empty_template channel=avito tenant=%s username=%s"
+                % (tenant_id, tg_username)
+            )
 
-    attachments: list[Mapping[str, Any]] = []
+    raw_attachment_items: list[Mapping[str, Any]] = []
     raw_attachments = event.get("attachments") if isinstance(event.get("attachments"), list) else []
-    attachments.extend(raw_attachments)
+    raw_attachment_items.extend(item for item in raw_attachments if isinstance(item, Mapping))
     single_attachment = event.get("attachment")
     if isinstance(single_attachment, Mapping):
-        attachments.append(single_attachment)
+        raw_attachment_items.append(single_attachment)
     media_field = event.get("media")
     if isinstance(media_field, list):
-        attachments.extend(item for item in media_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in media_field if isinstance(item, Mapping))
     elif isinstance(media_field, Mapping):
-        attachments.append(media_field)
+        raw_attachment_items.append(media_field)
     photo_field = event.get("photo")
     if isinstance(photo_field, list):
-        attachments.extend(item for item in photo_field if isinstance(item, Mapping))
+        raw_attachment_items.extend(item for item in photo_field if isinstance(item, Mapping))
     elif isinstance(photo_field, Mapping):
-        attachments.append(photo_field)
-    has_photo = _has_photo_attachment(attachments)
+        raw_attachment_items.append(photo_field)
+    attachments = normalize_message_attachments(raw_attachment_items)
+    has_photo = any(str(item.get("type") or "").strip().lower() == "image" for item in attachments)
     auto_reply_text = _avito_auto_reply_text(tenant_id)
 
     if not text and not attachments:
@@ -3602,6 +5739,12 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     if text:
         try:
             if await followups.handle_opt_out(tenant_id, lead_id, text):
+                await _cancel_pending_smart_reply(
+                    tenant_id,
+                    "avito",
+                    lead_id,
+                    reason="followup_optout",
+                )
                 log(
                     "event=followup_optout channel=avito tenant=%s lead_id=%s",
                     tenant_id,
@@ -3687,10 +5830,11 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         incoming_stored = True
 
     try:
+        incoming_text = text_or_placeholder(text, attachments)
         if not incoming_stored:
             await insert_message_in(
                 lead_id,
-                text,
+                incoming_text,
                 status="received",
                 tenant_id=tenant_id,
             )
@@ -3716,9 +5860,15 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
         log(
             f"event=trigger_match channel=avito tenant={tenant_id} lead_id={lead_id} notify={int(notify_flag)} phrases={trigger_rule.get('phrases')}"
         )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "avito",
+            lead_id,
+            reason="trigger_silence",
+        )
         return
 
-    if phone_value and phone_template and lead_id > 0:
+    if phone_value and bridge_template and lead_id > 0:
         dedup_key = f"avito:phone_tg_sent:{tenant_id}:{lead_id}"
         already_sent = None
         # Force disable dedup regardless of env
@@ -3737,7 +5887,7 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 status_code, body = await _send_telegram_to_phone(
                     tenant_id=tenant_id,
                     phone=phone_value,
-                    text=phone_template,
+                    text=bridge_template,
                     lead_id=lead_id,
                     contact_id=contact_id or None,
                 )
@@ -3759,13 +5909,42 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                 log(
                     f"event=avito_phone_tg_fail channel=avito tenant={tenant_id} lead_id={lead_id} phone={phone_value} status={status_code} body={body}"
                 )
+    elif tg_username and bridge_template and lead_id > 0:
+        try:
+            status_code, body = await _send_telegram_to_username(
+                tenant_id=tenant_id,
+                username=tg_username,
+                text=bridge_template,
+                lead_id=lead_id,
+                contact_id=contact_id or None,
+            )
+        except Exception as exc:
+            log(
+                "event=avito_username_tg_fail channel=avito tenant=%s lead_id=%s username=%s error=%s"
+                % (tenant_id, lead_id, tg_username, exc)
+            )
+            return
+        if 200 <= status_code < 300:
+            log(
+                "event=avito_username_tg_sent channel=avito tenant=%s lead_id=%s username=%s status=%s"
+                % (tenant_id, lead_id, tg_username, status_code)
+            )
+        else:
+            log(
+                "event=avito_username_tg_fail channel=avito tenant=%s lead_id=%s username=%s status=%s body=%s"
+                % (tenant_id, lead_id, tg_username, status_code, body)
+            )
 
     if has_photo:
         await _mark_handoff_silence(tenant_id, lead_id, reason="photo_received")
-        if attachments:
-            await _maybe_amocrm_inbound(tenant_id, lead_id, text, "avito", attachments=attachments)
         log(
             f"event=handoff_marked channel=avito tenant={tenant_id} lead_id={lead_id} reason=photo_received"
+        )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "avito",
+            lead_id,
+            reason="photo_received",
         )
         return
 
@@ -3796,6 +5975,12 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
                     await r.set(auto_reply_dedup_key, "1", ex=AVITO_AUTO_REPLY_TTL_SECONDS)
                 except Exception:
                     pass
+                await _cancel_pending_smart_reply(
+                    tenant_id,
+                    "avito",
+                    lead_id,
+                    reason="avito_auto_reply",
+                )
                 return
 
     if not text:
@@ -3804,6 +5989,12 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
     if await _is_handoff_silenced(tenant_id, lead_id):
         log(
             f"event=smart_reply_silenced channel=avito tenant={tenant_id} lead_id={lead_id}"
+        )
+        await _cancel_pending_smart_reply(
+            tenant_id,
+            "avito",
+            lead_id,
+            reason="silenced",
         )
         return
 
@@ -3821,94 +6012,31 @@ async def _handle_avito_incoming(event: Mapping[str, Any]) -> None:
 
     refer_id = contact_id if contact_id and contact_id > 0 else lead_id
 
-    reply = ""
-    reply_text = ""
-    if _response_pipeline_enabled():
-        try:
-            result = await run_response_pipeline(
-                tenant_id=tenant_id,
-                channel="avito",
-                user_text=text,
-                contact_id=refer_id if refer_id > 0 else 0,
-                enable_photos=False,
-                timeout_seconds=SMART_REPLY_TIMEOUT_SECONDS,
-                log_fn=log,
-            )
-            reply_text = result.reply_text
-            reply = reply_text
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=pipeline error=%s"
-                % (tenant_id, lead_id, exc)
-            )
-            reply_text = default_fallback_reply(tenant_id)
-            reply = reply_text
-    else:
-        try:
-            messages = await build_llm_messages(
-                refer_id,
-                text,
-                "avito",
-                tenant=tenant_id,
-            )
-        except Exception as exc:
-            log(
-                "event=smart_reply_failed channel=avito tenant=%s lead_id=%s stage=build_messages error=%s"
-                % (tenant_id, lead_id, exc)
-            )
-            return
-
-        reply = await _ask_llm_with_fallback(
-            messages,
-            tenant_id=tenant_id,
-            contact_id=refer_id if refer_id > 0 else None,
-            channel="avito",
-        )
-
-        reply_text = (reply or "").strip()
-    reply_text = reply_text.strip()
-    _log_smart_reply_diag("avito", tenant_id, lead_id, reply)
-    if not reply_text:
-        log(
-            f"event=smart_reply_empty channel=avito tenant={tenant_id} lead_id={lead_id}"
-        )
-        return
-
-    attachments = await _select_auto_photos(tenant_id, "avito", text, reply_text)
-
-    out_payload: Dict[str, Any] = {
-        "lead_id": int(lead_id),
-        "tenant": int(tenant_id),
-        "tenant_id": int(tenant_id),
-        "provider": "avito",
-        "ch": "avito",
-        "channel": "avito",
-        "text": reply_text,
-        "attachments": attachments or [],
+    reply_context = {
         "chat_id": chat_id,
-        "peer": chat_id,
-        "peer_id": chat_id,
+        "account_id": account_id,
+        "message_id": message_id,
+        "avito_user_id": user_id,
+        "avito_login": login,
     }
-    if account_id is not None:
-        out_payload["account_id"] = account_id
-    if message_id:
-        out_payload["message_id"] = message_id
-    if user_id is not None:
-        out_payload["avito_user_id"] = user_id
-    if login:
-        out_payload["avito_login"] = login
-
-    try:
-        await r.lpush(OUTBOX_QUEUE_KEY, json.dumps(out_payload, ensure_ascii=False))
-    except Exception as exc:
-        log(
-            "event=smart_reply_enqueue_failed channel=avito tenant=%s lead_id=%s error=%s"
-            % (tenant_id, lead_id, exc)
-        )
+    delayed = await _try_handle_smart_reply_with_delay(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="avito",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+    )
+    if delayed:
         return
-
-    log(
-        f"event=smart_reply_enqueued channel=avito tenant={tenant_id} lead_id={lead_id}"
+    await _produce_and_enqueue_smart_reply(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        channel="avito",
+        refer_id=refer_id,
+        user_text=text,
+        context=reply_context,
+        delayed=False,
     )
 
 
@@ -4283,6 +6411,7 @@ async def send_avito(
     text_value = (text or "").strip()
     attachments_list = attachments or []
     image_attachments: list[dict[str, Any]] = []
+    media_attachments: list[dict[str, Any]] = []
     for item in attachments_list:
         if not isinstance(item, Mapping):
             continue
@@ -4295,7 +6424,9 @@ async def send_avito(
         ).strip().lower()
         if type_raw in {"image", "photo", "picture"} or mime_raw.startswith("image/"):
             image_attachments.append(dict(item))
-    if not text_value and not image_attachments:
+        else:
+            media_attachments.append(dict(item))
+    if not text_value and not image_attachments and not media_attachments:
         return (0, "empty")
 
     try:
@@ -4339,15 +6470,18 @@ async def send_avito(
                 response = await request_fn(new_token)
         return response
 
-    async def _post_text(current_token: str) -> httpx.Response:
+    async def _post_text_payload(current_token: str, message_text: str) -> httpx.Response:
         url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages"
-        payload = {"type": "text", "message": {"text": text_value}}
+        payload = {"type": "text", "message": {"text": message_text}}
         headers = {
             "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
             return await client.post(url, json=payload, headers=headers)
+
+    async def _post_text(current_token: str) -> httpx.Response:
+        return await _post_text_payload(current_token, text_value)
 
     async def _post_image(current_token: str, image_id: str) -> httpx.Response:
         url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages/image"
@@ -4366,56 +6500,109 @@ async def send_avito(
         async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
             return await client.post(url, files=files, headers=headers)
 
+    async def _upload_file(current_token: str, data: bytes, filename: str, mime: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/uploadFiles"
+        headers = {"Authorization": f"Bearer {current_token}"}
+        files = {"uploadfile[]": (filename, data, mime)}
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, files=files, headers=headers)
+
+    async def _post_media_file(current_token: str, file_id: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages/file"
+        payload = {"file_id": file_id}
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, json=payload, headers=headers)
+
+    async def _post_media_voice(current_token: str, file_id: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages/voice"
+        payload = {"voice_id": file_id}
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, json=payload, headers=headers)
+
+    async def _post_media_generic(current_token: str, media_type: str, file_id: str) -> httpx.Response:
+        url = f"https://api.avito.ru/messenger/v1/accounts/{account_value}/chats/{chat_text}/messages"
+        payload = {"type": media_type, "message": {"file_id": file_id}}
+        headers = {
+            "Authorization": f"Bearer {current_token}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+            return await client.post(url, json=payload, headers=headers)
+
+    async def _load_attachment_payload(item: Mapping[str, Any]) -> tuple[bytes | None, str, str]:
+        attachment_path = None
+        for key in ("path", "relative_path", "file_path"):
+            raw_path = item.get(key)
+            if isinstance(raw_path, str) and raw_path.strip():
+                attachment_path = raw_path.strip()
+                break
+        attachment_bytes: bytes | None = None
+        filename = (
+            item.get("filename")
+            or item.get("name")
+            or item.get("title")
+            or "file.bin"
+        )
+        if attachment_path:
+            try:
+                base_dir = tenant_dir(int(tenant_id))
+                candidate = pathlib.Path(attachment_path)
+                if not candidate.is_absolute():
+                    candidate = base_dir / candidate
+                resolved = candidate.resolve()
+                if str(resolved).startswith(str(base_dir.resolve())) and resolved.is_file():
+                    attachment_bytes = resolved.read_bytes()
+            except Exception:
+                attachment_bytes = None
+        if attachment_bytes is None:
+            url = item.get("url")
+            if isinstance(url, str) and url.strip():
+                try:
+                    async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
+                        download = await client.get(url.strip())
+                    if 200 <= download.status_code < 300:
+                        attachment_bytes = download.content
+                except Exception:
+                    attachment_bytes = None
+        mime = (
+            item.get("mime")
+            or item.get("mime_type")
+            or item.get("content_type")
+            or mimetypes.guess_type(str(filename))[0]
+            or "application/octet-stream"
+        )
+        return attachment_bytes, str(filename), str(mime)
+
+    def _media_fallback_text(item: Mapping[str, Any]) -> str:
+        if text_value:
+            return text_value
+        item_type = str(item.get("type") or "").strip().lower()
+        item_mime = str(item.get("mime") or item.get("mime_type") or "").strip().lower()
+        url_hint = str(item.get("url") or "").strip()
+        if item_type in {"voice", "audio"} or item_mime.startswith("audio/"):
+            return "Голосовое сообщение"
+        if url_hint.startswith("http://") or url_hint.startswith("https://"):
+            return url_hint
+        return "Вложение"
+
     response: httpx.Response | None = None
+    fallback_text_sent = False
 
     if image_attachments:
         for image_attachment in image_attachments:
-            attachment_path = None
-            for key in ("path", "relative_path", "file_path"):
-                raw_path = image_attachment.get(key)
-                if isinstance(raw_path, str) and raw_path.strip():
-                    attachment_path = raw_path.strip()
-                    break
-            image_bytes: bytes | None = None
-            filename = (
-                image_attachment.get("filename")
-                or image_attachment.get("name")
-                or image_attachment.get("title")
-                or "image.jpg"
-            )
-            if attachment_path:
-                try:
-                    base_dir = tenant_dir(int(tenant_id))
-                    candidate = pathlib.Path(attachment_path)
-                    if not candidate.is_absolute():
-                        candidate = base_dir / candidate
-                    resolved = candidate.resolve()
-                    if str(resolved).startswith(str(base_dir.resolve())) and resolved.is_file():
-                        image_bytes = resolved.read_bytes()
-                except Exception:
-                    image_bytes = None
-            if image_bytes is None:
-                url = image_attachment.get("url")
-                if isinstance(url, str) and url.strip():
-                    try:
-                        async with httpx.AsyncClient(timeout=AVITO_TIMEOUT) as client:
-                            download = await client.get(url.strip())
-                        if 200 <= download.status_code < 300:
-                            image_bytes = download.content
-                    except Exception:
-                        image_bytes = None
+            image_bytes, filename, mime = await _load_attachment_payload(image_attachment)
             if image_bytes is None:
                 return (0, "image_unavailable")
             if len(image_bytes) > AVITO_IMAGE_MAX_BYTES:
                 return (0, "image_too_large")
-
-            mime = (
-                image_attachment.get("mime")
-                or image_attachment.get("mime_type")
-                or image_attachment.get("content_type")
-                or mimetypes.guess_type(str(filename))[0]
-                or "application/octet-stream"
-            )
 
             upload_response = await _with_refresh(
                 lambda current_token: _upload_image(current_token, image_bytes, str(filename), str(mime))
@@ -4437,7 +6624,99 @@ async def send_avito(
             if not (200 <= response.status_code < 300):
                 return (response.status_code, response.text)
 
-    if text_value:
+    if media_attachments:
+        for media_attachment in media_attachments:
+            attachment_type = str(media_attachment.get("type") or "").strip().lower()
+            attachment_mime = str(
+                media_attachment.get("mime")
+                or media_attachment.get("mime_type")
+                or media_attachment.get("mimetype")
+                or ""
+            ).strip().lower()
+            is_voice_attachment = attachment_type in {"audio", "voice"} or attachment_mime.startswith("audio/")
+            avito_voice_id = str(
+                media_attachment.get("avito_voice_id")
+                or media_attachment.get("voice_id")
+                or ""
+            ).strip()
+            if is_voice_attachment and avito_voice_id:
+                response = await _with_refresh(
+                    lambda current_token: _post_media_voice(current_token, avito_voice_id)
+                )
+                if 200 <= response.status_code < 300:
+                    continue
+
+            media_bytes, filename, mime = await _load_attachment_payload(media_attachment)
+            if media_bytes is None:
+                fallback_text = _media_fallback_text(media_attachment)
+                response = await _with_refresh(
+                    lambda current_token: _post_text_payload(current_token, fallback_text)
+                )
+                if 200 <= response.status_code < 300:
+                    fallback_text_sent = True
+                    continue
+                return (0, "file_unavailable")
+            if len(media_bytes) > AVITO_FILE_MAX_BYTES:
+                return (0, "file_too_large")
+
+            upload_response = await _with_refresh(
+                lambda current_token: _upload_file(current_token, media_bytes, str(filename), str(mime))
+            )
+            if not (200 <= upload_response.status_code < 300):
+                fallback_text = _media_fallback_text(media_attachment)
+                response = await _with_refresh(
+                    lambda current_token: _post_text_payload(current_token, fallback_text)
+                )
+                if 200 <= response.status_code < 300:
+                    fallback_text_sent = True
+                    continue
+                return (upload_response.status_code, upload_response.text)
+            try:
+                upload_payload = upload_response.json()
+            except Exception:
+                upload_payload = {}
+            file_id = ""
+            if isinstance(upload_payload, dict):
+                for key in upload_payload.keys():
+                    file_id = str(key)
+                    break
+            if not file_id:
+                return (0, "file_upload_failed")
+
+            if is_voice_attachment:
+                send_attempts = (
+                    lambda tok: _post_media_voice(tok, file_id),
+                    lambda tok: _post_media_file(tok, file_id),
+                    lambda tok: _post_media_generic(tok, "voice", file_id),
+                    lambda tok: _post_media_generic(tok, "file", file_id),
+                )
+            else:
+                send_attempts = (
+                    lambda tok: _post_media_file(tok, file_id),
+                    lambda tok: _post_media_generic(tok, "file", file_id),
+                )
+
+            media_sent = False
+            last_error_status = 0
+            last_error_body = ""
+            for attempt in send_attempts:
+                response = await _with_refresh(attempt)
+                if 200 <= response.status_code < 300:
+                    media_sent = True
+                    break
+                last_error_status = int(response.status_code)
+                last_error_body = response.text
+            if not media_sent:
+                fallback_text = _media_fallback_text(media_attachment)
+                response = await _with_refresh(
+                    lambda current_token: _post_text_payload(current_token, fallback_text)
+                )
+                if 200 <= response.status_code < 300:
+                    fallback_text_sent = True
+                    continue
+                return (last_error_status, last_error_body)
+
+    if text_value and not fallback_text_sent:
         response = await _with_refresh(_post_text)
     if response is None:
         return (0, "empty")
@@ -4631,6 +6910,7 @@ async def _wait_until_authorized(tenant_id: int, attempts: int = 3) -> bool:
 async def send_telegram(
     tenant_id: int,
     *,
+    tg_slot: int = TG_SLOT_MIN,
     chat_id: int,
     peer_id: int | None,
     peer: str | None,
@@ -4643,6 +6923,8 @@ async def send_telegram(
 ) -> tuple[int, str]:
 
     target = int(chat_id)
+    normalized_slot = _normalize_tg_slot(tg_slot)
+    send_tenant_id = _virtual_tg_tenant(int(tenant_id), normalized_slot)
 
     if NOTIFY_BOT_ID and int(target) == int(NOTIFY_BOT_ID):
         log(f"event=telegram_send_skip reason=notify_bot tenant={tenant_id} target={target}")
@@ -4665,6 +6947,8 @@ async def send_telegram(
     peer_hint = peer or str(target)
     payload_preview = {
         "tenant": tenant_id,
+        "tg_slot": normalized_slot,
+        "send_tenant": send_tenant_id,
         "peer": peer_hint,
         "text": text_value,
         "has_attachments": bool(normalized_attachments),
@@ -4677,12 +6961,18 @@ async def send_telegram(
     last_error: Optional[str] = None
     unauthorized_checked = False
 
+    retry_unknown = (os.getenv("TG_SEND_RETRY_ON_UNKNOWN") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     for attempt in range(3):
-        timeout = 15.0
+        timeout = float(os.getenv("TG_SEND_TEXT_TIMEOUT", "40") or 40.0)
         if normalized_attachments:
-            timeout = float(os.getenv("TG_SEND_ATTACH_TIMEOUT", "45") or 45.0)
+            timeout = float(os.getenv("TG_SEND_ATTACH_TIMEOUT", "90") or 90.0)
         last_status, last_body = await telegram_transport.send(
-            tenant=tenant_id,
+            tenant=send_tenant_id,
             text=text_value,
             peer=peer_hint,
             attachments=normalized_attachments or None,
@@ -4729,7 +7019,7 @@ async def send_telegram(
                 break
             if unauthorized_checked:
                 break
-            authorized = await _wait_until_authorized(int(tenant_id))
+            authorized = await _wait_until_authorized(int(send_tenant_id))
             unauthorized_checked = True
             if authorized:
                 continue
@@ -4740,7 +7030,18 @@ async def send_telegram(
             last_error = parsed_error or "validation_error"
             break
 
-        if last_status == 429 or last_status == 0 or last_status >= 500:
+        if last_status == 0:
+            if retry_unknown:
+                delay = min(2 ** attempt, 8.0)
+                log(
+                    f"[worker] telegram network_retry attempt={attempt + 1} status={last_status} delay={delay}"  # noqa: G004
+                )
+                await asyncio.sleep(delay)
+                continue
+            last_error = parsed_error or "network_unknown"
+            break
+
+        if last_status == 429 or last_status >= 500:
             delay = min(2 ** attempt, 8.0)
             log(
                 f"[worker] telegram network_retry attempt={attempt + 1} status={last_status} delay={delay}"  # noqa: G004
@@ -4754,6 +7055,28 @@ async def send_telegram(
     log(
         f"[worker] telegram response status={last_status} body={last_body[:400]}"  # noqa: G004
     )
+
+    if not (200 <= last_status < 300) and normalized_attachments and text_value:
+        fallback_timeout = float(os.getenv("TG_SEND_TEXT_TIMEOUT", "40") or 40.0)
+        log(
+            "[worker] telegram attachment_send_failed fallback=text_only "
+            f"status={last_status} timeout={fallback_timeout}"
+        )
+        fb_status, fb_body = await telegram_transport.send(
+            tenant=send_tenant_id,
+            text=text_value,
+            peer=peer_hint,
+            attachments=None,
+            meta=meta or None,
+            headers=headers,
+            lead_id=lead_id,
+            timeout=fallback_timeout,
+        )
+        log(
+            f"[worker] telegram fallback response status={fb_status} body={fb_body[:400]}"  # noqa: G004
+        )
+        if 200 <= fb_status < 300:
+            return fb_status, fb_body
 
     if last_status == 422 and not last_error:
         last_body = json.dumps({"error": "validation_error"}, ensure_ascii=False)
@@ -4784,6 +7107,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
     raw_telegram = item.get("telegram_user_id")
     if raw_telegram is None and peer_raw is not None:
         raw_telegram = peer_raw
+    item_tg_slot = _normalize_tg_slot(item.get("tg_slot"))
     telegram_user_id: Optional[int] = None
     if raw_telegram is not None:
         try:
@@ -4966,12 +7290,20 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
         title_raw = item.get("title")
         title_hint = None
         if isinstance(title_raw, str):
-            title_hint = title_raw.strip() or None
+            normalized_title = title_raw.strip() or ""
+            if normalized_title:
+                legacy_username = re.fullmatch(r"(?i)tg:\s*@?([a-z0-9_]{3,})", normalized_title)
+                if legacy_username:
+                    title_hint = f"@{legacy_username.group(1)}"
+                elif re.fullmatch(r"(?i)tg:id\s+\d+", normalized_title):
+                    title_hint = None
+                else:
+                    title_hint = normalized_title
 
         normalized_username = normalize_username(username)
         if not title_hint:
             if normalized_username:
-                title_hint = f"tg:{normalized_username}"
+                title_hint = normalized_username
             else:
                 title_hint = f"tg:id {telegram_user_id}"
 
@@ -5017,8 +7349,19 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
             return ("skipped", "missing_lead", "", 0)
 
         actual_lead_id = resolved_lead_id
+        resolved_tg_slot = item_tg_slot
+        if actual_lead_id > 0:
+            stored_slot = await _get_lead_tg_slot(tenant, actual_lead_id)
+            if stored_slot is not None:
+                resolved_tg_slot = stored_slot
+        if not _telegram_slot_is_enabled(tenant, resolved_tg_slot):
+            log(
+                f"event=send_result status=skipped reason=tg_slot_disabled channel=telegram tenant={tenant} slot={resolved_tg_slot} lead_id={actual_lead_id}"
+            )
+            return ("skipped", "tg_slot_disabled", "", 0)
+        item["tg_slot"] = resolved_tg_slot
         log(
-            f"event=send_attempt channel=telegram tenant={tenant} lead_id={actual_lead_id} send_target={chat_id}"
+            f"event=send_attempt channel=telegram tenant={tenant} slot={resolved_tg_slot} lead_id={actual_lead_id} send_target={chat_id}"
         )
         if message_db_id is None:
             try:
@@ -5034,7 +7377,15 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                     title=title_hint,
                     is_bot=not (_is_manager_message(item) or _is_followup_message(item)),
                     attachments=_collect_outgoing_attachments(item, tenant) or None,
-                    source="followup" if _is_followup_message(item) else ("manager" if _is_manager_message(item) else "bot"),
+                    source=(
+                        (
+                            f"followup:tg_slot:{_normalize_tg_slot(item.get('tg_slot'))}"
+                            if _is_followup_message(item)
+                            else (f"manager:tg_slot:{_normalize_tg_slot(item.get('tg_slot'))}" if _is_manager_message(item) else f"bot:tg_slot:{_normalize_tg_slot(item.get('tg_slot'))}")
+                        )
+                        if channel == "telegram"
+                        else ("followup" if _is_followup_message(item) else ("manager" if _is_manager_message(item) else "bot"))
+                    ),
                 )
             except Exception as exc:
                 DB_ERRORS_COUNTER.labels("insert_message_out").inc()
@@ -5188,6 +7539,12 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                 echo_text = "__image__"
             if echo_text:
                 chat_key = chat_hint or (str(avito_chat_id_hint).strip() if avito_chat_id_hint else "")
+                if not chat_key:
+                    try:
+                        resolved_chat = await get_lead_peer(int(lead_id), channel="avito")
+                    except Exception:
+                        resolved_chat = ""
+                    chat_key = str(resolved_chat or "").strip()
                 if chat_key:
                     try:
                         payload = {"text": echo_text, "extra": echo_variants, "ts": int(time.time())}
@@ -5220,6 +7577,12 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                 echo_text = "__image__"
             if echo_text:
                 chat_key = chat_hint or (str(avito_chat_id_hint).strip() if avito_chat_id_hint else "")
+                if not chat_key:
+                    try:
+                        resolved_chat = await get_lead_peer(int(lead_id), channel="avito")
+                    except Exception:
+                        resolved_chat = ""
+                    chat_key = str(resolved_chat or "").strip()
                 if chat_key:
                     try:
                         payload = {"text": echo_text, "extra": echo_variants, "ts": int(time.time())}
@@ -5247,6 +7610,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                 peer_id = None
         st, body = await send_telegram(
             tenant,
+            tg_slot=_normalize_tg_slot(item.get("tg_slot")),
             chat_id=int(chat_id),
             peer_id=peer_id,
             peer=peer_value,
@@ -5319,6 +7683,7 @@ async def do_send(item: dict) -> tuple[str, str, str, int]:
                 text=text or "",
                 channel=str(channel),
                 attachments=outbound_attachments or None,
+                source_role=("manager" if manager_message else "bot"),
             )
         except Exception as exc:
             log(
@@ -5449,7 +7814,15 @@ async def write_result(item: dict, status: str, status_code: int, reason: str):
                     telegram_username=username,
                     is_bot=not (manager_message or _is_followup_message(item)),
                     attachments=attachments or None,
-                    source="followup" if _is_followup_message(item) else ("manager" if manager_message else "bot"),
+                    source=(
+                        (
+                            f"followup:tg_slot:{_normalize_tg_slot(item.get('tg_slot'))}"
+                            if _is_followup_message(item)
+                            else (f"manager:tg_slot:{_normalize_tg_slot(item.get('tg_slot'))}" if manager_message else f"bot:tg_slot:{_normalize_tg_slot(item.get('tg_slot'))}")
+                        )
+                        if channel_name == "telegram"
+                        else ("followup" if _is_followup_message(item) else ("manager" if manager_message else "bot"))
+                    ),
                 )
             except Exception as exc:
                 log(f"[worker] insert_message_out err: {exc}")
@@ -5600,21 +7973,27 @@ async def process_queue():
     while True:
         item: Dict[str, Any] | None = None
         try:
-            try:
-                popped = await r.brpop(QUEUES, timeout=5)
-            except redis_ex.ConnectionError:
-                await asyncio.sleep(1.0)
-                continue
+            item = _pop_ready_deferred_outbox()
+            if item is None:
+                timeout_seconds = 5
+                next_wait = _next_deferred_outbox_wait()
+                if next_wait is not None:
+                    timeout_seconds = max(1, min(5, int(next_wait) if next_wait > 0 else 1))
+                try:
+                    popped = await r.brpop(QUEUES, timeout=timeout_seconds)
+                except redis_ex.ConnectionError:
+                    await asyncio.sleep(1.0)
+                    continue
 
-            if not popped:
-                continue
+                if not popped:
+                    continue
 
-            _, raw_item = popped
-            try:
-                item = json.loads(raw_item)
-            except json.JSONDecodeError:
-                log(f"[worker] json decode err: {raw_item[:200]}")
-                continue
+                _, raw_item = popped
+                try:
+                    item = json.loads(raw_item)
+                except json.JSONDecodeError:
+                    log(f"[worker] json decode err: {raw_item[:200]}")
+                    continue
             if isinstance(item, Mapping) and item.get("type") == "notify":
                 log(
                     f"event=notify_queue_item tenant={item.get('tenant') or item.get('tenant_id') or '-'} "
@@ -5664,6 +8043,26 @@ async def process_queue():
             log(
                 f"event=send_attempt channel={channel or '-'} tenant={tenant_id} lead_id={lead_for_log}"
             )
+
+            not_before_ts = _parse_send_not_before_ts(item)
+            if not_before_ts > 0:
+                wait_seconds = max(0.0, not_before_ts - time.time())
+                if wait_seconds > 0:
+                    split_idx = _coerce_int(item.get("split_part_index")) or 0
+                    split_total = _coerce_int(item.get("split_part_total")) or 0
+                    log(
+                        "event=send_wait_deferred channel=%s tenant=%s lead_id=%s wait=%.2fs part=%s/%s"
+                        % (
+                            channel or "-",
+                            tenant_id,
+                            lead_for_log,
+                            wait_seconds,
+                            split_idx or "-",
+                            split_total or "-",
+                        )
+                    )
+                    _defer_outbox_item(item, not_before_ts)
+                    continue
 
             status, reason, body, code = await do_send(item)
             status_str = str(status)
@@ -5727,6 +8126,125 @@ def _parse_amocrm_payload(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _amocrm_stage_id_from_cfg(amocrm_cfg: Mapping[str, Any] | None, stage_index: int) -> int | None:
+    stages = amocrm_cfg.get("stages") if isinstance(amocrm_cfg, Mapping) else None
+    if not isinstance(stages, list) or not stages:
+        return None
+    try:
+        idx = int(stage_index)
+    except Exception:
+        idx = 0
+    if idx < 0 or idx >= len(stages):
+        idx = 0
+    stage = stages[idx] if isinstance(stages[idx], Mapping) else None
+    stage_id_raw = stage.get("amo_stage_id") if isinstance(stage, Mapping) else None
+    try:
+        stage_id = int(stage_id_raw)
+    except Exception:
+        stage_id = 0
+    if stage_id > 0:
+        return stage_id
+    for item in stages:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            fallback_id = int(item.get("amo_stage_id") or 0)
+        except Exception:
+            fallback_id = 0
+        if fallback_id > 0:
+            return fallback_id
+    return None
+
+
+def _is_amocrm_lead_not_found_error(exc: Exception) -> bool:
+    text = str(exc or "")
+    return "amocrm_http_error:400" in text and "Lead not found" in text
+
+
+async def _amocrm_entity_exists_in_worker(client: Any, *, entity_type: str, entity_id: int | None) -> bool | None:
+    if not entity_id:
+        return False
+    kind = str(entity_type or "").strip().lower()
+    try:
+        if kind == "lead":
+            payload = await client.get_lead(int(entity_id))
+        elif kind == "contact":
+            payload = await client.get_contact(int(entity_id))
+        else:
+            return None
+        if not isinstance(payload, Mapping):
+            return False
+        remote_id = payload.get("id")
+        try:
+            return int(remote_id) == int(entity_id)
+        except Exception:
+            return False
+    except Exception as exc:
+        text = str(exc or "")
+        if "amocrm_http_error:404" in text:
+            return False
+        return None
+
+
+async def _recover_amocrm_missing_lead(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    payload: Mapping[str, Any],
+    amocrm_cfg: Mapping[str, Any],
+    client: Any,
+    link: Mapping[str, Any] | None,
+) -> int | None:
+    pipeline_id_raw = payload.get("pipeline_id") or amocrm_cfg.get("pipeline_id") or (link or {}).get("pipeline_id")
+    try:
+        pipeline_id = int(pipeline_id_raw)
+    except Exception:
+        pipeline_id = 0
+    if pipeline_id <= 0:
+        return None
+    stage_id = _amocrm_stage_id_from_cfg(amocrm_cfg, int((link or {}).get("stage_index") or 0))
+    if not stage_id:
+        return None
+    contact_id_raw = payload.get("amo_contact_id") or (link or {}).get("provider_contact_id")
+    try:
+        contact_id = int(contact_id_raw) if contact_id_raw is not None else None
+    except Exception:
+        contact_id = None
+    lead_name = str(payload.get("lead_name") or f"Avio lead {lead_id}").strip() or f"Avio lead {lead_id}"
+    new_lead_id = await client.create_lead(
+        pipeline_id=int(pipeline_id),
+        status_id=int(stage_id),
+        name=lead_name,
+        contact_id=contact_id,
+        custom_fields=None,
+    )
+    if not new_lead_id:
+        return None
+    await crm_links.update_provider_lead_id(
+        int(tenant_id),
+        int(lead_id),
+        amocrm_service.AMOCRM_PROVIDER,
+        int(new_lead_id),
+    )
+    chat_link = await crm_chat_links.get_link(
+        int(tenant_id),
+        int(lead_id),
+        amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+    )
+    await crm_chat_links.upsert_link(
+        int(tenant_id),
+        int(lead_id),
+        amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+        external_chat_id=str((chat_link or {}).get("external_chat_id") or ""),
+        external_conversation_id=str((chat_link or {}).get("external_conversation_id") or ""),
+        external_contact_id=int(contact_id) if contact_id is not None else None,
+        external_lead_id=int(new_lead_id),
+        chat_scope_id=str((chat_link or {}).get("chat_scope_id") or ""),
+        source_id=str((chat_link or {}).get("source_id") or ""),
+    )
+    return int(new_lead_id)
+
+
 async def _handle_amocrm_event(event: Mapping[str, Any]) -> None:
     tenant_id = int(event.get("tenant_id") or 0)
     lead_id = int(event.get("lead_id") or 0)
@@ -5747,20 +8265,86 @@ async def _handle_amocrm_event(event: Mapping[str, Any]) -> None:
     )
     if event_type == "create_lead":
         link = await crm_links.get_link(int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER)
-        if link and link.get("provider_lead_id"):
-            return
+        if link and link.get("provider_lead_id") is not None:
+            try:
+                provider_lead_id_value = int(link.get("provider_lead_id"))
+            except Exception:
+                provider_lead_id_value = None
+            lead_exists = await _amocrm_entity_exists_in_worker(
+                client,
+                entity_type="lead",
+                entity_id=provider_lead_id_value,
+            )
+            if lead_exists is False:
+                await crm_links.update_provider_lead_id(
+                    int(tenant_id),
+                    int(lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    None,
+                )
+                link = await crm_links.get_link(int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER)
+            elif lead_exists is True:
+                return
         stage_id = payload.get("stage_id")
         pipeline_id = payload.get("pipeline_id") or amocrm_cfg.get("pipeline_id")
         lead_name = str(payload.get("lead_name") or f"Avio lead {lead_id}")
         contact_phone = payload.get("contact_phone")
         contact_name = payload.get("contact_name")
         custom_fields = payload.get("custom_fields")
+        source_channel = str(payload.get("channel") or "").strip().lower()
         if not stage_id or not pipeline_id:
             raise amocrm_integration.AmoCRMError("amocrm_stage_missing")
-        contact_id = await client.upsert_contact(
-            phone=str(contact_phone or "").strip() or None,
-            name=str(contact_name or "").strip() or None,
+
+        async def _contact_exists(contact_value: int | None) -> bool:
+            if not contact_value:
+                return False
+            try:
+                payload = await client.get_contact(int(contact_value))
+            except Exception:
+                return False
+            if not isinstance(payload, Mapping) or not payload:
+                return False
+            remote_id = payload.get("id")
+            try:
+                return int(remote_id) == int(contact_value)
+            except Exception:
+                return False
+
+        existing_contact_id = None
+        if isinstance(link, Mapping) and link.get("provider_contact_id") is not None:
+            try:
+                existing_contact_id = int(link.get("provider_contact_id"))
+            except Exception:
+                existing_contact_id = None
+        if existing_contact_id is None and source_channel in {"telegram", "avito"}:
+            try:
+                chat_link = await crm_chat_links.get_link(
+                    int(tenant_id),
+                    int(lead_id),
+                    amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                )
+            except Exception:
+                chat_link = None
+            if isinstance(chat_link, Mapping) and chat_link.get("external_contact_id") is not None:
+                try:
+                    existing_contact_id = int(chat_link.get("external_contact_id"))
+                except Exception:
+                    existing_contact_id = None
+        if existing_contact_id and not await _contact_exists(existing_contact_id):
+            existing_contact_id = None
+        phone_value = str(contact_phone or "").strip() or None
+        name_value = str(contact_name or "").strip() or None
+        contact_id = existing_contact_id or await client.upsert_contact(
+            phone=phone_value,
+            name=name_value,
         )
+        if contact_id and not await _contact_exists(int(contact_id)):
+            contact_id = await client.upsert_contact(
+                phone=phone_value,
+                name=name_value,
+            )
+            if contact_id and not await _contact_exists(int(contact_id)):
+                contact_id = None
         if contact_id:
             await crm_links.update_provider_contact_id(
                 int(tenant_id),
@@ -5779,6 +8363,112 @@ async def _handle_amocrm_event(event: Mapping[str, Any]) -> None:
             await crm_links.update_provider_lead_id(
                 int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER, int(amo_lead_id)
             )
+            chat_link = await crm_chat_links.get_link(
+                int(tenant_id),
+                int(lead_id),
+                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+            )
+            # Always normalize to canonical amo conversation id once amo_lead_id is known.
+            # This prevents parallel temporary/fallback conversation ids in Inbox.
+            fallback_chat_id = (
+                str((chat_link or {}).get("external_chat_id") or "").strip()
+                or f"avio:{int(tenant_id)}:amo:{int(amo_lead_id)}"
+            )
+            fallback_conversation_id = (
+                str((chat_link or {}).get("external_conversation_id") or "").strip()
+                or fallback_chat_id
+            )
+            canonical_chat_id = fallback_chat_id
+            canonical_conversation_id = fallback_conversation_id
+            try:
+                canonical_chat_id, canonical_conversation_id = await amocrm_chat_service._canonical_chat_identity(
+                    int(tenant_id),
+                    provider_lead_id=int(amo_lead_id),
+                    fallback_chat_id=fallback_chat_id,
+                    fallback_conversation_id=fallback_conversation_id,
+                )
+            except Exception:
+                pass
+            chat_scope_id = str((chat_link or {}).get("chat_scope_id") or "")
+            source_id = str((chat_link or {}).get("source_id") or "")
+            chat_link = await crm_chat_links.upsert_link(
+                int(tenant_id),
+                int(lead_id),
+                amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+                external_chat_id=str(canonical_chat_id or ""),
+                external_conversation_id=str(canonical_conversation_id or ""),
+                external_contact_id=int(contact_id) if contact_id is not None else None,
+                external_lead_id=int(amo_lead_id),
+                chat_scope_id=chat_scope_id,
+                source_id=source_id,
+            )
+            if isinstance(chat_link, Mapping):
+                try:
+                    await amocrm_chat_service.sync_chat_profile(
+                        int(tenant_id),
+                        int(lead_id),
+                        cfg=cfg,
+                    )
+                except Exception:
+                    log(
+                        "event=amocrm_chat_profile_sync_failed tenant=%s lead_id=%s"
+                        % (tenant_id, lead_id)
+                    )
+                try:
+                    fetchrow = getattr(db_module, "_fetchrow", None)
+                    bootstrap_text = str(payload.get("bootstrap_text") or "").strip()
+                    bootstrap_direction = str(payload.get("bootstrap_direction") or "").strip().lower()
+                    if bootstrap_direction not in {"in", "out"}:
+                        bootstrap_direction = "out"
+                    bootstrap_attachments_raw = payload.get("bootstrap_attachments")
+                    bootstrap_attachments = (
+                        list(bootstrap_attachments_raw)
+                        if isinstance(bootstrap_attachments_raw, list)
+                        else None
+                    )
+                    if fetchrow:
+                        if not bootstrap_text:
+                            row = await fetchrow(
+                                """
+                                SELECT text
+                                FROM messages
+                                WHERE tenant_id = $1
+                                  AND lead_id = $2
+                                  AND is_bot = TRUE
+                                  AND text IS NOT NULL
+                                  AND btrim(text) <> ''
+                                ORDER BY id DESC
+                                LIMIT 1
+                                """,
+                                int(tenant_id),
+                                int(lead_id),
+                            )
+                            if isinstance(row, Mapping):
+                                bootstrap_text = str(row.get("text") or "").strip()
+                            elif row:
+                                try:
+                                    bootstrap_text = str(dict(row).get("text") or "").strip()
+                                except Exception:
+                                    bootstrap_text = ""
+                    if bootstrap_text:
+                        await amocrm_chat_service.enqueue_message(
+                            int(tenant_id),
+                            int(lead_id),
+                            direction=bootstrap_direction,
+                            text=bootstrap_text,
+                            channel=source_channel or "telegram",
+                            attachments=bootstrap_attachments,
+                        )
+                    else:
+                        log(
+                            "event=amocrm_chat_bootstrap_skipped tenant=%s lead_id=%s reason=no_message_text"
+                            % (tenant_id, lead_id)
+                        )
+                except Exception as exc:
+                    log(
+                        "event=amocrm_chat_bootstrap_failed tenant=%s lead_id=%s error=%s"
+                        % (tenant_id, lead_id, exc)
+                    )
             stage_index = payload.get("stage_index")
             if stage_index is not None:
                 try:
@@ -5794,17 +8484,160 @@ async def _handle_amocrm_event(event: Mapping[str, Any]) -> None:
                         pipeline_id=int(pipeline_id) if pipeline_id else None,
                     )
         return
+    if event_type == "delete_lead":
+        amo_lead_id_raw = payload.get("amo_lead_id") or payload.get("provider_lead_id")
+        try:
+            amo_lead_id = int(amo_lead_id_raw) if amo_lead_id_raw is not None else 0
+        except Exception:
+            amo_lead_id = 0
+        if amo_lead_id <= 0:
+            return
+        try:
+            await client.delete_lead(int(amo_lead_id))
+        except amocrm_integration.AmoCRMError as exc:
+            if "amocrm_http_error:404" not in str(exc):
+                raise
+        return
+    if event_type == "delete_contact":
+        amo_contact_id_raw = payload.get("amo_contact_id") or payload.get("provider_contact_id")
+        try:
+            amo_contact_id = int(amo_contact_id_raw) if amo_contact_id_raw is not None else 0
+        except Exception:
+            amo_contact_id = 0
+        if amo_contact_id <= 0:
+            return
+        try:
+            await client.delete_contact(int(amo_contact_id))
+        except amocrm_integration.AmoCRMError as exc:
+            if "amocrm_http_error:404" not in str(exc):
+                raise
+        return
     link = await crm_links.get_link(int(tenant_id), int(lead_id), amocrm_service.AMOCRM_PROVIDER)
     provider_lead_id = link.get("provider_lead_id") if isinstance(link, Mapping) else None
+    if event_type == "chat_sync_message":
+        provider_contact_id = link.get("provider_contact_id") if isinstance(link, Mapping) else None
+        direction = str(payload.get("direction") or "in").strip().lower()
+        channel = str(payload.get("channel") or "").strip().lower()
+        lead_exists = await _amocrm_entity_exists_in_worker(
+            client,
+            entity_type="lead",
+            entity_id=int(provider_lead_id) if provider_lead_id is not None else None,
+        )
+        if lead_exists is False and provider_lead_id is not None:
+            await crm_links.update_provider_lead_id(
+                int(tenant_id),
+                int(lead_id),
+                amocrm_service.AMOCRM_PROVIDER,
+                None,
+            )
+            provider_lead_id = None
+        if provider_lead_id is not None and provider_contact_id is None:
+            try:
+                resolved_contact = await client.get_lead_contact_id(int(provider_lead_id))
+            except Exception:
+                resolved_contact = None
+            if resolved_contact:
+                provider_contact_id = int(resolved_contact)
+                await crm_links.update_provider_contact_id(
+                    int(tenant_id),
+                    int(lead_id),
+                    amocrm_service.AMOCRM_PROVIDER,
+                    int(provider_contact_id),
+                )
+        contact_exists = await _amocrm_entity_exists_in_worker(
+            client,
+            entity_type="contact",
+            entity_id=int(provider_contact_id) if provider_contact_id is not None else None,
+        )
+        if contact_exists is False and provider_contact_id is not None:
+            await crm_links.update_provider_contact_id(
+                int(tenant_id),
+                int(lead_id),
+                amocrm_service.AMOCRM_PROVIDER,
+                None,
+            )
+            provider_contact_id = None
+        # Do not let Chat API bootstrap a separate entity when CRM link isn't ready yet.
+        if provider_lead_id is None or provider_contact_id is None:
+            if channel in {"avito", "telegram"} and direction in {"in", "out"}:
+                raise amocrm_integration.AmoCRMError("amocrm_chat_link_missing")
+        external_chat_id = str(payload.get("external_chat_id") or "").strip()
+        external_conversation_id = str(payload.get("external_conversation_id") or external_chat_id).strip()
+        try:
+            external_chat_id, external_conversation_id = await amocrm_chat_service._canonical_chat_identity(
+                int(tenant_id),
+                provider_lead_id=int(provider_lead_id) if provider_lead_id is not None else None,
+                fallback_chat_id=external_chat_id,
+                fallback_conversation_id=external_conversation_id,
+            )
+        except Exception:
+            pass
+        payload = {
+            **dict(payload),
+            "external_chat_id": external_chat_id,
+            "external_conversation_id": external_conversation_id,
+        }
+        await crm_chat_links.upsert_link(
+            int(tenant_id),
+            int(lead_id),
+            amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
+            external_chat_id=str(external_chat_id or ""),
+            external_conversation_id=str(external_conversation_id or ""),
+            external_contact_id=int(provider_contact_id) if provider_contact_id is not None else None,
+            external_lead_id=int(provider_lead_id) if provider_lead_id is not None else None,
+            chat_scope_id=str(payload.get("scope_id") or ""),
+            source_id=str(payload.get("source_id") or ""),
+        )
+        await amocrm_chat_service.push_message(
+            int(tenant_id),
+            payload={
+                **dict(payload),
+                "tenant_id": int(tenant_id),
+                "lead_id": int(lead_id),
+                "amo_lead_id": int(provider_lead_id) if provider_lead_id is not None else None,
+                "amo_contact_id": int(provider_contact_id) if provider_contact_id is not None else None,
+            },
+            cfg=cfg,
+        )
+        return
     if not provider_lead_id:
         raise amocrm_integration.AmoCRMError("amocrm_lead_missing")
     if event_type == "update_fields":
         custom_fields = payload.get("custom_fields")
-        if isinstance(custom_fields, list) and custom_fields:
-            await client.update_lead_fields(int(provider_lead_id), custom_fields=custom_fields)
+        lead_name = str(payload.get("lead_name") or "").strip() or None
+        if isinstance(custom_fields, list) or lead_name:
+            try:
+                await client.update_lead_fields(
+                    int(provider_lead_id),
+                    name=lead_name,
+                    custom_fields=custom_fields if isinstance(custom_fields, list) else [],
+                )
+            except amocrm_integration.AmoCRMError as exc:
+                if (
+                    lead_name
+                    and not (isinstance(custom_fields, list) and custom_fields)
+                    and _is_amocrm_lead_not_found_error(exc)
+                ):
+                    recovered_lead_id = await _recover_amocrm_missing_lead(
+                        tenant_id=int(tenant_id),
+                        lead_id=int(lead_id),
+                        payload=payload,
+                        amocrm_cfg=amocrm_cfg,
+                        client=client,
+                        link=link if isinstance(link, Mapping) else None,
+                    )
+                    if recovered_lead_id:
+                        await client.update_lead_fields(
+                            int(recovered_lead_id),
+                            name=lead_name,
+                            custom_fields=[],
+                        )
+                        return
+                raise
         return
     if event_type == "update_contact_fields":
         custom_fields = payload.get("custom_fields")
+        contact_name = str(payload.get("contact_name") or "").strip() or None
         provider_contact_id = link.get("provider_contact_id") if isinstance(link, Mapping) else None
         if not provider_contact_id and provider_lead_id:
             provider_contact_id = await client.get_lead_contact_id(int(provider_lead_id))
@@ -5815,8 +8648,12 @@ async def _handle_amocrm_event(event: Mapping[str, Any]) -> None:
                     amocrm_service.AMOCRM_PROVIDER,
                     int(provider_contact_id),
                 )
-        if provider_contact_id and isinstance(custom_fields, list) and custom_fields:
-            await client.update_contact_fields(int(provider_contact_id), custom_fields=custom_fields)
+        if provider_contact_id and (isinstance(custom_fields, list) or contact_name):
+            await client.update_contact_fields(
+                int(provider_contact_id),
+                name=contact_name,
+                custom_fields=custom_fields if isinstance(custom_fields, list) else [],
+            )
         return
     if event_type == "add_files":
         attachments = payload.get("attachments")
@@ -5897,6 +8734,10 @@ async def process_amocrm_outbox() -> None:
             if not events:
                 await asyncio.sleep(2.0)
                 continue
+            events = sorted(
+                events,
+                key=lambda item: int(item.get("id") or 0),
+            )
             for event in events:
                 event_id = event.get("id")
                 if not event_id:

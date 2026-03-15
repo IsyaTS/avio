@@ -30,6 +30,10 @@ class SessionSnapshot:
     twofa_backoff_until: Optional[int] = None
     needs_2fa: bool = False
     can_restart: bool = False
+    account_id: int | None = None
+    account_username: str | None = None
+    account_phone: str | None = None
+    account_title: str | None = None
 
     @classmethod
     def from_state(cls, state: SessionState) -> "SessionSnapshot":
@@ -75,6 +79,10 @@ class SessionSnapshot:
             can_restart=bool(getattr(state, "can_restart", False)),
             needs_2fa=bool(needs_twofa or twofa_pending),
             twofa_backoff_until=backoff_ms,
+            account_id=state.account_id,
+            account_username=state.account_username,
+            account_phone=state.account_phone,
+            account_title=state.account_title,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -89,6 +97,10 @@ class SessionSnapshot:
             "last_error": self.last_error,
             "can_restart": bool(self.can_restart),
             "twofa_backoff_until": self.twofa_backoff_until,
+            "account_id": self.account_id,
+            "account_username": self.account_username,
+            "account_phone": self.account_phone,
+            "account_title": self.account_title,
         }
 
 

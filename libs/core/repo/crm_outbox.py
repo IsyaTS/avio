@@ -164,6 +164,60 @@ async def has_recent_event(
     return bool(row)
 
 
+async def has_recent_event_type(
+    tenant_id: int,
+    provider: str,
+    lead_id: int,
+    event_type: str,
+    *,
+    window_seconds: int = 600,
+    statuses: tuple[str, ...] = ("pending", "processing", "done"),
+) -> bool:
+    """Check whether an event of this type already exists in a recent window.
+
+    Used to avoid enqueueing duplicate control events (e.g. create_lead)
+    when several inbound messages arrive before the first event is processed.
+    """
+
+    await ensure_schema()
+    fetchrow = getattr(db_module, "_fetchrow", None)
+    if not fetchrow:
+        return False
+    normalized_statuses = tuple(str(s).strip().lower() for s in statuses if str(s).strip())
+    if not normalized_statuses:
+        normalized_statuses = ("pending", "processing", "done")
+    try:
+        row = await fetchrow(
+            """
+            SELECT 1
+            FROM crm_outbox
+            WHERE tenant_id = $1
+              AND provider = $2
+              AND lead_id = $3
+              AND event_type = $4
+              AND status = ANY($5::text[])
+              AND created_at >= now() - make_interval(secs => $6)
+            LIMIT 1
+            """,
+            int(tenant_id),
+            str(provider),
+            int(lead_id),
+            str(event_type),
+            list(normalized_statuses),
+            int(window_seconds),
+        )
+    except Exception:
+        logger.exception(
+            "crm_outbox_has_recent_event_type_failed tenant_id=%s lead_id=%s provider=%s event=%s",
+            tenant_id,
+            lead_id,
+            provider,
+            event_type,
+        )
+        return False
+    return bool(row)
+
+
 async def take_pending(limit: int = 10) -> list[dict[str, Any]]:
     await ensure_schema()
     fetch_fn = getattr(db_module, "_fetch", None)
@@ -199,7 +253,9 @@ async def take_pending(limit: int = 10) -> list[dict[str, Any]]:
                           created_at,
                           updated_at
             )
-            SELECT * FROM updated
+            SELECT *
+            FROM updated
+            ORDER BY created_at ASC, id ASC
             """,
             limit,
         )
@@ -264,6 +320,61 @@ async def mark_retry(
         logger.exception("crm_outbox_mark_retry_failed event_id=%s", event_id)
 
 
+async def cancel_pending_events(
+    tenant_id: int,
+    provider: str,
+    lead_id: int,
+    event_type: str,
+    *,
+    reason: str = "cancelled",
+) -> int:
+    await ensure_schema()
+    exec_fn = getattr(db_module, "_exec", None)
+    fetchrow = getattr(db_module, "_fetchrow", None)
+    if not exec_fn or not fetchrow:
+        return 0
+    row = await fetchrow(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM crm_outbox
+        WHERE tenant_id = $1
+          AND provider = $2
+          AND lead_id = $3
+          AND event_type = $4
+          AND status IN ('pending', 'processing')
+        """,
+        int(tenant_id),
+        str(provider),
+        int(lead_id),
+        str(event_type),
+    )
+    try:
+        count = int((row or {}).get("cnt") or 0)
+    except Exception:
+        count = 0
+    if count <= 0:
+        return 0
+    await exec_fn(
+        """
+        UPDATE crm_outbox
+        SET status = 'done',
+            updated_at = now(),
+            last_error = left($5, 2000)
+        WHERE tenant_id = $1
+          AND provider = $2
+          AND lead_id = $3
+          AND event_type = $4
+          AND status IN ('pending', 'processing')
+        """,
+        int(tenant_id),
+        str(provider),
+        int(lead_id),
+        str(event_type),
+        str(reason or "cancelled"),
+    )
+    return count
+
+
 async def mark_dead(event_id: int, error: str | None) -> None:
     exec_fn = getattr(db_module, "_exec", None)
     if not exec_fn:
@@ -282,6 +393,85 @@ async def mark_dead(event_id: int, error: str | None) -> None:
         )
     except Exception:
         logger.exception("crm_outbox_mark_dead_failed event_id=%s", event_id)
+
+
+async def append_create_lead_bootstrap_message(
+    tenant_id: int,
+    provider: str,
+    lead_id: int,
+    *,
+    text: str,
+    direction: str | None = None,
+) -> bool:
+    """Append inbound text to pending create_lead bootstrap payload.
+
+    Helps preserve early dialog lines while create_lead is still waiting in outbox.
+    Returns True if payload was updated.
+    """
+
+    await ensure_schema()
+    fetchrow = getattr(db_module, "_fetchrow", None)
+    exec_fn = getattr(db_module, "_exec", None)
+    if not fetchrow or not exec_fn:
+        return False
+    text_value = str(text or "").strip()
+    if not text_value:
+        return False
+    row = await fetchrow(
+        """
+        SELECT id, payload
+        FROM crm_outbox
+        WHERE tenant_id = $1
+          AND provider = $2
+          AND lead_id = $3
+          AND event_type = 'create_lead'
+          AND status IN ('pending', 'processing')
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        int(tenant_id),
+        str(provider),
+        int(lead_id),
+    )
+    if not row:
+        return False
+    raw_payload = (row or {}).get("payload")
+    if isinstance(raw_payload, Mapping):
+        payload = dict(raw_payload)
+    elif isinstance(raw_payload, str):
+        try:
+            decoded = json.loads(raw_payload)
+        except Exception:
+            decoded = {}
+        payload = dict(decoded) if isinstance(decoded, Mapping) else {}
+    else:
+        payload = {}
+    bootstrap = str(payload.get("bootstrap_text") or "").strip()
+    if not bootstrap:
+        payload["bootstrap_text"] = text_value
+    else:
+        normalized_existing = {
+            part.strip().lower()
+            for part in bootstrap.split("\n")
+            if part.strip()
+        }
+        if text_value.strip().lower() in normalized_existing:
+            return False
+        payload["bootstrap_text"] = f"{bootstrap}\n{text_value}".strip()
+    if direction:
+        payload["bootstrap_direction"] = str(direction).strip().lower()
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    await exec_fn(
+        """
+        UPDATE crm_outbox
+        SET payload = $2::jsonb,
+            updated_at = now()
+        WHERE id = $1
+        """,
+        int((row or {}).get("id")),
+        payload_json,
+    )
+    return True
 
 
 __all__ = ["enqueue", "take_pending", "mark_done", "mark_retry", "mark_dead", "ensure_schema"]

@@ -41,7 +41,7 @@ async def test_worker_handles_whatsapp_event(monkeypatch: pytest.MonkeyPatch) ->
     async def fake_resolve_contact(**kwargs: object) -> int:
         return 777
 
-    async def fake_link_contact(lead_id: int, contact_id: int) -> None:
+    async def fake_link_contact(lead_id: int, contact_id: int, **kwargs: object) -> None:
         return None
 
     async def fake_build_llm_messages(*args: object, **kwargs: object) -> list[str]:
@@ -66,6 +66,7 @@ async def test_worker_handles_whatsapp_event(monkeypatch: pytest.MonkeyPatch) ->
     )
     monkeypatch.setattr(worker_module, "link_lead_contact", fake_link_contact, raising=False)
     monkeypatch.setattr(worker_module, "smart_reply_enabled", lambda *_: True, raising=False)
+    monkeypatch.setattr(worker_module, "_response_pipeline_enabled", lambda: False, raising=False)
     monkeypatch.setattr(worker_module, "build_llm_messages", fake_build_llm_messages, raising=False)
     monkeypatch.setattr(
         worker_module,

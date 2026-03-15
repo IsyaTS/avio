@@ -1,0 +1,65 @@
+{
+  "cases": [
+    {
+      "name": "door_flow_basic",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "квартира",
+        "авроры 5/3",
+        "гарда зеркало"
+      ],
+      "rules": {
+        "forbidden_substrings": [
+          "ваш запрос принят",
+          "отвечаю по запросу"
+        ],
+        "forbid_city_echo_ponyal": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 3
+      }
+    },
+    {
+      "name": "door_flow_no_address",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "квартира",
+        "гарда зеркало"
+      ],
+      "rules": {
+        "forbidden_substrings": [
+          "ваш запрос принят",
+          "отвечаю по запросу"
+        ],
+        "forbid_city_echo_ponyal": true,
+        "forbid_neighbor_claim_without_address": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 3
+      }
+    },
+    {
+      "name": "greeting_and_city_variants",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "салам алейкум",
+        "город уфа",
+        "для квартиры"
+      ],
+      "rules": {
+        "forbidden_substrings": [
+          "привет!",
+          "ваш запрос принят"
+        ],
+        "forbid_city_echo_ponyal": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 3
+      }
+    }
+  ]
+}

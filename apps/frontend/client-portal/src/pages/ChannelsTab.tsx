@@ -141,11 +141,79 @@ const TelegramCard: React.FC = () => {
   const [qrId, setQrId] = useState<string | null>(null);
   const [needs2fa, setNeeds2fa] = useState(false);
   const [password, setPassword] = useState('');
+  const [qrSlotsCount, setQrSlotsCount] = useState(1);
+  const [selectedSlot, setSelectedSlot] = useState(1);
+  const [multiMode, setMultiMode] = useState(true);
+  const [slotEnabled, setSlotEnabled] = useState<Record<number, boolean>>({ 1: true, 2: true, 3: true, 4: true, 5: true });
+  const [slotsLoaded, setSlotsLoaded] = useState(false);
+  const [suppressAutosave, setSuppressAutosave] = useState(false);
+
+  const slotQuery = useMemo(() => ({ slot: selectedSlot }), [selectedSlot]);
+  const selectedSlotEnabled = slotEnabled[selectedSlot] ?? true;
+
+  const fetchSlotSettings = async () => {
+    if (!api.tenantId || !api.key) return;
+    try {
+      const data = await requestJson<Record<string, any>>(buildUrl('/pub/tg/slots', api));
+      const count = Math.max(1, Math.min(5, Number(data.slot_count) || 1));
+      const enabledMap: Record<number, boolean> = { 1: true, 2: true, 3: true, 4: true, 5: true };
+      const rawEnabled = (data.slot_enabled as Record<string, any>) || {};
+      for (let i = 1; i <= 5; i += 1) {
+        enabledMap[i] = rawEnabled[String(i)] !== false;
+      }
+      setMultiMode(Boolean(data.multi_mode ?? true));
+      setQrSlotsCount(count);
+      setSlotEnabled(enabledMap);
+      const storageKey = api.tenantId ? `tg:selected_slot:${api.tenantId}` : '';
+      let preferredSlot = 1;
+      if (storageKey) {
+        const raw = window.localStorage.getItem(storageKey);
+        const parsed = Number(raw || '1');
+        preferredSlot = Math.max(1, Math.min(count, Number.isFinite(parsed) ? parsed : 1));
+      }
+      setSelectedSlot(preferredSlot);
+      setSlotsLoaded(true);
+    } catch {
+      // silent fallback to defaults
+      setSlotsLoaded(true);
+    }
+  };
+
+  const saveSlotSettings = async (quiet = false) => {
+    if (!api.tenantId || !api.key) return;
+    const payload = {
+      multi_mode: multiMode,
+      slot_count: qrSlotsCount,
+      slot_enabled: {
+        1: slotEnabled[1] ?? true,
+        2: slotEnabled[2] ?? true,
+        3: slotEnabled[3] ?? true,
+        4: slotEnabled[4] ?? true,
+        5: slotEnabled[5] ?? true,
+      },
+    };
+    try {
+      await postJson(buildUrl('/pub/tg/slots', api), payload);
+      if (!quiet) toast.success('Настройки слотов сохранены');
+      await fetchStatus();
+    } catch {
+      if (!quiet) toast.error('Не удалось сохранить настройки слотов');
+    }
+  };
 
   const fetchStatus = async () => {
     if (!api.tenantId || !api.key) return;
+    if (!selectedSlotEnabled) {
+      setStatus('Слот выключен');
+      setBadge('idle');
+      setNeeds2fa(false);
+      setQrId(null);
+      return;
+    }
     try {
-      const data = await requestJson<Record<string, any>>(buildUrl('/pub/tg/status', api, { _: Date.now() }));
+      const data = await requestJson<Record<string, any>>(
+        buildUrl('/pub/tg/status', api, { _: Date.now(), ...slotQuery }),
+      );
       const currentStatus = String(data.state || data.raw_state || data.status || 'unknown');
       if (currentStatus === 'authorized') {
         setStatus('Подключено');
@@ -174,18 +242,40 @@ const TelegramCard: React.FC = () => {
   };
 
   useEffect(() => {
+    fetchSlotSettings().catch(() => undefined);
+  }, [api.tenantId, api.key]);
+
+  useEffect(() => {
+    if (!api.tenantId) return;
+    const key = `tg:selected_slot:${api.tenantId}`;
+    window.localStorage.setItem(key, String(selectedSlot));
+  }, [api.tenantId, selectedSlot]);
+
+  useEffect(() => {
+    if (!slotsLoaded || suppressAutosave) return;
+    const timer = window.setTimeout(() => {
+      saveSlotSettings(true).catch(() => undefined);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [multiMode, qrSlotsCount, slotEnabled, slotsLoaded, suppressAutosave]);
+
+  useEffect(() => {
     fetchStatus().catch(() => undefined);
     if (!api.tenantId || !api.key) return;
     const timer = window.setInterval(() => {
       fetchStatus().catch(() => undefined);
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [api.tenantId, api.key]);
+  }, [api.tenantId, api.key, selectedSlot, selectedSlotEnabled]);
 
   const refreshQr = async () => {
     if (!api.tenantId || !api.key) return;
     try {
-      await requestJson(buildUrl('/pub/tg/start', api, { force: 1 }));
+      if (!selectedSlotEnabled) {
+        toast.error('Слот выключен');
+        return;
+      }
+      await requestJson(buildUrl('/pub/tg/start', api, { force: 1, ...slotQuery }));
       await fetchStatus();
       toast.success('QR обновлён');
     } catch {
@@ -196,7 +286,7 @@ const TelegramCard: React.FC = () => {
   const handleDisconnect = async () => {
     if (!api.tenantId || !api.key) return;
     try {
-      await requestJson(buildUrl('/pub/tg/logout', api), { method: 'POST' });
+      await requestJson(buildUrl('/pub/tg/logout', api, slotQuery), { method: 'POST' });
       await fetchStatus();
       toast.success('Telegram отключён');
     } catch {
@@ -210,7 +300,11 @@ const TelegramCard: React.FC = () => {
       return;
     }
     try {
-      await postJson(buildUrl('/pub/tg/2fa', api), { password: password.trim() });
+      if (!selectedSlotEnabled) {
+        toast.error('Слот выключен');
+        return;
+      }
+      await postJson(buildUrl('/pub/tg/2fa', api, slotQuery), { password: password.trim() });
       toast.success('Пароль отправлен');
       setPassword('');
       fetchStatus().catch(() => undefined);
@@ -220,8 +314,8 @@ const TelegramCard: React.FC = () => {
   };
 
   const qrUrl = qrId
-    ? buildUrl('/pub/tg/qr.png', api, { qr_id: qrId, t: Date.now() })
-    : buildUrl('/pub/tg/qr.png', api, { t: Date.now() });
+    ? buildUrl('/pub/tg/qr.png', api, { qr_id: qrId, t: Date.now(), ...slotQuery })
+    : buildUrl('/pub/tg/qr.png', api, { t: Date.now(), ...slotQuery });
 
   return (
     <div className="card space-y-4">
@@ -231,6 +325,73 @@ const TelegramCard: React.FC = () => {
           <div className="card-subtitle flex items-center gap-2">Подключение через QR или 2FA <Hint text="Подключение Telegram через QR, при необходимости вводится пароль двухфакторной защиты." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-xs text-slate-500">Мульти-режим</span>
+          <select
+            className="input"
+            value={multiMode ? 'on' : 'off'}
+            onChange={(e) => setMultiMode(e.target.value === 'on')}
+          >
+            <option value="on">Включён (все активные слоты)</option>
+            <option value="off">Выключен (слот 1)</option>
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-slate-500">Количество QR-слотов</span>
+          <select
+            className="input"
+            value={qrSlotsCount}
+            onChange={(e) => {
+              setSuppressAutosave(true);
+              const count = Math.max(1, Math.min(5, Number(e.target.value) || 1));
+              setQrSlotsCount(count);
+              if (selectedSlot > count) setSelectedSlot(count);
+              window.setTimeout(() => setSuppressAutosave(false), 0);
+            }}
+          >
+            {[1, 2, 3, 4, 5].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-slate-500">Активный QR-слот</span>
+          <select
+            className="input"
+            value={selectedSlot}
+            onChange={(e) => setSelectedSlot(Math.max(1, Math.min(qrSlotsCount, Number(e.target.value) || 1)))}
+          >
+            {Array.from({ length: qrSlotsCount }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>
+                Слот {n}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <div className="mb-2 text-xs font-medium text-slate-600">Статус слотов</div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {Array.from({ length: qrSlotsCount }, (_, i) => i + 1).map((slot) => (
+            <label key={slot} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+              <span>Слот {slot}</span>
+              <input
+                type="checkbox"
+                checked={slotEnabled[slot] ?? true}
+                onChange={(e) =>
+                  setSlotEnabled((prev) => ({
+                    ...prev,
+                    [slot]: e.target.checked,
+                  }))
+                }
+              />
+            </label>
+          ))}
+        </div>
       </div>
       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
         {needs2fa ? (
@@ -452,13 +613,32 @@ const MaxCard: React.FC = () => {
   );
 };
 
+type AmoPipelineOption = {
+  id: number;
+  name: string;
+};
+
 const AmoCRMCard: React.FC = () => {
   const { api, settings, refreshSettings, setSettings } = useClient();
   const [status, setStatus] = useState('Проверяем статус…');
   const [badge, setBadge] = useState<'ok' | 'warn' | 'err' | 'idle'>('idle');
   const [connected, setConnected] = useState(false);
+  const [chatInfo, setChatInfo] = useState<Record<string, any> | null>(null);
   const [stages, setStages] = useState<Array<Record<string, any>>>([]);
-  const [rulesOptions, setRulesOptions] = useState({ allow_multi_step: false, max_steps_per_event: 1 });
+  const [pipelineOptions, setPipelineOptions] = useState<AmoPipelineOption[]>([]);
+  const [pipelineRouting, setPipelineRouting] = useState({
+    default_pipeline_id: 0,
+    avito_pipeline_id: 0,
+    tgmax_pipeline_id: 0,
+  });
+  const [rulesOptions, setRulesOptions] = useState({
+    stage_router_mode: 'auto',
+    stage_router_confidence_auto: 0.72,
+    stage_router_confidence_semi: 0.45,
+    stage_router_cooldown_seconds: 300,
+    stage_router_max_stage_jump: 1,
+    stage_router_allow_terminal_auto: false,
+  });
   const [loadingStages, setLoadingStages] = useState(false);
   const [savingRules, setSavingRules] = useState(false);
 
@@ -467,40 +647,61 @@ const AmoCRMCard: React.FC = () => {
     () => buildUrl('/pub/integrations/amocrm/oauth/start', api),
     [api]
   );
-  const pipelineUrl = useMemo(() => buildUrl('/pub/integrations/amocrm/pipeline', api), [api]);
   const settingsSaveUrl = useMemo(() => buildUrl('/pub/settings/save', api), [api]);
   const disconnectUrl = useMemo(
     () => buildUrl('/pub/integrations/amocrm/disconnect', api),
     [api]
   );
 
-  const defaultRuleForIndex = (index: number) => {
-    if (index === 0) return { type: 'on_first_inbound', params: {} };
-    if (index === 1) return { type: 'on_inbound_count', params: { min_inbound_messages: 2 } };
-    if (index === 2) return { type: 'on_inbound_count', params: { min_inbound_messages: 4 } };
-    return { type: 'manual_only', params: {} };
+  const normalizeStages = (items: unknown[]) => {
+    return (items || []).map((stage) => ({ ...(stage || {}) } as Record<string, any>));
   };
 
-  const normalizeStages = (items: unknown[]) => {
-    return (items || []).map((stage, idx) => {
-      const normalized = { ...(stage || {}) } as Record<string, any>;
-      if (!normalized.rule) {
-        normalized.rule = defaultRuleForIndex(idx);
-      }
-      if (!normalized.rule.params) {
-        normalized.rule.params = {};
-      }
-      return normalized;
-    });
+  const normalizePipelines = (items: unknown): AmoPipelineOption[] => {
+    if (!Array.isArray(items)) return [];
+    return items
+      .map((item) => {
+        const id = Number.parseInt(String((item as any)?.id ?? ''), 10);
+        if (!Number.isFinite(id) || id <= 0) return null;
+        const name = String((item as any)?.name || '').trim() || `Воронка ${id}`;
+        return { id, name };
+      })
+      .filter((item): item is AmoPipelineOption => Boolean(item));
+  };
+
+  const asPipelineId = (value: any): number => {
+    const id = Number.parseInt(String(value ?? ''), 10);
+    return Number.isFinite(id) && id > 0 ? id : 0;
   };
 
   const normalizeOptions = (raw: any) => {
     const options = raw && typeof raw === 'object' ? raw : {};
-    const allow_multi_step = Boolean(options.allow_multi_step);
-    const max_steps_per_event = Number.parseInt(options.max_steps_per_event || '1', 10) || 1;
+    const modeRaw = String(options.stage_router_mode || 'auto').toLowerCase();
+    const stage_router_mode = modeRaw === 'off' || modeRaw === 'semi_auto' || modeRaw === 'auto' ? modeRaw : 'auto';
+    const stage_router_confidence_auto = Math.min(
+      1,
+      Math.max(0, Number.parseFloat(String(options.stage_router_confidence_auto ?? '0.72')) || 0.72),
+    );
+    const stage_router_confidence_semi = Math.min(
+      1,
+      Math.max(0, Number.parseFloat(String(options.stage_router_confidence_semi ?? '0.45')) || 0.45),
+    );
+    const stage_router_cooldown_seconds = Math.max(
+      0,
+      Number.parseInt(String(options.stage_router_cooldown_seconds ?? '300'), 10) || 300,
+    );
+    const stage_router_max_stage_jump = Math.min(
+      3,
+      Math.max(1, Number.parseInt(String(options.stage_router_max_stage_jump ?? '1'), 10) || 1),
+    );
+    const stage_router_allow_terminal_auto = Boolean(options.stage_router_allow_terminal_auto);
     return {
-      allow_multi_step,
-      max_steps_per_event: max_steps_per_event > 0 ? max_steps_per_event : 1,
+      stage_router_mode,
+      stage_router_confidence_auto,
+      stage_router_confidence_semi,
+      stage_router_cooldown_seconds,
+      stage_router_max_stage_jump,
+      stage_router_allow_terminal_auto,
     };
   };
 
@@ -509,6 +710,19 @@ const AmoCRMCard: React.FC = () => {
     try {
       const data = await requestJson<Record<string, any>>(statusUrl);
       const isConnected = Boolean(data.connected);
+      const statusPipelines = normalizePipelines((data as any).pipelines);
+      if (statusPipelines.length > 0) {
+        setPipelineOptions(statusPipelines);
+        setPipelineRouting((prev) => {
+          const fallback = statusPipelines[0].id;
+          return {
+            default_pipeline_id: prev.default_pipeline_id || fallback,
+            avito_pipeline_id: prev.avito_pipeline_id || prev.default_pipeline_id || fallback,
+            tgmax_pipeline_id: prev.tgmax_pipeline_id || prev.default_pipeline_id || fallback,
+          };
+        });
+      }
+      setChatInfo(data.chat && typeof data.chat === 'object' ? data.chat : null);
       setConnected(isConnected);
       if (isConnected) {
         setStatus('Подключено');
@@ -533,6 +747,18 @@ const AmoCRMCard: React.FC = () => {
     const amocrmCfg = (cfg.integrations || {}).amocrm || {};
     const list = normalizeStages(amocrmCfg.stages || []);
     setStages(list);
+    const options = normalizePipelines(amocrmCfg.pipelines_cache || []);
+    if (options.length > 0) {
+      setPipelineOptions(options);
+    }
+    const defaultPipeline = asPipelineId(amocrmCfg.pipeline_id);
+    const avitoPipeline = asPipelineId(amocrmCfg.pipeline_id_avito);
+    const tgmaxPipeline = asPipelineId(amocrmCfg.pipeline_id_tgmax);
+    setPipelineRouting({
+      default_pipeline_id: defaultPipeline,
+      avito_pipeline_id: avitoPipeline || defaultPipeline,
+      tgmax_pipeline_id: tgmaxPipeline || defaultPipeline,
+    });
     setRulesOptions(normalizeOptions(amocrmCfg.rules_options || {}));
   }, [settings]);
 
@@ -554,29 +780,41 @@ const AmoCRMCard: React.FC = () => {
     }
   };
 
-  const refreshPipeline = async () => {
+  const refreshPipeline = async (targetPipelineId?: number, opts?: { silent?: boolean }) => {
     if (!api.tenantId || !api.key) return;
     setLoadingStages(true);
     try {
-      const data = await requestJson<Record<string, any>>(pipelineUrl);
+      const data = await requestJson<Record<string, any>>(
+        buildUrl('/pub/integrations/amocrm/pipeline', api, targetPipelineId ? { pipeline_id: targetPipelineId } : undefined),
+      );
+      const available = normalizePipelines(data.pipelines);
+      if (available.length > 0) {
+        setPipelineOptions(available);
+      }
       if (Array.isArray(data.stages)) {
         setStages(normalizeStages(data.stages));
-        toast.success('Стадии загружены из amoCRM');
+        if (!opts?.silent) {
+          toast.success('Стадии загружены из amoCRM');
+        }
       } else {
-        toast.error('Не удалось получить стадии');
+        if (!opts?.silent) {
+          toast.error('Не удалось получить стадии');
+        }
       }
     } catch (error) {
-      toast.error('Не удалось загрузить стадии');
+      if (!opts?.silent) {
+        toast.error('Не удалось загрузить стадии');
+      }
     } finally {
       setLoadingStages(false);
     }
   };
 
-  const updateStageRule = (index: number, next: Record<string, any>) => {
-    setStages((prev) =>
-      prev.map((stage, idx) => (idx === index ? { ...stage, rule: { ...stage.rule, ...next } } : stage))
-    );
-  };
+  useEffect(() => {
+    if (!connected || !api.tenantId || !api.key) return;
+    const target = pipelineRouting.default_pipeline_id > 0 ? pipelineRouting.default_pipeline_id : undefined;
+    refreshPipeline(target, { silent: true }).catch(() => undefined);
+  }, [connected, api.tenantId, api.key]);
 
   const handleSaveRules = async () => {
     if (!api.tenantId || !api.key) return;
@@ -585,6 +823,26 @@ const AmoCRMCard: React.FC = () => {
       const cfg = ((settings && settings.cfg) || {}) as Record<string, any>;
       const integrations = { ...(cfg.integrations || {}) };
       const amocrmCfg = { ...(integrations.amocrm || {}) };
+      const selectedDefault =
+        pipelineRouting.default_pipeline_id > 0
+          ? pipelineRouting.default_pipeline_id
+          : (pipelineOptions[0]?.id || 0);
+      if (selectedDefault > 0) {
+        amocrmCfg.pipeline_id = selectedDefault;
+      }
+      if (pipelineRouting.avito_pipeline_id > 0) {
+        amocrmCfg.pipeline_id_avito = pipelineRouting.avito_pipeline_id;
+      } else {
+        delete amocrmCfg.pipeline_id_avito;
+      }
+      if (pipelineRouting.tgmax_pipeline_id > 0) {
+        amocrmCfg.pipeline_id_tgmax = pipelineRouting.tgmax_pipeline_id;
+      } else {
+        delete amocrmCfg.pipeline_id_tgmax;
+      }
+      if (pipelineOptions.length > 0) {
+        amocrmCfg.pipelines_cache = pipelineOptions.map((item) => ({ id: item.id, name: item.name }));
+      }
       amocrmCfg.stages = stages;
       amocrmCfg.rules_options = rulesOptions;
       integrations.amocrm = amocrmCfg;
@@ -600,20 +858,12 @@ const AmoCRMCard: React.FC = () => {
     }
   };
 
-  const ruleTypeOptions = [
-    { value: 'on_first_inbound', label: 'Первое входящее' },
-    { value: 'on_inbound_count', label: 'По количеству входящих' },
-    { value: 'on_keyword', label: 'По ключевому слову' },
-    { value: 'on_field_present', label: 'По наличию поля' },
-    { value: 'manual_only', label: 'Только вручную' },
-  ];
-
   return (
     <div className="card space-y-4 lg:col-span-3">
       <div className="flex items-center justify-between">
         <div>
           <div className="card-title">amoCRM</div>
-          <div className="card-subtitle flex items-center gap-2">Подключение аккаунта <Hint text="Интеграция amoCRM через OAuth, включая правила автопереходов по стадиям." /></div>
+          <div className="card-subtitle flex items-center gap-2">Подключение аккаунта <Hint text="Интеграция amoCRM через OAuth с AI-автопереходами по стадиям воронки." /></div>
         </div>
         <StatusBadge state={badge} label={status} />
       </div>
@@ -631,43 +881,207 @@ const AmoCRMCard: React.FC = () => {
       <div className="text-xs text-slate-400">
         Подключение выполняется через OAuth, настройки берутся из env.
       </div>
+      {connected && chatInfo && (
+        <div className="rounded-2xl border border-blue-100 bg-blue-50/80 p-4 text-sm text-slate-700">
+          <div className="font-semibold text-slate-900">amoCRM Chats / Inbox</div>
+          <div className="mt-1">
+            {chatInfo.connected
+              ? 'Telegram → amoCRM Inbox подключён. Новые сообщения смогут попадать в сделки и чат amoCRM.'
+              : chatInfo.env_configured
+                ? 'Коннектор amoCRM Chats готов, но аккаунт ещё не подключён к Inbox. После первого успешного connect появится scope канала.'
+                : 'Для реального Inbox нужны реквизиты коннектора amoCRM Chats. Пока обычная CRM-связка работает, но Telegram ещё не зеркалится в Inbox.'}
+          </div>
+          {chatInfo.webhook_url && (
+            <div className="mt-2 break-all text-xs text-slate-500">
+              Webhook URL: {chatInfo.webhook_url}
+            </div>
+          )}
+        </div>
+      )}
       {connected && (
         <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="text-sm font-semibold text-slate-700">Воронки amoCRM по каналам</div>
+            <div className="text-xs text-slate-500">
+              Доступно воронок: {pipelineOptions.length || 0}. Выберите, куда создавать сделки по источнику лида.
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="text-sm text-slate-600">
+                Базовая воронка (stage router)
+                <select
+                  className="input mt-1"
+                  value={pipelineRouting.default_pipeline_id || ''}
+                  onChange={(e) => {
+                    const nextId = asPipelineId(e.target.value);
+                    setPipelineRouting((prev) => ({
+                      ...prev,
+                      default_pipeline_id: nextId,
+                      avito_pipeline_id: prev.avito_pipeline_id || nextId,
+                      tgmax_pipeline_id: prev.tgmax_pipeline_id || nextId,
+                    }));
+                    if (nextId > 0) {
+                      refreshPipeline(nextId, { silent: true }).catch(() => undefined);
+                    }
+                  }}
+                >
+                  <option value="">Не выбрано</option>
+                  {pipelineOptions.map((item) => (
+                    <option key={`default-${item.id}`} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm text-slate-600">
+                Avito лиды
+                <select
+                  className="input mt-1"
+                  value={pipelineRouting.avito_pipeline_id || ''}
+                  onChange={(e) =>
+                    setPipelineRouting((prev) => ({
+                      ...prev,
+                      avito_pipeline_id: asPipelineId(e.target.value),
+                    }))
+                  }
+                >
+                  <option value="">Использовать базовую</option>
+                  {pipelineOptions.map((item) => (
+                    <option key={`avito-${item.id}`} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm text-slate-600">
+                Telegram / MAX лиды
+                <select
+                  className="input mt-1"
+                  value={pipelineRouting.tgmax_pipeline_id || ''}
+                  onChange={(e) =>
+                    setPipelineRouting((prev) => ({
+                      ...prev,
+                      tgmax_pipeline_id: asPipelineId(e.target.value),
+                    }))
+                  }
+                >
+                  <option value="">Использовать базовую</option>
+                  {pipelineOptions.map((item) => (
+                    <option key={`tgmax-${item.id}`} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
           <div className="text-sm font-semibold text-slate-700">Автопереходы по воронке</div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="flex items-center gap-2 text-sm text-slate-600">
-              <input
-                type="checkbox"
-                checked={rulesOptions.allow_multi_step}
-                onChange={(e) =>
-                  setRulesOptions((prev) => ({ ...prev, allow_multi_step: e.target.checked }))
-                }
-              />
-              Разрешить несколько шагов за сообщение
-            </label>
+          <div className="grid gap-3 md:grid-cols-3">
             <label className="text-sm text-slate-600">
-              Максимум шагов за событие
-              <input
+              Режим автоперехода
+              <select
                 className="input mt-1"
-                type="number"
-                min={1}
-                value={rulesOptions.max_steps_per_event}
+                value={rulesOptions.stage_router_mode}
                 onChange={(e) =>
                   setRulesOptions((prev) => ({
                     ...prev,
-                    max_steps_per_event: Number.parseInt(e.target.value || '1', 10) || 1,
+                    stage_router_mode: e.target.value as 'off' | 'semi_auto' | 'auto',
+                  }))
+                }
+              >
+                <option value="off">Выключен</option>
+                <option value="semi_auto">Semi-auto (рекомендация менеджеру)</option>
+                <option value="auto">Auto (автоприменение)</option>
+              </select>
+            </label>
+            <label className="text-sm text-slate-600">
+              Порог confidence (auto)
+              <input
+                className="input mt-1"
+                type="number"
+                min={0}
+                max={1}
+                step={0.01}
+                value={rulesOptions.stage_router_confidence_auto}
+                onChange={(e) =>
+                  setRulesOptions((prev) => ({
+                    ...prev,
+                    stage_router_confidence_auto: Math.min(1, Math.max(0, Number.parseFloat(e.target.value) || 0)),
                   }))
                 }
               />
             </label>
+            <label className="text-sm text-slate-600">
+              Порог confidence (semi-auto)
+              <input
+                className="input mt-1"
+                type="number"
+                min={0}
+                max={1}
+                step={0.01}
+                value={rulesOptions.stage_router_confidence_semi}
+                onChange={(e) =>
+                  setRulesOptions((prev) => ({
+                    ...prev,
+                    stage_router_confidence_semi: Math.min(1, Math.max(0, Number.parseFloat(e.target.value) || 0)),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-slate-600">
+              Cooldown между переходами (сек)
+              <input
+                className="input mt-1"
+                type="number"
+                min={0}
+                value={rulesOptions.stage_router_cooldown_seconds}
+                onChange={(e) =>
+                  setRulesOptions((prev) => ({
+                    ...prev,
+                    stage_router_cooldown_seconds: Math.max(0, Number.parseInt(e.target.value || '0', 10) || 0),
+                  }))
+                }
+              />
+            </label>
+            <label className="text-sm text-slate-600">
+              Макс. шагов за переход
+              <input
+                className="input mt-1"
+                type="number"
+                min={1}
+                max={3}
+                value={rulesOptions.stage_router_max_stage_jump}
+                onChange={(e) =>
+                  setRulesOptions((prev) => ({
+                    ...prev,
+                    stage_router_max_stage_jump: Math.min(3, Math.max(1, Number.parseInt(e.target.value || '1', 10) || 1)),
+                  }))
+                }
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={rulesOptions.stage_router_allow_terminal_auto}
+                onChange={(e) =>
+                  setRulesOptions((prev) => ({
+                    ...prev,
+                    stage_router_allow_terminal_auto: e.target.checked,
+                  }))
+                }
+              />
+              Разрешить автопереход в финальные стадии
+            </label>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-500">
+            Rule-based переходы удалены. Используется только AI-роутер стадий + guard-ограничения.
           </div>
           <div className="space-y-3">
             {stages.length === 0 && (
               <div className="text-sm text-slate-500">Стадии не загружены. Нажмите «Обновить стадии».</div>
             )}
             {stages.map((stage, index) => {
-              const rule = stage.rule || {};
-              const params = rule.params || {};
+              const stageType = String(stage.type || '').trim().toLowerCase();
+              const isTerminal = stageType === 'won' || stageType === 'lost';
               return (
                 <div key={`${stage.amo_stage_id || index}`} className="rounded-xl bg-white p-3 shadow-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -675,91 +1089,16 @@ const AmoCRMCard: React.FC = () => {
                       <div className="text-sm font-semibold text-slate-800">
                         {stage.name || `Стадия ${index + 1}`}
                       </div>
-                      <div className="text-xs text-slate-400">ID: {stage.amo_stage_id || '-'}</div>
+                      <div className="text-xs text-slate-400">
+                        ID: {stage.amo_stage_id || '-'} · Тип: {stageType || 'open'}
+                      </div>
                     </div>
-                    <select
-                      className="input"
-                      value={rule.type || ''}
-                      onChange={(e) =>
-                        updateStageRule(index, {
-                          type: e.target.value,
-                          params:
-                            e.target.value === 'on_inbound_count'
-                              ? { min_inbound_messages: params.min_inbound_messages || 2 }
-                              : e.target.value === 'on_keyword'
-                              ? { keywords: params.keywords || [] }
-                              : e.target.value === 'on_field_present'
-                              ? { field_key: params.field_key || '' }
-                              : {},
-                        })
-                      }
-                    >
-                      {ruleTypeOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    {isTerminal && (
+                      <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700">
+                        Финальная стадия
+                      </span>
+                    )}
                   </div>
-                  {rule.type === 'on_inbound_count' && (
-                    <div className="mt-2 text-sm text-slate-600">
-                      Минимум входящих
-                      <input
-                        className="input mt-1"
-                        type="number"
-                        min={1}
-                        value={params.min_inbound_messages || 1}
-                        onChange={(e) =>
-                          updateStageRule(index, {
-                            params: {
-                              ...params,
-                              min_inbound_messages:
-                                Number.parseInt(e.target.value || '1', 10) || 1,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                  )}
-                  {rule.type === 'on_keyword' && (
-                    <div className="mt-2 text-sm text-slate-600">
-                      Ключевые слова (через запятую)
-                      <input
-                        className="input mt-1"
-                        type="text"
-                        value={(params.keywords || []).join(', ')}
-                        onChange={(e) =>
-                          updateStageRule(index, {
-                            params: {
-                              ...params,
-                              keywords: e.target.value
-                                .split(',')
-                                .map((item: string) => item.trim())
-                                .filter(Boolean),
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                  )}
-                  {rule.type === 'on_field_present' && (
-                    <div className="mt-2 text-sm text-slate-600">
-                      Ключ поля (например phone)
-                      <input
-                        className="input mt-1"
-                        type="text"
-                        value={params.field_key || ''}
-                        onChange={(e) =>
-                          updateStageRule(index, {
-                            params: {
-                              ...params,
-                              field_key: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                  )}
                 </div>
               );
             })}

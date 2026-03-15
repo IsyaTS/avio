@@ -1,34 +1,43 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `apps/api/` contains the FastAPI entrypoint (`main.py`), routers under `web/`, and static/templates.
-- `apps/worker/` hosts the Redis worker entrypoints (`main.py`, `http.py`, `outbox.py`).
-- `apps/tgworker/` is the standalone Telegram transport service (FastAPI + Telethon).
-- `db/init/` seeds PostgreSQL, while `migrations/` holds incremental SQL files with ascending numeric prefixes.
-- `apps/waweb/` provides the WhatsApp bridge (Node.js + puppeteer).
+- `apps/api/` — FastAPI приложение: точка входа `main.py`, роуты в `web/`, шаблоны и статика.
+- `apps/worker/` — фоновые обработчики и очереди (`main.py`, `http.py`, `outbox.py`).
+- `apps/tgworker/` — отдельный Telegram transport (FastAPI + Telethon).
+- `apps/waweb/` — WhatsApp bridge (Node.js + puppeteer).
+- `libs/core/` — общая доменная логика, интеграции, репозитории, сервисы.
+- `db/init/` — SQL-инициализация PostgreSQL.
+- `tests/` — `pytest`-тесты.
+- `data/tenants/<id>/` — конфиги тенантов, персоны, каталоги.
 
 ## Build, Test, and Development Commands
-- Start the full stack for parity: `docker-compose up app worker waweb redis postgres`.
-- API-only iteration: run `uvicorn apps.api.main:app --reload --port 8000`; pair with `python -m apps.worker.main` if queue behavior matters.
-- WhatsApp bridge: from `apps/waweb/`, run `npm install` once, then `node index.js` (set `STATE_DIR` when emulating multiple tenants).
+- `docker-compose up app worker waweb redis postgres` — поднять основной стек локально.
+- `uvicorn apps.api.main:app --reload --port 8000` — быстрый запуск только API.
+- `python -m apps.worker.main` — запуск воркера при API-only разработке.
+- `cd apps/waweb && npm install && node index.js` — запуск WhatsApp bridge.
+- `pytest tests -q` — запуск Python-тестов.
 
 ## Coding Style & Naming Conventions
-- Target Python 3.11 with 4-space indents, snake_case functions, PascalCase classes, and consistent type hints aligned with `libs/core/sales_core.py`.
-- Order imports stdlib → third-party → local; prefer explicit JSON responses.
-- Name Redis keys in lowercase with `:` separators (example: `session:tenant:status`).
-- JavaScript in `apps/waweb/` uses CommonJS, camelCase helpers, and 2-space indentation.
+- Python: 3.11, 4 пробела, `snake_case` для функций, `PascalCase` для классов, явные type hints.
+- Импорты: stdlib → third-party → local.
+- Redis-ключи: lowercase + `:` (пример: `handoff:silence:101:<lead_id>`).
+- JavaScript (`apps/waweb/`): CommonJS, camelCase, 2 пробела.
 
 ## Testing Guidelines
-- Use `pytest` under `tests/` with files named `test_*.py`; employ `pytest-asyncio` for async handlers and mock Redis/Postgres as needed.
-- For integration smoke tests involving queues or migrations, run the relevant `docker-compose` services.
-- Add lightweight mocks for `whatsapp-web.js` in `apps/waweb/` and execute via an `npm test` script.
+- Фреймворк: `pytest` (+ `pytest-asyncio` для async-кейсов).
+- Имена файлов: `test_*.py`.
+- Новые изменения в интеграциях покрывайте unit/smoke-тестами с моками внешних API.
+- Для queue/db сценариев используйте поднятые `redis` и `postgres` из `docker-compose`.
 
 ## Commit & Pull Request Guidelines
-- Write imperative commit subjects (e.g., `Add tenant QR reset`) and note env changes or migrations in the body.
-- Pull requests should explain purpose, deployment steps, linked issues, and include UI or observability screenshots/logs when applicable.
-- Before requesting review, run the relevant services or tests and call out any skipped checks explicitly.
+- Коммиты: императивный стиль, коротко и предметно (например: `Fix amoCRM chat link reconciliation`).
+- PR должен содержать:
+  - цель изменений и затронутые модули;
+  - шаги деплоя/миграции (если есть);
+  - результаты проверок (`pytest`, smoke, логи);
+  - скриншоты/логи для UI и интеграционных фиксов.
 
 ## Security & Configuration Tips
-- `.env` stores secrets—never commit raw credentials; share sanitized samples only and rotate if exposed.
-- Scrub WhatsApp IDs, lead IDs, and queue payloads before sharing logs.
-- Reset WhatsApp sessions via `POST /session/:tenant/restart` instead of deleting container state.
+- Секреты храните только в `.env`; не коммитьте реальные ключи/токены.
+- Перед публикацией логов удаляйте телефоны, user id, access tokens, payloads.
+- Сбросы интеграций выполняйте через API/сервисные процедуры, а не удалением файлов состояния вручную.

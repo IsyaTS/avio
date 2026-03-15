@@ -128,10 +128,12 @@ def _prepare_app(
 
     monkeypatch.setenv("OUTBOX_ENABLED", "true")
     monkeypatch.setenv("OUTBOX_WHITELIST", whitelist)
+    monkeypatch.setenv("SEND_STRATEGY", "direct")
     monkeypatch.setenv("ADMIN_TOKEN", "test-token")
     monkeypatch.setenv("WA_WEB_TOKEN", "diag-token")
     monkeypatch.setattr(main_module.settings, "ADMIN_TOKEN", "test-token", raising=False)
     monkeypatch.setattr(main_module.C, "WA_INTERNAL_TOKEN", "diag-token", raising=False)
+    monkeypatch.setattr(main_module, "SEND_STRATEGY", "direct", raising=False)
 
     stub = StubTransportClient(response_factory)
     monkeypatch.setattr(main_module, "_transport_client", lambda channel, provider=None: stub)
