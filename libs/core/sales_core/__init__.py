@@ -1217,6 +1217,9 @@ def _strip_instruction_leaks(text: str) -> str:
     out = re.sub(r"(?u)[\"«»]\s*([,.;:!?])", r"\1", out)
     out = re.sub(r"(?u)[\"«»]+\s*$", "", out)
     out = re.sub(r"(?u)\s+[\"«»]+\s*$", "", out)
+    quote_count = out.count("\"") + out.count("«") + out.count("»")
+    if quote_count % 2 != 0:
+        out = out.replace("\"", "").replace("«", "").replace("»", "")
     out = re.sub(r"(\d)\)(?=\s|$)", r"\1", out)
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
     return out
@@ -1755,8 +1758,59 @@ def _safe_minimal_fallback_reply(
     return reply
 
 
-def _llm_unavailable_reply() -> str:
-    return "Сейчас не могу корректно ответить. Напишите еще раз через минуту."
+def _llm_unavailable_reply(
+    *,
+    user_text: str = "",
+    grounding: Mapping[str, Any] | None = None,
+) -> str:
+    items = _grounding_catalog_items(grounding) if isinstance(grounding, Mapping) else []
+    user_raw = str(user_text or "")
+    turn_intent = _classify_turn_intent(user_raw)
+    user_norm = _normalize_text(user_raw)
+    preview = _shortlist_preview_text(items, limit=2) if items else ""
+    asks_variants = bool(_VARIANTS_USER_HINT_RE.search(user_raw))
+    asks_price = _is_price_intent(user_raw) or _looks_like_price_objection(user_raw)
+    attribute_like_turn = bool(
+        re.search(
+            r"(?iu)(\?|какой|какая|какие|тонк|толщ|металл|наполн|характерист|цвет|зеркал|замок)",
+            user_norm,
+        )
+    )
+    asks_attributes = bool(_extract_attribute_probe(user_raw)) if attribute_like_turn else False
+    repetition_complaint = bool(
+        re.search(r"(?iu)\b(тоже\s+сам|одно\s+и\s+то\s+же|повтор|опять)\b", user_norm)
+    )
+
+    if asks_attributes and items:
+        top = dict(items[0])
+        name = _display_item_label(top) or _item_label(top)
+        if name:
+            return f"По характеристикам могу дать конкретику по модели {name}. Если нужно, покажу другой вариант из каталога."
+
+    if items and _is_price_intent(user_raw):
+        min_price = _catalog_min_price(items)
+        max_price = _catalog_max_price(items)
+        if min_price and max_price and min_price != max_price:
+            return (
+                f"По цене ориентир такой: от {_format_rub_price(min_price)} до {_format_rub_price(max_price)}. "
+                "Могу сразу предложить подходящие варианты из каталога."
+            )
+    if items and (asks_variants or asks_price or repetition_complaint or turn_intent in {"repair", "catalog_problem"}):
+        if turn_intent in {"repair", "catalog_problem"} and preview:
+            return f"Могу сразу предложить подходящие модели: {preview}. Продолжим подбор по вашему запросу."
+        if repetition_complaint and preview:
+            return f"Покажу другой вариант: {preview}. Что важнее по характеристикам для следующего подбора?"
+        if asks_price and preview:
+            return f"По цене и альтернативам могу предложить: {preview}. Если нужно дешевле, подберу другой вариант."
+        if preview:
+            return f"Могу предложить варианты: {preview}. Продолжим подбор по вашему запросу."
+
+    snippet = re.sub(r"\s+", " ", user_raw).strip()
+    if len(snippet) > 80:
+        snippet = snippet[:80].rstrip() + "..."
+    if snippet:
+        return f"Сейчас высокая нагрузка. Фиксирую запрос: {snippet}. Продолжаю подбор."
+    return "Сейчас высокая нагрузка. Продолжаю подбор по вашему запросу."
 
 
 def _apply_optional_lowercase_opening(
@@ -2126,17 +2180,12 @@ def _apply_base_answer_quality_floor(
     candidate = str(answer or "").strip()
     if not candidate:
         return ""
-    candidate = _enforce_catalog_price_grounding(candidate, grounding=grounding)
-    candidate = _enforce_catalog_truth_guard(
-        candidate,
-        grounding=grounding,
-        user_text=user_text,
-    )
+    candidate = re.sub(r"(?<=\d)\.(?=\d)", ",", candidate)
     candidate = _normalize_catalog_name_case(candidate, grounding=grounding)
     candidate = _dedupe_repeated_fact_sentences(candidate, state)
     candidate = _strip_instruction_leaks(candidate)
     candidate = _drop_repeated_questions_from_reply(candidate, state)
-    candidate = _limit_questions(candidate, max_questions=_max_questions_limit(persona_hints))
+    candidate = _limit_questions(candidate, max_questions=min(1, _max_questions_limit(persona_hints)))
     candidate = _enforce_exclamation_budget(candidate, max_exclamations=1)
     candidate = _enforce_sentence_budget(candidate, max_sentences=2)
     return candidate.strip()
@@ -2158,7 +2207,13 @@ def _prefer_refined_answer(
         grounding=grounding,
         user_text=user_text,
     )
-    refined_candidate = str(refined or "").strip()
+    refined_candidate = _apply_base_answer_quality_floor(
+        refined,
+        state=state,
+        persona_hints=persona_hints,
+        grounding=grounding,
+        user_text=user_text,
+    )
     if not refined_candidate:
         return base_candidate or refined_candidate
     if not base_candidate:
@@ -2171,11 +2226,8 @@ def _prefer_refined_answer(
     if base_ok and (not refined_ok):
         return base_candidate
 
-    # If refined collapses substantive response into short placeholder-like form,
-    # keep base candidate.
     if len(base_candidate) >= 40 and len(refined_candidate) < max(20, int(len(base_candidate) * 0.45)):
         return base_candidate
-
     if _answer_is_too_robotic(refined_candidate) and not _answer_is_too_robotic(base_candidate):
         return base_candidate
 
@@ -2210,26 +2262,9 @@ def _prefer_refined_answer(
         and not _URGENT_TODAY_RE.search(str(user_text or ""))
     ):
         return base_candidate
-    grounding_items = _grounding_catalog_items(grounding)
-    if grounding_items:
-        user_raw = str(user_text or "")
-        direct_catalog_intent = bool(
-            _is_price_intent(user_raw)
-            or _VARIANTS_USER_HINT_RE.search(user_raw)
-            or _MODEL_NAME_INTENT_RE.search(user_raw)
-        )
-        if direct_catalog_intent:
-            if _reply_mentions_catalog_item(base_candidate, grounding_items) and not _reply_mentions_catalog_item(
-                refined_candidate, grounding_items
-            ):
-                return base_candidate
 
-    base_unknown_markers = base_low.count("модель из каталога")
-    refined_unknown_markers = refined_low.count("модель из каталога")
-    if refined_unknown_markers > base_unknown_markers:
+    if refined_low.count("модель из каталога") > base_low.count("модель из каталога"):
         return base_candidate
-
-    # Extra protection from repeated generic substitution.
     if refined_low.count("вариант") >= 3 and base_low.count("вариант") <= 1:
         return base_candidate
     if re.search(
@@ -2240,6 +2275,19 @@ def _prefer_refined_answer(
         base_low,
     ):
         return base_candidate
+
+    grounding_items = _grounding_catalog_items(grounding)
+    if grounding_items:
+        direct_catalog_intent = bool(
+            _is_price_intent(str(user_text or ""))
+            or _VARIANTS_USER_HINT_RE.search(str(user_text or ""))
+            or _MODEL_NAME_INTENT_RE.search(str(user_text or ""))
+        )
+        if direct_catalog_intent:
+            if _reply_mentions_catalog_item(base_candidate, grounding_items) and not _reply_mentions_catalog_item(
+                refined_candidate, grounding_items
+            ):
+                return base_candidate
 
     return refined_candidate
 
@@ -2262,24 +2310,84 @@ def _safe_json_load(raw: str) -> Dict[str, Any]:
             return {}
 
 
+_LLM_MIN_CALL_GAP_SECONDS = max(
+    0.0,
+    float(os.getenv("LLM_MIN_CALL_GAP_SECONDS", "0.25") or 0.25),
+)
+_LLM_CALL_GUARD = asyncio.Lock()
+_LLM_NEXT_ALLOWED_TS = 0.0
+
+
+async def _llm_rate_limit_gate() -> None:
+    global _LLM_NEXT_ALLOWED_TS
+    if _LLM_MIN_CALL_GAP_SECONDS <= 0:
+        return
+    async with _LLM_CALL_GUARD:
+        now = time.monotonic()
+        wait_for = _LLM_NEXT_ALLOWED_TS - now
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+            now = time.monotonic()
+        _LLM_NEXT_ALLOWED_TS = max(now, _LLM_NEXT_ALLOWED_TS) + _LLM_MIN_CALL_GAP_SECONDS
+
+
 async def _llm_call_with_deadline(
     create_fn: Any,
     *,
     timeout_seconds: float,
     **kwargs: Any,
 ) -> Any:
+    async def _invoke_once(hard_deadline: float, call_kwargs: Mapping[str, Any]) -> Any:
+        try:
+            import anyio  # type: ignore
+
+            with anyio.fail_after(hard_deadline):
+                return await anyio.to_thread.run_sync(lambda: create_fn(**dict(call_kwargs)))
+        except Exception:
+            return await asyncio.wait_for(
+                asyncio.to_thread(create_fn, **dict(call_kwargs)),
+                timeout=hard_deadline,
+            )
+
     timeout_value = max(2.0, float(timeout_seconds or 0.0))
     hard_deadline = timeout_value + 2.0
-    try:
-        import anyio  # type: ignore
+    base_kwargs = dict(kwargs or {})
+    base_model = str(base_kwargs.get("model") or "").strip()
+    model_candidates: list[str] = []
+    if base_model:
+        model_candidates.append(base_model)
+    for extra_raw in (
+        os.getenv("OPENAI_MODEL_FALLBACKS", ""),
+        os.getenv("LEAD_CLASSIFIER_MODEL", ""),
+        "gpt-4o-mini",
+    ):
+        for model in [part.strip() for part in str(extra_raw or "").split(",") if part.strip()]:
+            if model and model not in model_candidates:
+                model_candidates.append(model)
+    if not model_candidates:
+        model_candidates.append("")
 
-        with anyio.fail_after(hard_deadline):
-            return await anyio.to_thread.run_sync(lambda: create_fn(**kwargs))
-    except Exception:
-        return await asyncio.wait_for(
-            asyncio.to_thread(create_fn, **kwargs),
-            timeout=hard_deadline,
-        )
+    retries = 2
+    last_exc: Exception | None = None
+    for model in model_candidates:
+        call_kwargs = dict(base_kwargs)
+        if model:
+            call_kwargs["model"] = model
+        for attempt in range(retries + 1):
+            await _llm_rate_limit_gate()
+            try:
+                return await _invoke_once(hard_deadline, call_kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if _is_quota_or_rate_limit_error(exc):
+                    if attempt < retries:
+                        await asyncio.sleep(0.6 + attempt * 0.8)
+                        continue
+                    break
+                raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("llm call failed without exception")
 
 
 _FACT_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", re.IGNORECASE)
@@ -4528,9 +4636,9 @@ def _looks_like_address_value(text: str) -> bool:
         for tok in tokens:
             if tok in blocked_tokens or tok in NEEDS_STOPWORDS:
                 continue
-            if re.search(r"(ского|ской|ская|ский|ина|ова|ева|ого|ая|ый|ий|ов|ев|ин)$", tok):
+            if re.search(r"(ского|ской|ская|ский|ина|ова|ева|овка|евка)$", tok):
                 suffix_hits += 1
-        return suffix_hits >= 1 and len(tokens) <= 3
+        return suffix_hits >= 1 and 2 <= len(tokens) <= 3
     # Typical address markers across free-form user input.
     markers = (
         "ул",
@@ -4560,7 +4668,7 @@ def _looks_like_address_value(text: str) -> bool:
         return False
     has_letters = any(bool(re.search(r"[a-zа-я]", tok, re.IGNORECASE)) for tok in tokens)
     street_like = any(
-        bool(re.search(r"(ского|ской|ская|ский|ина|ова|ева|ого|ая|ый|ий|ов|ев|ин)$", tok))
+        bool(re.search(r"(ского|ской|ская|ский|ина|ова|ева|овка|евка)$", tok))
         for tok in tokens
     )
     if _OBJECT_TYPE_HINT_RE.search(low):
@@ -6330,48 +6438,27 @@ def _enforce_catalog_price_grounding(
     items = _grounding_catalog_items(grounding)
     if not items:
         return base
-    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(base) if part.strip()]
-    if not sentences:
-        return base
+    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(base) if part.strip()] or [base]
     out: list[str] = []
     selected_item = _selected_item_from_grounding(grounding, items)
-    selected_price = (
-        _item_price_int(dict(selected_item)) if isinstance(selected_item, Mapping) else None
-    )
-    def _contextual_min_price(sentence_text: str) -> int | None:
-        sentence_tokens = [
-            tok
-            for tok in _tokenize_query(sentence_text)
-            if tok and not tok.isdigit() and tok not in NEEDS_STOPWORDS
-        ]
-        if not sentence_tokens:
-            return _catalog_min_price(items)
-        matched: list[Mapping[str, Any]] = []
-        for item in items:
-            try:
-                if _text_match_score(dict(item), sentence_tokens) > 0:
-                    matched.append(item)
-            except Exception:
-                continue
-        if matched:
-            return _catalog_min_price([dict(item) for item in matched])
-        return _catalog_min_price(items)
+    selected_price = _item_price_int(dict(selected_item)) if isinstance(selected_item, Mapping) else None
     catalog_prices = {
         int(price)
         for price in (_item_price_int(dict(item)) for item in items)
         if isinstance(price, int) and price > 0
     }
     for sentence in sentences:
-        low = sentence.lower()
-        has_price_hints = any(
-            token in low for token in ("цена", "стоит", "руб", "₽", "тыс", "тысяч", " к ")
-        )
-        price_spans = [
-            span
-            for span in _extract_price_spans(sentence)
-            if _is_catalog_price_candidate(span[2], catalog_prices)
-        ]
-        if not has_price_hints and not price_spans:
+        price_spans = [span for span in _extract_price_spans(sentence) if _is_likely_price_value(span[2])]
+        if not price_spans:
+            out.append(sentence)
+            continue
+        discount_spans: list[tuple[int, int, int]] = []
+        for span in price_spans:
+            window = sentence[max(0, span[0] - 32): min(len(sentence), span[1] + 16)]
+            if re.search(r"(?iu)\b(скидк|акци|промокод|купон)\w*\b", window):
+                discount_spans.append(span)
+        price_spans = [span for span in price_spans if span not in discount_spans]
+        if not price_spans:
             out.append(sentence)
             continue
         mentioned_items = _mentioned_catalog_items_in_order(sentence, items)
@@ -6379,68 +6466,32 @@ def _enforce_catalog_price_grounding(
             item = _best_catalog_item_match(sentence, items)
             if item is not None:
                 mentioned_items = [item]
-        if not mentioned_items:
-            if not price_spans:
-                out.append(sentence)
-                continue
-            replacements: list[tuple[int, int, str]] = []
-            # Keep valid catalog-wide minimum phrases factual.
-            min_phrase = bool(
-                re.search(r"(?iu)\b(цен\w*\s+начина|от\s+скольк|минимальн\w*)\b", low)
-            )
-            contextual_min_price = _contextual_min_price(sentence)
-            if min_phrase and contextual_min_price:
-                first = price_spans[0]
-                if first[2] != int(contextual_min_price):
-                    replacements.append(
-                        (first[0], first[1], _format_rub_price(int(contextual_min_price)))
-                    )
-            elif selected_price:
-                first = price_spans[0]
-                if first[2] != int(selected_price):
-                    replacements.append((first[0], first[1], _format_rub_price(int(selected_price))))
-            elif all(int(span[2]) in catalog_prices for span in price_spans):
-                out.append(sentence)
-                continue
-            else:
-                patched = sentence
-                for start, end, _ in sorted(price_spans, key=lambda item: item[0], reverse=True):
-                    patched = patched[:start] + "цена по каталогу" + patched[end:]
-                out.append(patched or sentence)
-                continue
-            if not replacements:
-                out.append(sentence)
-                continue
-            patched = sentence
-            for start, end, value in sorted(replacements, key=lambda item: item[0], reverse=True):
-                patched = patched[:start] + value + patched[end:]
-            out.append(patched)
-            continue
+        if (not mentioned_items) and isinstance(selected_price, int) and selected_price > 0:
+            mentioned_items = [dict(selected_item or {})]
         expected_prices: list[int] = []
         for item in mentioned_items:
             price = _item_price_int(item)
             if price:
                 expected_prices.append(price)
+
         if not expected_prices:
-            out.append(sentence)
-            continue
-        if not price_spans:
-            out.append(sentence)
-            continue
-        replacements: list[tuple[int, int, str]] = []
-        if len(expected_prices) >= 2 and len(price_spans) >= 2:
-            for idx, span in enumerate(price_spans):
-                if idx >= len(expected_prices):
-                    break
-                expected = expected_prices[idx]
-                if span[2] == expected:
+            if catalog_prices and all(int(span[2]) in catalog_prices for span in price_spans):
+                out.append(sentence)
+                continue
+            patched = sentence
+            for start, end, value in sorted(price_spans, key=lambda item: item[0], reverse=True):
+                if catalog_prices and int(value) in catalog_prices:
                     continue
-                replacements.append((span[0], span[1], _format_rub_price(expected)))
-        else:
-            expected = expected_prices[0]
-            first = price_spans[0]
-            if first[2] != expected:
-                replacements.append((first[0], first[1], _format_rub_price(expected)))
+                patched = patched[:start] + "цена по каталогу" + patched[end:]
+            out.append(patched)
+            continue
+
+        replacements: list[tuple[int, int, str]] = []
+        for idx, span in enumerate(price_spans):
+            expected = expected_prices[min(idx, len(expected_prices) - 1)]
+            if span[2] == int(expected):
+                continue
+            replacements.append((span[0], span[1], _format_rub_price(int(expected))))
         if not replacements:
             out.append(sentence)
             continue
@@ -6950,33 +7001,21 @@ def _selected_item_attribute_answer(
     raw_user = str(user_text or "").strip()
     if not raw_user:
         return ""
+    question_like = bool(
+        ("?" in raw_user)
+        or re.match(r"(?iu)^\s*(какой|какая|какие|какое|сколько|чем|как|почему|зачем)\b", raw_user)
+    )
+    probe = _extract_attribute_probe(raw_user)
     user_tokens = [tok for tok in _tokenize_query(raw_user) if tok]
-    # Avoid misclassifying a plain model mention as an attribute question.
-    if "?" not in raw_user:
-        model_label = _normalize_text(str(_item_label(dict(selected_item)) or ""))
-        model_tokens = set(_FACT_TOKEN_RE.findall(model_label))
-        meaningful_user_tokens = [
-            tok
-            for tok in user_tokens
-            if tok and tok not in _GENERIC_FACT_STOPWORDS and len(tok) >= 3
-        ]
-        if meaningful_user_tokens and model_tokens:
-            overlap = sum(1 for tok in meaningful_user_tokens if tok in model_tokens)
-            if overlap / max(1, len(meaningful_user_tokens)) >= 0.6:
-                return ""
-
-    item_map = dict(selected_item)
+    if not probe and not question_like:
+        return ""
+    source_tokens = _tokenize_query(probe) if probe else user_tokens
     probe_tokens = [
         _normalize_probe_token(tok)
-        for tok in user_tokens
+        for tok in source_tokens
         if tok and len(tok) >= 3 and tok not in _GENERIC_FACT_STOPWORDS
     ]
     probe_tokens = [tok for tok in probe_tokens if tok and tok not in _GENERIC_FACT_STOPWORDS]
-    if not probe_tokens:
-        probe = _extract_attribute_probe(raw_user)
-        if not probe:
-            return ""
-        probe_tokens = [tok for tok in _tokenize_query(probe) if tok]
     if not probe_tokens:
         return ""
 
@@ -6996,6 +7035,7 @@ def _selected_item_attribute_answer(
         "color",
         "tags",
     }
+    item_map = dict(selected_item)
     entries = _iter_item_attribute_pairs(item_map, blocked=blocked)
     candidates: list[tuple[float, str, str]] = []
     for key, val, _, _ in entries:
@@ -7044,54 +7084,47 @@ def _selected_item_attribute_answer(
         if rendered:
             return rendered
 
-    # Generic fallback: prefer concise technical-looking attributes.
-    fallback_values: list[tuple[float, str, str, bool]] = []
-    for key, val, _, val_norm in entries:
-        score = float(min(len(val_norm), 20))
-        has_digits = bool(re.search(r"\d", val))
-        if re.search(r"\d", val):
-            score += 8.0
-        if re.search(r"\b(?:мм|cm|kg|кг|см|шт|pcs|mm)\b", val, re.IGNORECASE):
-            score += 3.0
-        if _is_dimension_like_value(val):
-            score -= 12.0
-        token_count = len(_FACT_TOKEN_RE.findall(val_norm))
-        if token_count >= 10:
-            score -= 8.0
-        if "," in val:
-            score -= 10.0
-        if len(val_norm) > 56:
-            score -= 10.0
-        fallback_values.append((score, key, val, has_digits))
-    if fallback_values:
-        fallback_values.sort(key=lambda x: x[0], reverse=True)
-        picked_pairs: list[tuple[str, str]] = []
-        top_numeric: tuple[str, str] | None = None
-        top_text: tuple[str, str] | None = None
-        for _, key, val, has_digits in fallback_values:
-            pair = (str(key or "").strip(), str(val or "").strip())
-            if not pair[0] or not pair[1]:
-                continue
-            if has_digits and top_numeric is None:
-                top_numeric = pair
-            if (not has_digits) and top_text is None:
-                top_text = pair
-            if top_numeric is not None and top_text is not None:
-                break
-        if top_numeric is not None:
-            picked_pairs.append(top_numeric)
-        if top_text is not None and top_text not in picked_pairs:
-            picked_pairs.append(top_text)
-        for _, key, val, _ in fallback_values:
-            pair = (str(key or "").strip(), str(val or "").strip())
-            if not pair[0] or not pair[1] or pair in picked_pairs:
-                continue
-            picked_pairs.append(pair)
-            if len(picked_pairs) >= 2:
-                break
-        rendered = _format_attribute_pairs(picked_pairs, max_pairs=2)
-        if rendered:
-            return rendered
+    if question_like and entries:
+        fallback_values: list[tuple[float, str, str, bool]] = []
+        for key, val, _, val_norm in entries:
+            score = float(min(len(val_norm), 20))
+            has_digits = bool(re.search(r"\d", val))
+            if has_digits:
+                score += 8.0
+            if re.search(r"\b(?:мм|cm|kg|кг|см|шт|pcs|mm)\b", val, re.IGNORECASE):
+                score += 3.0
+            if _is_dimension_like_value(val):
+                score -= 12.0
+            token_count = len(_FACT_TOKEN_RE.findall(val_norm))
+            if token_count >= 10:
+                score -= 8.0
+            if "," in val:
+                score -= 10.0
+            if len(val_norm) > 56:
+                score -= 10.0
+            fallback_values.append((score, key, val, has_digits))
+        if fallback_values:
+            fallback_values.sort(key=lambda x: x[0], reverse=True)
+            picked_pairs: list[tuple[str, str]] = []
+            top_numeric: tuple[str, str] | None = None
+            top_text: tuple[str, str] | None = None
+            for _, key, val, has_digits in fallback_values:
+                pair = (str(key or "").strip(), str(val or "").strip())
+                if not pair[0] or not pair[1]:
+                    continue
+                if has_digits and top_numeric is None:
+                    top_numeric = pair
+                if (not has_digits) and top_text is None:
+                    top_text = pair
+                if top_numeric is not None and top_text is not None:
+                    break
+            if top_numeric is not None:
+                picked_pairs.append(top_numeric)
+            if top_text is not None and top_text not in picked_pairs:
+                picked_pairs.append(top_text)
+            rendered = _format_attribute_pairs(picked_pairs, max_pairs=2)
+            if rendered:
+                return rendered
     return ""
 
 
@@ -7818,6 +7851,12 @@ def _enforce_catalog_truth_guard(
         ):
             patched = base
             spans = [span for span in _extract_price_spans(patched) if _is_likely_price_value(span[2])]
+            if re.search(r"(?iu)\bскидк\w*\b", patched):
+                spans = [
+                    span
+                    for span in spans
+                    if not re.search(r"(?iu)\bскидк\w*\b", patched[max(0, span[0] - 32): span[1]])
+                ]
             for start, end, _ in sorted(spans, key=lambda item: item[0], reverse=True):
                 patched = patched[:start] + "цена по каталогу" + patched[end:]
             if patched.strip():
@@ -7866,22 +7905,16 @@ def _enforce_catalog_truth_guard(
         if selected_hint and selected_hint != object_type_need:
             selected_item = None
     object_type_has_evidence = _catalog_has_object_type_evidence(items, object_type_need)
-    # Do not aggressively hard-filter by two-panel for every insulation mention:
-    # this can hide valid products in generic "max/min price" requests.
-    # Keep this narrowing only for apartment context and non-extreme-price turns.
     if prefers_insulation and object_type_need == "apartment" and not (
         asks_min_price_global or asks_max_price_global
     ):
         two_panel = [item for item in candidate_items if _catalog_item_is_two_panel(item)]
         if two_panel:
             candidate_items = two_panel
-    # Narrow by extracted need keywords when possible (data-driven, not niche hardcoding).
+
     kw_values = needs_ctx.get("keywords")
     has_specific_kw = False
     if asks_price:
-        # For explicit price intents, narrow by current turn wording first.
-        # This avoids stale keywords from previous turns over-constraining
-        # the candidate set (for example, pinning to an older subset).
         query_needs = infer_user_needs(user_text)
         q_keywords = query_needs.get("keywords") if isinstance(query_needs, Mapping) else None
         if isinstance(q_keywords, Sequence):
@@ -7922,7 +7955,6 @@ def _enforce_catalog_truth_guard(
         and span[2] not in catalog_prices
     ]
     if invalid_prices:
-        # Keep LLM phrasing, but remove unverified numeric claims.
         patched = normalized
         replacements: list[tuple[int, int, str]] = []
         for start, end, value in price_spans:
@@ -7933,12 +7965,9 @@ def _enforce_catalog_truth_guard(
                 patched = patched[:start] + value + patched[end:]
             normalized = patched
         if asks_price or asks_variants or asks_model_name:
-            # Price/question intent: continue to deterministic branches below.
             pass
 
     if _reply_mentions_unknown_model(normalized, candidate_items or items):
-        # Keep wording human without canned fallbacks:
-        # neutralize unknown model fragments and drop only unsafe sentences.
         normalized = _neutralize_unknown_model_mentions(normalized, candidate_items or items)
         parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(normalized) if part.strip()]
         kept = [
@@ -7971,8 +8000,6 @@ def _enforce_catalog_truth_guard(
             normalized = _neutralize_unknown_model_mentions(normalized, candidate_items or items)
             return normalized
 
-    # Do not inject templated shortlist replies here.
-    # Guard should validate/correct facts, while wording stays LLM-driven.
     if has_unknown_model_marker:
         return normalized
 
@@ -7985,7 +8012,6 @@ def _enforce_catalog_truth_guard(
     if asked_probe and (not asks_price) and (not asks_model_name):
         probe_norm = _normalize_probe_token(asked_probe)
         source_for_attr = list((grounding or {}).get("catalog_items") or items)
-        # For structural attributes keep narrowed shortlist; otherwise use full catalog.
         if probe_norm.startswith("двухпанел"):
             source_for_attr = list(candidate_items)
         attr_items = _items_with_attribute(source_for_attr, asked_probe)
@@ -8009,7 +8035,6 @@ def _enforce_catalog_truth_guard(
             selected_attr_answer = _selected_item_attribute_answer(user_text, selected_item)
             if selected_attr_answer:
                 return selected_attr_answer
-        # If there is no confident fact response, keep model text as-is.
         if probe_norm:
             return normalized
 
@@ -8054,7 +8079,6 @@ def _enforce_catalog_truth_guard(
         asks_max_price = asks_max_price_global
         normalized_words = len(re.findall(r"(?u)\b\w+\b", normalized))
         normalized_sentences = len([s for s in re.split(r"[.!?]+", normalized) if s.strip()])
-        # Keep rich model answers only when they do not carry risky ungrounded prices.
         if (not asks_min_price) and (not asks_max_price):
             if normalized_words >= 10 and (normalized_sentences >= 2 or "?" in normalized):
                 spans = _extract_price_spans(normalized)
@@ -8596,6 +8620,7 @@ async def _audit_and_rewrite_persona_reply(
     last_user_message: str,
     state: SalesState | None = None,
     grounding: Mapping[str, Any] | None = None,
+    policy: Mapping[str, Any] | None = None,
 ) -> str:
     # Two-stage quality gate:
     # 1) deterministic cleanup
@@ -8658,14 +8683,39 @@ async def _audit_and_rewrite_persona_reply(
     )
     selected_item = _selected_item_from_grounding(grounding, grounding_items)
     selected_label = _item_label(dict(selected_item)) if isinstance(selected_item, Mapping) else ""
+    policy_tags = {
+        str(tag or "").strip().lower()
+        for tag in (policy or {}).get("intent_tags", [])
+        if str(tag or "").strip()
+    }
+    user_raw = str(last_user_message or "")
+    user_norm = _normalize_text(user_raw)
+    user_tokens = [
+        tok
+        for tok in _FACT_TOKEN_RE.findall(user_norm)
+        if len(tok) >= 3 and not tok.isdigit() and tok not in _GENERIC_FACT_STOPWORDS
+    ]
+    greeting_like = bool(_GREETING_PREFIX_RE.match(user_raw))
+    attr_probe = _extract_attribute_probe(user_raw)
+    has_attr_intent_cue = bool(_QUESTION_CUE_RE.search(user_raw) or "?" in user_raw)
+    lexical_attribute_intent = bool(attr_probe) and not greeting_like and (
+        has_attr_intent_cue
+        or bool(_MODEL_NAME_INTENT_RE.search(user_raw))
+        or bool(_VARIANTS_USER_HINT_RE.search(user_raw))
+        or bool(_is_price_intent(user_raw))
+        or len(user_tokens) >= 2
+    )
     intent_flags = {
-        "price_intent": bool(_is_price_intent(last_user_message)),
-        "variants_intent": bool(_VARIANTS_USER_HINT_RE.search(str(last_user_message or ""))),
+        "price_intent": bool("price" in policy_tags) or bool(_is_price_intent(last_user_message)),
+        "variants_intent": bool({"variants", "selection"} & policy_tags)
+        or bool(_VARIANTS_USER_HINT_RE.search(str(last_user_message or ""))),
         "repair_intent": bool(
+            {"repair", "complaint"} & policy_tags
+            or
             _REPAIR_TURN_RE.match(str(last_user_message or ""))
             or _CATALOG_UNAVAILABLE_RE.search(str(last_user_message or ""))
         ),
-        "attribute_intent": bool(_extract_attribute_probe(str(last_user_message or ""))),
+        "attribute_intent": bool("attributes" in policy_tags) or lexical_attribute_intent,
     }
 
     judge_prompt = (
@@ -8760,7 +8810,7 @@ async def _audit_and_rewrite_persona_reply(
                 judge_ok = False
                 issues.append("repair_intent_without_catalog_recovery")
         if needs_attributes:
-            probe = _extract_attribute_probe(str(last_user_message or ""))
+            probe = attr_probe
             probe_norm = _normalize_text(probe)
             attribute_terms: set[str] = set()
             for item in list(grounding_items or [])[:4]:
@@ -13168,7 +13218,6 @@ async def build_llm_messages(
         "- Не закрывай диалог пустой фразой, всегда давай следующий полезный шаг.\n"
         "- Если факт/срок не подтвержден, честно скажи, что уточняешь."
     )
-    system_blocks.append(_HUMAN_STYLE_FEW_SHOT)
     system_blocks.append(f"Канал: {channel_name}")
     system_blocks.append(f"Идентификатор контакта: {contact_id}")
 
@@ -13223,7 +13272,7 @@ async def build_llm_messages(
 class LLMReply(str):
     """String wrapper that carries planner/enforcement diagnostics for logging."""
 
-    __slots__ = ("llm_plan", "llm_raw_answer", "llm_refined")
+    __slots__ = ("llm_plan", "llm_raw_answer")
 
     def __new__(
         cls,
@@ -13235,7 +13284,6 @@ class LLMReply(str):
         obj = str.__new__(cls, content)
         obj.llm_plan = plan
         obj.llm_raw_answer = raw_answer
-        obj.llm_refined = content
         return obj
 
 
@@ -13310,7 +13358,6 @@ async def _direct_llm_reply(
             answer = "\n\n".join(
                 [f"Вариант {idx}: {text}" for idx, text in enumerate(variants, start=1)]
             )
-        answer = _enforce_catalog_price_grounding(answer, grounding=grounding)
         answer = _enforce_catalog_truth_guard(
             answer,
             grounding=grounding,
@@ -13319,67 +13366,12 @@ async def _direct_llm_reply(
         dummy_plan = planner.GeneratedPlan()
         enforcement_ctx = _make_enforcement_context(state, persona_hints, channel_name)
         existing_fp = set(enforcement_ctx.asked_fingerprints)
-        # Keep the base model answer and run only safety/quality guardrails.
-        refined_answer = answer
-        refined_answer = _enforce_catalog_price_grounding(refined_answer, grounding=grounding)
-        refined_answer = _enforce_catalog_truth_guard(
-            refined_answer,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        refined_answer = _drop_repeated_questions_from_reply(refined_answer, state)
-        persona_context = ""
-        if messages and str(messages[0].get("role") or "").strip().lower() == "system":
-            persona_context = str(messages[0].get("content") or "")
-        persona_rules_context = _resolve_persona_rules_context(
-            tenant=tenant,
-            channel_name=channel_name,
-            fallback_context=persona_context,
-        )
-        known_facts = _state_facts_snapshot(state)
-        refined_answer = _apply_persona_delivery_obligations(
-            refined_answer,
-            persona_context=persona_rules_context,
-            channel_name=channel_name,
-            last_user_message=last_user_message,
-            known_facts=known_facts,
-            state=state,
-        )
-        refined_answer = _drop_repeated_questions_from_reply(refined_answer, state)
-        refined_answer = _enforce_sentence_budget(refined_answer, max_sentences=3)
-        refined_answer = _enforce_catalog_price_grounding(refined_answer, grounding=grounding)
-        refined_answer = _enforce_catalog_truth_guard(
-            refined_answer,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        refined_answer = _normalize_catalog_name_case(refined_answer, grounding=grounding)
-        refined_answer = _dedupe_repeated_fact_sentences(refined_answer, state)
-        refined_answer = _strip_instruction_leaks(refined_answer)
-        refined_answer = _drop_repeated_questions_from_reply(refined_answer, state)
-        refined_answer = _enforce_sentence_budget(refined_answer, max_sentences=3)
-        refined_answer = await _audit_and_rewrite_persona_reply(
-            create_fn,
-            model=settings.OPENAI_MODEL,
-            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-            prepared_messages=messages,
-            answer=refined_answer,
-            last_user_message=last_user_message,
-            state=state,
-            grounding=grounding,
-        )
-        refined_answer = _apply_base_answer_quality_floor(
-            refined_answer,
-            state=state,
-            persona_hints=persona_hints,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
+        final_answer = str(answer or "").strip()
         _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
-        _update_fact_memory(state, refined_answer)
-        _remember_questions_from_reply(state, refined_answer)
+        _update_fact_memory(state, final_answer)
+        _remember_questions_from_reply(state, final_answer)
         save_sales_state(state)
-        result = _wrap_llm_reply(refined_answer, plan=dummy_plan, raw_answer=answer)
+        result = _wrap_llm_reply(final_answer, plan=dummy_plan, raw_answer=answer)
         record_bot_reply(contact_ref, tenant, channel_name, str(result))
         return result
     except APITimeoutError as exc:
@@ -13390,7 +13382,10 @@ async def _direct_llm_reply(
         else:
             logger.exception("direct llm call failed", exc_info=exc)
 
-    fallback = _llm_unavailable_reply()
+    fallback = _llm_unavailable_reply(
+        user_text=last_user_message,
+        grounding=grounding,
+    )
     return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
@@ -13499,67 +13494,11 @@ async def _human_llm_reply(
             grounding=grounding,
             user_text=last_user_message,
         )
-        # Keep planner answer as-is; no deterministic style rewriting.
-        answer = str(answer or "").strip()
-        refined = answer
-        refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
-        refined = _enforce_catalog_truth_guard(
-            refined,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        refined = _drop_repeated_questions_from_reply(refined, state)
-        persona_context = ""
-        if human_messages and str(human_messages[0].get("role") or "").strip().lower() == "system":
-            persona_context = str(human_messages[0].get("content") or "")
-        persona_rules_context = _resolve_persona_rules_context(
-            tenant=tenant,
-            channel_name=channel_name,
-            fallback_context=persona_context,
-        )
-        known_facts = _state_facts_snapshot(state)
-        refined = _apply_persona_delivery_obligations(
-            refined,
-            persona_context=persona_rules_context,
-            channel_name=channel_name,
-            last_user_message=last_user_message,
-            known_facts=known_facts,
-            state=state,
-        )
-        refined = _drop_repeated_questions_from_reply(refined, state)
-        refined = _enforce_sentence_budget(refined, max_sentences=3)
-        refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
-        refined = _enforce_catalog_truth_guard(
-            refined,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        refined = _normalize_catalog_name_case(refined, grounding=grounding)
-        refined = _dedupe_repeated_fact_sentences(refined, state)
-        refined = _strip_instruction_leaks(refined)
-        refined = _drop_repeated_questions_from_reply(refined, state)
-        refined = _enforce_sentence_budget(refined, max_sentences=3)
-        refined = await _audit_and_rewrite_persona_reply(
-            create_fn,
-            model=settings.OPENAI_MODEL,
-            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-            prepared_messages=human_messages,
-            answer=refined,
-            last_user_message=last_user_message,
-            state=state,
-            grounding=grounding,
-        )
-        refined = _apply_base_answer_quality_floor(
-            refined,
-            state=state,
-            persona_hints=persona_hints,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        _update_fact_memory(state, refined)
-        _remember_questions_from_reply(state, refined)
+        final_answer = str(answer or "").strip()
+        _update_fact_memory(state, final_answer)
+        _remember_questions_from_reply(state, final_answer)
         save_sales_state(state)
-        result = _wrap_llm_reply(refined, plan=plan.to_dict(), raw_answer=answer)
+        result = _wrap_llm_reply(final_answer, plan=plan.to_dict(), raw_answer=answer)
         record_bot_reply(contact_ref, tenant, channel_name, str(result))
         return result
     except APITimeoutError as exc:
@@ -13569,7 +13508,10 @@ async def _human_llm_reply(
             logger.warning("human llm quota/rate limited, fallback enabled")
         else:
             logger.exception("human llm failed", exc_info=exc)
-    fallback = _llm_unavailable_reply()
+    fallback = _llm_unavailable_reply(
+        user_text=last_user_message,
+        grounding=grounding,
+    )
     return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
@@ -13587,6 +13529,7 @@ async def _single_llm_reply(
         return {
             "action": "respond",
             "intent": "general",
+            "intent_tags": [],
             "respond_to_user_question_first": True,
             "continue_flow": True,
             "question_strategy": {
@@ -13607,6 +13550,7 @@ async def _single_llm_reply(
     def _build_policy_grounding() -> Dict[str, Any]:
         merged: List[Dict[str, Any]] = []
         seen: set[str] = set()
+        search_needs: Dict[str, Any] = {}
 
         def _append(items: Sequence[Mapping[str, Any]]) -> None:
             for raw in items or []:
@@ -13619,9 +13563,30 @@ async def _single_llm_reply(
 
         if state.last_items:
             _append(state.last_items)
+        if isinstance(state.facts, Mapping):
+            for key in ("city", "address", "object_type", "model", "budget", "timeline", "dimensions", "color"):
+                value = _safe_short_text(str(state.facts.get(key) or ""), 120)
+                if value:
+                    search_needs[key] = value
+        if isinstance(state.needs, Mapping):
+            for key in ("keywords", "budget_max", "price_order", "object_type", "color", "dimensions"):
+                value = state.needs.get(key)
+                if value in (None, "", [], {}, ()):
+                    continue
+                search_needs[key] = value
+        try:
+            turn_needs = infer_user_needs(last_user_message)
+        except Exception:
+            turn_needs = {}
+        if isinstance(turn_needs, Mapping):
+            for key in ("keywords", "budget_max", "price_order", "object_type", "color", "dimensions"):
+                value = turn_needs.get(key)
+                if value in (None, "", [], {}, ()):
+                    continue
+                search_needs[key] = value
         if tenant is not None:
             try:
-                _append(search_catalog({}, limit=8, tenant=tenant, query=last_user_message))
+                _append(search_catalog(search_needs, limit=8, tenant=tenant, query=last_user_message))
             except Exception:
                 pass
             if not merged:
@@ -13636,8 +13601,6 @@ async def _single_llm_reply(
             matched = _best_catalog_item_match(selected_hint, merged)
             if isinstance(matched, Mapping):
                 selected_item = dict(matched)
-        if selected_item is None and merged:
-            selected_item = dict(merged[0])
         return {
             "items": [dict(item) for item in merged[:8]],
             "selected_item": dict(selected_item) if isinstance(selected_item, Mapping) else None,
@@ -13649,6 +13612,29 @@ async def _single_llm_reply(
             return plan
         plan["action"] = str(raw.get("action") or "respond").strip().lower() or "respond"
         plan["intent"] = str(raw.get("intent") or "general").strip().lower() or "general"
+        raw_tags = raw.get("intent_tags")
+        tags: List[str] = []
+        if isinstance(raw_tags, Sequence):
+            for tag in raw_tags[:8]:
+                normalized = str(tag or "").strip().lower()
+                if normalized and normalized not in tags:
+                    tags.append(normalized)
+        heuristic_tags: list[str] = []
+        if _is_price_intent(last_user_message) or _looks_like_price_objection(last_user_message):
+            heuristic_tags.append("price")
+        if _VARIANTS_USER_HINT_RE.search(last_user_message):
+            heuristic_tags.append("variants")
+        if _extract_attribute_probe(last_user_message):
+            heuristic_tags.append("attributes")
+        turn_intent_hint = _classify_turn_intent(last_user_message, known_facts=state.facts)
+        if turn_intent_hint in {"repair", "catalog_problem"}:
+            heuristic_tags.append("repair")
+        if re.search(r"(?iu)\b(тоже\s+сам|одно\s+и\s+то\s+же|опять\s+то\s+же|повтор)\b", last_user_message):
+            heuristic_tags.append("complaint")
+        for tag in heuristic_tags:
+            if tag not in tags:
+                tags.append(tag)
+        plan["intent_tags"] = tags
         plan["respond_to_user_question_first"] = bool(raw.get("respond_to_user_question_first", True))
         plan["continue_flow"] = bool(raw.get("continue_flow", True))
         qs_raw = raw.get("question_strategy")
@@ -13875,6 +13861,32 @@ async def _single_llm_reply(
             )
         return validated, dropped
 
+    def _constrain_claims_by_turn_intent(
+        policy: Dict[str, Any],
+        validated_claims: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        tags = {
+            str(tag or "").strip().lower()
+            for tag in (policy.get("intent_tags") or [])
+            if str(tag or "").strip()
+        }
+        # Catalog claims are allowed only when user intent explicitly requires
+        # factual catalog grounding (price/variants/attributes/repair/selection).
+        allow_catalog_claims = bool(
+            {"price", "variants", "attributes", "repair", "complaint", "selection"} & tags
+        )
+        allowed_without_catalog = {"state_ack", "business_rule", "channel_action", "handoff_action"}
+        constrained: List[Dict[str, Any]] = []
+        for raw in list(validated_claims or []):
+            claim = dict(raw)
+            claim_type = str(claim.get("type") or "").strip().lower()
+            if allow_catalog_claims:
+                constrained.append(claim)
+                continue
+            if claim_type in allowed_without_catalog:
+                constrained.append(claim)
+        return constrained
+
     def _apply_policy_state_updates(policy: Dict[str, Any], grounding_map: Mapping[str, Any]) -> None:
         if not isinstance(state.facts, dict):
             state.facts = {}
@@ -13918,30 +13930,45 @@ async def _single_llm_reply(
         prepared_messages: List[Dict[str, str]],
         known_facts: Mapping[str, str],
         grounding_map: Mapping[str, Any],
+        persona_context: str,
     ) -> Dict[str, Any]:
         dialogue_tail = [
             {"role": str(item.get("role") or ""), "content": str(item.get("content") or "")}
             for item in prepared_messages
             if str(item.get("role") or "").strip().lower() in {"user", "assistant"}
         ][-10:]
+        persona_excerpt = str(persona_context or "").strip()
+        if len(persona_excerpt) > 7000:
+            persona_excerpt = persona_excerpt[:7000]
+        pending_fact_key = _canonical_fact_key(str(state.pending_fact_key or "")) or ""
         grounding_preview = format_items_for_prompt(
             [dict(item) for item in _grounding_catalog_items(grounding_map)[:5]],
             "₽",
         )
         policy_system = (
             "You are a policy planner for a sales chatbot. "
+            "You MUST follow persona instructions from context as hard contract. "
+            "Prioritize current user intent first and never repeat already answered question. "
             "Return JSON only with schema keys: "
-            "action,intent,respond_to_user_question_first,continue_flow,"
+            "action,intent,intent_tags,respond_to_user_question_first,continue_flow,"
             "question_strategy,claims,fact_updates,selected_item_ref,reply_plan. "
+            "intent_tags: array with zero or more tags from "
+            "[price,variants,attributes,repair,complaint,handoff,selection]. "
             "question_strategy keys: should_ask,question_goal,question_fact_key. "
             "claims item keys: type,subject,attribute,value,confidence. "
             "fact_updates item keys: fact_key,value,source. "
             "Allowed claim types: catalog_attribute,catalog_price,catalog_item_identity,"
             "catalog_shortlist_offer,state_ack,business_rule,channel_action,handoff_action,soft_sales_claim. "
+            "Keep claims empty unless they are needed to answer the current user turn. "
+            "For greeting/rapport turns without product question, do not output catalog claims. "
+            "Set question_strategy.should_ask=false when the user asked a direct factual question and it is answerable from grounding. "
             "Always prioritize current user turn over scripted next step."
         )
         policy_user = (
+            f"Persona contract:\n{persona_excerpt or 'none'}\n\n"
             f"Known facts: {json.dumps(dict(known_facts or {}), ensure_ascii=False)}\n"
+            f"Current pending_fact_key: {pending_fact_key or 'none'}\n"
+            f"Last assistant reply: {str(state.last_bot_reply or '').strip() or 'none'}\n"
             f"Grounded catalog preview:\n{grounding_preview or 'none'}\n"
             f"Last user message: {last_user_message}\n"
             f"Recent dialogue: {json.dumps(dialogue_tail, ensure_ascii=False)}"
@@ -13985,6 +14012,11 @@ async def _single_llm_reply(
             "Следуй персоне и не используй служебные фразы. "
             "Не начинай с «Понял/Поняла/Спасибо, что уточнили». "
             "Не выдумывай товары/характеристики вне grounded catalog context. "
+            "Если intent_tags содержит variants или selection — покажи минимум один конкретный альтернативный вариант из каталога и назови его как вариант/модель. "
+            "Если intent_tags содержит price — обязательно закрой вопрос цены явным ценовым объяснением. "
+            "Если intent_tags содержит attributes — обязательно дай конкретный параметр/характеристику. "
+            "Если intent_tags содержит repair или complaint — сначала обработай это и затем верни к подбору с конкретными моделями/вариантами; явно покажи, что можешь сразу предложить подходящие модели. "
+            "Если в policy есть missing_coverage — исправь именно эти пробелы. "
             "1-3 коротких предложения, максимум 1 вопрос."
         )
         render_user = (
@@ -14002,7 +14034,7 @@ async def _single_llm_reply(
                 {"role": "system", "content": render_system},
                 {"role": "user", "content": render_user},
             ],
-            temperature=settings.OPENAI_TEMPERATURE,
+            temperature=0.1,
             top_p=0.9,
             max_tokens=220,
             timeout=settings.OPENAI_TIMEOUT_SECONDS,
@@ -14012,6 +14044,90 @@ async def _single_llm_reply(
             return ""
         message = getattr(choices[0], "message", None)
         return str(getattr(message, "content", "") or "").strip()
+
+    def _mentioned_catalog_ids(text: str, items: Sequence[Mapping[str, Any]]) -> set[str]:
+        candidate = _normalize_text(text)
+        if not candidate:
+            return set()
+        hits: set[str] = set()
+        for raw_item in items:
+            item = dict(raw_item)
+            identity = _catalog_item_identity(item)
+            if not identity:
+                continue
+            for alias in _item_aliases(item):
+                alias_norm = _normalize_model_alias(alias)
+                if len(alias_norm) < 4:
+                    continue
+                if alias_norm in candidate:
+                    hits.add(identity)
+                    break
+        return hits
+
+    def _missing_intent_coverage(
+        text: str,
+        policy: Mapping[str, Any],
+        grounding_map: Mapping[str, Any],
+    ) -> List[str]:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return ["empty"]
+        tags = [
+            str(tag or "").strip().lower()
+            for tag in (policy.get("intent_tags") or [])
+            if str(tag or "").strip()
+        ]
+        items = [dict(item) for item in _grounding_catalog_items(grounding_map)]
+        missing: List[str] = []
+        variant_like = ("variants" in tags) or ("selection" in tags)
+        if variant_like and items:
+            mentions_item = _reply_mentions_catalog_item(candidate, items)
+            has_price = bool(_PRICE_INLINE_RE.search(candidate))
+            if not mentions_item and not has_price:
+                missing.append("variants")
+            if not re.search(r"(?iu)\b(вариант|модель)\w*\b", candidate):
+                missing.append("variants_wording")
+            prev_ids = _mentioned_catalog_ids(str(state.last_bot_reply or ""), items)
+            current_ids = _mentioned_catalog_ids(candidate, items)
+            all_ids = {_catalog_item_identity(dict(item)) for item in items}
+            available_new = {item_id for item_id in all_ids if item_id and item_id not in prev_ids}
+            if prev_ids and current_ids and current_ids.issubset(prev_ids):
+                if len(items) > len(current_ids):
+                    missing.append("variants_alternative")
+            if prev_ids and current_ids and available_new and (current_ids & prev_ids):
+                missing.append("variants_no_repeat")
+        if "price" in tags:
+            has_price_signal = bool(
+                _PRICE_INLINE_RE.search(candidate)
+                or re.search(r"(?iu)\b(цена|диапазон|дешевле|альтернатив\w*)\b", candidate)
+            )
+            if not has_price_signal:
+                missing.append("price")
+        if "attributes" in tags:
+            has_attribute_signal = bool(re.search(r"\d", candidate)) or ":" in candidate
+            if not has_attribute_signal:
+                missing.append("attributes")
+        if ("repair" in tags or "complaint" in tags) and items:
+            has_catalog_recovery = _reply_mentions_catalog_item(candidate, items) or bool(
+                _PRICE_INLINE_RE.search(candidate)
+            )
+            if not has_catalog_recovery:
+                missing.append("repair_catalog_recovery")
+            has_recovery_offer = bool(
+                re.search(
+                    r"(?iu)\b(могу\s+сразу\s+предлож\w*|подходящ\w*\s+(модел\w*|вариант\w*))\b",
+                    candidate,
+                )
+            )
+            if not has_recovery_offer:
+                missing.append("repair_offer")
+        if "complaint" in tags and items:
+            has_alternative_signal = bool(
+                re.search(r"(?iu)\b(друг\w*\s+вариант\w*|альтернатив\w*|что\s+важнее)\b", candidate)
+            )
+            if not has_alternative_signal:
+                missing.append("complaint_alternative")
+        return missing
 
     try:
         create_fn = _resolve_chat_completion_callable(client)
@@ -14030,14 +14146,19 @@ async def _single_llm_reply(
             fallback_context=persona_context,
         )
 
-        policy = await _llm_policy_decision(create_fn, prepared_messages, known_facts, grounding)
+        policy = await _llm_policy_decision(
+            create_fn,
+            prepared_messages,
+            known_facts,
+            grounding,
+            persona_rules_context,
+        )
         validated_claims, dropped_claims = _validate_policy_claims(policy, grounding)
-        policy["claims"] = validated_claims
+        policy["claims"] = _constrain_claims_by_turn_intent(policy, validated_claims)
         if dropped_claims:
             policy["dropped_claims"] = dropped_claims
 
         _apply_policy_state_updates(policy, grounding)
-        known_facts = _state_facts_snapshot(state)
 
         answer = await _render_policy_reply(create_fn, prepared_messages, policy, grounding)
         if not answer:
@@ -14049,58 +14170,62 @@ async def _single_llm_reply(
             )
         if not answer:
             raise RuntimeError("empty llm render")
+        missing_coverage = _missing_intent_coverage(answer, policy, grounding)
+        if missing_coverage:
+            retry_policy = dict(policy or {})
+            retry_policy["missing_coverage"] = list(missing_coverage)
+            retry_answer = await _render_policy_reply(
+                create_fn,
+                prepared_messages,
+                retry_policy,
+                grounding,
+            )
+            if retry_answer:
+                answer = retry_answer
 
-        refined = _apply_base_answer_quality_floor(
-            answer,
-            state=state,
-            persona_hints=persona_hints,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        refined = _ensure_dialog_greeting_on_first_reply(
-            refined,
-            state,
-            persona_context=persona_rules_context,
-        )
-        refined = _apply_persona_delivery_obligations(
-            refined,
-            persona_context=persona_rules_context,
-            channel_name=channel_name,
-            last_user_message=last_user_message,
-            known_facts=known_facts,
-            state=state,
-        )
-        refined = await _audit_and_rewrite_persona_reply(
+        answer = _strip_instruction_leaks(answer)
+        final_answer = str(answer or "").strip()
+        final_answer = await _audit_and_rewrite_persona_reply(
             create_fn,
             model=settings.OPENAI_MODEL,
             timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
             prepared_messages=prepared_messages,
-            answer=refined,
+            answer=final_answer,
             last_user_message=last_user_message,
             state=state,
             grounding=grounding,
+            policy=policy,
         )
-        refined = _apply_base_answer_quality_floor(
-            refined,
+        final_answer = _ensure_dialog_greeting_on_first_reply(
+            final_answer,
+            state,
+            persona_context=persona_rules_context,
+        )
+        final_answer = _apply_base_answer_quality_floor(
+            final_answer,
             state=state,
             persona_hints=persona_hints,
             grounding=grounding,
             user_text=last_user_message,
         )
+        if not final_answer:
+            final_answer = str(answer or "").strip()
 
-        actual_questions = _extract_questions_from_text(refined)
+        actual_questions = _extract_questions_from_text(final_answer)
         question_strategy = policy.get("question_strategy")
+        pending_key = ""
         if isinstance(question_strategy, Mapping) and bool(question_strategy.get("should_ask")) and actual_questions:
             pending_key = _canonical_fact_key(str(question_strategy.get("question_fact_key") or "")) or ""
-            state.pending_fact_key = pending_key
-        else:
-            state.pending_fact_key = ""
+        if not pending_key and actual_questions:
+            inferred = _normalize_slot_name("", question=actual_questions[0])
+            pending_key = _canonical_fact_key(inferred) or ""
+        state.pending_fact_key = pending_key
         state.pending_slot = ""
         state.last_plan = dict(policy or {})
-        _update_fact_memory(state, refined)
-        _remember_questions_from_reply(state, refined)
+        _update_fact_memory(state, final_answer)
+        _remember_questions_from_reply(state, final_answer)
         save_sales_state(state)
-        result = _wrap_llm_reply(refined, plan=dict(policy or {}), raw_answer=answer)
+        result = _wrap_llm_reply(final_answer, plan=dict(policy or {}), raw_answer=answer)
         record_bot_reply(contact_ref, tenant, channel_name, str(result))
         return result
     except APITimeoutError as exc:
@@ -14110,7 +14235,9 @@ async def _single_llm_reply(
             logger.warning("single llm quota/rate limited, fallback enabled")
         else:
             logger.exception("single llm failed", exc_info=exc)
-    fallback = _llm_unavailable_reply()
+    fallback = _llm_unavailable_reply(
+        user_text=last_user_message,
+    )
     return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
@@ -14148,7 +14275,24 @@ async def ask_llm(
     # Без ключа — быстрый локальный ответ
     client = _get_openai_client()
     if client is None:
-        fallback = _llm_unavailable_reply()
+        state = load_sales_state(tenant, contact_ref)
+        if last and state.pending_fact_key:
+            _capture_pending_fact_answer(state, last)
+        grounding = _build_reply_grounding(
+            tenant=tenant,
+            state=state,
+            user_text=last,
+        )
+        fallback = _llm_unavailable_reply(
+            user_text=last,
+            grounding=grounding,
+        )
+        state.last_bot_reply = fallback
+        state.append_history("assistant", fallback)
+        state.last_updated_ts = time.time()
+        _update_fact_memory(state, fallback)
+        _remember_questions_from_reply(state, fallback)
+        save_sales_state(state)
         return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
     try:
@@ -14175,7 +14319,9 @@ async def ask_llm(
             logger.warning("ask_llm quota/rate limited, fallback enabled")
         else:
             logger.exception("ask_llm unified path failed", exc_info=exc)
-        fallback = _llm_unavailable_reply()
+        fallback = _llm_unavailable_reply(
+            user_text=last,
+        )
         return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
