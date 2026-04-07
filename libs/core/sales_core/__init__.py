@@ -1,8 +1,18 @@
 from __future__ import annotations
-import os, json, re, csv, asyncio, pathlib, time, random, hashlib, logging
+import os
+import json
+import re
+import csv
+import asyncio
+import pathlib
+import time
+import random
+import hashlib
+import logging
 from typing import List, Dict, Any, Optional, Tuple, Mapping, Sequence
 from dataclasses import dataclass, field
-import urllib.request, urllib.error
+import urllib.request
+import urllib.error
 import yaml
 
 # Redis (асинхронный клиент можно использовать при необходимости)
@@ -19,10 +29,12 @@ except Exception:  # библиотека может быть не устано�
 try:  # pragma: no cover - зависимость optional
     from openai import APITimeoutError  # type: ignore
 except Exception:  # pragma: no cover
+
     class APITimeoutError(Exception):  # type: ignore
         """Fallback timeout error when OpenAI SDK недоступен."""
 
         pass
+
 
 from ..brain import planner, quality
 
@@ -99,7 +111,9 @@ _TENANT_CONFIG_CACHE: Dict[int, Tuple[float, float, dict]] = {}
 _TENANT_PERSONA_CACHE: Dict[int, Tuple[float, str]] = {}
 _PERSONA_RULES_CACHE: Dict[str, "PersonaCompiledRules"] = {}
 # Key: (tenant or None, tuple of (path, mtime, size)) -> parsed, normalized items
-_CATALOG_CACHE: Dict[Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]], List[Dict[str, Any]]] = {}
+_CATALOG_CACHE: Dict[
+    Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]], List[Dict[str, Any]]
+] = {}
 _TENANTS_CONFIG_CACHE: Dict[int, Dict[str, Any]] = {}
 
 CTA_COOLDOWN_SECONDS = float(os.getenv("CTA_COOLDOWN_SECONDS", "180"))
@@ -137,18 +151,18 @@ _DEFAULT_WORKER_BASE_URL = "http://worker:8000"
 
 class Settings:
     DEFAULT_WORKER_BASE_URL = _DEFAULT_WORKER_BASE_URL
-    APP_VERSION   = os.getenv("APP_VERSION", "v21.0")
-    SEND          = os.getenv("SEND_ENABLED", "true").lower() == "true"
+    APP_VERSION = os.getenv("APP_VERSION", "v21.0")
+    SEND = os.getenv("SEND_ENABLED", "true").lower() == "true"
 
-    REDIS_URL     = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
     r = redis_async.from_url(REDIS_URL, decode_responses=True)
 
     # Публичный URL API (для вебхука waweb)
-    APP_PUBLIC_URL   = (os.getenv("APP_PUBLIC_URL") or "").rstrip("/")
+    APP_PUBLIC_URL = (os.getenv("APP_PUBLIC_URL") or "").rstrip("/")
     APP_INTERNAL_URL = os.getenv("APP_INTERNAL_URL", "http://app:8000").rstrip("/")
 
     # waweb
-    WA_WEB_URL    = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
+    WA_WEB_URL = (os.getenv("WA_WEB_URL", "http://waweb:9001") or "http://waweb:9001").rstrip("/")
     WA_PREFETCH_START = _env_bool("WA_PREFETCH_START", True)
     try:
         WA_QR_FETCH_ATTEMPTS = int(os.getenv("WA_QR_FETCH_ATTEMPTS", "3"))
@@ -162,21 +176,25 @@ class Settings:
         WA_QR_FETCH_RETRY_DELAY = 0.7
     if WA_QR_FETCH_RETRY_DELAY < 0:
         WA_QR_FETCH_RETRY_DELAY = 0.0
-    BAILEYS_URL = (os.getenv("BAILEYS_URL") or os.getenv("WABAILEYS_URL") or "http://wabaileys:9002").rstrip("/")
+    BAILEYS_URL = (
+        os.getenv("BAILEYS_URL") or os.getenv("WABAILEYS_URL") or "http://wabaileys:9002"
+    ).rstrip("/")
     _provider_default = (os.getenv("WHATSAPP_PROVIDER_DEFAULT") or "waweb").strip().lower()
     if _provider_default not in {"waweb", "baileys"}:
         _provider_default = "waweb"
     WHATSAPP_PROVIDER_DEFAULT = _provider_default
 
     _PDF_TABLES_ENGINE_RAW = (os.getenv("PDF_TABLES_ENGINE") or "plumber").strip().lower()
-    PDF_TABLES_ENGINE = _PDF_TABLES_ENGINE_RAW if _PDF_TABLES_ENGINE_RAW in {"plumber", "camelot"} else "plumber"
+    PDF_TABLES_ENGINE = (
+        _PDF_TABLES_ENGINE_RAW if _PDF_TABLES_ENGINE_RAW in {"plumber", "camelot"} else "plumber"
+    )
     try:
         PDF_RENDER_DPI = int(os.getenv("PDF_RENDER_DPI", "220"))
     except ValueError:
         PDF_RENDER_DPI = 220
 
     # Админка
-    ADMIN_TOKEN   = (os.getenv("ADMIN_TOKEN") or "").strip()
+    ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
     _WORKER_BASE_RAW = (
         os.getenv("WORKER_BASE_URL")
         or os.getenv("TGWORKER_BASE_URL")
@@ -186,13 +204,17 @@ class Settings:
     )
     WORKER_BASE_URL = str(_WORKER_BASE_RAW).strip().rstrip("/") or _DEFAULT_WORKER_BASE_URL
     TGWORKER_BASE_URL = WORKER_BASE_URL
-    PUBLIC_KEY    = _resolve_public_key(ADMIN_TOKEN)
+    PUBLIC_KEY = _resolve_public_key(ADMIN_TOKEN)
     WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
 
     # Avito OAuth
     AVITO_CLIENT_ID = (os.getenv("AVITO_CLIENT_ID") or "1OuyOIqOV6Pi6ewYI3mi").strip()
-    AVITO_CLIENT_SECRET = (os.getenv("AVITO_CLIENT_SECRET") or "t-JCi261jbPfuvx1d5x0EP8Y9wKxyvDBwKU8sdTe").strip()
-    AVITO_REDIRECT_URL = (os.getenv("AVITO_REDIRECT_URL") or "https://hub.avio.website/v1/oauth/avito/callback").strip()
+    AVITO_CLIENT_SECRET = (
+        os.getenv("AVITO_CLIENT_SECRET") or "t-JCi261jbPfuvx1d5x0EP8Y9wKxyvDBwKU8sdTe"
+    ).strip()
+    AVITO_REDIRECT_URL = (
+        os.getenv("AVITO_REDIRECT_URL") or "https://hub.avio.website/v1/oauth/avito/callback"
+    ).strip()
     AVITO_AUTH_URL = (os.getenv("AVITO_AUTH_URL") or "https://www.avito.ru/oauth").strip()
     AVITO_TOKEN_URL = (os.getenv("AVITO_TOKEN_URL") or "https://api.avito.ru/token/").strip()
     AVITO_SCOPE = (os.getenv("AVITO_SCOPE") or "messenger:read,messenger:write,user:read").strip()
@@ -203,7 +225,7 @@ class Settings:
 
     # LLM
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     try:
         OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "4"))
     except ValueError:
@@ -226,13 +248,13 @@ class Settings:
         LOWERCASE_OPENING_CHANCE = 1.0
 
     # Бизнес-поля
-    AGENT_NAME    = os.getenv("AGENT_NAME", "Акакий")
-    BRAND_NAME    = os.getenv("BRAND_NAME", "Гермес")
+    AGENT_NAME = os.getenv("AGENT_NAME", "Акакий")
+    BRAND_NAME = os.getenv("BRAND_NAME", "Гермес")
     WHATSAPP_LINK = os.getenv("WHATSAPP_LINK", "https://wa.me/7XXXXXXXXXX")
-    CITY          = os.getenv("CITY", "Уфа")
+    CITY = os.getenv("CITY", "Уфа")
 
     # Персоны/промпты с диска
-    PERSONA_MD    = os.getenv("PERSONA_MD") or str(DATA_DIR / "persona.md")
+    PERSONA_MD = os.getenv("PERSONA_MD") or str(DATA_DIR / "persona.md")
 
 
 settings = Settings()
@@ -408,7 +430,7 @@ def _with_sync_redis(func, default=None):
 
 
 # Куки и ключи
-ADMIN_COOKIE        = "admin_token"
+ADMIN_COOKIE = "admin_token"
 TENANT_PUBKEYS_HASH = "tenant_pubkeys"
 
 
@@ -416,6 +438,7 @@ TENANT_PUBKEYS_HASH = "tenant_pubkeys"
 STATE_KEY_PREFIX = "sales_state"
 STATE_TTL_SECONDS = int(os.getenv("STATE_TTL_SECONDS", str(8 * 3600)))
 _STATE_CACHE: Dict[str, "SalesState"] = {}
+_STATE_STORE_UNAVAILABLE = object()
 
 
 def _reset_state_store() -> None:
@@ -445,20 +468,27 @@ def _state_key(tenant: int | None, contact_id: int | None) -> str:
 
 def _state_store_read(key: str) -> Optional[dict]:
     try:
-        raw = _with_sync_redis(lambda client: client.get(key), None)
-        if not raw:
+        raw = _with_sync_redis(lambda client: client.get(key), _STATE_STORE_UNAVAILABLE)
+        if raw is _STATE_STORE_UNAVAILABLE:
             cached = _STATE_CACHE.get(key)
             if cached:
                 return cached.to_dict()
             return None
+        if not raw:
+            return None
         return json.loads(raw)
     except Exception:
+        cached = _STATE_CACHE.get(key)
+        if cached:
+            return cached.to_dict()
         return None
 
 
 def _state_store_write(key: str, payload: dict) -> None:
     _with_sync_redis(
-        lambda client: client.setex(key, STATE_TTL_SECONDS, json.dumps(payload, ensure_ascii=False)),
+        lambda client: client.setex(
+            key, STATE_TTL_SECONDS, json.dumps(payload, ensure_ascii=False)
+        ),
         None,
     )
 
@@ -469,7 +499,9 @@ class SalesState:
     contact_id: int
     channel: str = "whatsapp"
     needs: Dict[str, Any] = field(default_factory=dict)
-    spin: Dict[str, str] = field(default_factory=lambda: {stage: "pending" for stage in ("s", "p", "i", "n")})
+    spin: Dict[str, str] = field(
+        default_factory=lambda: {stage: "pending" for stage in ("s", "p", "i", "n")}
+    )
     bant: Dict[str, Any] = field(default_factory=dict)
     asked_questions: List[str] = field(default_factory=list)
     asked_question_fingerprints: List[str] = field(default_factory=list)
@@ -544,7 +576,9 @@ class SalesState:
         obj = cls(tenant=tenant, contact_id=contact_id)
         obj.channel = payload.get("channel", obj.channel)
         obj.needs = payload.get("needs", {}) or {}
-        obj.spin = payload.get("spin", obj.spin) or {stage: "pending" for stage in ("s", "p", "i", "n")}
+        obj.spin = payload.get("spin", obj.spin) or {
+            stage: "pending" for stage in ("s", "p", "i", "n")
+        }
         obj.bant = payload.get("bant", {}) or {}
         obj.asked_questions = payload.get("asked_questions", []) or []
         obj.asked_question_fingerprints = payload.get("asked_question_fingerprints", []) or []
@@ -593,7 +627,11 @@ class SalesState:
         content = content.strip()
         if not content:
             return
-        if self.history and self.history[-1].get("role") == role and self.history[-1].get("content") == content:
+        if (
+            self.history
+            and self.history[-1].get("role") == role
+            and self.history[-1].get("content") == content
+        ):
             return
         self.history.append({"role": role, "content": content})
         if len(self.history) > 24:
@@ -701,7 +739,9 @@ _ROBOTIC_BANNED_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _GRATITUDE_RE = re.compile(r"\b(спасибо|благодарю|благодарим)\b", re.IGNORECASE)
-_GREETING_PREFIX_RE = re.compile(r"^\s*(здравствуйте|добрый день|добрый вечер|привет)\b[!,. ]*", re.IGNORECASE)
+_GREETING_PREFIX_RE = re.compile(
+    r"^\s*(здравствуйте|добрый день|добрый вечер|привет)\b[!,. ]*", re.IGNORECASE
+)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _GRATITUDE_PHRASE_RE = re.compile(
     r"\b(спасибо(?:\s+за\s+обращение)?|благодарю(?:\s+за\s+обращение)?|благодарим(?:\s+за\s+обращение)?)\b[,.! ]*",
@@ -719,7 +759,7 @@ _LOWERCASE_OPENING_BLOCKED = {
     "ваалейкум",
 }
 _ENTITY_ACK_PREFIX_RE = re.compile(
-    r"^\s*([a-zа-яё0-9][a-zа-яё0-9\-\s]{1,42}),\s*(понял|принял|услышал)\b[,.! ]*",
+    r"^\s*([a-zа-яё0-9][a-zа-яё0-9\-\s]{1,42})\s*[,—-]\s*(понял|принял|услышал|принято)\b[,.! ]*",
     re.IGNORECASE,
 )
 _NEIGHBOR_CLAIM_RE = re.compile(
@@ -734,12 +774,11 @@ _URGENT_TODAY_RE = re.compile(
     r"\b(срочн\w*|сегодня|как\s+можно\s+быстрее|прямо\s+сейчас)\b",
     re.IGNORECASE,
 )
-_URGENT_REPLY_MARKERS = ("сегодня", "выезд", "мастер", "интервал", "приед")
 _ETA_INTENT_RE = re.compile(
     r"(?iu)\b(через\s+сколько|когда\s+приед|когда\s+можно\s+приех|когда\s+приехать|"
-    r"сколько\s+ждать|во\s+сколько|к\s+какому\s+времени)\b"
+    r"сколько\s+ждать|во\s+сколько|к\s+какому\s+времени|можете\s+завтра|"
+    r"завтра\s+с\s+утра|утром|вечером)\b"
 )
-_ETA_REPLY_MARKERS = ("мин", "час", "ориентир", "интервал", "окно", "к ", "до ")
 _INSTRUCTION_LEAK_LINE_RE = re.compile(
     r"(?im)^\s*(после\s+приветствия\s+последовательно\s+уточни:?\s*|"
     r"диалог-скрипт\s*(?:\(.*?\))?:?\s*|"
@@ -791,9 +830,21 @@ _CATALOG_UNAVAILABLE_RE = re.compile(
     r"пока\s+не\s+могу\s+посмотреть\s+каталог"
     r")\b"
 )
+_WHY_QUESTION_RE = re.compile(
+    r"(?iu)\b(зачем|почему|для\s+чего|для\s+чего\s+это|почему\s+нужен|почему\s+нужна|"
+    r"зачем\s+нужен|зачем\s+нужна|зачем\s+вам)\b"
+)
+_REPAIR_TURN_RE = re.compile(
+    r"(?iu)^\s*(чего|что\??|в\s+смысле|не\s+понял(?:а)?|не\s+поняли|"
+    r"не\s+разобрал(?:а)?|не\s+ясно|не\s+очень\s+понятно|"
+    r"я\s+же\s+говорил(?:а)?(?:\s+уже)?|уже\s+говорил(?:а)?|"
+    r"я\s+же\s+писал(?:а)?|уже\s+писал(?:а)?|"
+    r"вы\s+уже\s+спрашивали|опять\s+спрашиваете|зачем\s+повторяете)\s*$"
+)
 _NOISE_NEED_RE = re.compile(r"(?iu)\b(тих\w*|шумк\w*|шумоизоляц\w*|без\s+шума)\b")
 _INSULATION_NEED_RE = re.compile(
-    r"(?iu)\b(дует|сквозняк|промерз\w*|продува\w*|холод\w*|утеплен\w*|теплоизоляц\w*)\b"
+    r"(?iu)\b(дует|сквозняк|промерз\w*|продува\w*|холод\w*|утеплен\w*|теплоизоляц\w*|"
+    r"терморазрыв\w*|термо\s*разрыв\w*|термодвер\w*)\b"
 )
 _OBJECT_TYPE_HINT_RE = re.compile(
     r"(?iu)\b(квартир\w*|дом\w*|помещен\w*|офис\w*|склад\w*|коммерч\w*|студи\w*|комнат\w*|этаж\w*)\b"
@@ -803,13 +854,13 @@ _HUMAN_STYLE_FEW_SHOT = (
     "Клиент: «Здравствуйте»\n"
     "Менеджер: «Здравствуйте. В каком городе планируете установку?»\n\n"
     "Клиент: «Уфа»\n"
-    "Менеджер: «Понял. Выбираете для квартиры или частного дома?»\n\n"
+    "Менеджер: «Уточню: для квартиры или частного дома?»\n\n"
     "Клиент: «Пока нет фото и размеров»\n"
     "Менеджер: «Без проблем, можно начать без фото. Дам предварительный вариант, а размеры уточним позже.»\n\n"
     "Клиент: «Зачем две модели?»\n"
-    "Менеджер: «Понял. Тогда дам один лучший вариант под ваш запрос.»\n\n"
+    "Менеджер: «Тогда дам один лучший вариант под ваш запрос.»\n\n"
     "Антишаблоны (не использовать): «Спасибо, понял», «Ваш запрос принят», "
-    "«Если что-то ещё интересует — спрашивайте»."
+    "«Если что-то ещё интересует — спрашивайте», «Понял», «Поняла»."
 )
 
 
@@ -824,9 +875,13 @@ def _apply_conversational_phrasing(
 
     # Structural cleanup only: no phrase-level hardcoded rewrites.
     # Prevent technical placeholders like event_format leaking to user text.
-    out = re.sub(r"\b([a-z]+_[a-z0-9_]+)\b", lambda m: m.group(1).replace("_", " "), out, flags=re.IGNORECASE)
+    out = re.sub(
+        r"\b([a-z]+_[a-z0-9_]+)\b", lambda m: m.group(1).replace("_", " "), out, flags=re.IGNORECASE
+    )
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
     out = "\n".join(lines).strip()
+    if _OPENING_HEY_RE.match(out):
+        out = _OPENING_HEY_RE.sub("Здравствуйте. ", out, count=1).strip()
     out = _normalize_entity_ack_opening(out)
 
     return out
@@ -835,7 +890,11 @@ def _apply_conversational_phrasing(
 def _recent_gratitude_count(state: SalesState, tail: int = 6) -> int:
     if not isinstance(state, SalesState):
         return 0
-    recent_assistant = [str(item.get("content") or "") for item in (state.history or []) if item.get("role") == "assistant"]
+    recent_assistant = [
+        str(item.get("content") or "")
+        for item in (state.history or [])
+        if item.get("role") == "assistant"
+    ]
     if tail > 0:
         recent_assistant = recent_assistant[-tail:]
     count = 0
@@ -877,6 +936,24 @@ def _limit_questions(text: str, max_questions: int = 1) -> str:
                 out.append(".")
                 continue
             questions_left -= 1
+        out.append(ch)
+    return "".join(out)
+
+
+def _enforce_exclamation_budget(text: str, max_exclamations: int = 1) -> str:
+    candidate = str(text or "")
+    if not candidate:
+        return candidate
+    if max_exclamations < 0:
+        max_exclamations = 0
+    out: list[str] = []
+    left = max_exclamations
+    for ch in candidate:
+        if ch == "!":
+            if left <= 0:
+                out.append(".")
+                continue
+            left -= 1
         out.append(ch)
     return "".join(out)
 
@@ -944,7 +1021,7 @@ def _strip_unverified_local_claims(text: str, state: SalesState) -> str:
     if not removed:
         return candidate
     rebuilt = " ".join(kept).strip()
-    return rebuilt or "Понял, продолжаем подбор."
+    return rebuilt or "Продолжаем подбор."
 
 
 def _normalize_entity_ack_opening(text: str) -> str:
@@ -961,10 +1038,31 @@ def _normalize_entity_ack_opening(text: str) -> str:
     if tail.lower().startswith("что "):
         return candidate
     if not tail:
-        return "Понял."
+        return candidate
     if tail and tail[0].isalpha():
         tail = tail[0].upper() + tail[1:]
-    return f"Понял. {tail}".strip()
+    return tail.strip()
+
+
+def _looks_like_contextual_short_followup(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if "?" in raw:
+        return False
+    if re.search(r"\d", raw):
+        return False
+    if _looks_like_address_value(raw):
+        return False
+    low = _normalize_text(raw)
+    if _OBJECT_TYPE_HINT_RE.search(low):
+        return False
+    tokens = [tok for tok in _FACT_TOKEN_RE.findall(raw) if tok]
+    if not tokens or len(tokens) > 2:
+        return False
+    if _MODEL_NAME_INTENT_RE.search(raw) or _VARIANTS_USER_HINT_RE.search(raw):
+        return False
+    return True
 
 
 def _is_unsubscribe_intent(text: str) -> bool:
@@ -982,41 +1080,48 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 
 
 def _unsubscribe_ack_text() -> str:
-    return "Понял, остановил сообщения. Больше не пишем."
-
-
-def _ensure_urgent_same_day_ack(reply: str, last_user_message: str) -> str:
-    candidate = (reply or "").strip()
-    if not candidate:
-        return candidate
-    if not _URGENT_TODAY_RE.search(str(last_user_message or "")):
-        return candidate
-    low = candidate.lower()
-    if any(marker in low for marker in _URGENT_REPLY_MARKERS):
-        return candidate
-    return f"Понял, выезд сегодня возможен. {candidate}".strip()
-
-
-def _ensure_eta_guidance(reply: str, last_user_message: str) -> str:
-    candidate = (reply or "").strip()
-    if not candidate:
-        return candidate
-    if not _ETA_INTENT_RE.search(str(last_user_message or "")):
-        return candidate
-    low = candidate.lower()
-    if any(marker in low for marker in _ETA_REPLY_MARKERS):
-        return candidate
-    return f"{candidate} Ориентир по времени: напишу интервал после подтверждения адреса.".strip()
+    return ""
 
 
 def _strip_instruction_leaks(text: str) -> str:
     candidate = str(text or "")
     if not candidate.strip():
         return ""
+    # Remove unresolved placeholders from persona examples.
+    candidate = re.sub(r"<\s*[^>\n]{1,40}\s*>", "", candidate)
+    # Drop markdown/code fence artifacts that should never be shown to leads.
+    candidate = candidate.replace("`", " ")
     out = _INSTRUCTION_LEAK_LINE_RE.sub("", candidate)
     out = _SHORTLIST_LEAK_RE.sub("", out)
+    # Remove meta tails about formatting/delivery that should never be shown to leads.
+    out = re.sub(
+        r"(?iu)\bсначала\b[^.?!\n]{0,220}\bотдельн\w*\s+сообщени\w*[^.?!\n]*",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*\bотвечайт\w*\s+(?:разв[её]рнут\w*|подробн\w*|не\s+односложн\w*)\b[.!?]*",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*\bне\s+одн\w*\s+строк\w*\b[.!?]*",
+        "",
+        out,
+    )
+    out = _strip_embedded_operator_tail(out)
     out = re.sub(
         r"(?iu)\bпосле\s+приветствия\s+последовательно\s+уточни:?\s*",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*\bотдельн\w*\s+сообщени\w*\b[^.?!\n]*",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)\bв\s+этом\s+же\s+ответе\s+[^.?!\n]*(?:[.?!]|$)",
         "",
         out,
     )
@@ -1027,10 +1132,92 @@ def _strip_instruction_leaks(text: str) -> str:
             continue
         cleaned_lines.append(line)
     lines = cleaned_lines
-    if lines and all(re.match(r"^\d+[).]\s*", ln) for ln in lines):
-        out = ""
-    else:
-        out = "\n".join(lines)
+    out = "\n".join(lines)
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", out) if part.strip()]
+    if parts:
+        filtered_parts: list[str] = []
+        for part in parts:
+            low = part.lower().replace("ё", "е")
+            if _is_operator_instruction_sentence(part):
+                continue
+            if _is_response_format_instruction_sentence(part):
+                continue
+            if _is_sequence_process_instruction_sentence(part):
+                continue
+            if ("?" not in part) and re.match(
+                r"(?iu)^\s*(поздоровайт\w*|поприветствуйт\w*)\b",
+                low,
+            ):
+                continue
+            if ("?" not in part) and re.match(
+                r"(?iu)^\s*(скажите|спросите|уточните|напишите)\s+что\b",
+                low,
+            ):
+                continue
+            part = _strip_embedded_operator_tail(part)
+            if not part:
+                continue
+            low = part.lower().replace("ё", "е")
+            if re.search(
+                r"(?iu)\b(без\s+лишних\s+уточнен|без\s+повтора|дайте\s+адрес\s+сразу|"
+                r"при\s+известном\s+городе)\b",
+                low,
+            ):
+                continue
+            if re.search(r"(?iu)^(pdf|пдф)\b.*\b(каталог|ссылк)\b", low):
+                continue
+            if re.match(
+                r"(?iu)^\s*(честно\s+)?(сообщайте|предлагайте|предложите|уточните|спросите|попросите|"
+                r"примите|извлеките|фиксируйте|передайте|дайте)\b",
+                low,
+            ) and ("?" not in part):
+                continue
+            filtered_parts.append(part)
+        out = " ".join(filtered_parts).strip()
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    out = re.sub(
+        r"(?iu)\b(работаем\s+по\s+каталогу\s+и\s+выездом)\s*,?\s*без\s+адресов\s+магазин\w*\b",
+        r"\1",
+        out,
+    )
+    out = re.sub(r"(?iu)\bот\s+цена\s+по\s+каталогу\b", "цена по каталогу", out)
+    out = re.sub(r"(?iu)\bза\s+цена\s+по\s+каталогу\b", "цена по каталогу", out)
+    out = re.sub(r"(?iu)\bв\s+цена\s+по\s+каталогу\b", "цена по каталогу", out)
+    out = re.sub(r"(?iu)\bк\s+цена\s+по\s+каталогу\b", "цена по каталогу", out)
+    catalog_price_placeholder = "цена по каталогу"
+    if catalog_price_placeholder and catalog_price_placeholder in out.lower().replace("ё", "е"):
+        sentence_parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(out) if part.strip()]
+        if sentence_parts:
+            rewritten_parts: list[str] = []
+            has_placeholder_sentence = False
+            for part in sentence_parts:
+                low = part.lower().replace("ё", "е")
+                if catalog_price_placeholder in low:
+                    needs_rewrite = bool(
+                        re.search(
+                            r"(?iu)\b(обойд|будет|итог|примерно|с\s+уч[её]том\s+скид|"
+                            r"после\s+скид|со\s+скидк)\w*\b",
+                            low,
+                        )
+                    )
+                    if needs_rewrite:
+                        has_placeholder_sentence = True
+                        rewritten_parts.append("Точную цену по выбранной модели уточню и сразу напишу.")
+                        continue
+                rewritten_parts.append(part)
+            if has_placeholder_sentence:
+                final_parts: list[str] = []
+                for part in rewritten_parts:
+                    low = part.lower().replace("ё", "е")
+                    if ("?" in part) and re.search(r"(?iu)\b(оформ|подтверд|берем|берём|заказ)\w*\b", low):
+                        continue
+                    final_parts.append(part)
+                out = " ".join(final_parts).strip()
+    out = re.sub(r"(?u)[\"«»]\s*([,.;:!?])", r"\1", out)
+    out = re.sub(r"(?u)[\"«»]+\s*$", "", out)
+    out = re.sub(r"(?u)\s+[\"«»]+\s*$", "", out)
+    out = re.sub(r"(\d)\)(?=\s|$)", r"\1", out)
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
     return out
 
@@ -1048,16 +1235,367 @@ def _safe_minimal_fallback_reply(
     branding = _branding_for_tenant(tenant, channel_name)
     known_facts = _state_facts_snapshot(state)
     turn_intent = _classify_turn_intent(last_user_message, known_facts=known_facts)
+    direct_persona_reply = _persona_direct_reply_for_user_turn(
+        persona_text,
+        last_user_message=last_user_message,
+        known_facts=known_facts,
+        state=state,
+    )
+    grounding = _build_reply_grounding(
+        tenant=tenant,
+        state=state,
+        user_text=last_user_message,
+    )
+    catalog_items = _grounding_catalog_items(grounding)
+    if (not catalog_items) and (tenant is not None):
+        try:
+            catalog_items = read_all_catalog(tenant=tenant)
+        except Exception:
+            catalog_items = []
+    effective_grounding: dict[str, Any] = dict(grounding or {})
+    if catalog_items and not _grounding_catalog_items(grounding):
+        effective_grounding["catalog_items"] = [dict(item) for item in list(catalog_items or [])[:40]]
+    selected = _selected_item_from_grounding(grounding, catalog_items)
+    last_user_low = _normalize_text(str(last_user_message or ""))
+    model_repair_turn = bool(
+        _LOW_SIGNAL_CONTEXT_RE.search(str(last_user_message or ""))
+        or _CATALOG_UNAVAILABLE_RE.search(str(last_user_message or ""))
+        or ("груз" in last_user_low)
+        or ("открыва" in last_user_low)
+        or ("открыл" in last_user_low and "не" in last_user_low)
+    )
+    if state.pending_fact_key == "model" and model_repair_turn:
+        intro = _persona_catalog_unavailable_reply(persona_text)
+        preview = ""
+        preview_items: list[Mapping[str, Any]] = []
+        grounding_items = _grounding_catalog_items(grounding)
+        if grounding_items:
+            preview_items = [dict(item) for item in list(grounding_items or [])[:2]]
+            preview = _shortlist_preview_text(preview_items, limit=2)
+        if (not preview_items) and tenant is not None:
+            try:
+                # Build fresh retrieval needs from confirmed facts and current user turn.
+                # Avoid stale free-form state.needs tokens degrading catalog match quality.
+                needs: Dict[str, Any] = {}
+                for key in ("city", "object_type", "address"):
+                    fact_val = str((state.facts or {}).get(key) or "").strip()
+                    if fact_val:
+                        needs[key] = fact_val
+                query_needs = infer_user_needs(last_user_message)
+                safe_need_keys = {"keywords", "budget_max", "price_order", "color", "object_type", "dimensions", "model"}
+                for key, value in dict(query_needs or {}).items():
+                    if value in (None, "", [], {}, ()):
+                        continue
+                    if key not in safe_need_keys:
+                        continue
+                    needs[key] = value
+                preview_items = list(
+                    search_catalog(
+                        needs,
+                        limit=2,
+                        tenant=tenant,
+                        query=last_user_message,
+                    )
+                    or []
+                )
+                preview = _shortlist_preview_text(preview_items, limit=2)
+                if not preview_items:
+                    catalog_items = list(read_all_catalog(tenant=tenant) or [])
+                    probe = _extract_attribute_probe(last_user_message)
+                    if probe:
+                        probe_items = _items_with_attribute(catalog_items, probe)
+                        if probe_items:
+                            catalog_items = [dict(item) for item in probe_items]
+                    budget_cap = _extract_budget_cap_from_needs(query_needs)
+                    if budget_cap:
+                        filtered = [
+                            dict(item)
+                            for item in catalog_items
+                            if isinstance(_item_price_int(dict(item)), int)
+                            and int(_item_price_int(dict(item)) or 0) > 0
+                            and int(_item_price_int(dict(item)) or 0) <= int(budget_cap)
+                        ]
+                        if filtered:
+                            catalog_items = filtered
+                    order = _extract_price_order_intent(last_user_message)
+                    if order in {"asc", "desc"}:
+                        reverse = order == "desc"
+                        priced = [
+                            dict(item)
+                            for item in catalog_items
+                            if isinstance(_item_price_int(dict(item)), int)
+                            and int(_item_price_int(dict(item)) or 0) > 0
+                        ]
+                        if priced:
+                            catalog_items = sorted(
+                                priced,
+                                key=lambda item: int(_item_price_int(dict(item)) or 0),
+                                reverse=reverse,
+                            )
+                    preview_items = [dict(item) for item in list(catalog_items or [])[:2]]
+                    preview = _shortlist_preview_text(preview_items, limit=2)
+            except Exception:
+                preview = ""
+                preview_items = []
+        if preview and intro:
+            reply = f"{intro.rstrip('.!?')}: {preview}."
+        elif preview:
+            reply = f"{preview}."
+        else:
+            reply = intro or _persona_driven_question_for_fact(persona_text, "model", state=state)
+        if preview_items:
+            effective_grounding["catalog_items"] = [dict(item) for item in preview_items[:8]]
+            state.last_items = [dict(item) for item in preview_items[:2]]
+        state.pending_fact_key = "model"
+        reply = _apply_base_answer_quality_floor(
+            reply,
+            state=state,
+            persona_hints=persona_hints,
+            grounding=effective_grounding,
+            user_text=last_user_message,
+        )
+        reply = _ensure_dialog_greeting_on_first_reply(reply, state, persona_context=persona_text)
+        state.last_bot_reply = reply
+        state.append_history("assistant", reply)
+        state.last_updated_ts = time.time()
+        save_sales_state(state)
+        return reply
+    current_pending = _canonical_fact_key(str(state.pending_fact_key or ""))
+    unresolved_model_followup = bool(
+        current_pending == "model"
+        and selected is None
+        and bool(state.last_items)
+        and (
+            bool(_extract_attribute_probe(last_user_message))
+            or _looks_like_contextual_short_followup(last_user_message)
+            or bool(
+                state.last_items
+                and _is_shortlist_feedback_turn(last_user_message, known_facts=known_facts)
+            )
+        )
+    )
+    if unresolved_model_followup:
+        shortlist_answer, shortlist_items = _shortlist_comparison_followup_plan(
+            last_user_message,
+            state.last_items or [],
+            tenant=tenant,
+            persona_context=persona_text,
+            state=state,
+        )
+        if not shortlist_answer:
+            shortlist_answer = _shortlist_attribute_answer(last_user_message, state.last_items or [])
+        if shortlist_answer:
+            reply = shortlist_answer
+            if shortlist_items:
+                state.last_items = [dict(item) for item in shortlist_items[:2]]
+        else:
+            reply = _fallback_contextual_question(
+                last_user_message,
+                state=state,
+                persona_context=persona_text,
+            ) or _persona_driven_question_for_fact(persona_text, "model", state=state)
+        state.pending_fact_key = "model"
+        reply = _apply_base_answer_quality_floor(
+            reply,
+            state=state,
+            persona_hints=persona_hints,
+            grounding=effective_grounding,
+            user_text=last_user_message,
+        )
+        state.last_bot_reply = reply
+        state.append_history("assistant", reply)
+        state.last_updated_ts = time.time()
+        save_sales_state(state)
+        return reply
+    if current_pending == "model" and selected is None:
+        model_probe = _extract_attribute_probe(last_user_message)
+        if model_probe:
+            probe_items: list[Mapping[str, Any]] = []
+            source_items = _grounding_catalog_items(grounding)
+            if not source_items and tenant is not None:
+                try:
+                    source_items = read_all_catalog(tenant=tenant)
+                except Exception:
+                    source_items = []
+            if source_items:
+                probe_items = _items_with_attribute(source_items, model_probe)
+            if not probe_items and source_items:
+                probe_items = [dict(item) for item in list(source_items or [])[:2]]
+            if probe_items:
+                shortlist = [dict(item) for item in list(probe_items or [])[:2]]
+                preview = _shortlist_preview_text(shortlist, limit=2)
+                if preview:
+                    reply = _render_shortlist_preview_reply(
+                        preview,
+                        ask_detail=True,
+                        persona_context=persona_text,
+                        state=state,
+                        user_text=last_user_message,
+                    )
+                    state.last_items = shortlist[:2]
+                    state.pending_fact_key = "model"
+                    effective_grounding["catalog_items"] = [dict(item) for item in shortlist[:8]]
+                    reply = _apply_base_answer_quality_floor(
+                        reply,
+                        state=state,
+                        persona_hints=persona_hints,
+                        grounding=effective_grounding,
+                        user_text=last_user_message,
+                    )
+                    reply = _ensure_dialog_greeting_on_first_reply(reply, state, persona_context=persona_text)
+                    state.last_bot_reply = reply
+                    state.append_history("assistant", reply)
+                    state.last_updated_ts = time.time()
+                    save_sales_state(state)
+                    return reply
 
     required = _required_facts_from_persona_text(persona_text)
     missing = _missing_required_facts(required, known_facts)
-    if turn_intent == "offtopic":
-        reply = "Давайте вернемся к вашему запросу. Что нужно по товару или услуге?"
-    elif missing:
+    missing = _prioritize_missing_facts(missing, turn_intent=turn_intent)
+    script_questions = _persona_script_questions(persona_text)
+    script_question = _persona_primary_script_question(persona_text, state=state)
+    suppress_followup_questions = False
+    catalog_intent = bool(
+        _is_price_intent(last_user_message)
+        or _MODEL_NAME_INTENT_RE.search(str(last_user_message or ""))
+        or _VARIANTS_USER_HINT_RE.search(str(last_user_message or ""))
+    )
+    selected_followup_intent = bool(
+        selected is not None
+        and (
+            _is_price_intent(last_user_message)
+            or bool(_MODEL_NAME_INTENT_RE.search(str(last_user_message or "")))
+            or bool(_VARIANTS_USER_HINT_RE.search(str(last_user_message or "")))
+            or bool(_extract_attribute_probe(last_user_message))
+        )
+    )
+    if direct_persona_reply and turn_intent not in {"repair", "catalog_problem"}:
+        reply = direct_persona_reply
+    elif selected_followup_intent:
+        state.pending_fact_key = ""
+        reply = _selected_item_attribute_answer(last_user_message, selected)
+        if not reply and bool(_MODEL_NAME_INTENT_RE.search(str(last_user_message or ""))):
+            reply = _selected_item_brief_answer(selected)
+        if not reply and _is_price_intent(last_user_message):
+            selected_name = _item_label(dict(selected))
+            selected_price = _item_price_int(dict(selected))
+            if selected_name and selected_price:
+                reply = f"{selected_name} {_format_rub_price(selected_price)}".strip()
+        if not reply:
+            reply = _selected_item_brief_answer(selected)
+    elif turn_intent == "why_question":
+        target_key = current_pending or (missing[0] if missing else "")
+        reply = _explain_missing_fact_need(target_key, persona_context=persona_text)
+        if not reply:
+            reply = _persona_driven_question_for_fact(persona_text, target_key or "model", state=state)
+        followup_question = ""
+        if target_key:
+            followup_question = _persona_driven_question_for_fact(
+                persona_text,
+                target_key,
+                state=state,
+            )
+        if reply and followup_question and not _is_repeated_question_against_state(followup_question, state):
+            reply = f"{reply.rstrip()} {followup_question}".strip()
+        elif not reply and followup_question:
+            reply = followup_question
+        if target_key:
+            state.pending_fact_key = _canonical_fact_key(target_key)
+    elif turn_intent == "offtopic":
+        reply = "Готов помочь по вашему запросу."
+        suppress_followup_questions = True
+        missing = []
+        state.pending_fact_key = ""
+    elif turn_intent == "repair":
+        target_key = current_pending or (missing[0] if missing else "")
+        if target_key:
+            if _canonical_fact_key(target_key) == "model" and state.last_items:
+                shortlist_answer, shortlist_items = _shortlist_comparison_followup_plan(
+                    last_user_message,
+                    state.last_items or [],
+                    tenant=tenant,
+                    persona_context=persona_text,
+                    state=state,
+                )
+                if not shortlist_answer:
+                    shortlist_answer = _shortlist_attribute_answer(
+                        last_user_message, state.last_items or []
+                    )
+                if shortlist_answer:
+                    reply = shortlist_answer
+                    if shortlist_items:
+                        state.last_items = [dict(item) for item in shortlist_items[:2]]
+                else:
+                    reply = _fallback_contextual_question(
+                        last_user_message,
+                        state=state,
+                        persona_context=persona_text,
+                    )
+            else:
+                reply = _persona_driven_question_for_fact(persona_text, target_key, state=state)
+            state.pending_fact_key = _canonical_fact_key(target_key)
+        else:
+            reply = _fallback_contextual_question(
+                last_user_message,
+                state=state,
+                persona_context=persona_text,
+            ) or _persona_primary_script_question(persona_text, state=state)
+    elif selected is not None and not missing:
+        state.pending_fact_key = ""
+        reply = _selected_item_attribute_answer(last_user_message, selected)
+        if not reply:
+            explicit_match = _best_catalog_item_match(last_user_message, catalog_items)
+            if explicit_match is not None:
+                reply = _selected_item_brief_answer(explicit_match)
+        if not reply:
+            reply = _selected_item_brief_answer(selected)
+    elif catalog_intent:
+        reply = ""
+        if selected is not None and _is_price_intent(last_user_message):
+            selected_name = _item_label(dict(selected))
+            selected_price = _item_price_int(dict(selected))
+            if selected_name and selected_price:
+                reply = f"По каталогу {selected_name} стоит {_format_rub_price(selected_price)}."
+        if not reply and _is_price_intent(last_user_message):
+            min_price = _catalog_min_price(catalog_items)
+            if min_price:
+                reply = f"По каталогу есть варианты от {_format_rub_price(min_price)}."
+        if not reply:
+            preferred_question = script_question if missing else ""
+            if preferred_question and (
+                _is_price_intent(last_user_message)
+                or bool(_MODEL_NAME_INTENT_RE.search(str(last_user_message or "")))
+                or bool(_VARIANTS_USER_HINT_RE.search(str(last_user_message or "")))
+            ):
+                if not (
+                    _question_covers_fact(preferred_question, "model")
+                    or _question_covers_fact(preferred_question, "budget")
+                ):
+                    preferred_question = ""
+            reply = preferred_question or _fallback_contextual_question(
+                last_user_message,
+                state=state,
+                persona_context=persona_text,
+            )
+        if missing:
+            selected_key = missing[0]
+            selected_question = _persona_driven_question_for_fact(
+                persona_text,
+                selected_key,
+                state=state,
+            )
+            if selected_question and ("?" not in reply):
+                reply = f"{reply} {selected_question}".strip()
+                state.pending_fact_key = _canonical_fact_key(selected_key)
+    elif missing and not suppress_followup_questions:
         selected_key = missing[0]
-        selected_question = _persona_question_for_fact(persona_text, selected_key) or _generic_question_for_fact(selected_key)
+        selected_question = _persona_driven_question_for_fact(
+            persona_text,
+            selected_key,
+            state=state,
+        )
         for key in missing:
-            q = _persona_question_for_fact(persona_text, key) or _generic_question_for_fact(key)
+            q = _persona_driven_question_for_fact(persona_text, key, state=state)
             if not _is_repeated_question_against_state(q, state):
                 selected_key = key
                 selected_question = q
@@ -1065,27 +1603,57 @@ def _safe_minimal_fallback_reply(
         if _is_repeated_question_against_state(selected_question, state):
             non_address = [k for k in missing if _canonical_fact_key(k) != "address"]
             for key in non_address:
-                q = _persona_question_for_fact(persona_text, key) or _generic_question_for_fact(key)
+                q = _persona_driven_question_for_fact(persona_text, key, state=state)
                 if not _is_repeated_question_against_state(q, state):
                     selected_key = key
                     selected_question = q
                     break
         state.pending_fact_key = _canonical_fact_key(selected_key)
-        reply = f"Понял. {selected_question}"
+        reply = selected_question
     elif turn_intent == "catalog_request" and str(branding.get("CATALOG_URL") or "").strip():
         reply = f"Вот каталог: {str(branding.get('CATALOG_URL') or '').strip()}"
     elif _ORDER_INTENT_RE.search(str(last_user_message or "")):
         if str(known_facts.get("contact") or "").strip():
-            reply = "Понял, продолжаем оформление. Подтверждение отправлю по вашему контакту."
+            reply = "Продолжаем оформление. Подтверждение отправлю по вашему контакту."
         else:
             state.pending_fact_key = "contact"
-            reply = "Понял. Чтобы оформить, оставьте, пожалуйста, телефон или удобный мессенджер."
+            reply = "Чтобы оформить, оставьте, пожалуйста, телефон или удобный мессенджер."
+    elif known_facts.get("model") and not missing:
+        state.pending_fact_key = ""
+        reply = ""
+        if selected is not None:
+            attr_answer = _selected_item_attribute_answer(last_user_message, selected)
+            if attr_answer:
+                reply = attr_answer
+            elif bool(_MODEL_NAME_INTENT_RE.search(str(last_user_message or ""))):
+                reply = _selected_item_brief_answer(selected)
+        if not reply:
+            reply = _fallback_contextual_question(
+                last_user_message,
+                state=state,
+                persona_context=persona_text,
+            ) or _selected_item_brief_answer(selected if isinstance(selected, Mapping) else {})
     else:
-        reply = "Понял. Уточните, пожалуйста, что именно нужно сейчас."
-    reply = _humanize_reply_text(reply, state=state, persona_hints=persona_hints)
-    reply = _drop_repeated_questions_from_reply(reply, state)
-    reply = _ensure_urgent_same_day_ack(reply, last_user_message)
-    reply = _ensure_eta_guidance(reply, last_user_message)
+        if script_question and missing:
+            reply = script_question
+            for key in _fact_keys_from_line(script_question):
+                canonical = _canonical_fact_key(key)
+                if canonical:
+                    state.pending_fact_key = canonical
+                    break
+        else:
+            reply = _fallback_contextual_question(
+                last_user_message,
+                state=state,
+                persona_context=persona_text,
+            )
+    reply = _apply_base_answer_quality_floor(
+        reply,
+        state=state,
+        persona_hints=persona_hints,
+        grounding=effective_grounding,
+        user_text=last_user_message,
+    )
     reply = _apply_persona_sequence_obligations(
         reply,
         persona_context=persona_text,
@@ -1101,11 +1669,94 @@ def _safe_minimal_fallback_reply(
         known_facts=known_facts,
         state=state,
     )
-    if len((reply or "").strip()) <= 8:
-        reply = "Понял. Уточните, пожалуйста, что именно нужно сейчас."
+    if len((reply or "").strip()) <= 8 and not suppress_followup_questions:
+        preferred_short_question = str(script_question or "").strip()
+        if preferred_short_question and _is_repeated_question_against_state(preferred_short_question, state):
+            preferred_short_question = ""
+        if (not preferred_short_question) and missing:
+            inferred = _persona_driven_question_for_fact(persona_text, missing[0], state=state)
+            if inferred and not _is_repeated_question_against_state(inferred, state):
+                preferred_short_question = inferred
+        reply = preferred_short_question or _fallback_contextual_question(
+            last_user_message,
+            state=state,
+            persona_context=persona_text,
+        )
+    reply = _apply_base_answer_quality_floor(
+        reply,
+        state=state,
+        persona_hints=persona_hints,
+        grounding=effective_grounding,
+        user_text=last_user_message,
+    )
+    if direct_persona_reply:
+        direct_questions = _extract_questions_from_text(reply)
+        if direct_questions:
+            pending_key = ""
+            for question in direct_questions:
+                inferred = _normalize_slot_name("", question=question)
+                canonical = _canonical_fact_key(inferred)
+                if canonical:
+                    pending_key = canonical
+                    break
+            if not pending_key:
+                for miss_key in missing:
+                    if any(_question_covers_fact(question, miss_key) for question in direct_questions):
+                        pending_key = _canonical_fact_key(miss_key)
+                        break
+            state.pending_fact_key = pending_key
+    if state is not None and script_questions and _is_repeated_question_against_state(reply, state):
+        preferred_pending = _canonical_fact_key(str(state.pending_fact_key or ""))
+        if preferred_pending:
+            pending_question = _persona_driven_question_for_fact(
+                persona_text,
+                preferred_pending,
+                state=state,
+            )
+            if pending_question and not _is_repeated_question_against_state(pending_question, state):
+                reply = pending_question
+        if _is_repeated_question_against_state(reply, state) and not preferred_pending:
+            for question in script_questions:
+                if not _is_repeated_question_against_state(question, state):
+                    reply = question
+                    break
+    if not str(reply or "").strip():
+        preferred_script = str(script_question or "").strip()
+        if preferred_script and not _is_repeated_question_against_state(preferred_script, state):
+            reply = preferred_script
+        preferred_key = (
+            _canonical_fact_key(str(state.pending_fact_key or ""))
+            or _canonical_fact_key(current_pending)
+            or (_canonical_fact_key(missing[0]) if missing else "")
+            or ""
+        )
+        if preferred_key == "model" and not catalog_items:
+            non_model_missing = [
+                _canonical_fact_key(key)
+                for key in missing
+                if _canonical_fact_key(key) and _canonical_fact_key(key) != "model"
+            ]
+            preferred_key = (non_model_missing[0] if non_model_missing else "") or "budget"
+        if (not preferred_key) and catalog_items:
+            preferred_key = "model"
+        if not preferred_key:
+            preferred_key = "budget"
+        if not str(reply or "").strip():
+            reply = _persona_driven_question_for_fact(persona_text, preferred_key, state=state)
+        if not str(reply or "").strip():
+            reply = _generic_question_for_fact(preferred_key)
+    reply = _ensure_dialog_greeting_on_first_reply(reply, state, persona_context=persona_text)
+    state.last_bot_reply = reply
+    state.append_history("assistant", reply)
+    state.last_updated_ts = time.time()
+    _update_fact_memory(state, reply)
     _remember_questions_from_reply(state, reply)
     save_sales_state(state)
     return reply
+
+
+def _llm_unavailable_reply() -> str:
+    return "Сейчас не могу корректно ответить. Напишите еще раз через минуту."
 
 
 def _apply_optional_lowercase_opening(
@@ -1131,6 +1782,8 @@ def _apply_optional_lowercase_opening(
     lower_opening = opening.lower()
     if lower_opening in _LOWERCASE_OPENING_BLOCKED:
         return candidate
+    if len(opening) >= 3 and opening.isupper():
+        return candidate
     # Keep sentence case only for explicitly formal style.
     tone = (persona_hints.tone or "").lower() if persona_hints else ""
     if any(token in tone for token in ("формал", "официал")):
@@ -1152,7 +1805,7 @@ def _humanize_reply_text(
         return text
     text = _strip_instruction_leaks(text)
     if not text:
-        return "Понял. Уточните, пожалуйста, что именно нужно."
+        return ""
 
     # Remove technical multi-variant labels if they slip into final output.
     text = re.sub(r"(?im)^\s*Вариант\s+\d+\s*:\s*", "", text).strip()
@@ -1164,6 +1817,9 @@ def _humanize_reply_text(
     # Final cleanup (minimal and non-destructive).
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"\?\.+", "?", text)
+    text = re.sub(r"!\.+", "!", text)
+    text = re.sub(r"\.\?+", "?", text)
     text = re.sub(r"([,;:])\1+", r"\1", text)
     text = _apply_conversational_phrasing(text, persona_hints=persona_hints)
     text = _trim_redundant_gratitude_opening(text, state)
@@ -1179,7 +1835,9 @@ def _persona_requires_first_greeting(persona_context: str) -> bool:
     low = str(persona_context or "").lower().replace("ё", "е")
     if not low:
         return False
-    has_greeting_tokens = any(token in low for token in ("здорова", "приветств", "добрый день", "здравствуйте"))
+    has_greeting_tokens = any(
+        token in low for token in ("здорова", "приветств", "добрый день", "здравствуйте")
+    )
     if not has_greeting_tokens:
         return False
     patterns = (
@@ -1209,14 +1867,26 @@ def _ensure_dialog_greeting_on_first_reply(
     persona_force_greeting = _persona_requires_first_greeting(persona_context)
     if not force_greeting and not persona_force_greeting:
         return candidate
-    if _GREETING_PREFIX_RE.match(candidate):
-        return candidate
     has_bot_history = bool(str(getattr(state, "last_bot_reply", "") or "").strip())
     if has_bot_history:
         return candidate
     if re.match(r"^\s*(https?://|@[\w\d_]+)", candidate):
         return candidate
-    return f"Здравствуйте. {candidate}".strip()
+    greeting = "Здравствуйте."
+    persona_low = str(persona_context or "").lower().replace("ё", "е")
+    if "добрый день" in persona_low:
+        greeting = "Добрый день."
+    elif "добрый вечер" in persona_low:
+        greeting = "Добрый вечер."
+    if _OPENING_HEY_RE.match(candidate):
+        body = _OPENING_HEY_RE.sub("", candidate, count=1).strip()
+        return f"{greeting} {body}".strip() if body else greeting
+    if _GREETING_PREFIX_RE.match(candidate):
+        return candidate
+    body = str(candidate or "").strip()
+    if not body:
+        return greeting
+    return f"{greeting} {body}".strip()
 
 
 def _answer_is_too_robotic(text: str) -> bool:
@@ -1245,18 +1915,36 @@ def _normalize_numbered_list_punctuation(text: str) -> str:
     return re.sub(r"(?<![0-9A-Za-zА-Яа-яЁё])(\d{1,2})\.\s+", r"\1) ", candidate)
 
 
-def _enforce_sentence_budget(text: str, max_sentences: int = 4) -> str:
+def _enforce_sentence_budget(
+    text: str,
+    max_sentences: int = 4,
+    max_chars: int = 420,
+) -> str:
     candidate = _normalize_numbered_list_punctuation(text)
     if not candidate:
         return candidate
     parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", candidate) if part.strip()]
-    if len(parts) <= max(1, int(max_sentences or 1)):
-        return candidate
-    kept = parts[: max(1, int(max_sentences or 1))]
-    clipped = " ".join(kept).strip()
+    limit_sent = max(1, int(max_sentences or 1))
+    clipped = candidate
+    if len(parts) > limit_sent:
+        kept = parts[:limit_sent]
+        clipped = " ".join(kept).strip()
     if clipped and clipped[-1] not in ".!?":
         clipped = clipped + "."
-    return clipped
+    limit_chars = max(120, int(max_chars or 120))
+    if len(clipped) <= limit_chars:
+        return clipped
+    hard = clipped[:limit_chars].rstrip()
+    tail_punct = max(hard.rfind("."), hard.rfind("?"), hard.rfind("!"))
+    if tail_punct >= max(0, limit_chars - 120):
+        hard = hard[: tail_punct + 1].rstrip()
+    else:
+        tail_space = hard.rfind(" ")
+        if tail_space >= max(0, limit_chars - 80):
+            hard = hard[:tail_space].rstrip()
+        if hard and hard[-1] not in ".!?":
+            hard = hard + "."
+    return hard
 
 
 def _question_token_set(question: str) -> set[str]:
@@ -1294,12 +1982,38 @@ def _is_repeated_question_against_state(question: str, state: SalesState) -> boo
     q_tokens = _question_token_set(question)
     if not q_tokens:
         return False
-    previous_fps = [str(item or "").strip() for item in (state.asked_question_fingerprints or []) if str(item or "").strip()]
+    core_fact_keys = ("city", "address", "object_type", "model", "budget", "timeline", "dimensions", "contact")
+
+    def _question_fact_set(text: str) -> set[str]:
+        out: set[str] = set()
+        for key in core_fact_keys:
+            if _question_covers_fact(text, key):
+                out.add(key)
+        return out
+
+    current_facts = _question_fact_set(question)
+    previous_fps = [
+        str(item or "").strip()
+        for item in (state.asked_question_fingerprints or [])
+        if str(item or "").strip()
+    ]
+    previous_questions = [
+        str(item or "").strip()
+        for item in (state.asked_questions or [])
+        if str(item or "").strip()
+    ]
     last_question = str(state.last_question_text or "").strip()
     if last_question:
         last_fp = quality.question_fingerprint(last_question)
         if last_fp:
             previous_fps.append(last_fp)
+            previous_questions.append(last_question)
+    prev_fact_map: dict[str, set[str]] = {}
+    for q_text in previous_questions[-24:]:
+        fp = quality.question_fingerprint(q_text)
+        if not fp:
+            continue
+        prev_fact_map[fp] = _question_fact_set(q_text)
     for prev_fp in previous_fps[-24:]:
         prev_tokens = {token for token in prev_fp.split() if token}
         if not prev_tokens:
@@ -1311,6 +2025,9 @@ def _is_repeated_question_against_state(question: str, state: SalesState) -> boo
         coverage_prev = overlap / max(1, len(prev_tokens))
         jaccard = overlap / max(1, len(q_tokens | prev_tokens))
         if coverage_cur >= 0.72 or coverage_prev >= 0.72 or jaccard >= 0.62:
+            prev_facts = prev_fact_map.get(prev_fp, set())
+            if current_facts and prev_facts and current_facts.isdisjoint(prev_facts):
+                continue
             return True
     return False
 
@@ -1338,6 +2055,13 @@ def _drop_repeated_questions_from_reply(text: str, state: SalesState) -> str:
             kept.append(part)
             continue
         question = part[: first_q + 1].strip()
+        known_facts = _state_facts_snapshot(state)
+        if any(
+            _question_covers_fact(question, key) and str(known_facts.get(key) or "").strip()
+            for key in ("city", "address", "object_type", "model")
+        ):
+            removed_count += 1
+            continue
         if _is_repeated_question_against_state(question, state):
             removed_count += 1
             continue
@@ -1379,6 +2103,9 @@ def _render_passes_rubric(text: str, state: SalesState) -> bool:
     )
     if any(phrase in low for phrase in banned):
         return False
+    for part in [part.strip() for part in _SENTENCE_SPLIT_RE.split(candidate) if part.strip()]:
+        if _is_operator_instruction_sentence(part):
+            return False
     # Avoid repeating previous bot reply almost verbatim.
     prev = (state.last_bot_reply or "").strip().lower()
     if prev and len(prev) > 20 and candidate.lower() == prev:
@@ -1386,6 +2113,135 @@ def _render_passes_rubric(text: str, state: SalesState) -> bool:
     if _reply_has_repeated_question(candidate, state):
         return False
     return True
+
+
+def _apply_base_answer_quality_floor(
+    answer: str,
+    *,
+    state: SalesState,
+    persona_hints: PersonaHints | None,
+    grounding: Mapping[str, Any] | None,
+    user_text: str,
+) -> str:
+    candidate = str(answer or "").strip()
+    if not candidate:
+        return ""
+    candidate = _enforce_catalog_price_grounding(candidate, grounding=grounding)
+    candidate = _enforce_catalog_truth_guard(
+        candidate,
+        grounding=grounding,
+        user_text=user_text,
+    )
+    candidate = _normalize_catalog_name_case(candidate, grounding=grounding)
+    candidate = _dedupe_repeated_fact_sentences(candidate, state)
+    candidate = _strip_instruction_leaks(candidate)
+    candidate = _drop_repeated_questions_from_reply(candidate, state)
+    candidate = _limit_questions(candidate, max_questions=_max_questions_limit(persona_hints))
+    candidate = _enforce_exclamation_budget(candidate, max_exclamations=1)
+    candidate = _enforce_sentence_budget(candidate, max_sentences=2)
+    return candidate.strip()
+
+
+def _prefer_refined_answer(
+    *,
+    answer: str,
+    refined: str,
+    state: SalesState,
+    persona_hints: PersonaHints | None,
+    grounding: Mapping[str, Any] | None,
+    user_text: str,
+) -> str:
+    base_candidate = _apply_base_answer_quality_floor(
+        answer,
+        state=state,
+        persona_hints=persona_hints,
+        grounding=grounding,
+        user_text=user_text,
+    )
+    refined_candidate = str(refined or "").strip()
+    if not refined_candidate:
+        return base_candidate or refined_candidate
+    if not base_candidate:
+        return refined_candidate
+    if refined_candidate == base_candidate:
+        return refined_candidate
+
+    base_ok = _render_passes_rubric(base_candidate, state)
+    refined_ok = _render_passes_rubric(refined_candidate, state)
+    if base_ok and (not refined_ok):
+        return base_candidate
+
+    # If refined collapses substantive response into short placeholder-like form,
+    # keep base candidate.
+    if len(base_candidate) >= 40 and len(refined_candidate) < max(20, int(len(base_candidate) * 0.45)):
+        return base_candidate
+
+    if _answer_is_too_robotic(refined_candidate) and not _answer_is_too_robotic(base_candidate):
+        return base_candidate
+
+    refined_parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(refined_candidate) if part.strip()]
+    base_parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(base_candidate) if part.strip()]
+    refined_instructional = any(
+        _is_operator_instruction_sentence(part)
+        or _is_response_format_instruction_sentence(part)
+        or _is_sequence_process_instruction_sentence(part)
+        for part in refined_parts
+    )
+    base_instructional = any(
+        _is_operator_instruction_sentence(part)
+        or _is_response_format_instruction_sentence(part)
+        or _is_sequence_process_instruction_sentence(part)
+        for part in base_parts
+    )
+    if refined_instructional and not base_instructional:
+        return base_candidate
+
+    base_low = _normalize_text(base_candidate)
+    refined_low = _normalize_text(refined_candidate)
+    if (
+        "ориентир по времени" in refined_low
+        and "ориентир по времени" not in base_low
+        and not _ETA_INTENT_RE.search(str(user_text or ""))
+    ):
+        return base_candidate
+    if (
+        "выезд сегодня возможен" in refined_low
+        and "выезд сегодня возможен" not in base_low
+        and not _URGENT_TODAY_RE.search(str(user_text or ""))
+    ):
+        return base_candidate
+    grounding_items = _grounding_catalog_items(grounding)
+    if grounding_items:
+        user_raw = str(user_text or "")
+        direct_catalog_intent = bool(
+            _is_price_intent(user_raw)
+            or _VARIANTS_USER_HINT_RE.search(user_raw)
+            or _MODEL_NAME_INTENT_RE.search(user_raw)
+        )
+        if direct_catalog_intent:
+            if _reply_mentions_catalog_item(base_candidate, grounding_items) and not _reply_mentions_catalog_item(
+                refined_candidate, grounding_items
+            ):
+                return base_candidate
+
+    base_unknown_markers = base_low.count("модель из каталога")
+    refined_unknown_markers = refined_low.count("модель из каталога")
+    if refined_unknown_markers > base_unknown_markers:
+        return base_candidate
+
+    # Extra protection from repeated generic substitution.
+    if refined_low.count("вариант") >= 3 and base_low.count("вариант") <= 1:
+        return base_candidate
+    if re.search(
+        r"(?iu)\b(цвет|модель|тип|стиль|оттенок)\w*\s+вариант\b",
+        refined_low,
+    ) and not re.search(
+        r"(?iu)\b(цвет|модель|тип|стиль|оттенок)\w*\s+вариант\b",
+        base_low,
+    ):
+        return base_candidate
+
+    return refined_candidate
 
 
 def _safe_json_load(raw: str) -> Dict[str, Any]:
@@ -1431,15 +2287,11 @@ _CONTACT_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _CONTACT_HANDLE_RE = re.compile(r"(?<!\w)@[\w\d_]{4,}")
 _CONTACT_PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\-\s()]{8,}\d)(?!\d)")
 _PRICE_INLINE_RE = re.compile(
-    r"(?<!\d)(?:\d{1,3}(?:[ \u00A0]\d{3})+|\d{4,7})(?:\s*(?:₽|руб(?:\.|ля|лей)?))?",
+    r"(?<!\d)(?:\d{1,3}(?:[ \u00A0\u202F]\d{3})+|\d{4,7})(?!\d)(?:\s*(?:₽|руб(?:\.|ля|лей)?))?",
     re.IGNORECASE,
 )
-_PRICE_THOUSANDS_RE = re.compile(
-    r"(?iu)\b(\d{1,3})\s*(?:тыс(?:\.|яч)?|тысяч(?:а|и)?|к)\b"
-)
-_MODEL_QUOTED_MENTION_RE = re.compile(
-    r'(?iu)\b(модель|вариант|дверь)\s*[«"]([^"»]{2,80})[»"]'
-)
+_PRICE_THOUSANDS_RE = re.compile(r"(?iu)\b(\d{1,3})\s*(?:тыс(?:\.|яч)?|тысяч(?:а|и)?|к)\b")
+_MODEL_QUOTED_MENTION_RE = re.compile(r'(?iu)\b(модель|вариант|дверь)\s*[«"]([^"»]{2,80})[»"]')
 _GENERIC_FACT_STOPWORDS = {
     "и",
     "или",
@@ -1461,6 +2313,15 @@ _GENERIC_FACT_STOPWORDS = {
     "к",
     "же",
     "ли",
+    "чего",
+    "зачем",
+    "почему",
+    "тоже",
+    "самое",
+    "этот",
+    "эта",
+    "эти",
+    "этого",
     "мы",
     "вы",
 }
@@ -1491,6 +2352,8 @@ def _is_plausible_contact_phone(token: str) -> bool:
     if re.fullmatch(r"\+\d+", raw):
         return 10 <= len(digits) <= 15
     return True
+
+
 _QUESTION_TOPIC_TO_SLOT = {
     "location": "location",
     "object": "object",
@@ -1584,6 +2447,37 @@ def _missing_required_facts(required: Sequence[str], facts: Mapping[str, str]) -
     return missing
 
 
+def _prioritize_missing_facts(missing: Sequence[str], *, turn_intent: str = "") -> List[str]:
+    items = [_canonical_fact_key(item) for item in missing]
+    clean = [item for item in items if item]
+    if not clean:
+        return []
+    if str(turn_intent or "").strip().lower() == "order":
+        order = (
+            "contact",
+            "city",
+            "address",
+            "object_type",
+            "model",
+            "budget",
+            "timeline",
+            "dimensions",
+        )
+    else:
+        order = (
+            "city",
+            "object_type",
+            "address",
+            "model",
+            "budget",
+            "timeline",
+            "dimensions",
+            "contact",
+        )
+    weight = {key: idx for idx, key in enumerate(order)}
+    return sorted(clean, key=lambda key: (weight.get(key, len(order)), clean.index(key)))
+
+
 def _question_covers_fact(question: str, fact_key: str) -> bool:
     low = str(question or "").lower()
     key = _canonical_fact_key(fact_key)
@@ -1605,19 +2499,113 @@ def _question_covers_fact(question: str, fact_key: str) -> bool:
     return False
 
 
+def _question_lists_catalog_options(
+    question: str,
+    items: Sequence[Mapping[str, Any]],
+) -> bool:
+    low = _normalize_text(question)
+    if not low or "или" not in low:
+        return False
+    if not items:
+        return False
+
+    hits: set[str] = set()
+    for item in list(items)[:120]:
+        probes: list[str] = []
+        label = str(_item_label(item) or "").strip()
+        if label:
+            probes.append(_normalize_model_alias(label))
+            label_tokens = [tok for tok in _normalize_model_alias(label).split() if tok]
+            if len(label_tokens) >= 2:
+                probes.append(" ".join(label_tokens[:2]))
+        color_val = str(item.get("color") or "").strip()
+        if color_val:
+            probes.append(_normalize_model_alias(color_val))
+        for probe in probes:
+            clean = str(probe or "").strip()
+            if len(clean) < 3:
+                continue
+            if clean in low:
+                hits.add(clean)
+                if len(hits) >= 2:
+                    return True
+    return False
+
+
+def _replace_reply_question(reply: str, new_question: str) -> str:
+    candidate = str(reply or "").strip()
+    question = str(new_question or "").strip()
+    if not question:
+        return candidate
+    if not candidate:
+        return question
+    parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(candidate) if part.strip()]
+    if not parts:
+        return question
+    kept = [part for part in parts if "?" not in part]
+    if kept:
+        return " ".join(kept + [question]).strip()
+    return question
+
+
 def _generic_question_for_fact(fact_key: str) -> str:
     key = _canonical_fact_key(fact_key)
     prompts = {
-        "city": "В каком городе планируете установку?",
-        "address": "Подскажите адрес установки",
-        "object_type": "Для квартиры или частного дома выбираете?",
-        "model": "Что из каталога приглянулось?",
-        "dimensions": "Подскажите размеры проема или пришлите фото",
-        "budget": "Есть ориентир по бюджету?",
-        "timeline": "На какие сроки ориентируетесь?",
-        "contact": "Оставьте контакт для связи",
+        "city": "Подскажите, пожалуйста, в каком городе нужна установка?",
+        "object_type": "Подскажите тип объекта: квартира или частный дом?",
+        "address": "Подскажите, пожалуйста, адрес установки.",
+        "model": "Подскажите, какая модель или тип из каталога интересует?",
+        "budget": "Какой бюджет рассматриваете?",
+        "timeline": "Когда планируете установку?",
+        "dimensions": "Подскажите размеры проема, если уже есть замер.",
+        "contact": "Оставьте, пожалуйста, удобный контакт для связи.",
     }
-    return prompts.get(key, f"Подскажите, пожалуйста, {key}.")
+    return str(prompts.get(str(key or "").strip(), "") or "").strip()
+
+
+def _persona_driven_question_for_fact(
+    persona_context: str,
+    fact_key: str,
+    *,
+    state: SalesState | None = None,
+) -> str:
+    question = _persona_question_for_fact(persona_context, fact_key)
+    if question:
+        return question
+    script_question = _persona_primary_script_question(persona_context, state=state)
+    if script_question and _question_covers_fact(script_question, fact_key):
+        return script_question
+    return _generic_question_for_fact(fact_key)
+
+
+def _has_substantive_non_question_payload(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    segments = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", candidate) if part.strip()]
+    if not segments:
+        segments = [candidate]
+    for segment in segments:
+        if "?" in segment:
+            continue
+        probe = str(segment or "").strip()
+        if len(probe) < 16:
+            continue
+        if (
+            _PRICE_INLINE_RE.search(probe)
+            or _PRICE_THOUSANDS_RE.search(probe)
+            or "%" in probe
+            or "₽" in probe
+        ):
+            return True
+        tokens = [
+            tok
+            for tok in _FACT_TOKEN_RE.findall(_normalize_text(probe))
+            if len(tok) >= 3 and tok not in _GENERIC_FACT_STOPWORDS
+        ]
+        if len(tokens) >= 3:
+            return True
+    return False
 
 
 def _enforce_next_required_fact_question(
@@ -1644,12 +2632,22 @@ def _enforce_next_required_fact_question(
     user_raw = str(user_text or "").strip()
     turn_intent = _classify_turn_intent(user_raw, known_facts=facts)
     candidate = (reply or "").strip()
+    if _reply_contains_unconfirmed_required_claim(
+        candidate,
+        missing_required=missing,
+        known_facts=facts,
+        user_text=user_raw,
+        persona_context=persona_context,
+    ):
+        candidate = ""
     if turn_intent == "offtopic":
         if candidate:
             return candidate, ""
-        return "Давайте вернемся к вашему запросу. Что нужно по товару или услуге?", ""
+        return "Готов помочь по вашему запросу.", ""
     user_low = user_raw.lower()
-    candidate_substantive = len(candidate) >= 36
+    candidate_substantive = _has_substantive_non_question_payload(candidate) or (
+        len(candidate) >= 72 and candidate.count("?") <= 1
+    ) or (len(candidate) >= 46 and bool(_extract_questions_from_text(candidate)))
     payment_intent = _is_payment_intent(user_raw)
     store_address_intent = _is_store_address_intent(user_raw)
     handoff_intent = _is_channel_handoff_intent(user_raw)
@@ -1670,7 +2668,11 @@ def _enforce_next_required_fact_question(
     if payment_intent and candidate:
         payment_questions: List[str] = []
         for q in _extract_questions_from_text(candidate):
-            if _question_covers_fact(q, "city") or _question_covers_fact(q, "address") or _question_covers_fact(q, "object_type"):
+            if (
+                _question_covers_fact(q, "city")
+                or _question_covers_fact(q, "address")
+                or _question_covers_fact(q, "object_type")
+            ):
                 continue
             payment_questions.append(q.strip())
         if payment_questions:
@@ -1681,11 +2683,16 @@ def _enforce_next_required_fact_question(
 
     if store_address_intent:
         city_map = _extract_store_addresses_from_persona(persona_context)
-        known_city = str(
-            facts.get("city")
-            or (state.known_slots.get("city") if isinstance(state.known_slots, dict) else "")
-            or ""
-        ).strip().lower().replace("ё", "е")
+        known_city = (
+            str(
+                facts.get("city")
+                or (state.known_slots.get("city") if isinstance(state.known_slots, dict) else "")
+                or ""
+            )
+            .strip()
+            .lower()
+            .replace("ё", "е")
+        )
         if (not known_city) and city_map and isinstance(state.history, list):
             for item in reversed(state.history):
                 if str(item.get("role") or "").strip().lower() != "user":
@@ -1702,7 +2709,7 @@ def _enforce_next_required_fact_question(
                 if str(item.get("role") or "").strip().lower() != "user":
                     continue
                 txt_raw = str(item.get("content") or "").strip()
-                hint = _extract_city_hint(txt_raw)
+                hint = _extract_city_hint(txt_raw, allow_standalone=True)
                 if hint:
                     known_city = hint.lower().replace("ё", "е")
                     break
@@ -1710,20 +2717,42 @@ def _enforce_next_required_fact_question(
             for city_key, address in city_map.items():
                 if city_key and (city_key in known_city or known_city in city_key):
                     return address, ""
-        # Address/store request without city: ask city directly.
-        return _generic_question_for_fact("city"), "city"
+        # Address/store request without city: ask city directly, but keep persona wording.
+        return _persona_driven_question_for_fact(persona_context, "city", state=state), "city"
 
     if next_key == "model":
         items = grounding_items
-        asks_price_or_name = _is_price_intent(user_raw) or bool(_MODEL_NAME_INTENT_RE.search(user_raw))
-        asks_selected_attribute = bool(selected_item) and bool(_selected_item_attribute_answer(user_raw, selected_item))
+        asks_price_or_name = _is_price_intent(user_raw) or bool(
+            _MODEL_NAME_INTENT_RE.search(user_raw)
+        )
+        asks_model_options = bool(_VARIANTS_USER_HINT_RE.search(user_raw)) or asks_price_or_name
+        asks_selected_attribute = bool(selected_item) and bool(
+            _selected_item_attribute_answer(user_raw, selected_item)
+        )
         user_explicit_model = bool(_best_catalog_item_match(user_raw, items)) if items else False
-        candidate_has_substance = len(candidate) >= 24 and not _question_covers_fact(candidate, "model")
+        candidate_has_substance = candidate_substantive
+        persona_model_question = _persona_driven_question_for_fact(
+            persona_context,
+            "model",
+            state=state,
+        )
+        existing_questions = _extract_questions_from_text(candidate)
+        if (
+            existing_questions
+            and (not asks_model_options)
+            and (not user_explicit_model)
+            and any(_question_lists_catalog_options(q, items) for q in existing_questions)
+        ):
+            return _replace_reply_question(candidate, persona_model_question), "model"
 
         # Guard conflict resolver:
         # if the user asked a direct factual follow-up and reply already contains a substantive answer,
         # do not override with generic "what model did you like?" question.
-        if candidate and candidate_has_substance and (asks_price_or_name or asks_selected_attribute or user_explicit_model):
+        if (
+            candidate
+            and candidate_has_substance
+            and (asks_price_or_name or asks_selected_attribute or user_explicit_model)
+        ):
             return candidate, ""
 
         cannot_open_catalog = bool(_CATALOG_UNAVAILABLE_RE.search(user_low))
@@ -1736,6 +2765,8 @@ def _enforce_next_required_fact_question(
             return candidate, ""
         if candidate_substantive:
             # LLM produced substantive guidance; do not overwrite with rigid next-step prompt.
+            if any(_question_covers_fact(item, "model") for item in _extract_questions_from_text(candidate)):
+                return candidate, "model"
             return candidate, ""
 
     # Keep strict progression only for core qualification facts.
@@ -1748,7 +2779,10 @@ def _enforce_next_required_fact_question(
         if candidate and ("город" in cand_low or "населен" in cand_low):
             return candidate, ""
         if candidate and not _extract_questions_from_text(candidate):
-            return f"{candidate} {_generic_question_for_fact('city')}".strip(), "city"
+            city_question = _persona_driven_question_for_fact(persona_context, "city", state=state)
+            if city_question:
+                return f"{candidate} {city_question}".strip(), "city"
+            return candidate, ""
 
     if deferral_intent and candidate:
         return candidate, ""
@@ -1761,13 +2795,25 @@ def _enforce_next_required_fact_question(
             lead = f"Цена зависит от модели, старт от {_format_rub_price(price_floor)}."
         else:
             lead = "Цена зависит от модели."
-        question = _generic_question_for_fact("city")
-        return f"{lead} {question}".strip(), "city"
+        question = _persona_driven_question_for_fact(persona_context, "city", state=state)
+        if question:
+            return f"{lead} {question}".strip(), "city"
+        return lead, ""
 
-    question = _persona_question_for_fact(persona_context, next_key) or _generic_question_for_fact(next_key)
+    question = _persona_driven_question_for_fact(persona_context, next_key, state=state)
+    if not question:
+        return candidate, ""
     existing_questions = _extract_questions_from_text(candidate)
     if existing_questions:
+        # If reply is already meaningful and asks a coherent question,
+        # do not hard-replace it with a scripted mandatory slot question.
+        if candidate_substantive:
+            if any(_question_covers_fact(item, next_key) for item in existing_questions):
+                return candidate, next_key
+            return candidate, ""
         if any(_question_covers_fact(item, next_key) for item in existing_questions):
+            if candidate_substantive:
+                return candidate, next_key
             for item in existing_questions:
                 if _question_covers_fact(item, next_key):
                     # Keep the actual qualification question and drop service preambles.
@@ -1776,6 +2822,8 @@ def _enforce_next_required_fact_question(
         # For core qualification chain we enforce the missing step question to keep
         # deterministic progression from persona script.
         if next_key in {"city", "address", "object_type", "model"}:
+            if candidate_substantive:
+                return candidate, ""
             return question, next_key
         # For non-core keys keep substantive guidance.
         if candidate_substantive:
@@ -1834,21 +2882,33 @@ def _required_facts_from_persona_text(persona_context: str) -> List[str]:
             in_primary_block = False
         if is_heading and in_secondary_block:
             in_secondary_block = False
-        if any(token in low for token in ("диалог-скрипт", "скрипт диалога", "последовательно уточни")):
+        if any(
+            token in low for token in ("диалог-скрипт", "скрипт диалога", "последовательно уточни")
+        ):
             in_primary_block = True
             in_secondary_block = False
             continue
-        if "шаблон реплик" in low:
+        if all(token in low for token in ("шаблон", "реплик")):
             in_secondary_block = True
             in_primary_block = False
             continue
         if in_primary_block:
-            if re.match(r"^\d+\)", low) or re.match(r"^\d+\.", low) or low.startswith("-") or low.startswith("•"):
+            if (
+                re.match(r"^\d+\)", low)
+                or re.match(r"^\d+\.", low)
+                or low.startswith("-")
+                or low.startswith("•")
+            ):
                 primary_lines.append(line)
                 continue
             primary_lines.append(line)
         elif in_secondary_block:
-            if re.match(r"^\d+\)", low) or re.match(r"^\d+\.", low) or low.startswith("-") or low.startswith("•"):
+            if (
+                re.match(r"^\d+\)", low)
+                or re.match(r"^\d+\.", low)
+                or low.startswith("-")
+                or low.startswith("•")
+            ):
                 secondary_lines.append(line)
                 continue
             secondary_lines.append(line)
@@ -1869,7 +2929,16 @@ def _required_facts_from_persona_text(persona_context: str) -> List[str]:
         if normalized.startswith("если "):
             continue
         # Only explicit data-collection actions are treated as required.
-        action_prefixes = ("уточ", "спрос", "узна", "получ", "собер", "подскаж", "пришли", "пришлите")
+        action_prefixes = (
+            "уточ",
+            "спрос",
+            "узна",
+            "получ",
+            "собер",
+            "подскаж",
+            "пришли",
+            "пришлите",
+        )
         has_action = any(normalized.startswith(prefix) for prefix in action_prefixes)
         has_question = "?" in line
         if not has_action and not has_question:
@@ -1906,11 +2975,233 @@ def _line_to_question(line: str) -> str:
         parts = _extract_questions_from_text(txt)
         if parts:
             return parts[0].strip()
-    # Convert imperative script line into a neutral question via generic fact map.
-    fact_keys = _fact_keys_from_line(txt)
-    if fact_keys:
-        return _generic_question_for_fact(fact_keys[0])
+    # Domain-agnostic imperative conversion for free-form persona scripts.
+    imperative = re.match(
+        r"(?iu)^(?:уточни(?:те)?|уточняй(?:те)?|уточнить|спроси(?:те)?|"
+        r"спрашивай(?:те)?|спросить|узнай(?:те)?|узнавай(?:те)?|узнать|"
+        r"выясни(?:те)?|выясняй(?:те)?|выяснить|получи(?:те)?|получай(?:те)?|"
+        r"получить|собери(?:те)?|собирай(?:те)?|собрать|попроси(?:те)?|"
+        r"попросить|определи(?:те)?|определить)\s*[,:-]?\s+(.+)$",
+        txt,
+    )
+    if imperative:
+        tail = str(imperative.group(1) or "").strip(" .")
+        if tail:
+            tail = re.sub(r"\([^)]{1,80}\)", "", tail).strip(" .")
+            tail = re.sub(
+                r"(?iu)\b(?:если\s+не\s+назван|если\s+не\s+указан|"
+                r"при\s+известн\w+\s+город\w*|если\s+город\s+уже\s+назван)\b",
+                "",
+                tail,
+            ).strip(" .,:;-")
+            tail = re.sub(r"(?iu)^(?:у\s+клиента\s+)?", "", tail).strip(" .")
+            if tail:
+                tail_tokens = [tok for tok in _FACT_TOKEN_RE.findall(_normalize_text(tail)) if tok]
+                if len(tail_tokens) <= 2:
+                    inferred_keys = _fact_keys_from_line(txt)
+                    if inferred_keys:
+                        generic = _generic_question_for_fact(inferred_keys[0])
+                        if generic:
+                            return generic
+                if tail[-1] not in "?!":
+                    tail += "?"
+                lead = tail[0].lower() + tail[1:] if tail else ""
+                if lead.startswith("какая "):
+                    return str(lead or "").strip()
+                if lead.startswith("какой "):
+                    return str(lead or "").strip()
+                if lead.startswith("какие "):
+                    return str(lead or "").strip()
+                return str(lead or "").strip() if tail else ""
     return ""
+
+
+def _infer_persona_template_condition_and_action(line: str) -> tuple[str, str]:
+    clean = re.sub(r"^[\-\s•\d\).\(\"']+", "", str(line or "")).strip()
+    if ":" not in clean:
+        return "", ""
+    lhs, rhs = clean.split(":", 1)
+    lhs = lhs.strip()
+    rhs = rhs.strip()
+    if not lhs:
+        return "", ""
+    low = lhs.lower().replace("ё", "е")
+    if not (
+        low.startswith("на ")
+        or "ожидаемого ответа" in low
+        or "на сообщение" in low
+        or "на фразу" in low
+    ):
+        return "", ""
+    quoted = [
+        str(part or "").strip()
+        for part in re.findall(r"[\"«]([^\"»]{1,220})[\"»]", lhs)
+        if str(part or "").strip()
+    ]
+    if not quoted:
+        return "", ""
+    return quoted[0], rhs
+
+
+def _persona_safe_uncertain_reply(persona_context: str) -> str:
+    _ = str(persona_context or "")
+    return ""
+
+
+def _persona_direct_reply_for_user_turn(
+    persona_context: str,
+    *,
+    last_user_message: str,
+    known_facts: Mapping[str, str] | None = None,
+    state: SalesState | None = None,
+) -> str:
+    persona_text = str(persona_context or "").strip()
+    if not persona_text:
+        return ""
+    raw = str(last_user_message or "").strip()
+    facts = dict(known_facts or {})
+    if str(facts.get("model") or "").strip():
+        if (
+            "?" in raw
+            or bool(_MODEL_NAME_INTENT_RE.search(raw))
+            or bool(_VARIANTS_USER_HINT_RE.search(raw))
+            or bool(_extract_attribute_probe(raw))
+        ):
+            return ""
+    compiled = _compile_persona_rules(persona_text)
+    if not compiled.conditionals:
+        return ""
+    for rule in compiled.conditionals:
+        if not _conditional_rule_matches(
+            rule,
+            last_user_message=last_user_message,
+            known_facts={},
+            state=None,
+        ):
+            continue
+        quoted = [
+            str(part or "").strip()
+            for part in re.findall(r"[\"«]([^\"»]{8,260})[\"»]", str(rule.action_text or ""))
+            if str(part or "").strip()
+        ]
+        normalized: list[str] = []
+        for part in quoted:
+            chunk = re.sub(r"<\s*[^>\n]{1,40}\s*>", "", part).strip()
+            if not chunk:
+                continue
+            if chunk[-1] not in ".!?":
+                chunk += "."
+            normalized.append(chunk)
+        if normalized:
+            return " ".join(normalized).strip()
+    return ""
+
+
+def _is_operator_like_question(question: str) -> bool:
+    low = _normalize_text(question)
+    if not low:
+        return False
+    if re.search(
+        r"(?iu)\b(предложите|предложи|напишите|позвоните|перейдите|"
+        r"переведите|зафиксируйте|оформите|согласуйте|свяжитесь)\b",
+        low,
+    ):
+        return True
+    if re.search(r"(?iu)\bи\b", low) and re.search(
+        r"(?iu)\b(предлож|напиш|перевед|соглас|оформ|подтверд)\w*",
+        low,
+    ):
+        return True
+    return False
+
+
+def _is_operator_instruction_sentence(text: str) -> bool:
+    low = _normalize_text(text)
+    if not low:
+        return False
+    if not re.search(r"(?iu)\b(сначала|затем|потом|далее|после\s+этого|в\s+этом\s+же\s+ответе)\b", low):
+        return False
+    has_delivery_hint = bool(
+        re.search(
+            r"(?iu)\b(отдельн\w*\s+сообщени\w*|только\s+ссылк\w*|"
+            r"только\s+номер\w*|ссылк\w*|контакт\w*|телефон\w*|username|@)\b",
+            low,
+        )
+    )
+    if not has_delivery_hint:
+        return False
+    # If it is a natural user-facing question, keep it.
+    if "?" in str(text or ""):
+        return False
+    return True
+
+
+def _is_response_format_instruction_sentence(text: str) -> bool:
+    low = _normalize_text(text)
+    if not low:
+        return False
+    if "?" in str(text or ""):
+        return False
+    if re.fullmatch(r"(?iu)\s*не\s+одн\w*\s+строк\w*\s*\.?\s*", low):
+        return True
+    if re.search(
+        r"(?iu)\b(отвечайт\w*|пишит\w*|напишит\w*)\b[^.?!]{0,64}\b"
+        r"(развернут\w*|подробн\w*|односложн\w*|коротк\w*|одн\w*\s+строк\w*)\b",
+        low,
+    ):
+        return True
+    return False
+
+
+def _is_sequence_process_instruction_sentence(text: str) -> bool:
+    low = _normalize_text(text)
+    if not low:
+        return False
+    if "?" in str(text or ""):
+        return False
+    if not re.search(r"(?iu)\b(сначала|затем|потом|далее|после\s+этого)\b", low):
+        return False
+    if not re.search(
+        r"(?iu)\b(уточняйте|давайте|следуйте|спрашивайте|задавайте|предлагайте|предложите|фиксируйте|собирайте)\b",
+        low,
+    ):
+        return False
+    if re.search(
+        r"(?iu)\b(ответ|скрипт|сценари\w*|персон\w*|географ\w*|этап\w*|шаг\w*|логик\w*|правил\w*)\b",
+        low,
+    ):
+        return True
+    return False
+
+
+def _strip_embedded_operator_tail(text: str) -> str:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return candidate
+    out = candidate
+    # Remove leaked internal operator tails while preserving the useful head.
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*(поздоровайт\w*|поприветствуйт\w*)\b[^.?!\n]*$",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*(скажите|спросите|уточните|напишите)\s+что\b[^.?!\n]*$",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*давайте\s+ответ\b[^.?!\n]*$",
+        "",
+        out,
+    )
+    out = re.sub(
+        r"(?iu)[,;:\-\s]*ответ\s+строго\b[^.?!\n]*$",
+        "",
+        out,
+    )
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,;:-")
+    return out
 
 
 def _extract_primary_script_lines(persona_text: str) -> List[str]:
@@ -1924,15 +3215,197 @@ def _extract_primary_script_lines(persona_text: str) -> List[str]:
         is_heading = low.startswith("#")
         if is_heading and in_primary_block:
             in_primary_block = False
-        if any(token in low for token in ("диалог-скрипт", "скрипт диалога", "последовательно уточни")):
+        if any(
+            token in low
+            for token in ("диалог-скрипт", "скрипт диалога", "последовательно уточни", "порядок диалога")
+        ):
             in_primary_block = True
             continue
         if in_primary_block:
-            if re.match(r"^\d+\)", low) or re.match(r"^\d+\.", low) or low.startswith("-") or low.startswith("•"):
+            if (
+                re.match(r"^\d+\)", low)
+                or re.match(r"^\d+\.", low)
+                or low.startswith("-")
+                or low.startswith("•")
+            ):
                 primary_lines.append(line)
                 continue
             primary_lines.append(line)
     return primary_lines
+
+
+def _persona_script_questions(persona_text: str) -> List[str]:
+    candidates = _extract_primary_script_lines(persona_text)
+    if not candidates:
+        for line in str(persona_text or "").splitlines():
+            clean = str(line or "").strip()
+            if not clean:
+                continue
+            low = clean.lower().replace("ё", "е")
+            if any(
+                token in low
+                for token in (
+                    "уточни",
+                    "уточняй",
+                    "спроси",
+                    "спрашивай",
+                    "узнай",
+                    "узнавай",
+                    "получи",
+                    "получай",
+                    "собери",
+                    "собирай",
+                    "попроси",
+                    "выясни",
+                    "выясняй",
+                )
+            ):
+                candidates.append(clean)
+    questions: List[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        question = _line_to_question(raw)
+        if not question:
+            continue
+        if _is_operator_like_question(question):
+            continue
+        key = _normalize_text(question)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        questions.append(question)
+    return questions
+
+
+def _persona_primary_script_question(
+    persona_text: str,
+    *,
+    state: SalesState | None = None,
+) -> str:
+    questions = _persona_script_questions(persona_text)
+    for question in questions:
+        if not question:
+            continue
+        if state is not None and _is_repeated_question_against_state(question, state):
+            continue
+        return question
+    if questions and state is None:
+        return questions[0]
+    return ""
+
+
+def _persona_catalog_unavailable_reply(persona_text: str) -> str:
+    lines = [str(line or "").strip() for line in str(persona_text or "").splitlines() if str(line or "").strip()]
+    for line in lines:
+        low = _normalize_text(line)
+        if "каталог" not in low:
+            continue
+        if not (
+            "не открыл" in low
+            or "не открыва" in low
+            or "пока не открыл" in low
+            or "груз" in low
+        ):
+            continue
+        quoted = [
+            str(part or "").strip()
+            for part in re.findall(r"[\"«]([^\"»]{8,260})[\"»]", line)
+            if str(part or "").strip()
+        ]
+        if quoted:
+            reply = quoted[0].strip()
+            if reply and reply[-1] not in ".!?":
+                reply += "."
+            return reply
+        cleaned = re.sub(r"^[\-\s•\d\).:]+", "", line).strip()
+        cleaned = re.sub(r"(?iu)^нормально:\s*", "", cleaned).strip()
+        if cleaned and cleaned[-1] not in ".!?":
+            cleaned += "."
+        return cleaned
+    return ""
+
+
+def _explain_missing_fact_need(
+    fact_key: str,
+    *,
+    persona_context: str = "",
+) -> str:
+    key = _canonical_fact_key(fact_key)
+    if not key:
+        return ""
+    overrides = {
+        "city": "Город нужен, чтобы сразу подсказать адрес магазина, условия и ближайший вариант установки.",
+        "object_type": "Уточняю тип объекта, потому что для квартиры и частного дома подходят разные варианты.",
+        "address": "Адрес нужен, чтобы не ошибиться по выезду, установке и дальнейшему подбору.",
+        "model": "Хочу понять, какой вариант Вам ближе, чтобы не промахнуться по цене и характеристикам.",
+        "contact": "Контакт нужен, чтобы подтвердить заказ и отправить точные детали.",
+    }
+    reply = str(overrides.get(key) or "").strip()
+    if not reply:
+        return ""
+    if reply[-1] not in ".!?":
+        reply += "."
+    return reply
+
+
+def _fallback_contextual_question(
+    user_text: str,
+    *,
+    state: SalesState | None = None,
+    persona_context: str = "",
+) -> str:
+    raw = str(user_text or "").strip()
+    known_facts = _state_facts_snapshot(state) if state is not None else {}
+    current_pending = _canonical_fact_key(str(getattr(state, "pending_fact_key", "") or ""))
+    if known_facts.get("model"):
+        if (
+            bool(_extract_attribute_probe(raw))
+            or bool(_MODEL_NAME_INTENT_RE.search(raw))
+            or bool(_VARIANTS_USER_HINT_RE.search(raw))
+        ):
+            return ""
+    if persona_context and state is not None:
+        required = _required_facts_from_persona_text(persona_context)
+        missing = _missing_required_facts(required, known_facts)
+        if missing:
+            persona_question = _persona_driven_question_for_fact(
+                persona_context,
+                missing[0],
+                state=state,
+            )
+            if persona_question and not _is_repeated_question_against_state(persona_question, state):
+                return persona_question
+    if "?" in raw and not (state is not None and current_pending == "model" and bool(state.last_items)):
+        if state is not None and current_pending:
+            direct = _persona_driven_question_for_fact(persona_context, current_pending, state=state)
+            if direct and not _is_repeated_question_against_state(direct, state):
+                return direct
+    topic_tokens = [
+        tok
+        for tok in _FACT_TOKEN_RE.findall(_normalize_text(raw))
+        if len(tok) >= 4 and tok not in NEEDS_STOPWORDS and tok not in _GENERIC_FACT_STOPWORDS
+    ]
+    topic = topic_tokens[0] if topic_tokens else ""
+    candidates: list[str]
+    if not raw:
+        candidates = [""]
+    elif _ORDER_INTENT_RE.search(raw):
+        candidates = [""]
+    elif _is_price_intent(raw):
+        candidates = [""]
+    elif _MODEL_NAME_INTENT_RE.search(raw) or _VARIANTS_USER_HINT_RE.search(raw):
+        candidates = [""]
+    elif _ETA_INTENT_RE.search(raw):
+        candidates = [""]
+    else:
+        candidates = [""]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if state is not None and _is_repeated_question_against_state(candidate, state):
+            continue
+        return candidate
+    return ""
 
 
 def _extract_expected_tokens_from_condition(text: str) -> List[str]:
@@ -1941,8 +3414,86 @@ def _extract_expected_tokens_from_condition(text: str) -> List[str]:
         return []
     tokens = [tok for tok in re.findall(r"[a-zа-я0-9\-]{2,}", raw)]
     stop = {
-        "если", "клиент", "когда", "после", "при", "то", "или", "и", "а", "не", "из", "в", "во", "на", "по",
-        "город", "адрес", "квартира", "дом", "помещение", "тип", "объект", "модель", "бюджет", "срок", "контакт",
+        "если",
+        "клиент",
+        "когда",
+        "после",
+        "при",
+        "то",
+        "или",
+        "и",
+        "а",
+        "не",
+        "из",
+        "в",
+        "во",
+        "на",
+        "по",
+        "город",
+        "адрес",
+        "квартира",
+        "дом",
+        "помещение",
+        "тип",
+        "объект",
+        "модель",
+        "бюджет",
+        "срок",
+        "контакт",
+        "просит",
+        "попросил",
+        "попросила",
+        "пишет",
+        "написал",
+        "написала",
+        "ответил",
+        "ответила",
+        "сказал",
+        "сказала",
+        "указал",
+        "указала",
+        "уточнил",
+        "уточнила",
+        "нужно",
+        "нужен",
+        "нужна",
+        "нужны",
+        "можно",
+        "давайте",
+        "давай",
+        "надо",
+        "хочу",
+        "отправить",
+        "отправляй",
+        "отправляйте",
+        "скинуть",
+        "скинь",
+        "скиньте",
+        "перейти",
+        "продолжить",
+        "продолжим",
+        "пользователь",
+        "название",
+        "формате",
+        "ответьте",
+        "естественно",
+        "извлеките",
+        "назвал",
+        "назван",
+        "затем",
+        "дает",
+        "дал",
+        "только",
+        "любой",
+        "любого",
+        "города",
+        "городов",
+        "республики",
+        "этих",
+        "включая",
+        "направлении",
+        "известен",
+        "известном",
     }
     out: List[str] = []
     for tok in tokens:
@@ -2059,7 +3610,9 @@ def _is_delivery_directive_line(text: str) -> bool:
         "дайте",
         "связ",
     )
-    return any(marker in low for marker in contact_markers) and any(marker in low for marker in action_markers)
+    return any(marker in low for marker in contact_markers) and any(
+        marker in low for marker in action_markers
+    )
 
 
 def _delivery_rule_from_line(
@@ -2070,7 +3623,9 @@ def _delivery_rule_from_line(
 ) -> PersonaDeliveryRule:
     clean = re.sub(r"^[\-\s•\d\).\(\"']+", "", str(source_line or "")).strip()
     low = clean.lower().replace("ё", "е")
-    wants_handle = "@" in low or any(marker in low for marker in ("username", "юзернейм", "ник", "логин"))
+    wants_handle = "@" in low or any(
+        marker in low for marker in ("username", "юзернейм", "ник", "логин")
+    )
     wants_phone = any(marker in low for marker in ("номер", "телефон", "звон", "контакт"))
     wants_link = any(marker in low for marker in ("ссылк", "http"))
     if not (wants_handle or wants_phone or wants_link):
@@ -2095,6 +3650,27 @@ def _delivery_rule_from_line(
     )
 
 
+def _infer_delivery_condition_from_line(source_line: str) -> str:
+    clean = re.sub(r"^[\-\s•\d\).\(\"']+", "", str(source_line or "")).strip()
+    if ":" not in clean:
+        return ""
+    lhs, rhs = clean.split(":", 1)
+    lhs = lhs.strip()
+    rhs = rhs.strip()
+    if not lhs or not rhs:
+        return ""
+    # Heuristic: treat the left side as trigger phrase only when it clearly looks
+    # like user wording/examples (quoted alternatives), not an instruction header.
+    has_quote = any(mark in lhs for mark in ('"', "«", "»", "`", "'"))
+    has_alternatives = "/" in lhs
+    if not (has_quote or has_alternatives):
+        return ""
+    lhs = lhs.strip(" \t'\"`«»")
+    if not lhs or len(lhs) > 180:
+        return ""
+    return lhs
+
+
 def _compile_persona_rules(persona_text: str) -> PersonaCompiledRules:
     key = _persona_rules_cache_key(persona_text)
     if key:
@@ -2104,6 +3680,37 @@ def _compile_persona_rules(persona_text: str) -> PersonaCompiledRules:
     text = str(persona_text or "")
     compiled = PersonaCompiledRules()
     compiled.contact_artifacts = _extract_contact_artifacts(text)
+
+    def _append_conditional_rule(
+        *,
+        condition_text: str,
+        action_text: str,
+        source_line: str,
+        channel_scope: List[str] | None = None,
+    ) -> None:
+        cond = str(condition_text or "").strip()
+        action = str(action_text or "").strip()
+        if not cond or not action:
+            return
+        cond_keys = _fact_keys_from_line(cond)
+        fact_key = _canonical_fact_key(cond_keys[0]) if cond_keys else ""
+        compiled.conditionals.append(
+            PersonaConditionalRule(
+                source_line=str(source_line or "").strip() or f"{cond}: {action}",
+                condition_text=cond,
+                action_text=action,
+                fact_key=fact_key,
+                expected_tokens=_extract_expected_tokens_from_condition(cond),
+            )
+        )
+        if _is_delivery_directive_line(action):
+            compiled.delivery_rules.append(
+                _delivery_rule_from_line(
+                    source_line=action,
+                    channel_scope=list(channel_scope or []),
+                    condition_text=cond,
+                )
+            )
 
     for line in _extract_primary_script_lines(text):
         clean = re.sub(r"^[\-\s•\d\).\(\"']+", "", line).strip()
@@ -2115,7 +3722,28 @@ def _compile_persona_rules(persona_text: str) -> PersonaCompiledRules:
         keys = _fact_keys_from_line(clean)
         if not keys:
             continue
-        canonical = _canonical_fact_key(keys[0])
+        question = _line_to_question(clean)
+        canonical = ""
+        question_low = question.lower().replace("ё", "е") if question else ""
+        canonical_keys = [_canonical_fact_key(raw_key) for raw_key in keys]
+        if (
+            "object_type" in canonical_keys
+            and question_low
+            and ("квартир" in question_low or "частн" in question_low or "тип объект" in question_low)
+        ):
+            canonical = "object_type"
+        elif "address" in canonical_keys and question_low and _question_covers_fact(question, "address"):
+            canonical = "address"
+        elif "model" in canonical_keys and question_low and _question_covers_fact(question, "model"):
+            canonical = "model"
+        if question and not canonical:
+            for raw_key in keys:
+                probe = _canonical_fact_key(raw_key)
+                if probe and _question_covers_fact(question, probe):
+                    canonical = probe
+                    break
+        if not canonical:
+            canonical = _canonical_fact_key(keys[0])
         if not canonical:
             continue
         if any(step.fact_key == canonical for step in compiled.steps):
@@ -2124,63 +3752,117 @@ def _compile_persona_rules(persona_text: str) -> PersonaCompiledRules:
             PersonaStepRule(
                 fact_key=canonical,
                 source_line=clean,
-                question=_line_to_question(clean),
+                question=question,
             )
         )
 
     section_scope: List[str] = []
+    pending_conditional_text = ""
+    pending_conditional_source = ""
+    pending_conditional_scope: List[str] = []
+    pending_template_text = ""
+    pending_template_source = ""
+    pending_template_scope: List[str] = []
     for raw_line in text.splitlines():
         line = str(raw_line or "").strip()
         if not line:
             continue
+        clean_line = re.sub(r"^[\-\s•\d\).\(\"']+", "", line).strip()
+        clean_low = clean_line.lower().replace("ё", "е")
         if line.startswith("#"):
+            pending_conditional_text = ""
+            pending_conditional_source = ""
+            pending_conditional_scope = []
+            pending_template_text = ""
+            pending_template_source = ""
+            pending_template_scope = []
             section_scope = _detect_persona_line_channels(line)
             continue
-        low = line.lower().replace("ё", "е")
         line_scope = _detect_persona_line_channels(line)
         effective_scope = section_scope or line_scope
-        if (not low.startswith("если ")) and _is_delivery_directive_line(line):
+        if pending_conditional_text:
+            # Support two-line persona rules:
+            # "Если ...:" on one line and action on the next line.
+            if not clean_low.startswith("если "):
+                _append_conditional_rule(
+                    condition_text=pending_conditional_text,
+                    action_text=clean_line,
+                    source_line=f"{pending_conditional_source} {clean_line}".strip(),
+                    channel_scope=pending_conditional_scope or effective_scope,
+                )
+                pending_conditional_text = ""
+                pending_conditional_source = ""
+                pending_conditional_scope = []
+                continue
+            pending_conditional_text = ""
+            pending_conditional_source = ""
+            pending_conditional_scope = []
+        if pending_template_text:
+            if not clean_low.startswith("если "):
+                _append_conditional_rule(
+                    condition_text=pending_template_text,
+                    action_text=clean_line,
+                    source_line=f"{pending_template_source} {clean_line}".strip(),
+                    channel_scope=pending_template_scope or effective_scope,
+                )
+                pending_template_text = ""
+                pending_template_source = ""
+                pending_template_scope = []
+                continue
+            pending_template_text = ""
+            pending_template_source = ""
+            pending_template_scope = []
+        if clean_line and (not clean_low.startswith("если ")) and _is_delivery_directive_line(clean_line):
+            inferred_cond = _infer_delivery_condition_from_line(clean_line)
             compiled.delivery_rules.append(
                 _delivery_rule_from_line(
-                    source_line=line,
+                    source_line=clean_line,
                     channel_scope=effective_scope,
+                    condition_text=inferred_cond,
                 )
             )
-        if not low.startswith("если "):
+        if clean_line and (not clean_low.startswith("если ")):
+            inferred_cond, inferred_action = _infer_persona_template_condition_and_action(clean_line)
+            if inferred_cond and inferred_action:
+                _append_conditional_rule(
+                    condition_text=inferred_cond,
+                    action_text=inferred_action,
+                    source_line=clean_line,
+                    channel_scope=effective_scope,
+                )
+            elif inferred_cond:
+                pending_template_text = inferred_cond
+                pending_template_source = clean_line
+                pending_template_scope = list(effective_scope or [])
+        if not clean_low.startswith("если "):
             continue
         cond = ""
         action = ""
-        if ":" in line:
-            cond, action = line.split(":", 1)
-        elif " - " in line:
-            cond, action = line.split(" - ", 1)
-        elif " то " in low:
-            idx = low.find(" то ")
-            cond = line[:idx].strip()
-            action = line[idx + 4 :].strip()
+        if ":" in clean_line:
+            cond, action = clean_line.split(":", 1)
+        elif " - " in clean_line:
+            cond, action = clean_line.split(" - ", 1)
+        else:
+            m_to = re.search(r"(?iu)\bто\b", clean_low)
+            if m_to:
+                idx = m_to.start()
+                cond = clean_line[:idx].strip()
+                action = clean_line[m_to.end() :].strip(" -:")
         cond = cond.strip()
         action = action.strip()
-        if not cond or not action:
+        if not cond:
             continue
-        cond_keys = _fact_keys_from_line(cond)
-        fact_key = _canonical_fact_key(cond_keys[0]) if cond_keys else ""
-        compiled.conditionals.append(
-            PersonaConditionalRule(
-                source_line=line,
-                condition_text=cond,
-                action_text=action,
-                fact_key=fact_key,
-                expected_tokens=_extract_expected_tokens_from_condition(cond),
-            )
+        if not action:
+            pending_conditional_text = cond
+            pending_conditional_source = clean_line
+            pending_conditional_scope = list(effective_scope or [])
+            continue
+        _append_conditional_rule(
+            condition_text=cond,
+            action_text=action,
+            source_line=clean_line,
+            channel_scope=effective_scope,
         )
-        if _is_delivery_directive_line(action):
-            compiled.delivery_rules.append(
-                _delivery_rule_from_line(
-                    source_line=action,
-                    channel_scope=effective_scope,
-                    condition_text=cond,
-                )
-            )
 
     if compiled.delivery_rules:
         unique_delivery: List[PersonaDeliveryRule] = []
@@ -2262,12 +3944,39 @@ def _conditional_rule_matches(
     if not haystack:
         return False
     if not rule.expected_tokens:
-        # Generic fallback: condition mentions "если", so require at least one token overlap.
-        cond_tokens = [tok for tok in re.findall(r"[a-zа-я0-9\-]{3,}", cond)]
-        return any(tok in haystack for tok in cond_tokens[:4])
-    # Persona conditions often list alternatives (cities/channels/etc), so
-    # matching by ANY token is more robust than requiring all of them.
-    return any(tok in haystack for tok in rule.expected_tokens)
+        return False
+    fact_probe = _normalize_probe_token(str(facts.get(rule.fact_key) or "")) if rule.fact_key else ""
+    hay_tokens = [_normalize_probe_token(tok) for tok in _FACT_TOKEN_RE.findall(haystack)]
+
+    def _near_token_form(a: str, b: str) -> bool:
+        aa = str(a or "").strip().lower()
+        bb = str(b or "").strip().lower()
+        if not aa or not bb:
+            return False
+        if aa == bb:
+            return True
+        if len(aa) >= 3 and len(bb) >= 3 and aa[:-1] == bb[:-1]:
+            return True
+        if len(aa) >= 4 and len(bb) >= 4 and aa[:3] == bb[:3] and abs(len(aa) - len(bb)) <= 1:
+            return True
+        return False
+
+    for token in rule.expected_tokens:
+        tok = str(token or "").strip().lower()
+        if not tok:
+            continue
+        if re.search(rf"(?iu)(?<![\w-]){re.escape(tok)}(?![\w-])", haystack):
+            return True
+        tok_probe = _normalize_probe_token(tok)
+        if tok_probe and any(tok_probe == h or tok_probe in h or h in tok_probe for h in hay_tokens if h):
+            return True
+        if tok_probe and any(_near_token_form(tok_probe, h) for h in hay_tokens if h):
+            return True
+        if fact_probe and tok_probe and (tok_probe in fact_probe or fact_probe in tok_probe):
+            return True
+        if fact_probe and tok_probe and _near_token_form(tok_probe, fact_probe):
+            return True
+    return False
 
 
 def _apply_persona_sequence_obligations(
@@ -2282,17 +3991,223 @@ def _apply_persona_sequence_obligations(
     persona_text = str(persona_context or "").strip()
     if not candidate or not persona_text:
         return candidate
+    facts = dict(known_facts or {})
+    turn_intent = _classify_turn_intent(last_user_message, known_facts=facts)
+    if turn_intent in {"why_question", "repair", "catalog_problem"}:
+        return _strip_instruction_leaks(candidate)
+    if isinstance(state, SalesState) and _canonical_fact_key(str(state.pending_fact_key or "")) == "model":
+        low_candidate = _normalize_text(candidate)
+        if (
+            "модел" in low_candidate
+            or "каталог" in low_candidate
+            or "вариант" in low_candidate
+        ):
+            return _strip_instruction_leaks(candidate)
+    if str(facts.get("model") or "").strip():
+        if (
+            bool(_extract_attribute_probe(last_user_message))
+            or bool(_MODEL_NAME_INTENT_RE.search(str(last_user_message or "")))
+            or bool(_VARIANTS_USER_HINT_RE.search(str(last_user_message or "")))
+        ):
+            return _strip_instruction_leaks(candidate)
     compiled = _compile_persona_rules(persona_text)
     if not compiled.conditionals:
         return candidate
+
+    def _normalize_action_for_reply(action_text: str) -> str:
+        raw = re.sub(r"^[\-\s•\d\).\(\"']+", "", str(action_text or "")).strip()
+        raw = raw.replace("`", " ")
+        if not raw:
+            return ""
+        low = raw.lower().replace("ё", "е")
+        if low.startswith("не "):
+            return ""
+        # Persona sometimes stores meta-instructions like:
+        # "в этом же ответе добавьте: "..." и "...""
+        # Extract quoted user-facing fragments first.
+        quoted_parts = [
+            str(part or "").strip()
+            for part in re.findall(r"[\"«]([^\"»]{3,220})[\"»]", raw)
+            if str(part or "").strip()
+        ]
+        if quoted_parts:
+            normalized_chunks: list[str] = []
+            for chunk in quoted_parts:
+                raw_chunk = str(chunk or "")
+                if re.search(r"<\s*[^>\n]{1,40}\s*>", raw_chunk):
+                    continue
+                chunk_clean = re.sub(r"<\s*[^>\n]{1,40}\s*>", "", raw_chunk).strip()
+                if not chunk_clean:
+                    continue
+                if chunk_clean[-1] not in ".!?":
+                    chunk_clean += "."
+                normalized_chunks.append(chunk_clean)
+            merged = " ".join(normalized_chunks).strip()
+            if merged:
+                return merged[:220].strip()
+        # Question-like directives should stay in planning, not in final text.
+        if re.match(
+            r"(?iu)^\s*(?:сначала|затем|потом|далее|обязательно|просто)?\s*"
+            r"(спросите|уточните|попросите|напишите|задайте)\b",
+            low,
+        ):
+            return ""
+        # Internal infinitive instructions should not leak into user text.
+        if re.match(
+            r"(?iu)^\s*(?:сначала|затем|потом|далее|обязательно|просто)?\s*"
+            r"(предупредить|уточнить|добавить|сообщить|указать|"
+            r"предложить|спросить|попросить|написать|отправить|"
+            r"перевести|соотнести|проверить|зафиксировать)\b",
+            low,
+        ):
+            return ""
+        # Purely internal delivery instructions should not leak to user text.
+        if re.search(
+            r"(?iu)\b(в\s+этом\s+же\s+ответе|в\s+текущем\s+сообщении|"
+            r"только\s+потом|переходить\s+к\s+уточнениям|"
+            r"добавьте\s*:\s*$|дать\s+адрес\s+магазина\s+и\s+условие\s+скидки)\b",
+            low,
+        ):
+            return ""
+        # Pure operator directives ("how to ask") must not leak into user text.
+        if re.search(
+            r"(?iu)\b(при\s+известном\s+городе|без\s+повтора|"
+            r"сразу\s+давайте\s+адрес|затем\s+один\s+уточняющ)\b",
+            low,
+        ):
+            return ""
+        # Convert imperative instruction stems to neutral phrasing.
+        stripped = re.sub(
+            r"(?iu)^\s*(?:честно\s+|сразу\s+|коротко\s+|обязательно\s+)*"
+            r"(предлагайте|сообщайте|добавьте|укажите|пишите|отправляйте)\s+",
+            "",
+            raw,
+        ).strip(" ,")
+        if not stripped:
+            stripped = raw
+        stripped = _strip_embedded_operator_tail(stripped).strip()
+        if not stripped:
+            return ""
+        low_stripped = stripped.lower().replace("ё", "е")
+        # Root-cause guard: never allow operator imperatives to be appended as
+        # user-visible text from persona conditional actions.
+        if ("?" not in stripped) and re.search(
+            r"(?iu)\b(поздоровайт\w*|поприветствуйт\w*|скажите|спросите|"
+            r"уточните|напишите|дайте|предложите|предлагайте|попросите|задайте)\b",
+            low_stripped,
+        ):
+            return ""
+        # Minor normalization for common promo wording.
+        if low_stripped.startswith("скидку "):
+            stripped = "Действует скидка " + stripped[len("скидку ") :]
+        elif low_stripped.startswith("скидка "):
+            stripped = "Действует " + stripped
+        if stripped and stripped[-1] not in ".!?":
+            stripped += "."
+        return stripped[:220].strip()
+
+    def _reply_covers_action(reply_text: str, action_text: str) -> bool:
+        rep = _normalize_text(reply_text)
+        act = _normalize_text(action_text)
+        if not rep or not act:
+            return False
+        action_numbers = set(re.findall(r"\d{2,}", action_text))
+        if action_numbers and not action_numbers.issubset(set(re.findall(r"\d{2,}", reply_text))):
+            return False
+        action_tokens = [
+            tok
+            for tok in _FACT_TOKEN_RE.findall(act)
+            if len(tok) >= 4 and tok not in _GENERIC_FACT_STOPWORDS
+        ]
+        if not action_tokens:
+            return False
+        hits = sum(1 for tok in action_tokens if tok in rep)
+        return hits >= max(1, int(len(action_tokens) * 0.45))
+
+    def _append_action_sentence(reply_text: str, sentence: str) -> str:
+        base = str(reply_text or "").strip()
+        addon = str(sentence or "").strip()
+        if not addon:
+            return base
+        if not base:
+            return addon
+        if _count_sentences(base) >= 3:
+            parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(base) if part.strip()]
+            if parts:
+                parts[-1] = f"{parts[-1]} {addon}".strip()
+                return " ".join(parts).strip()
+            return f"{base} {addon}".strip()
+        if base.endswith((".", "!", "?")):
+            return f"{base} {addon}".strip()
+        return f"{base}. {addon}".strip()
+
+    def _assistant_recently_covers_action(action_text: str, window: int = 6) -> bool:
+        if not isinstance(state, SalesState):
+            return False
+        history = state.history if isinstance(state.history, list) else []
+        if not history:
+            return False
+        checked = 0
+        for item in reversed(history):
+            role = str(item.get("role") or "").strip().lower()
+            if role != "assistant":
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            checked += 1
+            if _reply_covers_action(content, action_text):
+                return True
+            if checked >= max(1, int(window)):
+                break
+        return False
+
+    def _user_explicitly_requests_action(action_text: str) -> bool:
+        user_msg = str(last_user_message or "").strip()
+        if not user_msg:
+            return False
+        if _reply_covers_action(user_msg, action_text):
+            return True
+        action_tokens = [
+            tok
+            for tok in _FACT_TOKEN_RE.findall(_normalize_text(action_text))
+            if len(tok) >= 4 and tok not in _GENERIC_FACT_STOPWORDS
+        ]
+        if not action_tokens:
+            return False
+        user_norm = _normalize_text(user_msg)
+        hits = sum(1 for tok in action_tokens if tok in user_norm)
+        user_tokens = [tok for tok in _FACT_TOKEN_RE.findall(user_norm) if len(tok) >= 3]
+        if user_tokens and len(user_tokens) <= 5 and hits >= 1:
+            return True
+        return hits >= max(1, int(len(action_tokens) * 0.4))
+
+    def _action_recently_in_memory(action_text: str) -> bool:
+        if not isinstance(state, SalesState):
+            return False
+        fp = _fact_fingerprint(action_text)
+        if not fp:
+            return False
+        recent = list(state.recent_fact_fingerprints or [])
+        if fp in recent:
+            return True
+        cur_tokens = set(fp.split())
+        if not cur_tokens:
+            return False
+        for prev in recent:
+            prev_tokens = set(str(prev or "").split())
+            if not prev_tokens:
+                continue
+            overlap = len(cur_tokens & prev_tokens)
+            if overlap < 3:
+                continue
+            ratio = overlap / max(1, min(len(cur_tokens), len(prev_tokens)))
+            if ratio >= 0.72:
+                return True
+        return False
+
+    appended_fingerprints: set[str] = set()
     out = candidate
-    out_norm = _normalize_text(out)
-    existing_questions = _extract_questions_from_text(out)
-    existing_topics = {
-        _question_topic(item)
-        for item in existing_questions
-        if str(item or "").strip()
-    }
     for rule in compiled.conditionals:
         if not _conditional_rule_matches(
             rule,
@@ -2304,38 +4219,32 @@ def _apply_persona_sequence_obligations(
         action = str(rule.action_text or "").strip()
         if not action:
             continue
-        action_norm = _normalize_text(action)
-        if not action_norm:
+        action_for_reply = _normalize_action_for_reply(action)
+        if not action_for_reply:
             continue
-        if action_norm in out_norm:
+        if _assistant_recently_covers_action(action_for_reply) and (
+            not _user_explicitly_requests_action(action_for_reply)
+        ):
             continue
-        action_questions = _extract_questions_from_text(action)
-        if action_questions and existing_questions:
-            action_topics = {
-                _question_topic(item)
-                for item in action_questions
-                if str(item or "").strip()
-            }
-            if action_topics & existing_topics:
+        action_parts = [
+            part.strip()
+            for part in _SENTENCE_SPLIT_RE.split(action_for_reply)
+            if part and part.strip()
+        ]
+        if not action_parts:
+            action_parts = [action_for_reply]
+        for part in action_parts:
+            part_fp = _fact_fingerprint(part)
+            if part_fp and part_fp in appended_fingerprints:
                 continue
-        out_tokens = set(_FACT_TOKEN_RE.findall(out_norm))
-        action_tokens = set(_FACT_TOKEN_RE.findall(action_norm))
-        if out_tokens and action_tokens:
-            overlap = len(out_tokens & action_tokens)
-            coverage = overlap / max(1, len(action_tokens))
-            if coverage >= 0.7:
+            if _reply_covers_action(out, part):
                 continue
-        if len(action) > 260:
-            continue
-        out = f"{out} {action}".strip()
-        out_norm = _normalize_text(out)
-        existing_questions = _extract_questions_from_text(out)
-        existing_topics = {
-            _question_topic(item)
-            for item in existing_questions
-            if str(item or "").strip()
-        }
-    candidate = out
+            if _action_recently_in_memory(part) and (not _user_explicitly_requests_action(part)):
+                continue
+            out = _append_action_sentence(out, part)
+            if part_fp:
+                appended_fingerprints.add(part_fp)
+    candidate = _strip_instruction_leaks(out)
     return candidate
 
 
@@ -2408,6 +4317,11 @@ def _is_contact_request_text(text: str) -> bool:
         "номер",
         "телефон",
         "ссылка",
+        "каталог",
+        "pdf",
+        "пдф",
+        "прайс",
+        "фото",
         "whatsapp",
         "ватсап",
         "вотсап",
@@ -2462,6 +4376,31 @@ def _delivery_intro_text(rule: PersonaDeliveryRule, channel_name: str) -> str:
     return ""
 
 
+def _strip_unsolicited_links(reply: str, last_user_message: str) -> str:
+    candidate = str(reply or "").strip()
+    if not candidate:
+        return candidate
+    user_text = str(last_user_message or "")
+    if _is_contact_request_text(user_text) or re.search(r"(?iu)https?://", user_text):
+        return candidate
+    if not re.search(r"(?iu)https?://", candidate):
+        return candidate
+    cleaned_lines: list[str] = []
+    removed = False
+    for raw_line in candidate.splitlines():
+        line = str(raw_line or "")
+        if re.fullmatch(r"(?iu)\s*https?://\S+\s*", line):
+            removed = True
+            continue
+        cleaned_lines.append(line)
+    out = "\n".join(line for line in cleaned_lines if line.strip()).strip()
+    out = re.sub(r"(?iu)\s*https?://\S+", "", out).strip()
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    if removed and out:
+        return out
+    return out or candidate
+
+
 def _apply_persona_delivery_obligations(
     reply: str,
     *,
@@ -2488,6 +4427,17 @@ def _apply_persona_delivery_obligations(
             state=state,
         ):
             continue
+        # Formatting directives like "send links as a separate message" should
+        # not force-link emission on every turn when the rule is unconditional.
+        if (
+            rule.wants_link
+            and not rule.wants_handle
+            and not rule.wants_phone
+            and not str(rule.condition_text or "").strip()
+            and not _reply_has_contact_artifact(out, compiled.contact_artifacts)
+            and not _is_contact_request_text(last_user_message)
+        ):
+            continue
         chosen_artifacts = _select_contact_artifacts_for_rule(rule, compiled.contact_artifacts)
         chosen_artifacts = [item for item in chosen_artifacts if _is_contact_artifact_token(item)]
         if not chosen_artifacts:
@@ -2496,7 +4446,9 @@ def _apply_persona_delivery_obligations(
             continue
         if isinstance(state, SalesState):
             since_contact = _assistant_messages_since_contact(state, chosen_artifacts)
-            if since_contact < max(1, int(rule.min_assistant_gap or 1)) and not _is_contact_request_text(last_user_message):
+            if since_contact < max(
+                1, int(rule.min_assistant_gap or 1)
+            ) and not _is_contact_request_text(last_user_message):
                 continue
         intro = _delivery_intro_text(rule, channel_name)
         payload_parts: List[str] = []
@@ -2507,7 +4459,7 @@ def _apply_persona_delivery_obligations(
         if not payload:
             continue
         out = f"{out}\n{payload}".strip()
-    return out
+    return _strip_unsolicited_links(out, last_user_message)
 
 
 def _state_facts_snapshot(state: SalesState) -> Dict[str, str]:
@@ -2543,16 +4495,13 @@ def _looks_like_address_value(text: str) -> bool:
     has_digit = bool(re.search(r"\d", low))
     if not has_digit:
         tokens = [tok for tok in re.split(r"[\s,.;:()]+", low) if tok]
-        if len(tokens) < 2 or len(tokens) > 6:
+        if len(tokens) < 1 or len(tokens) > 4:
             return False
         explicit_markers = (
             "ул",
             "улиц",
             "просп",
             "пр-",
-            "дом",
-            "корп",
-            "стр",
             "переул",
             "пер",
             "шоссе",
@@ -2561,12 +4510,27 @@ def _looks_like_address_value(text: str) -> bool:
         )
         if any(marker in low for marker in explicit_markers):
             return True
-        # Allow partial address like "хмельницкого", "ленина", "коммунистическая"
+        if _OBJECT_TYPE_HINT_RE.search(low):
+            return False
+        # Allow partial street-like address like "хмельницкого", "ленина", "коммунистическая"
+        blocked_tokens = {
+            "для",
+            "частного",
+            "частный",
+            "дома",
+            "дом",
+            "квартиры",
+            "квартира",
+            "помещения",
+            "помещение",
+        }
         suffix_hits = 0
         for tok in tokens:
-            if re.search(r"(ского|ской|ская|ский|ина|ова|ева|ого|ая|ый|ий)$", tok):
+            if tok in blocked_tokens or tok in NEEDS_STOPWORDS:
+                continue
+            if re.search(r"(ского|ской|ская|ский|ина|ова|ева|ого|ая|ый|ий|ов|ев|ин)$", tok):
                 suffix_hits += 1
-        return suffix_hits >= 1
+        return suffix_hits >= 1 and len(tokens) <= 3
     # Typical address markers across free-form user input.
     markers = (
         "ул",
@@ -2589,17 +4553,31 @@ def _looks_like_address_value(text: str) -> bool:
     )
     if any(marker in low for marker in markers):
         return True
-    # Fallback: at least two tokens and one token with letters.
+    # Conservative fallback for numeric strings without explicit street markers.
+    # Example accepted: "космонавтов 2"; rejected: "2 двери", "для частного дома 2".
     tokens = [tok for tok in re.split(r"[\s,]+", low) if tok]
-    if len(tokens) < 2:
+    if len(tokens) < 2 or len(tokens) > 5:
         return False
     has_letters = any(bool(re.search(r"[a-zа-я]", tok, re.IGNORECASE)) for tok in tokens)
-    return has_letters
+    street_like = any(
+        bool(re.search(r"(ского|ской|ская|ский|ина|ова|ева|ого|ая|ый|ий|ов|ев|ин)$", tok))
+        for tok in tokens
+    )
+    if _OBJECT_TYPE_HINT_RE.search(low):
+        return False
+    return has_letters and has_digit and street_like
 
 
 def _is_plausible_city_text(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw:
+        return False
+    low_raw = raw.lower().replace("ё", "е")
+    if _GREETING_PREFIX_RE.match(raw):
+        return False
+    if re.search(r"(?iu)\b(здравств\w*|привет\w*|добр\w+\s+д\w*|салам\w*|hello|hi)\b", low_raw):
+        return False
+    if low_raw in {"здравствуйте", "добрый день", "добрый вечер", "привет", "салам", "hello", "hi"}:
         return False
     if "?" in raw:
         return False
@@ -2608,14 +4586,51 @@ def _is_plausible_city_text(text: str) -> bool:
     tokens = [tok for tok in re.split(r"[\s,.;:()]+", raw) if tok]
     if not tokens or len(tokens) > 3:
         return False
+    normalized_tokens = [
+        str(tok).lower().replace("ё", "е")
+        for tok in tokens
+        if str(tok).strip()
+    ]
+    non_city_markers = {
+        "зачем",
+        "почему",
+        "когда",
+        "куда",
+        "как",
+        "что",
+        "кто",
+        "чего",
+        "чем",
+        "вам",
+        "мне",
+        "тебе",
+        "адрес",
+        "установка",
+        "установки",
+        "нужно",
+        "надо",
+    }
+    if any(tok in non_city_markers for tok in normalized_tokens):
+        return False
+    if normalized_tokens and all(tok in NEEDS_STOPWORDS for tok in normalized_tokens):
+        return False
     if all(re.fullmatch(r"\d+", tok) for tok in tokens):
         return False
     if not any(re.search(r"[A-Za-zА-Яа-яЁё]", tok) for tok in tokens):
         return False
+    # Filter obvious verb-like single-word inputs (e.g. "летать"),
+    # which are frequently false positives in city extraction.
+    for token in tokens:
+        tok = str(token).strip()
+        if not re.search(r"[А-Яа-яЁё]", tok):
+            continue
+        low = tok.lower()
+        if low.endswith("ться") or low.endswith("ть") or low.endswith("чь"):
+            return False
     return True
 
 
-def _extract_city_hint(text: str) -> str:
+def _extract_city_hint(text: str, *, allow_standalone: bool = False) -> str:
     raw = str(text or "").strip()
     if not raw:
         return ""
@@ -2630,9 +4645,88 @@ def _extract_city_hint(text: str) -> str:
         candidate = m.group(1).strip(" ,.;:!?")
         if _is_plausible_city_text(candidate):
             return candidate
-    if _is_plausible_city_text(raw):
+    if allow_standalone and _is_plausible_city_text(raw):
         return raw
     return ""
+
+
+def _extract_standalone_city_hint(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if "?" in raw:
+        return ""
+    low = _normalize_text(raw)
+    if _OBJECT_TYPE_HINT_RE.search(low):
+        return ""
+    if _is_price_intent(raw) or _is_store_address_intent(raw):
+        return ""
+    tokens = [tok for tok in _FACT_TOKEN_RE.findall(raw) if tok]
+    if not tokens or len(tokens) > 3:
+        return ""
+    return _extract_city_hint(raw, allow_standalone=True)
+
+
+def _reply_contains_unconfirmed_required_claim(
+    reply: str,
+    *,
+    missing_required: Sequence[str],
+    known_facts: Mapping[str, str] | None = None,
+    user_text: str = "",
+    persona_context: str = "",
+) -> bool:
+    candidate = str(reply or "").strip()
+    if not candidate:
+        return False
+    missing = {_canonical_fact_key(item) for item in (missing_required or []) if str(item or "").strip()}
+    missing.discard("")
+    if not missing:
+        return False
+
+    facts = dict(known_facts or {})
+    user_raw = str(user_text or "").strip()
+    user_city = _extract_city_hint(user_raw, allow_standalone=True) or _extract_standalone_city_hint(user_raw)
+    user_city_norm = _normalize_text(user_city)
+    user_obj = _canonical_object_type_hint(
+        (infer_user_needs(user_raw) or {}).get("object_type") or _object_type_from_turn_text(user_raw)
+    )
+    reply_questions = _extract_questions_from_text(candidate)
+    has_city_question = any(_question_covers_fact(q, "city") for q in reply_questions)
+    has_object_question = any(_question_covers_fact(q, "object_type") for q in reply_questions)
+
+    if "city" in missing and (not str(facts.get("city") or "").strip()) and not has_city_question:
+        reply_city_norm = ""
+        city_map = _extract_store_addresses_from_persona(persona_context)
+        if city_map:
+            low_reply = _normalize_text(candidate)
+            for city_key in city_map.keys():
+                city_norm = _normalize_text(city_key)
+                if not city_norm:
+                    continue
+                if re.search(rf"(?iu)(?<![\w-]){re.escape(city_norm)}(?![\w-])", low_reply):
+                    reply_city_norm = city_norm
+                    break
+        if not reply_city_norm:
+            extracted = _extract_city_hint(candidate, allow_standalone=True)
+            if extracted:
+                reply_city_norm = _normalize_text(extracted)
+        if reply_city_norm:
+            if user_city_norm and reply_city_norm != user_city_norm:
+                return True
+            if not user_city_norm:
+                return True
+
+    if "object_type" in missing and (not str(facts.get("object_type") or "").strip()) and not has_object_question:
+        reply_obj = _canonical_object_type_hint(
+            (infer_user_needs(candidate) or {}).get("object_type") or _object_type_from_turn_text(candidate)
+        )
+        if reply_obj:
+            if user_obj and reply_obj != user_obj:
+                return True
+            if not user_obj:
+                return True
+
+    return False
 
 
 def _capture_pending_fact_answer(state: SalesState, user_text: str) -> None:
@@ -2644,7 +4738,20 @@ def _capture_pending_fact_answer(state: SalesState, user_text: str) -> None:
         return
     if not isinstance(state.facts, dict):
         state.facts = {}
-    city_hint = _extract_city_hint(text)
+    turn_intent = _classify_turn_intent(text, known_facts=_state_facts_snapshot(state))
+    if turn_intent in {
+        "unsubscribe",
+        "payment",
+        "store_address",
+        "handoff",
+        "catalog_request",
+        "offtopic",
+        "why_question",
+        "catalog_problem",
+        "repair",
+    }:
+        return
+    city_hint = _extract_city_hint(text, allow_standalone=(key == "city"))
     if city_hint:
         state.facts["city"] = _safe_short_text(city_hint, 180)
     tokens = [tok for tok in _FACT_TOKEN_RE.findall(text) if tok]
@@ -2663,21 +4770,132 @@ def _capture_pending_fact_answer(state: SalesState, user_text: str) -> None:
         return
     if key == "object_type" and not _OBJECT_TYPE_HINT_RE.search(low):
         return
+    if key == "budget":
+        if _extract_budget(low) is None and not _extract_price_spans(text):
+            return
+    if key == "dimensions":
+        has_size_pattern = bool(
+            re.search(
+                r"(?iu)\b\d{2,4}\s*[xх*]\s*\d{2,4}(?:\s*[xх*]\s*\d{2,4})?\b",
+                text,
+            )
+        )
+        has_dimension_words = bool(
+            re.search(r"(?iu)\b(размер|проем|проём|ширин|высот|фото)\w*\b", low)
+        )
+        if not (has_size_pattern or has_dimension_words):
+            return
     if key == "model":
         if _LOW_SIGNAL_CONTEXT_RE.search(low) or _CATALOG_UNAVAILABLE_RE.search(low):
             return
         noisy = {"каталог", "грузится", "не", "могу", "пока", "позже"}
-        if tokens and sum(1 for tok in tokens if _normalize_text(tok) in noisy) >= max(1, len(tokens) // 2):
+        if tokens and sum(1 for tok in tokens if _normalize_text(tok) in noisy) >= max(
+            1, len(tokens) // 2
+        ):
             return
-    state.facts[key] = _safe_short_text(text, 180)
+        tenant = state.tenant if isinstance(getattr(state, "tenant", None), int) else None
+        if tenant is None:
+            return
+        try:
+            catalog_items = _read_catalog(int(tenant))
+        except Exception:
+            return
+        match = _best_catalog_item_match(text, catalog_items or [])
+        if not match:
+            return
+        label = _item_label(match)
+        if not label:
+            return
+        state.facts[key] = _safe_short_text(label, 180)
+        if not isinstance(state.known_slots, dict):
+            state.known_slots = {}
+        state.known_slots["model"] = _safe_short_text(label, 120)
+        state.pending_fact_key = ""
+        return
+    if key == "object_type":
+        normalized_obj = _object_type_from_turn_text(text)
+        if not normalized_obj:
+            return
+        state.facts[key] = normalized_obj
+    elif key == "city":
+        if not _is_plausible_city_text(text):
+            return
+        state.facts[key] = _safe_short_text(text, 180)
+    else:
+        state.facts[key] = _safe_short_text(text, 180)
     state.pending_fact_key = ""
 
 
-def _merge_fact_updates(state: SalesState, updates: Mapping[str, Any] | None) -> None:
+def _merge_fact_updates(
+    state: SalesState,
+    updates: Mapping[str, Any] | None,
+    *,
+    user_text: str = "",
+) -> None:
     if not updates:
         return
     if not isinstance(state.facts, dict):
         state.facts = {}
+    user_raw = str(user_text or "").strip()
+    user_city = _extract_city_hint(user_raw, allow_standalone=True) or _extract_standalone_city_hint(user_raw)
+    user_city_norm = _normalize_text(user_city)
+    user_obj = _canonical_object_type_hint(
+        (infer_user_needs(user_raw) or {}).get("object_type") or _object_type_from_turn_text(user_raw)
+    )
+    def _fact_value_is_valid(key: str, value: str) -> bool:
+        raw = str(value or "").strip()
+        if not raw:
+            return False
+        if key == "city":
+            return _is_plausible_city_text(raw)
+        if key == "address":
+            return _looks_like_address_value(raw)
+        if key == "object_type":
+            return bool(_OBJECT_TYPE_HINT_RE.search(_normalize_text(raw)))
+        if key == "model":
+            low = _normalize_text(raw)
+            tokens = [tok for tok in _FACT_TOKEN_RE.findall(low) if tok]
+            if not tokens:
+                return False
+            if all(tok in _GENERIC_MODEL_WORDS or tok in NEEDS_STOPWORDS for tok in tokens):
+                return False
+            tenant = state.tenant if isinstance(getattr(state, "tenant", None), int) else None
+            if tenant is None:
+                return False
+            try:
+                catalog_items = _read_catalog(int(tenant))
+            except Exception:
+                return False
+            return _best_catalog_item_match(raw, catalog_items or []) is not None
+        if key == "budget":
+            return _extract_budget(_normalize_text(raw)) is not None
+        return True
+
+    def _fact_update_supported_by_user_turn(key: str, value: str) -> bool:
+        # Core factual updates must be grounded in the current user turn.
+        if key == "city":
+            if not user_city_norm:
+                return False
+            value_norm = _normalize_text(value)
+            if not value_norm:
+                return False
+            return bool(value_norm == user_city_norm or value_norm in user_city_norm or user_city_norm in value_norm)
+        if key == "object_type":
+            value_obj = _canonical_object_type_hint(value)
+            return bool(value_obj and user_obj and value_obj == user_obj)
+        if key == "address":
+            return _looks_like_address_value(user_raw)
+        if key == "model":
+            tenant = state.tenant if isinstance(getattr(state, "tenant", None), int) else None
+            if tenant is None:
+                return False
+            try:
+                catalog_items = _read_catalog(int(tenant))
+            except Exception:
+                return False
+            return _best_catalog_item_match(user_raw, catalog_items or []) is not None
+        return True
+
     for raw_key, raw_value in dict(updates or {}).items():
         key = _canonical_fact_key(str(raw_key))
         if not key:
@@ -2685,6 +4903,30 @@ def _merge_fact_updates(state: SalesState, updates: Mapping[str, Any] | None) ->
         value = _safe_short_text(str(raw_value or ""), 180)
         if not value:
             continue
+        if not _fact_value_is_valid(key, value):
+            continue
+        if not _fact_update_supported_by_user_turn(key, value):
+            continue
+        if key == "object_type":
+            normalized_obj = _object_type_from_turn_text(value)
+            if not normalized_obj:
+                continue
+            value = normalized_obj
+        elif key == "model":
+            tenant = state.tenant if isinstance(getattr(state, "tenant", None), int) else None
+            if tenant is None:
+                continue
+            try:
+                catalog_items = _read_catalog(int(tenant))
+            except Exception:
+                continue
+            match = _best_catalog_item_match(user_raw or value, catalog_items or [])
+            if not match:
+                continue
+            label = _item_label(match)
+            if not label:
+                continue
+            value = _safe_short_text(label, 180)
         state.facts[key] = value
 
 
@@ -2764,19 +5006,33 @@ def _dedupe_repeated_fact_sentences(text: str, state: SalesState) -> str:
     recent = set(state.recent_fact_fingerprints or [])
     if not recent:
         return raw
+    recent_token_sets = [set(fp.split()) for fp in recent if fp]
     parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(raw) if part.strip()]
     kept: list[str] = []
     for part in parts:
         if "?" in part:
             kept.append(part)
             continue
-        low = part.lower()
-        # Do not drop factual numeric lines (price/discount/amount) even if they repeat.
-        if re.search(r"\d", part) and any(token in low for token in ("цен", "скид", "руб", "₽", "стоим")):
+        fp = _fact_fingerprint(part)
+        if not fp:
             kept.append(part)
             continue
-        fp = _fact_fingerprint(part)
-        if not fp or fp not in recent:
+        if fp in recent:
+            continue
+        current_tokens = set(fp.split())
+        is_near_duplicate = False
+        if current_tokens:
+            for prev_tokens in recent_token_sets:
+                if not prev_tokens:
+                    continue
+                overlap = len(current_tokens & prev_tokens)
+                if overlap < 3:
+                    continue
+                ratio = overlap / max(1, min(len(current_tokens), len(prev_tokens)))
+                if ratio >= 0.7:
+                    is_near_duplicate = True
+                    break
+        if not is_near_duplicate:
             kept.append(part)
     if not kept:
         return raw
@@ -2808,6 +5064,19 @@ def _capture_pending_slot_answer(state: SalesState, user_text: str) -> None:
     text = str(user_text or "").strip()
     if not text:
         return
+    turn_intent = _classify_turn_intent(text, known_facts=_state_facts_snapshot(state))
+    if turn_intent in {
+        "unsubscribe",
+        "payment",
+        "store_address",
+        "handoff",
+        "catalog_request",
+        "offtopic",
+        "why_question",
+        "catalog_problem",
+        "repair",
+    }:
+        return
     token_count = len(_FACT_TOKEN_RE.findall(text))
     if "?" in text and token_count > 8:
         return
@@ -2826,8 +5095,29 @@ def _capture_pending_slot_answer(state: SalesState, user_text: str) -> None:
             return
         generic_model_noise = {"не", "могу", "пока", "грузится", "грузится", "каталог", "потом"}
         tokens = [tok for tok in _FACT_TOKEN_RE.findall(low) if tok]
-        if tokens and sum(1 for tok in tokens if tok in generic_model_noise) >= max(1, len(tokens) // 2):
+        if tokens and sum(1 for tok in tokens if tok in generic_model_noise) >= max(
+            1, len(tokens) // 2
+        ):
             return
+        tenant = state.tenant if isinstance(getattr(state, "tenant", None), int) else None
+        if tenant is None:
+            return
+        try:
+            catalog_items = _read_catalog(int(tenant))
+        except Exception:
+            return
+        match = _best_catalog_item_match(text, catalog_items or [])
+        if not match:
+            return
+        label = _item_label(match)
+        if not label:
+            return
+        state.known_slots[slot] = _safe_short_text(label, limit=140)
+        if not isinstance(state.facts, dict):
+            state.facts = {}
+        state.facts["model"] = _safe_short_text(label, limit=180)
+        state.pending_slot = ""
+        return
     state.known_slots[slot] = _safe_short_text(text, limit=140)
     if not isinstance(state.facts, dict):
         state.facts = {}
@@ -2840,16 +5130,31 @@ def _capture_pending_slot_answer(state: SalesState, user_text: str) -> None:
 
 def _item_price_int(item: Mapping[str, Any]) -> Optional[int]:
     raw = str(item.get("price") or "").strip()
-    match = re.search(r"\d[\d\s.,]*", raw)
-    if not match:
+    if not raw:
         return None
-    digits = re.sub(r"\D", "", match.group(0))
-    if not digits:
+    candidates: list[int] = []
+    for match in re.finditer(r"\d[\d\s.,]*", raw):
+        digits = re.sub(r"\D", "", str(match.group(0) or ""))
+        if not digits:
+            continue
+        try:
+            value = int(digits)
+        except Exception:
+            continue
+        candidates.append(value)
+    if not candidates:
         return None
-    try:
-        return int(digits)
-    except Exception:
-        return None
+    for value in candidates:
+        if 1000 <= value <= 1_000_000:
+            return value
+    lowered = raw.lower()
+    has_currency = any(token in lowered for token in ("₽", "руб", "rub", "$", "€", "usd", "eur"))
+    for value in candidates:
+        if 1 <= value < 1000 and has_currency:
+            return value
+    if len(candidates) == 1 and candidates[0] > 0:
+        return candidates[0]
+    return None
 
 
 def _item_label(item: Mapping[str, Any]) -> str:
@@ -2858,6 +5163,545 @@ def _item_label(item: Mapping[str, Any]) -> str:
         if value:
             return value
     return ""
+
+
+def _display_item_label(item: Mapping[str, Any]) -> str:
+    label = _item_label(item)
+    if not label:
+        return ""
+    if len(label) >= 3 and label.upper() == label:
+        parts = []
+        for token in label.split():
+            if token.isupper() and any(ch.isalpha() for ch in token):
+                parts.append(token.capitalize())
+            else:
+                parts.append(token)
+        return " ".join(parts).strip()
+    return label
+
+
+def _shortlist_preview_text(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = 2,
+) -> str:
+    parts: list[str] = []
+    for item in list(items or [])[: max(1, int(limit))]:
+        name = _item_label(dict(item))
+        price = _item_price_int(dict(item))
+        if not name:
+            continue
+        if price:
+            parts.append(f"{name} — {_format_rub_price(price)}")
+        else:
+            parts.append(name)
+    return "; ".join(parts).strip()
+
+
+def _render_shortlist_preview_reply(
+    preview: str,
+    *,
+    ask_detail: bool = True,
+    persona_context: str = "",
+    state: Any = None,
+    fact_key: str = "model",
+    user_text: str = "",
+) -> str:
+    text = str(preview or "").strip()
+    if not text:
+        return ""
+    base = f"Варианты: {text}."
+    followup = _fallback_contextual_question(
+        user_text,
+        state=state,
+        persona_context=persona_context,
+    ) or _persona_driven_question_for_fact(persona_context, fact_key, state=state)
+    followup = str(followup or "").strip()
+    if (
+        followup
+        and state is not None
+        and fact_key
+        and bool(getattr(state, "last_items", None))
+        and _question_covers_fact(followup, fact_key)
+    ):
+        alt_followup = _fallback_contextual_question(
+            user_text,
+            state=state,
+            persona_context="",
+        )
+        alt_followup = str(alt_followup or "").strip()
+        if alt_followup and not _question_covers_fact(alt_followup, fact_key):
+            followup = alt_followup
+        else:
+            followup = ""
+    if followup and state is not None and _is_repeated_question_against_state(followup, state):
+        generic_q = _generic_question_for_fact(fact_key)
+        generic_q = str(generic_q or "").strip()
+        if generic_q and not _is_repeated_question_against_state(generic_q, state):
+            followup = generic_q
+        else:
+            followup = ""
+    if ask_detail and followup:
+        return f"{base} {followup}".strip()
+    if followup:
+        return f"{base} {followup}".strip()
+    return base
+
+
+def _best_numeric_attribute_delta_line(
+    current_items: Sequence[Mapping[str, Any]],
+    alternative_items: Sequence[Mapping[str, Any]],
+) -> str:
+    cur = [dict(item) for item in list(current_items or [])[:2] if isinstance(item, Mapping)]
+    alt = [dict(item) for item in list(alternative_items or [])[:2] if isinstance(item, Mapping)]
+    if not cur or not alt:
+        return ""
+    numeric_by_key_cur: dict[str, list[float]] = {}
+    numeric_by_key_alt: dict[str, list[float]] = {}
+    value_samples: dict[str, str] = {}
+    ignored_keys = {"price", "цена", "cost", "стоимость", "stock", "id", "sku", "_search_text"}
+    for item in cur:
+        for raw_key, raw_val in item.items():
+            key = str(raw_key or "").strip()
+            val = str(raw_val or "").strip()
+            if not key or not val:
+                continue
+            key_norm = _normalize_text(key)
+            if key_norm in ignored_keys or key_norm.startswith("_"):
+                continue
+            num = _first_number_value(val)
+            if num is None:
+                continue
+            numeric_by_key_cur.setdefault(key, []).append(float(num))
+            value_samples.setdefault(key, val)
+    for item in alt:
+        for raw_key, raw_val in item.items():
+            key = str(raw_key or "").strip()
+            val = str(raw_val or "").strip()
+            if not key or not val:
+                continue
+            key_norm = _normalize_text(key)
+            if key_norm in ignored_keys or key_norm.startswith("_"):
+                continue
+            num = _first_number_value(val)
+            if num is None:
+                continue
+            numeric_by_key_alt.setdefault(key, []).append(float(num))
+            value_samples.setdefault(key, val)
+    best_key = ""
+    best_score = 0.0
+    best_cur_avg = 0.0
+    best_alt_avg = 0.0
+    for key, cur_vals in numeric_by_key_cur.items():
+        alt_vals = numeric_by_key_alt.get(key) or []
+        if not cur_vals or not alt_vals:
+            continue
+        cur_avg = sum(cur_vals) / max(1, len(cur_vals))
+        alt_avg = sum(alt_vals) / max(1, len(alt_vals))
+        gain = alt_avg - cur_avg
+        if gain <= 0:
+            continue
+        sample = str(value_samples.get(key) or "")
+        score = gain
+        if re.search(r"\b(?:мм|cm|kg|кг|см|шт|pcs|mm)\b", sample, re.IGNORECASE):
+            score += 4.0
+        if _is_dimension_like_value(sample):
+            score -= 6.0
+        if score > best_score:
+            best_key = key
+            best_score = score
+            best_cur_avg = cur_avg
+            best_alt_avg = alt_avg
+    if not best_key or best_score <= 0:
+        return ""
+    cur_str = str(int(round(best_cur_avg)))
+    alt_str = str(int(round(best_alt_avg)))
+    return f"{best_key}: {cur_str} -> {alt_str}."
+
+
+def _shortlist_attribute_answer(
+    user_text: str,
+    items: Sequence[Mapping[str, Any]],
+) -> str:
+    shortlist = [dict(item) for item in list(items or [])[:2] if isinstance(item, Mapping)]
+    if not shortlist:
+        return ""
+    per_item: list[tuple[str, str]] = []
+    for item in shortlist:
+        name = _display_item_label(item) or _item_label(item)
+        answer = _selected_item_attribute_answer(user_text, item)
+        if not answer:
+            continue
+        answer = answer.strip()
+        if answer.endswith("."):
+            answer = answer[:-1].strip()
+        if not name or not answer:
+            continue
+        per_item.append((name, answer))
+    if not per_item:
+        return ""
+    unique_answers = {ans.lower() for _, ans in per_item}
+    if len(unique_answers) == 1:
+        common = per_item[0][1].strip()
+        if common and common[-1] not in ".!?":
+            common += "."
+        return common
+    parts = [f"{name}: {answer}" for name, answer in per_item]
+    merged = ". ".join(part.strip() for part in parts if part.strip()).strip()
+    if merged and merged[-1] not in ".!?":
+        merged += "."
+    return merged
+
+
+def _item_mm_value(item: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        raw = str(item.get(key) or "").strip()
+        if not raw:
+            continue
+        match = re.search(r"(\d+(?:[.,]\d+)?)", raw)
+        if not match:
+            continue
+        try:
+            return float(match.group(1).replace(",", "."))
+        except Exception:
+            continue
+    return None
+
+
+def _first_number_value(value: Any) -> float | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"(\d+(?:[.,]\d+)?)", raw.replace(" ", ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _item_number_value(item: Mapping[str, Any], *keys: str) -> float:
+    for key in keys:
+        raw = str(item.get(key) or "").strip()
+        if not raw:
+            continue
+        match = re.search(r"(\d+(?:[.,]\d+)?)", raw.replace(" ", ""))
+        if not match:
+            continue
+        try:
+            return float(match.group(1).replace(",", "."))
+        except Exception:
+            continue
+    return 0.0
+
+
+def _shortlist_comparison_followup_plan(
+    user_text: str,
+    items: Sequence[Mapping[str, Any]],
+    *,
+    tenant: int | None,
+    persona_context: str = "",
+    state: Any = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    shortlist = [dict(item) for item in list(items or [])[:4] if isinstance(item, Mapping)]
+    if not shortlist:
+        return "", []
+    low = _normalize_text(user_text)
+    turn_intent = _classify_turn_intent(user_text)
+    if turn_intent == "repair":
+        repair = _fallback_contextual_question(
+            user_text,
+            state=state,
+            persona_context=persona_context,
+        ) or _generic_question_for_fact("model")
+        return (repair, shortlist[:2])
+    current_thicknesses = [
+        val
+        for val in (
+            _item_mm_value(item, "Толщина полотна", "Толщина короба")
+            for item in shortlist
+        )
+        if val is not None
+    ]
+    if not current_thicknesses:
+        return "", shortlist[:2]
+    current_max = max(current_thicknesses)
+    current_min = min(current_thicknesses)
+
+    def _build_non_repeating_alternatives(
+        *,
+        prefer_thicker: bool,
+        min_thickness_floor: float | None = None,
+    ) -> list[dict[str, Any]]:
+        if tenant is None:
+            return []
+        try:
+            catalog_items = read_all_catalog(tenant=tenant)
+        except Exception:
+            catalog_items = []
+        if not catalog_items:
+            return []
+        shortlist_ids = {_catalog_item_identity(dict(item)) for item in shortlist}
+        alternatives: list[Mapping[str, Any]] = []
+        for item in catalog_items:
+            identity = _catalog_item_identity(dict(item))
+            if identity in shortlist_ids:
+                continue
+            thickness = _item_mm_value(item, "Толщина полотна", "Толщина короба")
+            if prefer_thicker:
+                if thickness is None or thickness <= current_max:
+                    continue
+            if min_thickness_floor is not None:
+                if thickness is None or thickness < min_thickness_floor:
+                    continue
+            alternatives.append(item)
+        if not alternatives:
+            return []
+        alternatives = sorted(
+            alternatives,
+            key=lambda item: (
+                _item_number_value(item, "price", "Цена"),
+                _item_mm_value(item, "Толщина полотна", "Толщина короба") or 0,
+            ),
+        )
+        return [dict(item) for item in alternatives[:2]]
+
+    attr_probe = _extract_attribute_probe(user_text)
+    asks_attribute = bool(attr_probe)
+    asks_variants = _is_shortlist_feedback_turn(user_text)
+    if _looks_like_contextual_short_followup(user_text):
+        # Avoid repeating the same shortlist forever on short confirmations.
+        prefer_thicker = current_max <= 50
+        min_floor = current_min if current_min >= 60 else None
+        alternatives = _build_non_repeating_alternatives(
+            prefer_thicker=prefer_thicker,
+            min_thickness_floor=min_floor,
+        )
+        if alternatives:
+            preview = _shortlist_preview_text(alternatives, limit=2)
+            if preview:
+                delta = _best_numeric_attribute_delta_line(shortlist[:2], alternatives[:2])
+                preview_text = f"{preview} {delta}".strip()
+                return (
+                    _render_shortlist_preview_reply(
+                        preview_text,
+                        ask_detail=True,
+                        persona_context=persona_context,
+                        state=state,
+                        user_text=user_text,
+                    ),
+                    alternatives,
+                )
+        preview = _shortlist_preview_text(shortlist[:2], limit=2)
+        if preview:
+            return (
+                _render_shortlist_preview_reply(
+                    preview,
+                    ask_detail=True,
+                    persona_context=persona_context,
+                    state=state,
+                    user_text=user_text,
+                ),
+                shortlist[:2],
+            )
+        return "", shortlist[:2]
+    if _is_price_intent(user_text) or _looks_like_price_objection(user_text):
+        asks_cheaper = _extract_price_order_intent(user_text) == "asc"
+        prices = [_item_price_int(dict(item)) for item in shortlist]
+        valid_prices = [int(price) for price in prices if isinstance(price, int) and price > 0]
+        price_order = _extract_price_order_intent(user_text)
+        if (price_order == "asc" or asks_cheaper) and valid_prices and tenant is not None:
+            try:
+                catalog_items = read_all_catalog(tenant=tenant)
+            except Exception:
+                catalog_items = []
+            if catalog_items:
+                shortlist_ids = {_catalog_item_identity(dict(item)) for item in shortlist}
+                cheaper: list[Mapping[str, Any]] = []
+                price_floor = min(valid_prices)
+                for item in catalog_items:
+                    identity = _catalog_item_identity(dict(item))
+                    if identity in shortlist_ids:
+                        continue
+                    item_price = _item_price_int(dict(item))
+                    if not isinstance(item_price, int) or item_price <= 0:
+                        continue
+                    if item_price < price_floor:
+                        cheaper.append(item)
+                if cheaper:
+                    cheaper = sorted(
+                        cheaper,
+                        key=lambda item: _item_number_value(item, "price", "Цена"),
+                    )
+                    cheaper_items = [dict(item) for item in cheaper[:2]]
+                    preview = _shortlist_preview_text(cheaper_items, limit=2)
+                    if preview:
+                        return (
+                            _render_shortlist_preview_reply(
+                                preview,
+                                ask_detail=True,
+                                persona_context=persona_context,
+                                state=state,
+                                user_text=user_text,
+                            ),
+                            cheaper_items,
+                        )
+        if valid_prices:
+            min_price = min(valid_prices)
+            max_price = max(valid_prices)
+            budget_question = _persona_driven_question_for_fact(
+                persona_context,
+                "budget",
+                state=state,
+            )
+            budget_question = str(budget_question or "").strip()
+            if asks_cheaper:
+                price_text = f"Сейчас самый доступный вариант — {_format_rub_price(min_price)}."
+                if budget_question:
+                    return (f"{price_text} {budget_question}".strip(), shortlist[:2])
+                return (price_text, shortlist[:2])
+            if min_price == max_price:
+                price_text = f"Цена: {_format_rub_price(min_price)}."
+            else:
+                price_text = f"Цена: {_format_rub_price(min_price)} - {_format_rub_price(max_price)}."
+            if budget_question:
+                return (f"{price_text} {budget_question}".strip(), shortlist[:2])
+            return (price_text, shortlist[:2])
+        budget_question = _persona_driven_question_for_fact(persona_context, "budget", state=state)
+        if budget_question:
+            return (budget_question, shortlist[:2])
+        return (_generic_question_for_fact("budget"), shortlist[:2])
+    if asks_attribute:
+        probe = _extract_attribute_probe(user_text)
+        if probe:
+            matched_items = _items_with_attribute(shortlist[:2], probe)
+            if matched_items:
+                matched_preview = _shortlist_preview_text(matched_items[:2], limit=2)
+                if matched_preview:
+                    return (
+                        _render_shortlist_preview_reply(
+                            matched_preview,
+                            ask_detail=True,
+                            persona_context=persona_context,
+                            state=state,
+                            user_text=user_text,
+                        ),
+                        [dict(item) for item in matched_items[:2]],
+                    )
+        attr_answer = _shortlist_attribute_answer(user_text, shortlist[:2])
+        attr_answer_norm = _normalize_text(attr_answer)
+        last_reply_norm = _normalize_text(str(getattr(state, "last_bot_reply", "") or "")) if state is not None else ""
+        alternatives = _build_non_repeating_alternatives(
+            prefer_thicker=(current_max <= 50),
+            min_thickness_floor=current_min if current_min >= 50 else None,
+        )
+        if alternatives:
+            preview = _shortlist_preview_text(alternatives, limit=2)
+            if preview:
+                delta = _best_numeric_attribute_delta_line(shortlist[:2], alternatives[:2])
+                preview_text = f"{preview} {delta}".strip()
+                return (
+                    _render_shortlist_preview_reply(
+                        preview_text,
+                        ask_detail=True,
+                        persona_context=persona_context,
+                        state=state,
+                        user_text=user_text,
+                    ),
+                    alternatives,
+                )
+        if attr_answer and attr_answer_norm and attr_answer_norm != last_reply_norm:
+            return (attr_answer, shortlist[:2])
+        if attr_answer:
+            return (attr_answer, shortlist[:2])
+        preview = _shortlist_preview_text(shortlist[:2], limit=2)
+        if preview:
+            return (
+                _render_shortlist_preview_reply(
+                    preview,
+                    ask_detail=True,
+                    persona_context=persona_context,
+                    state=state,
+                    user_text=user_text,
+                ),
+                shortlist[:2],
+            )
+        return "", shortlist[:2]
+
+    if not asks_variants:
+        return "", shortlist[:2]
+    alternatives = _build_non_repeating_alternatives(prefer_thicker=False)
+    if alternatives:
+        preview = _shortlist_preview_text(alternatives, limit=2)
+        if preview:
+            delta = _best_numeric_attribute_delta_line(shortlist[:2], alternatives[:2])
+            preview_text = f"{preview} {delta}".strip()
+            return (
+                _render_shortlist_preview_reply(
+                    preview_text,
+                    ask_detail=True,
+                    persona_context=persona_context,
+                    state=state,
+                    user_text=user_text,
+                ),
+                alternatives,
+            )
+    preview = _shortlist_preview_text(shortlist[:2], limit=2)
+    if preview:
+        return (
+            _render_shortlist_preview_reply(
+                preview,
+                ask_detail=True,
+                persona_context=persona_context,
+                state=state,
+                user_text=user_text,
+            ),
+            shortlist[:2],
+        )
+    return "", shortlist[:2]
+
+    if tenant is None:
+        q = _generic_question_for_fact("model")
+        return (q, shortlist[:2])
+    try:
+        catalog_items = read_all_catalog(tenant=tenant)
+    except Exception:
+        catalog_items = []
+    if not catalog_items:
+        q = _generic_question_for_fact("model")
+        return (q, shortlist[:2])
+    alternatives: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for item in catalog_items:
+        identity = _catalog_item_identity(dict(item))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        thickness = _item_mm_value(item, "Толщина полотна", "Толщина короба")
+        if thickness is None or thickness <= current_max:
+            continue
+        alternatives.append(item)
+    if not alternatives:
+        return "", shortlist[:2]
+    alternatives = sorted(
+        alternatives,
+        key=lambda item: (
+            _item_mm_value(item, "Толщина полотна", "Толщина короба") or 0,
+            _item_number_value(item, "price", "Цена"),
+        ),
+    )
+    preview = _shortlist_preview_text(alternatives[:2], limit=2)
+    if preview:
+        return _render_shortlist_preview_reply(
+            preview,
+            ask_detail=False,
+            persona_context=persona_context,
+            state=state,
+            user_text=user_text,
+        ), [dict(item) for item in alternatives[:2]]
+    q = _generic_question_for_fact("model")
+    return (q, shortlist[:2])
 
 
 def _item_aliases(item: Mapping[str, Any]) -> list[str]:
@@ -2875,17 +5719,32 @@ def _item_aliases(item: Mapping[str, Any]) -> list[str]:
 
 
 def _token_overlap_score(query: str, alias: str) -> float:
-    q_tokens = {tok for tok in _FACT_TOKEN_RE.findall((query or "").lower().replace("ё", "е")) if len(tok) >= 2}
-    a_tokens = {tok for tok in _FACT_TOKEN_RE.findall((alias or "").lower().replace("ё", "е")) if len(tok) >= 2}
+    q_tokens = {
+        tok
+        for tok in _FACT_TOKEN_RE.findall((query or "").lower().replace("ё", "е"))
+        if (
+            len(tok) >= 2
+            and (not tok.isdigit())
+            and tok not in NEEDS_STOPWORDS
+            and tok not in _GENERIC_MODEL_WORDS
+        )
+    }
+    a_tokens = {
+        tok
+        for tok in _FACT_TOKEN_RE.findall((alias or "").lower().replace("ё", "е"))
+        if len(tok) >= 2 and (not tok.isdigit())
+    }
     if not q_tokens or not a_tokens:
         return 0.0
     overlap = len(q_tokens & a_tokens)
     if overlap == 0:
         return 0.0
-    return overlap / max(1, len(q_tokens))
+    return overlap / max(1, min(len(q_tokens), len(a_tokens)))
 
 
-def _best_catalog_item_match(query: str, items: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+def _best_catalog_item_match(
+    query: str, items: Sequence[Mapping[str, Any]]
+) -> Optional[Mapping[str, Any]]:
     text = str(query or "").strip().lower().replace("ё", "е")
     if not text:
         return None
@@ -2909,7 +5768,22 @@ def _best_catalog_item_match(query: str, items: Sequence[Mapping[str, Any]]) -> 
     return best_item
 
 
-def _collect_grounding_items(tenant: int | None, state: SalesState, user_text: str) -> List[Dict[str, Any]]:
+def _strict_catalog_item_match(
+    query: str, items: Sequence[Mapping[str, Any]]
+) -> Optional[Mapping[str, Any]]:
+    probe = _normalize_model_alias(query)
+    if not probe:
+        return None
+    for item in items:
+        for alias in _item_aliases(item):
+            if _normalize_model_alias(alias) == probe:
+                return item
+    return None
+
+
+def _collect_grounding_items(
+    tenant: int | None, state: SalesState, user_text: str
+) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -2969,12 +5843,18 @@ def _collect_grounding_items(tenant: int | None, state: SalesState, user_text: s
     if tenant is not None:
         try:
             needs: Dict[str, Any] = dict(state.needs or {})
+            for key in ("object_type", "city", "address", "model"):
+                fact_val = str((state.facts or {}).get(key) or "").strip()
+                if fact_val and key not in needs:
+                    needs[key] = fact_val
             query_needs = infer_user_needs(effective_query or user_text)
             for key, value in query_needs.items():
                 if value in (None, "", [], {}, ()):
                     continue
                 if key == "keywords":
-                    merged_tokens: List[str] = [str(x) for x in (needs.get("keywords") or []) if str(x).strip()]
+                    merged_tokens: List[str] = [
+                        str(x) for x in (needs.get("keywords") or []) if str(x).strip()
+                    ]
                     for token in value if isinstance(value, list) else [value]:
                         token_str = str(token).strip()
                         if token_str and token_str not in merged_tokens:
@@ -2983,7 +5863,9 @@ def _collect_grounding_items(tenant: int | None, state: SalesState, user_text: s
                         needs["keywords"] = merged_tokens[:8]
                     continue
                 needs[key] = value
-            extra = search_catalog(needs, limit=8, tenant=tenant, query=effective_query or user_text)
+            extra = search_catalog(
+                needs, limit=8, tenant=tenant, query=effective_query or user_text
+            )
             _append(extra)
         except Exception:
             pass
@@ -3050,7 +5932,9 @@ def _model_root_tokens(item: Mapping[str, Any]) -> set[str]:
     return set(tokens)
 
 
-def _has_single_color_variant(selected_item: Mapping[str, Any], catalog_items: Sequence[Mapping[str, Any]]) -> bool:
+def _has_single_color_variant(
+    selected_item: Mapping[str, Any], catalog_items: Sequence[Mapping[str, Any]]
+) -> bool:
     root = _model_root_tokens(selected_item)
     if not root:
         return False
@@ -3085,25 +5969,57 @@ def _build_reply_grounding(
             full_catalog = [dict(item) for item in _read_catalog(int(tenant))]
         except Exception:
             full_catalog = []
-    selected_query = state.known_slots.get("model") or user_text
+    selected_query = (
+        state.known_slots.get("model")
+        or str((state.facts or {}).get("model") or "").strip()
+        or user_text
+    )
     selected_item = _best_catalog_item_match(selected_query, full_catalog or items)
     forbidden_topics: set[str] = set()
 
-    if selected_item is not None and full_catalog and _has_single_color_variant(selected_item, full_catalog):
+    if (
+        selected_item is not None
+        and full_catalog
+        and _has_single_color_variant(selected_item, full_catalog)
+    ):
         forbidden_topics.add("color")
 
     model_aliases: set[str] = set()
     source_for_aliases = full_catalog or items
     for item in source_for_aliases:
         for alias in _item_aliases(item):
-            normalized = re.sub(r"[^0-9a-zа-яё]+", " ", str(alias).lower().replace("ё", "е")).strip()
+            normalized = re.sub(
+                r"[^0-9a-zа-яё]+", " ", str(alias).lower().replace("ё", "е")
+            ).strip()
             if normalized and len(normalized) >= 3:
                 model_aliases.add(normalized)
+
+    needs_payload: Dict[str, Any] = dict(state.needs or {})
+    if not needs_payload:
+        inferred_current = infer_user_needs(user_text or "")
+        if isinstance(inferred_current, dict):
+            needs_payload.update({k: v for k, v in inferred_current.items() if v not in (None, "", [], {}, ())})
+    for key in ("object_type", "city", "address", "model"):
+        fact_val = str((state.facts or {}).get(key) or "").strip()
+        if fact_val and key not in needs_payload:
+            needs_payload[key] = fact_val
+    if "object_type" not in needs_payload:
+        for entry in reversed(state.history or []):
+            if str(entry.get("role") or "").strip().lower() != "user":
+                continue
+            content = str(entry.get("content") or "").strip()
+            if not content:
+                continue
+            probe = infer_user_needs(content)
+            obj = str((probe or {}).get("object_type") or "").strip()
+            if obj:
+                needs_payload["object_type"] = obj
+                break
 
     return {
         "items": items,
         "catalog_items": full_catalog[:500],
-        "needs": dict(state.needs or {}),
+        "needs": needs_payload,
         "selected_item": dict(selected_item) if isinstance(selected_item, Mapping) else None,
         "forbid_question_topics": sorted(forbidden_topics),
         "model_aliases": sorted(model_aliases),
@@ -3116,11 +6032,17 @@ def _maybe_store_model_slot(state: SalesState, tenant: int | None, user_text: st
     text = str(user_text or "").strip()
     if not text:
         return
+    if re.match(r"(?iu)^\s*(здрав\w*|привет\w*|добрый|салам|hello|hi)\b", text):
+        return
+    if _classify_turn_intent(text) == "offtopic":
+        return
     low = text.lower().replace("ё", "е")
     if "?" in text and len(_FACT_TOKEN_RE.findall(text)) > 6:
         return
     tokens = [tok for tok in _FACT_TOKEN_RE.findall(low) if len(tok) >= 2]
     if not tokens:
+        return
+    if len(tokens) <= 2 and not _MODEL_NAME_INTENT_RE.search(text):
         return
     if all(tok in _GENERIC_MODEL_WORDS for tok in tokens):
         return
@@ -3182,6 +6104,7 @@ def _compose_reply_from_policy_blocks(
     plan: Mapping[str, Any],
     *,
     state: SalesState,
+    persona_context: str = "",
     known_facts: Mapping[str, str] | None = None,
     required_facts: Sequence[str] | None = None,
     block_requires_override: Mapping[int, Sequence[str]] | None = None,
@@ -3196,7 +6119,11 @@ def _compose_reply_from_policy_blocks(
     question_used = False
     next_question_key = ""
     for idx, raw in enumerate(blocks[:8]):
-        if block_allowance_override and idx in block_allowance_override and not bool(block_allowance_override[idx]):
+        if (
+            block_allowance_override
+            and idx in block_allowance_override
+            and not bool(block_allowance_override[idx])
+        ):
             continue
         if not isinstance(raw, Mapping):
             continue
@@ -3211,7 +6138,9 @@ def _compose_reply_from_policy_blocks(
         else:
             requires = []
         if block_requires_override and idx in block_requires_override:
-            requires.extend(str(x) for x in (block_requires_override.get(idx) or []) if str(x).strip())
+            requires.extend(
+                str(x) for x in (block_requires_override.get(idx) or []) if str(x).strip()
+            )
         if not _all_required_facts_present(requires, facts):
             continue
         block_type = str(raw.get("type") or "").strip().lower()
@@ -3244,10 +6173,6 @@ def _compose_reply_from_policy_blocks(
         out.append(text)
         if len(out) >= 3:
             break
-    if missing_required and not question_used:
-        miss_key = missing_required[0]
-        out.append(_generic_question_for_fact(miss_key))
-        next_question_key = _canonical_fact_key(miss_key)
     reply = " ".join(out).strip()
     return reply, next_question_key
 
@@ -3337,17 +6262,6 @@ def _mentioned_catalog_items_in_order(
 
 
 def _catalog_item_is_two_panel(item: Mapping[str, Any]) -> bool:
-    hay = _normalize_text(_collect_item_text(dict(item)))
-    if "2мдф" in hay or "двухпанел" in hay:
-        return True
-    for raw_key, raw_val in item.items():
-        key = _normalize_text(raw_key)
-        val = _normalize_text(raw_val)
-        if not key or not val:
-            continue
-        if "мдф" in key and ("снаруж" in key or "наруж" in key):
-            if re.search(r"\d", val):
-                return True
     return False
 
 
@@ -3359,7 +6273,7 @@ def _grounding_catalog_items(grounding: Mapping[str, Any] | None) -> list[dict[s
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
     for bucket_name in ("items", "catalog_items"):
-        for raw_item in ((grounding or {}).get(bucket_name) or []):
+        for raw_item in (grounding or {}).get(bucket_name) or []:
             if not isinstance(raw_item, Mapping):
                 continue
             item = dict(raw_item)
@@ -3395,11 +6309,11 @@ def _enforce_catalog_model_grounding(
         normalized = _normalize_model_alias(model_name)
         if normalized and normalized in aliases:
             return match.group(0)
-        if items and _best_catalog_item_match(model_name, items) is not None:
+        if items and _strict_catalog_item_match(model_name, items) is not None:
             return match.group(0)
         if noun:
-            return f"{noun} из каталога"
-        return "модель из каталога"
+            return str(noun or "").strip()
+        return ""
 
     return _MODEL_QUOTED_MENTION_RE.sub(_replace, base)
 
@@ -3420,13 +6334,43 @@ def _enforce_catalog_price_grounding(
     if not sentences:
         return base
     out: list[str] = []
+    selected_item = _selected_item_from_grounding(grounding, items)
+    selected_price = (
+        _item_price_int(dict(selected_item)) if isinstance(selected_item, Mapping) else None
+    )
+    def _contextual_min_price(sentence_text: str) -> int | None:
+        sentence_tokens = [
+            tok
+            for tok in _tokenize_query(sentence_text)
+            if tok and not tok.isdigit() and tok not in NEEDS_STOPWORDS
+        ]
+        if not sentence_tokens:
+            return _catalog_min_price(items)
+        matched: list[Mapping[str, Any]] = []
+        for item in items:
+            try:
+                if _text_match_score(dict(item), sentence_tokens) > 0:
+                    matched.append(item)
+            except Exception:
+                continue
+        if matched:
+            return _catalog_min_price([dict(item) for item in matched])
+        return _catalog_min_price(items)
+    catalog_prices = {
+        int(price)
+        for price in (_item_price_int(dict(item)) for item in items)
+        if isinstance(price, int) and price > 0
+    }
     for sentence in sentences:
         low = sentence.lower()
-        if "?" in sentence:
-            out.append(sentence)
-            continue
-        has_price_hints = any(token in low for token in ("цена", "стоит", "руб", "₽", "тыс", "тысяч", " к "))
-        price_spans = _extract_price_spans(sentence)
+        has_price_hints = any(
+            token in low for token in ("цена", "стоит", "руб", "₽", "тыс", "тысяч", " к ")
+        )
+        price_spans = [
+            span
+            for span in _extract_price_spans(sentence)
+            if _is_catalog_price_candidate(span[2], catalog_prices)
+        ]
         if not has_price_hints and not price_spans:
             out.append(sentence)
             continue
@@ -3436,7 +6380,41 @@ def _enforce_catalog_price_grounding(
             if item is not None:
                 mentioned_items = [item]
         if not mentioned_items:
-            out.append(sentence)
+            if not price_spans:
+                out.append(sentence)
+                continue
+            replacements: list[tuple[int, int, str]] = []
+            # Keep valid catalog-wide minimum phrases factual.
+            min_phrase = bool(
+                re.search(r"(?iu)\b(цен\w*\s+начина|от\s+скольк|минимальн\w*)\b", low)
+            )
+            contextual_min_price = _contextual_min_price(sentence)
+            if min_phrase and contextual_min_price:
+                first = price_spans[0]
+                if first[2] != int(contextual_min_price):
+                    replacements.append(
+                        (first[0], first[1], _format_rub_price(int(contextual_min_price)))
+                    )
+            elif selected_price:
+                first = price_spans[0]
+                if first[2] != int(selected_price):
+                    replacements.append((first[0], first[1], _format_rub_price(int(selected_price))))
+            elif all(int(span[2]) in catalog_prices for span in price_spans):
+                out.append(sentence)
+                continue
+            else:
+                patched = sentence
+                for start, end, _ in sorted(price_spans, key=lambda item: item[0], reverse=True):
+                    patched = patched[:start] + "цена по каталогу" + patched[end:]
+                out.append(patched or sentence)
+                continue
+            if not replacements:
+                out.append(sentence)
+                continue
+            patched = sentence
+            for start, end, value in sorted(replacements, key=lambda item: item[0], reverse=True):
+                patched = patched[:start] + value + patched[end:]
+            out.append(patched)
             continue
         expected_prices: list[int] = []
         for item in mentioned_items:
@@ -3481,17 +6459,18 @@ _VARIANTS_PROMISE_RE = re.compile(
     r"(?iu)\b(скину|скинуть|покажу|подберу|отправлю|сейчас скину|сейчас подберу)\b"
 )
 _PRICE_INTENT_RE = re.compile(
-    r"(?iu)\b(сколько\s+стоит|сколько\s+цена|цена|ценник|по\s*ч[её]м|поч[её]м|чо\s+по\s+чем|"
+    r"(?iu)\b(сколько\s+стоит|сколько\s+стоят|сколько\s+цена|цена|ценник|по\s*ч[её]м|поч[её]м|чо\s+по\s+чем|"
     r"от\s+скольк[аи]|от\s+какой\s+цены|по\s+какой\s+цене|что\s+за\s+дверь\s+за\s*\d+|за\s*\d+\s*$)\b"
 )
 _MIN_PRICE_INTENT_RE = re.compile(
     r"(?iu)\b(от\s+скольк|начина(?:ется|ются)|минимальн\w+|сам\w*\s+дешев\w*)\b"
 )
+_MAX_PRICE_INTENT_RE = re.compile(
+    r"(?iu)\b(сам\w*\s+дорог\w*|наибол\w*\s+дорог\w*|максимальн\w*\s+цен\w*|подороже)\b"
+)
 _MODEL_NAME_INTENT_RE = re.compile(
     r"(?iu)\b(назван\w*|название\s+модел\w*|какая\s+модел\w*|что\s+за\s+модел\w*|как\s+называет\w*)\b"
 )
-
-
 def _reply_mentions_catalog_item(text: str, items: Sequence[Mapping[str, Any]]) -> bool:
     hay = _normalize_model_alias(text)
     if not hay:
@@ -3510,6 +6489,30 @@ def _reply_mentions_catalog_item(text: str, items: Sequence[Mapping[str, Any]]) 
     return False
 
 
+def _quote_likely_model_reference(source: str, quote_start: int) -> bool:
+    raw = str(source or "")
+    if not raw:
+        return False
+    left = raw[max(0, int(quote_start) - 56) : int(quote_start)]
+    if not left:
+        return False
+    near_left = left[-28:]
+    # Attribute context near quote (color/style/finish) is usually not a model mention.
+    if re.search(
+        r"(?iu)\b(цвет|оттен|стиль|фактур|дизайн|панел|внутри|снаружи|наружн|внутрен)\w*\b",
+        near_left,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"(?iu)\b(модель|вариант|двер[ья]|позиц(?:ия|ии|ий)?|"
+            r"предлож(?:у|ить|им|ите)?|подбер(?:у|ем|ите)?|"
+            r"рекоменд(?:ую|уем|ует)|покаж(?:у|ем|ите)?)\b",
+            left,
+        )
+    )
+
+
 def _reply_mentions_unknown_model(text: str, items: Sequence[Mapping[str, Any]]) -> bool:
     raw = str(text or "").strip()
     if not raw:
@@ -3518,22 +6521,235 @@ def _reply_mentions_unknown_model(text: str, items: Sequence[Mapping[str, Any]])
         r"(?iu)\b(?:модель|вариант)\s+[«\"]?([a-zа-яё0-9][^\"»\n,.!?;:]{1,80})",
         raw,
     )
+    # Also catch quoted names in generic phrasing like:
+    # "могу предложить "Гарда Белая" ..."
+    lower_raw = raw.lower().replace("ё", "е")
+    if (
+        _extract_price_spans(raw)
+        or re.search(r"(?iu)\b(предлож|двер|модель|вариант)\w*\b", lower_raw)
+    ):
+        for match in re.finditer(r"[«\"]([^\"»\n]{2,80})[»\"]", raw):
+            token = str(match.group(1) or "").strip()
+            if len(token) < 3:
+                continue
+            if not _quote_likely_model_reference(raw, match.start()):
+                continue
+            fragments.append(token)
+    # Catch plain-name proposals without quotes:
+    # "могу предложить гарда белая и эмалит белая ..."
+    for m in re.finditer(
+        r"(?iu)\b(?:предлож(?:у|ить|им|ите)?|подбер(?:у|ем|ите)?|"
+        r"рекоменд(?:ую|уем|ует)|покаж(?:у|ем|ите)?)\s+"
+        r"([a-zа-яё0-9][a-zа-яё0-9\s./-]{2,80})",
+        raw,
+    ):
+        probe = str(m.group(1) or "").strip()
+        if probe:
+            fragments.append(probe)
     if not fragments:
         return False
     for fragment in fragments:
         probe = str(fragment or "").strip(" -—\t")
         if len(probe) < 3:
             continue
-        if _best_catalog_item_match(probe, items) is None:
+        if not _looks_like_model_reference_fragment(probe):
+            continue
+        probe_norm = _normalize_text(probe)
+        # Ignore long descriptive fragments accidentally captured after
+        # "модель/вариант" markers; validate only compact model-like names.
+        if len(_FACT_TOKEN_RE.findall(probe_norm)) > 6:
+            continue
+        if any(
+            marker in probe_norm
+            for marker in ("по каталогу", "из каталога", "самый", "самая", "самое")
+        ):
+            continue
+        if _strict_catalog_item_match(probe, items) is None:
             # Allow descriptor-heavy mentions that still point to known catalog model,
             # e.g. "гарда 8 с зеркалом" -> "гарда 8".
             stripped = re.sub(r"(?iu)\bс\s+зеркал\w*\b", " ", probe)
             stripped = re.sub(r"(?iu)\bзеркал\w*\b", " ", stripped)
             stripped = re.sub(r"\s{2,}", " ", stripped).strip()
-            if stripped and _best_catalog_item_match(stripped, items) is not None:
+            if stripped and _strict_catalog_item_match(stripped, items) is not None:
                 continue
             return True
     return False
+
+
+def _looks_like_model_reference_fragment(fragment: str) -> bool:
+    probe = _normalize_text(fragment)
+    if not probe:
+        return False
+    if re.search(r"(?iu)https?://|@[a-z0-9_]{2,}", probe):
+        return False
+    if re.search(
+        r"(?iu)\b(telegram|телеграм|whatsapp|ватсап|вотсап|max|"
+        r"контакт|телефон|номер|связ|детал|обсуд|удобн|перейд|"
+        r"продолж|напис|позвон|каталог)\w*\b",
+        probe,
+    ):
+        return False
+    tokens = [tok for tok in _FACT_TOKEN_RE.findall(probe) if tok]
+    if not tokens:
+        return False
+    if len(tokens) > 6:
+        return False
+    if tokens[0] in {
+        "и",
+        "или",
+        "а",
+        "но",
+        "что",
+        "чтобы",
+        "как",
+        "для",
+        "в",
+        "на",
+        "с",
+        "по",
+    }:
+        return False
+    verb_like = sum(
+        1
+        for tok in tokens
+        if re.search(r"(?iu)(ть|ться|йте|ете|ешь|ем|ут|ют|им|ите)$", tok)
+    )
+    if verb_like >= 1 and len(tokens) >= 3:
+        return False
+    content_tokens = [
+        tok
+        for tok in tokens
+        if tok not in NEEDS_STOPWORDS and tok not in _GENERIC_MODEL_WORDS
+    ]
+    if not content_tokens:
+        return False
+    return True
+
+
+def _neutralize_unknown_model_mentions(
+    text: str,
+    items: Sequence[Mapping[str, Any]],
+) -> str:
+    base = str(text or "").strip()
+    if not base:
+        return base
+
+    def _known_or_close(fragment: str) -> bool:
+        probe = str(fragment or "").strip(" -—\t")
+        if len(probe) < 3:
+            return True
+        if _strict_catalog_item_match(probe, items) is not None:
+            return True
+        stripped = re.sub(r"(?iu)\bс\s+зеркал\w*\b", " ", probe)
+        stripped = re.sub(r"(?iu)\bзеркал\w*\b", " ", stripped)
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+        if stripped and _strict_catalog_item_match(stripped, items) is not None:
+            return True
+        return False
+
+    out = base
+    prefixed_re = re.compile(
+        r"(?iu)\b(модель|вариант)\s+[«\"]?([^\"»\n,.!?;:]{2,80})[»\"]?"
+    )
+
+    def _replace_prefixed(match: re.Match[str]) -> str:
+        noun = str(match.group(1) or "").strip()
+        fragment = str(match.group(2) or "").strip()
+        if not _looks_like_model_reference_fragment(fragment):
+            return match.group(0)
+        if _known_or_close(fragment):
+            return match.group(0)
+        return ""
+
+    out = prefixed_re.sub(_replace_prefixed, out)
+
+    quote_re = re.compile(r"[«\"]([^\"»\n]{2,80})[»\"]")
+    src = out
+
+    def _replace_quoted(match: re.Match[str]) -> str:
+        fragment = str(match.group(1) or "").strip()
+        if _known_or_close(fragment):
+            return match.group(0)
+        if _quote_likely_model_reference(src, match.start()):
+            return ""
+        return match.group(0)
+
+    out = quote_re.sub(_replace_quoted, out)
+    verb_re = re.compile(
+        r"(?iu)\b((?:могу\s+)?(?:предложить|предложу|подберу|рекомендую|покажу))\s+"
+        r"([a-zа-яё0-9][a-zа-яё0-9\s./-]{2,80})"
+    )
+
+    def _replace_verb_phrase(match: re.Match[str]) -> str:
+        lead = str(match.group(1) or "").strip()
+        fragment = str(match.group(2) or "").strip()
+        if not _looks_like_model_reference_fragment(fragment):
+            return match.group(0)
+        if _known_or_close(fragment):
+            return match.group(0)
+        return str(lead or "").strip()
+
+    out = verb_re.sub(_replace_verb_phrase, out)
+    out = re.sub(r"(?iu)\bвариант\s+вариант\b", "вариант", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out
+
+
+def _neutralize_unverified_priced_labels(
+    text: str,
+    items: Sequence[Mapping[str, Any]],
+) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+
+    def _replace(match: re.Match[str]) -> str:
+        label_raw = str(match.group(1) or "").strip()
+        tokens = [
+            tok
+            for tok in _FACT_TOKEN_RE.findall(_normalize_text(label_raw))
+            if len(tok) >= 3 and tok not in _GENERIC_PRICE_LABEL_TOKENS
+        ]
+        if not tokens:
+            return match.group(0)
+        probe = " ".join(tokens[-5:])
+        if _strict_catalog_item_match(probe, items) is not None:
+            return match.group(0)
+        return ""
+
+    out = re.sub(
+        r"(?iu)([a-zа-яё0-9][a-zа-яё0-9\s./-]{1,80})\s*(?:—|-|:)\s*(\d{1,3}(?:[ \u00A0\u202F]\d{3})+|\d{4,7})",
+        _replace,
+        raw,
+    )
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
+def _neutralize_catalog_model_mentions(
+    text: str,
+    items: Sequence[Mapping[str, Any]],
+) -> str:
+    raw = str(text or "").strip()
+    if not raw or not items:
+        return raw
+    out = raw
+    seen: set[str] = set()
+    for item in items:
+        label = str(_item_label(item) or "").strip()
+        if len(label) < 3:
+            continue
+        key = _normalize_model_alias(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out = re.sub(re.escape(label), "модель из каталога", out, flags=re.IGNORECASE)
+        tokens = [token for token in label.split() if token]
+        if len(tokens) >= 2:
+            short = f"{tokens[0]} {tokens[1]}".strip()
+            if len(short) >= 5:
+                out = re.sub(re.escape(short), "модель из каталога", out, flags=re.IGNORECASE)
+    out = re.sub(r"(?iu)(модель из каталога[\s,;:]*){2,}", "модель из каталога ", out)
+    return re.sub(r"\s{2,}", " ", out).strip()
 
 
 def _format_short_catalog_variants(items: Sequence[Mapping[str, Any]], limit: int = 2) -> str:
@@ -3599,9 +6815,42 @@ def _selected_item_from_grounding(
 def _normalize_probe_token(token: str) -> str:
     value = _normalize_text(token)
     for suffix in (
-        "ая", "яя", "ое", "ее", "ый", "ий", "ой", "ую", "юю", "ые", "ие",
-        "ого", "его", "ому", "ему", "ыми", "ими", "ых", "их", "ость", "ности",
-        "ом", "ем", "ам", "ям", "ах", "ях", "ами", "ями", "у", "ю", "а", "я", "е", "ы", "и",
+        "ая",
+        "яя",
+        "ое",
+        "ее",
+        "ый",
+        "ий",
+        "ой",
+        "ую",
+        "юю",
+        "ые",
+        "ие",
+        "ого",
+        "его",
+        "ому",
+        "ему",
+        "ыми",
+        "ими",
+        "ых",
+        "их",
+        "ость",
+        "ности",
+        "ом",
+        "ем",
+        "ам",
+        "ям",
+        "ах",
+        "ях",
+        "ами",
+        "ями",
+        "у",
+        "ю",
+        "а",
+        "я",
+        "е",
+        "ы",
+        "и",
     ):
         if len(value) > len(suffix) + 2 and value.endswith(suffix):
             return value[: -len(suffix)]
@@ -3609,49 +6858,259 @@ def _normalize_probe_token(token: str) -> str:
 
 
 def _extract_attribute_probe(user_text: str) -> str:
-    raw = str(user_text or "")
-    if "?" not in raw:
-        return ""
-    tokens = [tok for tok in _FACT_TOKEN_RE.findall(_normalize_text(raw)) if len(tok) >= 4]
-    if not tokens:
-        return ""
-    stop = {
-        "сколько", "стоит", "цена", "цена", "модель", "название", "какая", "какой", "какие",
-        "подойдет", "подойдёт", "подходит", "она", "эта", "этот", "это", "ли", "и", "а",
-        "почему", "зачем", "именно", "предложили", "предложил", "их", "эти", "варианты",
-        "так", "тогда", "вообще", "просто",
-    }
-    for token in tokens:
-        if token in stop or token.isdigit():
+    tokens = [
+        tok
+        for tok in _FACT_TOKEN_RE.findall(_normalize_text(str(user_text or "")))
+        if len(tok) >= 3 and not tok.isdigit() and tok not in _GENERIC_FACT_STOPWORDS
+    ]
+    candidates: list[tuple[int, int, str]] = []
+    for idx, token in enumerate(tokens):
+        normalized = _normalize_probe_token(token)
+        if not normalized or normalized in _GENERIC_FACT_STOPWORDS:
             continue
-        return token
+        score = len(normalized)
+        candidates.append((score, idx, normalized))
+    if candidates:
+        # Prefer more informative probe tokens over short functional words.
+        candidates.sort(key=lambda row: (row[0], row[1]))
+        return str(candidates[-1][2] or "").strip()
     return ""
+
+
+def _is_noisy_attribute_value(value: str) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    token_count = len(_FACT_TOKEN_RE.findall(_normalize_text(raw)))
+    if token_count >= 24:
+        return True
+    if raw.count(":") >= 3:
+        return True
+    if raw.count(";") >= 3:
+        return True
+    return False
+
+
+def _is_dimension_like_value(value: str) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    if re.search(r"\d{2,5}\s*[xх*]\s*\d{2,5}", raw, re.IGNORECASE):
+        return True
+    if re.search(r"\d{2,5}\s*/\s*\d{2,5}", raw):
+        return True
+    return False
+
+
+def _iter_item_attribute_pairs(
+    item_map: Mapping[str, Any],
+    *,
+    blocked: set[str],
+) -> list[tuple[str, str, str, str]]:
+    pairs: list[tuple[str, str, str, str]] = []
+    for raw_key, raw_val in item_map.items():
+        key = str(raw_key or "").strip()
+        val = str(raw_val or "").strip()
+        if not key or not val:
+            continue
+        key_norm = _normalize_text(key)
+        if not key_norm or key_norm in blocked or key_norm.startswith("_"):
+            continue
+        if _is_noisy_attribute_value(val):
+            continue
+        val_norm = _normalize_text(val)
+        if len(val_norm) < 2:
+            continue
+        pairs.append((key, val, key_norm, val_norm))
+    return pairs
+
+
+def _format_attribute_pairs(pairs: Sequence[tuple[str, str]], *, max_pairs: int = 2) -> str:
+    out: list[str] = []
+    seen: set[str] = set()
+    for key, val in pairs:
+        key_clean = str(key or "").strip()
+        val_clean = str(val or "").strip()
+        if not key_clean or not val_clean:
+            continue
+        dedupe = f"{_normalize_text(key_clean)}::{_normalize_text(val_clean)}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        out.append(f"{key_clean}: {val_clean}")
+        if len(out) >= max(1, int(max_pairs or 1)):
+            break
+    return "; ".join(out).strip()
 
 
 def _selected_item_attribute_answer(
     user_text: str,
     selected_item: Mapping[str, Any],
 ) -> str:
-    probe = _extract_attribute_probe(user_text)
-    if not probe:
+    raw_user = str(user_text or "").strip()
+    if not raw_user:
         return ""
-    name = _item_label(dict(selected_item))
+    user_tokens = [tok for tok in _tokenize_query(raw_user) if tok]
+    # Avoid misclassifying a plain model mention as an attribute question.
+    if "?" not in raw_user:
+        model_label = _normalize_text(str(_item_label(dict(selected_item)) or ""))
+        model_tokens = set(_FACT_TOKEN_RE.findall(model_label))
+        meaningful_user_tokens = [
+            tok
+            for tok in user_tokens
+            if tok and tok not in _GENERIC_FACT_STOPWORDS and len(tok) >= 3
+        ]
+        if meaningful_user_tokens and model_tokens:
+            overlap = sum(1 for tok in meaningful_user_tokens if tok in model_tokens)
+            if overlap / max(1, len(meaningful_user_tokens)) >= 0.6:
+                return ""
+
+    item_map = dict(selected_item)
+    probe_tokens = [
+        _normalize_probe_token(tok)
+        for tok in user_tokens
+        if tok and len(tok) >= 3 and tok not in _GENERIC_FACT_STOPWORDS
+    ]
+    probe_tokens = [tok for tok in probe_tokens if tok and tok not in _GENERIC_FACT_STOPWORDS]
+    if not probe_tokens:
+        probe = _extract_attribute_probe(raw_user)
+        if not probe:
+            return ""
+        probe_tokens = [tok for tok in _tokenize_query(probe) if tok]
+    if not probe_tokens:
+        return ""
+
+    blocked = {
+        "id",
+        "sku",
+        "article",
+        "title",
+        "name",
+        "price",
+        "cost",
+        "url",
+        "image",
+        "photo",
+        "link",
+        "stock",
+        "color",
+        "tags",
+    }
+    entries = _iter_item_attribute_pairs(item_map, blocked=blocked)
+    candidates: list[tuple[float, str, str]] = []
+    for key, val, _, _ in entries:
+        hay_tokens = {
+            _normalize_probe_token(tok)
+            for tok in _tokenize_query(f"{key} {val}")
+            if tok and len(tok) >= 3
+        }
+        if not hay_tokens:
+            continue
+        score = 0.0
+        for tok in probe_tokens:
+            probe_tok = _normalize_probe_token(tok)
+            if not probe_tok:
+                continue
+            if probe_tok in hay_tokens:
+                score += 2.0
+                continue
+            if any(probe_tok in h or h in probe_tok for h in hay_tokens):
+                score += 0.8
+        if score > 0:
+            candidates.append((score, key, val))
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        selected_pairs: list[tuple[str, str]] = []
+        for _, key, value in candidates:
+            clean = str(value or "").strip()
+            if not clean:
+                continue
+            pair = (str(key or "").strip(), clean)
+            if pair in selected_pairs:
+                continue
+            selected_pairs.append(pair)
+            if len(selected_pairs) >= 2:
+                break
+        if len(selected_pairs) == 1 and "?" in raw_user:
+            selected_values_norm = {_normalize_text(val) for _, val in selected_pairs}
+            for key, val, key_norm, _ in entries:
+                if key_norm in blocked:
+                    continue
+                if _normalize_text(val) in selected_values_norm:
+                    continue
+                selected_pairs.append((key, val))
+                break
+        rendered = _format_attribute_pairs(selected_pairs, max_pairs=2)
+        if rendered:
+            return rendered
+
+    # Generic fallback: prefer concise technical-looking attributes.
+    fallback_values: list[tuple[float, str, str, bool]] = []
+    for key, val, _, val_norm in entries:
+        score = float(min(len(val_norm), 20))
+        has_digits = bool(re.search(r"\d", val))
+        if re.search(r"\d", val):
+            score += 8.0
+        if re.search(r"\b(?:мм|cm|kg|кг|см|шт|pcs|mm)\b", val, re.IGNORECASE):
+            score += 3.0
+        if _is_dimension_like_value(val):
+            score -= 12.0
+        token_count = len(_FACT_TOKEN_RE.findall(val_norm))
+        if token_count >= 10:
+            score -= 8.0
+        if "," in val:
+            score -= 10.0
+        if len(val_norm) > 56:
+            score -= 10.0
+        fallback_values.append((score, key, val, has_digits))
+    if fallback_values:
+        fallback_values.sort(key=lambda x: x[0], reverse=True)
+        picked_pairs: list[tuple[str, str]] = []
+        top_numeric: tuple[str, str] | None = None
+        top_text: tuple[str, str] | None = None
+        for _, key, val, has_digits in fallback_values:
+            pair = (str(key or "").strip(), str(val or "").strip())
+            if not pair[0] or not pair[1]:
+                continue
+            if has_digits and top_numeric is None:
+                top_numeric = pair
+            if (not has_digits) and top_text is None:
+                top_text = pair
+            if top_numeric is not None and top_text is not None:
+                break
+        if top_numeric is not None:
+            picked_pairs.append(top_numeric)
+        if top_text is not None and top_text not in picked_pairs:
+            picked_pairs.append(top_text)
+        for _, key, val, _ in fallback_values:
+            pair = (str(key or "").strip(), str(val or "").strip())
+            if not pair[0] or not pair[1] or pair in picked_pairs:
+                continue
+            picked_pairs.append(pair)
+            if len(picked_pairs) >= 2:
+                break
+        rendered = _format_attribute_pairs(picked_pairs, max_pairs=2)
+        if rendered:
+            return rendered
+    return ""
+
+
+def _selected_item_brief_answer(selected_item: Mapping[str, Any]) -> str:
+    item_map = dict(selected_item)
+    name = _display_item_label(item_map)
     if not name:
         return ""
-    hay = _normalize_text(_collect_item_text(dict(selected_item)))
-    probe_norm = _normalize_probe_token(probe)
-    has_attribute = bool(probe_norm and probe_norm in hay)
-    if probe_norm.startswith("двухпанел"):
-        has_attribute = _catalog_item_is_two_panel(selected_item)
-    if has_attribute:
-        probe_text = _safe_short_text(str(probe or "").strip().lower(), 24)
-        name_norm = _normalize_text(name)
-        if probe_norm and probe_norm in name_norm:
-            return "Да, есть в наличии."
-        if probe_text:
-            return "Да, есть."
-        return "Да, есть в наличии."
-    return ""
+    parts = [name]
+    price = _item_price_int(item_map)
+    if price:
+        parts.append(f"{_format_rub_price(price)}")
+    inside = str(item_map.get("Цвет внутренней панели") or item_map.get("color") or "").strip()
+    if inside:
+        parts.append(f"внутри {inside}")
+    lock_count = str(item_map.get("Количество замков") or "").strip()
+    if lock_count:
+        parts.append(f"{lock_count} замка")
+    return ". ".join(parts[:3]) + "."
 
 
 def _items_with_attribute(
@@ -3661,17 +7120,249 @@ def _items_with_attribute(
     needle = _normalize_probe_token(probe)
     if not needle:
         return []
-    out: List[Mapping[str, Any]] = []
+    direct: List[Mapping[str, Any]] = []
     for item in items:
         text = _normalize_text(_collect_item_text(dict(item)))
         if not text:
             continue
         has_attribute = needle in text
-        if needle.startswith("двухпанел"):
-            has_attribute = _catalog_item_is_two_panel(item)
         if has_attribute:
-            out.append(item)
+            direct.append(item)
+    if direct:
+        return direct
+
+    # Fallback: semantic token match for probes that are phrased differently
+    # from catalog values (e.g. inflections/compounds), while remaining
+    # data-driven and tenant-agnostic.
+    probe_tokens = [tok for tok in _tokenize_query(probe) if tok]
+    if not probe_tokens:
+        return []
+    semantic: List[Mapping[str, Any]] = []
+    for item in items:
+        try:
+            score = _text_match_score(dict(item), probe_tokens)
+        except Exception:
+            score = 0.0
+        if score > 0:
+            semantic.append(item)
+    return semantic
+
+
+def _items_with_attribute_direct(
+    items: Sequence[Mapping[str, Any]],
+    probe: str,
+) -> List[Mapping[str, Any]]:
+    needle = _normalize_probe_token(probe)
+    if not needle:
+        return []
+    direct: List[Mapping[str, Any]] = []
+    for item in items:
+        text = _normalize_text(_collect_item_text(dict(item)))
+        if not text:
+            continue
+        has_attribute = needle in text
+        if has_attribute:
+            direct.append(item)
+    return direct
+
+
+def _narrow_catalog_items_by_user_text(
+    items: Sequence[Mapping[str, Any]],
+    user_text: str,
+) -> List[Mapping[str, Any]]:
+    if not items:
+        return []
+    tokens = [
+        tok
+        for tok in _tokenize_query(user_text)
+        if tok and (tok not in NEEDS_STOPWORDS) and (not tok.isdigit())
+    ]
+    if not tokens:
+        return list(items)
+    generic = {
+        "товар",
+        "товары",
+        "услуга",
+        "услуги",
+        "модель",
+        "модели",
+        "вариант",
+        "варианты",
+        "дороже",
+        "дешевле",
+    }
+    generic_stems = (
+        "двер",
+        "квартир",
+        "дом",
+        "частн",
+        "дорог",
+        "дешев",
+        "сам",
+        "покаж",
+    )
+    raw_low = _normalize_text(user_text)
+    neg_probes = _negative_attribute_probes(raw_low)
+    source_items: List[Mapping[str, Any]] = list(items)
+    if neg_probes:
+        narrowed = []
+        for item in source_items:
+            text = _normalize_text(_collect_item_text(dict(item)))
+            if not text:
+                continue
+            if any(probe and probe in text for probe in neg_probes):
+                continue
+            narrowed.append(item)
+        if narrowed:
+            source_items = narrowed
+    best: List[Mapping[str, Any]] | None = None
+    for token in tokens[:8]:
+        token_norm = _normalize_probe_token(token)
+        if (
+            token in generic
+            or any(token_norm.startswith(stem) for stem in generic_stems)
+            or (token_norm in neg_probes)
+        ):
+            continue
+        matched: List[Mapping[str, Any]] = []
+        matched = _items_with_attribute_direct(source_items, token_norm)
+        if not matched:
+            continue
+        if best is None or len(matched) < len(best):
+            best = list(matched)
+    return best if best is not None else source_items
+
+
+def _negative_attribute_probes(text: str) -> set[str]:
+    low = _normalize_text(text)
+    return {
+        _normalize_probe_token(match.group(1))
+        for match in re.finditer(r"(?iu)\bбез\s+([a-zа-яё0-9-]{3,})", low)
+        if match.group(1)
+    }
+
+
+def _exclude_items_with_negative_probes(
+    items: Sequence[Mapping[str, Any]],
+    probes: set[str],
+) -> List[Mapping[str, Any]]:
+    if not items or not probes:
+        return list(items)
+    out: List[Mapping[str, Any]] = []
+    for item in items:
+        text = _normalize_text(_collect_item_text(dict(item)))
+        if not text:
+            continue
+        if any(probe and probe in text for probe in probes):
+            continue
+        out.append(item)
     return out
+
+
+def _canonical_object_type_hint(value: Any) -> str:
+    low = _normalize_text(value)
+    if not low:
+        return ""
+    is_apartment = bool(re.search(r"(?iu)\b(apartment|flat|квартир\w*|кв\.)\b", low))
+    is_house = bool(re.search(r"(?iu)\b(house|home|частн\w*|коттедж\w*|дом\w*)\b", low))
+    if is_apartment and not is_house:
+        return "apartment"
+    if is_house and not is_apartment:
+        return "house"
+    return ""
+
+
+def _object_type_from_turn_text(text: str) -> str:
+    low = _normalize_text(text)
+    if not low:
+        return ""
+    apartment_markers = (
+        "квартир",
+        "кв.",
+        "кв ",
+        "апартамент",
+        "flat",
+        "apartment",
+    )
+    house_markers = (
+        "частн",
+        "дом",
+        "коттедж",
+        "таунхаус",
+        "house",
+        "home",
+    )
+    is_apartment = any(marker in low for marker in apartment_markers)
+    is_house = any(marker in low for marker in house_markers)
+    if is_apartment and not is_house:
+        return "apartment"
+    if is_house and not is_apartment:
+        return "house"
+    return ""
+
+
+def _item_object_type_hint(item: Mapping[str, Any]) -> str:
+    direct = _canonical_object_type_hint(item.get("object_type"))
+    if direct:
+        return direct
+
+    tags = item.get("tags") or []
+    tag_tokens = {
+        _normalize_text(tag)
+        for tag in (tags if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes)) else [tags])
+        if str(tag or "").strip()
+    }
+    if "house_ready" in tag_tokens:
+        return "house"
+    if "apartment_ready" in tag_tokens:
+        return "apartment"
+
+    for raw_key, raw_val in item.items():
+        key = _normalize_text(raw_key)
+        if not key:
+            continue
+        if any(token in key for token in ("object", "usage", "назнач", "помещ", "тип")):
+            kind = _canonical_object_type_hint(raw_val)
+            if kind:
+                return kind
+
+    # Fallback: infer from rich item text only when signal is unambiguous.
+    hay = _normalize_text(_collect_item_text(dict(item)))
+    if hay:
+        kind = _canonical_object_type_hint(hay)
+        if kind:
+            return kind
+    return ""
+
+
+def _filter_items_by_object_type_need(
+    items: Sequence[Mapping[str, Any]],
+    needs: Mapping[str, Any] | None,
+) -> List[Mapping[str, Any]]:
+    if not items or not isinstance(needs, Mapping):
+        return list(items)
+    target = _normalize_text(needs.get("object_type") or "")
+    if target not in {"apartment", "house"}:
+        return list(items)
+
+    hints = [_item_object_type_hint(item) for item in items]
+    if target == "apartment":
+        # For apartment requests, at minimum exclude explicitly house-marked items.
+        if any(hint == "house" for hint in hints):
+            out = [item for item, hint in zip(items, hints) if hint != "house"]
+            if out:
+                return out
+        if any(hint == "apartment" for hint in hints):
+            out = [item for item, hint in zip(items, hints) if hint == "apartment"]
+            if out:
+                return out
+        return list(items)
+
+    if any(hint == "house" for hint in hints):
+        out = [item for item, hint in zip(items, hints) if hint == "house"]
+        if out:
+            return out
+    return list(items)
 
 
 def _extract_budget_cap_from_needs(needs: Mapping[str, Any] | None) -> Optional[int]:
@@ -3704,12 +7395,45 @@ def _catalog_min_price(items: Sequence[Mapping[str, Any]]) -> int | None:
     return min(clean)
 
 
+def _catalog_max_price(items: Sequence[Mapping[str, Any]]) -> int | None:
+    vals = [_item_price_int(dict(item)) for item in items]
+    clean = [int(v) for v in vals if isinstance(v, int) and v > 0]
+    if not clean:
+        return None
+    return max(clean)
+
+
+def _catalog_extreme_item_by_price(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    highest: bool,
+) -> Mapping[str, Any] | None:
+    best: Mapping[str, Any] | None = None
+    best_price: int | None = None
+    for item in items:
+        price = _item_price_int(dict(item))
+        if not isinstance(price, int) or price <= 0:
+            continue
+        if best is None or best_price is None:
+            best = item
+            best_price = price
+            continue
+        if highest and price > best_price:
+            best = item
+            best_price = price
+        if (not highest) and price < best_price:
+            best = item
+            best_price = price
+    return best
+
+
 def _is_price_intent(text: str) -> bool:
     low = str(text or "").lower().replace("ё", "е")
     if not low:
         return False
     patterns = (
         r"\bсколько\s+стоит\b",
+        r"\bсколько\s+стоят\b",
         r"\bкакая\s+цена\b",
         r"\bкакую\s+цен[уы]\b",
         r"\bпо\s+какой\s+цене\b",
@@ -3721,6 +7445,13 @@ def _is_price_intent(text: str) -> bool:
         r"\bценник\b",
         r"\bстоимость\b",
         r"\bстоит\b",
+        r"\bстоят\b",
+        r"\bсам\w*\s+дорог\w*\b",
+        r"\bсам\w*\s+дешев\w*\b",
+        r"\bподороже\b",
+        r"\bподешевле\b",
+        r"\bмаксимальн\w*\s+цен\w*\b",
+        r"\bминимальн\w*\s+цен\w*\b",
     )
     return any(re.search(pattern, low) for pattern in patterns)
 
@@ -3758,7 +7489,9 @@ def _is_channel_handoff_intent(text: str) -> bool:
     low = str(text or "").lower().replace("ё", "е")
     if not low:
         return False
-    return any(token in low for token in ("telegram", "телег", "тг", "whatsapp", "ватсап", "вотсап"))
+    return any(
+        token in low for token in ("telegram", "телег", "тг", "whatsapp", "ватсап", "вотсап")
+    )
 
 
 def _is_catalog_request_intent(text: str) -> bool:
@@ -3792,6 +7525,12 @@ def _classify_turn_intent(text: str, *, known_facts: Mapping[str, str] | None = 
         return "unknown"
     if _is_unsubscribe_intent(raw):
         return "unsubscribe"
+    if _WHY_QUESTION_RE.search(raw):
+        return "why_question"
+    if _CATALOG_UNAVAILABLE_RE.search(raw) or _LOW_SIGNAL_CONTEXT_RE.search(raw):
+        return "catalog_problem"
+    if _REPAIR_TURN_RE.search(raw):
+        return "repair"
     if _is_payment_intent(raw):
         return "payment"
     if _is_store_address_intent(raw):
@@ -3805,11 +7544,42 @@ def _classify_turn_intent(text: str, *, known_facts: Mapping[str, str] | None = 
     return "product"
 
 
+def _is_shortlist_feedback_turn(
+    text: str,
+    *,
+    known_facts: Mapping[str, str] | None = None,
+) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if _MODEL_NAME_INTENT_RE.search(raw):
+        return False
+    if _looks_like_address_value(raw):
+        return False
+    if _extract_city_hint(raw, allow_standalone=True):
+        return False
+    if _object_type_from_turn_text(raw):
+        return False
+    if _ORDER_INTENT_RE.search(raw) or _is_payment_intent(raw):
+        return False
+    if _is_channel_handoff_intent(raw) or _is_store_address_intent(raw):
+        return False
+    if _is_catalog_request_intent(raw):
+        return False
+    if _is_price_intent(raw) or _extract_attribute_probe(raw):
+        return True
+    turn_intent = _classify_turn_intent(raw, known_facts=known_facts)
+    return turn_intent in {"product", "repair", "catalog_problem", "why_question"}
+
+
 def _is_deferral_message(text: str) -> bool:
     low = str(text or "").lower().replace("ё", "е")
     if not low:
         return False
-    return any(token in low for token in ("позже", "потом", "вечером", "завтра", "позднее", "как буду", "как смогу"))
+    return any(
+        token in low
+        for token in ("позже", "потом", "вечером", "завтра", "позднее", "как буду", "как смогу")
+    )
 
 
 def _extract_store_addresses_from_persona(persona_context: str) -> Dict[str, str]:
@@ -3873,6 +7643,162 @@ def _closest_catalog_item_by_price(
     return best
 
 
+def _is_likely_price_value(value: int) -> bool:
+    try:
+        number = int(value)
+    except Exception:
+        return False
+    if number <= 0:
+        return False
+    # Ignore long identifiers/phone-like numbers.
+    if len(str(abs(number))) >= 9:
+        return False
+    return True
+
+
+def _is_catalog_price_candidate(value: int, catalog_prices: set[int] | None) -> bool:
+    if not _is_likely_price_value(value):
+        return False
+    prices = {int(v) for v in (catalog_prices or set()) if isinstance(v, int) and v > 0}
+    if not prices:
+        return True
+    min_catalog = min(prices)
+    # Ignore low promo/discount numbers when catalog prices are materially higher.
+    dynamic_floor = max(300, int(min_catalog * 0.33))
+    try:
+        return int(value) >= dynamic_floor
+    except Exception:
+        return False
+
+
+_GENERIC_PRICE_KEYWORD_PREFIXES = (
+    "цен",
+    "стоим",
+    "скольк",
+    "дорог",
+    "дешев",
+    "сам",
+    "покаж",
+    "вариант",
+    "модел",
+    "двер",
+    "квартир",
+    "дом",
+    "частн",
+)
+
+
+def _is_specific_catalog_keyword(keyword: str) -> bool:
+    token = _normalize_probe_token(keyword)
+    if len(token) < 4:
+        return False
+    if any(token.startswith(prefix) for prefix in _GENERIC_PRICE_KEYWORD_PREFIXES):
+        return False
+    return True
+
+
+_GENERIC_PRICE_LABEL_TOKENS = {
+    "самый",
+    "самая",
+    "самое",
+    "дорогой",
+    "дорогая",
+    "дешевый",
+    "дешевая",
+    "доступный",
+    "доступная",
+    "вариант",
+    "варианты",
+    "каталог",
+    "каталогу",
+    "модель",
+    "модели",
+    "дверь",
+    "цена",
+    "стоит",
+    "за",
+    "от",
+    "до",
+}
+
+
+def _catalog_has_object_type_evidence(
+    items: Sequence[Mapping[str, Any]],
+    object_type_need: str,
+) -> bool:
+    kind = _normalize_text(object_type_need)
+    if kind not in {"apartment", "house"}:
+        return True
+    hints = ("квартир", "apartment", "flat") if kind == "apartment" else ("частн", "дом", "house")
+    for item in items:
+        text = _normalize_text(_collect_item_text(dict(item)))
+        if any(hint in text for hint in hints):
+            return True
+    return False
+
+
+def _extract_explicit_model_probe(user_text: str) -> str:
+    raw = str(user_text or "").strip()
+    if not raw:
+        return ""
+    low = _normalize_text(raw)
+    if not re.search(r"(?iu)\b(есть|имеется|в наличии|подойдет|подойд[её]т)\b", low):
+        return ""
+    if len(raw) > 55:
+        return ""
+    stop = {
+        "есть",
+        "имеется",
+        "наличии",
+        "в",
+        "на",
+        "для",
+        "или",
+        "и",
+        "а",
+        "подойдет",
+        "подойдет",
+        "подойдет",
+        "подойдет",
+        "подойдёт",
+        "квартиры",
+        "квартира",
+        "дома",
+        "дом",
+        "частного",
+    }
+    tokens = [tok for tok in _FACT_TOKEN_RE.findall(low) if len(tok) >= 3 and tok not in stop]
+    if len(tokens) < 2 or len(tokens) > 4:
+        return ""
+    return " ".join(tokens[:5])
+
+
+def _has_unverified_priced_labels(
+    text: str,
+    items: Sequence[Mapping[str, Any]],
+) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    for match in re.finditer(
+        r"(?iu)([a-zа-яё0-9][a-zа-яё0-9\s./-]{1,80})\s*(?:—|-|:)\s*(\d{1,3}(?:[ \u00A0\u202F]\d{3})+|\d{4,7})",
+        raw,
+    ):
+        label_raw = str(match.group(1) or "").strip()
+        tokens = [
+            tok
+            for tok in _FACT_TOKEN_RE.findall(_normalize_text(label_raw))
+            if len(tok) >= 3 and tok not in _GENERIC_PRICE_LABEL_TOKENS
+        ]
+        if not tokens:
+            continue
+        probe = " ".join(tokens[-5:])
+        if _strict_catalog_item_match(probe, items) is not None:
+            continue
+        return True
+    return False
+
+
 def _enforce_catalog_truth_guard(
     text: str,
     *,
@@ -3883,7 +7809,19 @@ def _enforce_catalog_truth_guard(
     if not base:
         return base
     items = _grounding_catalog_items(grounding)
+    user_raw = str(user_text or "")
     if not items:
+        if (
+            _is_price_intent(user_raw)
+            or bool(_MODEL_NAME_INTENT_RE.search(user_raw))
+            or bool(_VARIANTS_USER_HINT_RE.search(user_raw))
+        ):
+            patched = base
+            spans = [span for span in _extract_price_spans(patched) if _is_likely_price_value(span[2])]
+            for start, end, _ in sorted(spans, key=lambda item: item[0], reverse=True):
+                patched = patched[:start] + "цена по каталогу" + patched[end:]
+            if patched.strip():
+                return patched
         return base
 
     normalized = _enforce_catalog_model_grounding(base, grounding=grounding)
@@ -3892,17 +7830,146 @@ def _enforce_catalog_truth_guard(
     low = normalized.lower()
     mentions_known = _reply_mentions_catalog_item(normalized, items)
     has_unknown_model_marker = "модель из каталога" in low
-    asks_price = _is_price_intent(user_text)
-    asks_model_name = bool(_MODEL_NAME_INTENT_RE.search(str(user_text or "")))
-    has_price_tokens = bool(_extract_price_spans(normalized))
+    asks_price = _is_price_intent(user_raw)
+    asks_min_price_global = bool(_MIN_PRICE_INTENT_RE.search(user_raw))
+    asks_max_price_global = bool(_MAX_PRICE_INTENT_RE.search(user_raw))
+    asks_variants = bool(_VARIANTS_USER_HINT_RE.search(user_raw))
+    asks_model_name = bool(_MODEL_NAME_INTENT_RE.search(user_raw))
+    catalog_prices = {
+        int(price)
+        for price in (_item_price_int(dict(item)) for item in items)
+        if isinstance(price, int) and price > 0
+    }
+    price_spans = [
+        span
+        for span in _extract_price_spans(normalized)
+        if _is_catalog_price_candidate(span[2], catalog_prices)
+    ]
+    has_price_tokens = bool(price_spans)
     needs_ctx = dict((grounding or {}).get("needs") or {})
-    prefers_insulation = bool(needs_ctx.get("insulation_priority") or needs_ctx.get("noise_priority"))
+    prefers_insulation = bool(
+        needs_ctx.get("insulation_priority") or needs_ctx.get("noise_priority")
+    )
+    object_type_need = _normalize_text(needs_ctx.get("object_type") or "")
+    turn_object_type = _object_type_from_turn_text(user_raw)
+    if turn_object_type in {"apartment", "house"}:
+        object_type_need = turn_object_type
+        needs_ctx["object_type"] = turn_object_type
     candidate_items = list(items)
+    filtered_by_object = _filter_items_by_object_type_need(candidate_items, needs_ctx)
+    if filtered_by_object:
+        candidate_items = filtered_by_object
+    object_filter_restricted = len(candidate_items) < len(items)
     selected_item = _selected_item_from_grounding(grounding, items)
-    if prefers_insulation:
+    if selected_item is not None and object_type_need in {"apartment", "house"}:
+        selected_hint = _item_object_type_hint(selected_item)
+        if selected_hint and selected_hint != object_type_need:
+            selected_item = None
+    object_type_has_evidence = _catalog_has_object_type_evidence(items, object_type_need)
+    # Do not aggressively hard-filter by two-panel for every insulation mention:
+    # this can hide valid products in generic "max/min price" requests.
+    # Keep this narrowing only for apartment context and non-extreme-price turns.
+    if prefers_insulation and object_type_need == "apartment" and not (
+        asks_min_price_global or asks_max_price_global
+    ):
         two_panel = [item for item in candidate_items if _catalog_item_is_two_panel(item)]
         if two_panel:
             candidate_items = two_panel
+    # Narrow by extracted need keywords when possible (data-driven, not niche hardcoding).
+    kw_values = needs_ctx.get("keywords")
+    has_specific_kw = False
+    if asks_price:
+        # For explicit price intents, narrow by current turn wording first.
+        # This avoids stale keywords from previous turns over-constraining
+        # the candidate set (for example, pinning to an older subset).
+        query_needs = infer_user_needs(user_text)
+        q_keywords = query_needs.get("keywords") if isinstance(query_needs, Mapping) else None
+        if isinstance(q_keywords, Sequence):
+            q_specific = [kw for kw in q_keywords if _is_specific_catalog_keyword(str(kw or ""))]
+            if q_specific:
+                kw_values = q_specific
+    if isinstance(kw_values, Sequence):
+        has_specific_kw = any(_is_specific_catalog_keyword(str(kw or "")) for kw in kw_values)
+    if isinstance(kw_values, Sequence):
+        best_kw_match: List[Mapping[str, Any]] | None = None
+        for raw_kw in kw_values:
+            kw = str(raw_kw or "").strip()
+            if len(kw) < 4:
+                continue
+            kw_norm = _normalize_probe_token(kw)
+            allow_semantic_kw = not any(
+                kw_norm.startswith(stem)
+                for stem in ("квартир", "двер", "дом", "частн", "дорог", "дешев", "сам")
+            )
+            matched_by_kw = _items_with_attribute_direct(candidate_items, kw)
+            if not matched_by_kw and allow_semantic_kw:
+                matched_by_kw = _items_with_attribute(candidate_items, kw)
+            if not matched_by_kw and (not object_filter_restricted):
+                matched_by_kw = _items_with_attribute_direct(items, kw)
+            if not matched_by_kw and allow_semantic_kw and (not object_filter_restricted):
+                matched_by_kw = _items_with_attribute(items, kw)
+            if matched_by_kw:
+                if best_kw_match is None or len(matched_by_kw) < len(best_kw_match):
+                    best_kw_match = list(matched_by_kw)
+        if best_kw_match:
+            candidate_items = list(best_kw_match)
+
+    invalid_prices = [
+        span[2]
+        for span in price_spans
+        if catalog_prices
+        and _is_catalog_price_candidate(span[2], catalog_prices)
+        and span[2] not in catalog_prices
+    ]
+    if invalid_prices:
+        # Keep LLM phrasing, but remove unverified numeric claims.
+        patched = normalized
+        replacements: list[tuple[int, int, str]] = []
+        for start, end, value in price_spans:
+            if catalog_prices and int(value) not in catalog_prices:
+                replacements.append((start, end, "цена по каталогу"))
+        if replacements:
+            for start, end, value in sorted(replacements, key=lambda item: item[0], reverse=True):
+                patched = patched[:start] + value + patched[end:]
+            normalized = patched
+        if asks_price or asks_variants or asks_model_name:
+            # Price/question intent: continue to deterministic branches below.
+            pass
+
+    if _reply_mentions_unknown_model(normalized, candidate_items or items):
+        # Keep wording human without canned fallbacks:
+        # neutralize unknown model fragments and drop only unsafe sentences.
+        normalized = _neutralize_unknown_model_mentions(normalized, candidate_items or items)
+        parts = [part.strip() for part in _SENTENCE_SPLIT_RE.split(normalized) if part.strip()]
+        kept = [
+            part
+            for part in parts
+            if not _reply_mentions_unknown_model(part, candidate_items or items)
+        ]
+        if kept:
+            normalized = " ".join(kept).strip()
+        else:
+            normalized = _neutralize_unknown_model_mentions(base, candidate_items or items).strip()
+            normalized = re.sub(r"\s{2,}", " ", normalized).strip()
+        if _reply_mentions_unknown_model(normalized, candidate_items or items):
+            if not (asks_variants or asks_price or asks_model_name):
+                return normalized
+
+    if asks_variants and (not mentions_known):
+        return normalized
+
+    explicit_probe = _extract_explicit_model_probe(user_raw)
+    if explicit_probe and _strict_catalog_item_match(explicit_probe, candidate_items or items) is None:
+        return normalized
+
+    if asks_price and has_price_tokens:
+        if _has_unverified_priced_labels(normalized, candidate_items or items):
+            normalized = _neutralize_unverified_priced_labels(
+                normalized,
+                candidate_items or items,
+            )
+            normalized = _neutralize_unknown_model_mentions(normalized, candidate_items or items)
+            return normalized
 
     # Do not inject templated shortlist replies here.
     # Guard should validate/correct facts, while wording stays LLM-driven.
@@ -3926,7 +7993,9 @@ def _enforce_catalog_truth_guard(
             attr_items = _items_with_attribute(items, asked_probe)
         budget_cap = _extract_budget_cap_from_needs(dict((grounding or {}).get("needs") or {}))
         if budget_cap and attr_items:
-            limited = [it for it in attr_items if (_item_price_int(dict(it)) or 10**9) <= budget_cap]
+            limited = [
+                it for it in attr_items if (_item_price_int(dict(it)) or 10**9) <= budget_cap
+            ]
             if limited:
                 attr_items = limited
             else:
@@ -3935,9 +8004,7 @@ def _enforce_catalog_truth_guard(
                     nm = str(_item_label(dict(nearest_attr)) or "").lower()
                     pr = _item_price_int(dict(nearest_attr))
                     if nm and pr:
-                        return (
-                            f"Ближайший по цене вариант — {nm} за {_format_rub_price(pr)}."
-                        )
+                        return f"{nm} {_format_rub_price(pr)}".strip()
         if selected_item is not None:
             selected_attr_answer = _selected_item_attribute_answer(user_text, selected_item)
             if selected_attr_answer:
@@ -3946,21 +8013,74 @@ def _enforce_catalog_truth_guard(
         if probe_norm:
             return normalized
 
-    if asks_price and (not mentions_known or has_price_tokens):
+    if asks_price and (
+        (not mentions_known)
+        or has_price_tokens
+        or asks_min_price_global
+        or asks_max_price_global
+    ):
+        if (
+            object_type_need in {"apartment", "house"}
+            and (not object_filter_restricted)
+            and (not object_type_has_evidence)
+            and (not has_specific_kw)
+        ):
+            guarded = _neutralize_catalog_model_mentions(normalized, items)
+            for start, end, value in sorted(
+                _extract_price_spans(guarded), key=lambda item: item[0], reverse=True
+            ):
+                if _is_catalog_price_candidate(value, None):
+                    guarded = guarded[:start] + "цена по каталогу" + guarded[end:]
+            return re.sub(r"\s{2,}", " ", guarded).strip()
+        if (
+            object_type_need in {"apartment", "house"}
+            and (asks_min_price_global or asks_max_price_global)
+            and len(candidate_items) == len(items)
+            and (not has_specific_kw)
+            and not _catalog_has_object_type_evidence(candidate_items, object_type_need)
+        ):
+            return normalized
+        narrowed_by_text = _narrow_catalog_items_by_user_text(candidate_items or items, user_text)
+        if narrowed_by_text:
+            candidate_items = list(narrowed_by_text)
+        neg_probes = _negative_attribute_probes(user_text)
+        if neg_probes:
+            neg_filtered = _exclude_items_with_negative_probes(candidate_items or items, neg_probes)
+            if not neg_filtered:
+                neg_filtered = _exclude_items_with_negative_probes(items, neg_probes)
+            if neg_filtered:
+                candidate_items = list(neg_filtered)
+        asks_min_price = asks_min_price_global
+        asks_max_price = asks_max_price_global
         normalized_words = len(re.findall(r"(?u)\b\w+\b", normalized))
         normalized_sentences = len([s for s in re.split(r"[.!?]+", normalized) if s.strip()])
-        # Keep rich model answers for detailed user prompts instead of forcing one-line min-price fallback.
-        if normalized_words >= 10 and (normalized_sentences >= 2 or "?" in normalized):
-            return normalized
-        asks_min_price = bool(_MIN_PRICE_INTENT_RE.search(str(user_text or "")))
+        # Keep rich model answers only when they do not carry risky ungrounded prices.
+        if (not asks_min_price) and (not asks_max_price):
+            if normalized_words >= 10 and (normalized_sentences >= 2 or "?" in normalized):
+                spans = _extract_price_spans(normalized)
+                if not spans:
+                    return normalized
+                if mentions_known and all(int(span[2]) in {int(p) for p in [_item_price_int(dict(it)) for it in items] if p} for span in spans):
+                    return normalized
+        if asks_max_price:
+            max_item = _catalog_extreme_item_by_price(candidate_items or items, highest=True)
+            if max_item is not None:
+                max_name = _item_label(dict(max_item))
+                max_price = _item_price_int(dict(max_item))
+                if max_name and max_price:
+                    return f"{max_name} {_format_rub_price(max_price)}".strip()
+        if asks_min_price:
+            min_item = _catalog_extreme_item_by_price(candidate_items or items, highest=False)
+            if min_item is not None:
+                min_name = _item_label(dict(min_item))
+                min_price = _item_price_int(dict(min_item))
+                if min_name and min_price:
+                    return f"{min_name} {_format_rub_price(min_price)}".strip()
         if selected_item is not None and (not asks_min_price):
             selected_name = _item_label(dict(selected_item))
             selected_price = _item_price_int(dict(selected_item))
             if selected_name and selected_price:
-                return (
-                    f"По каталогу {selected_name} стоит {_format_rub_price(selected_price)}. "
-                    "Рассказать подробнее по этой модели?"
-                )
+                return f"{selected_name} {_format_rub_price(selected_price)}".strip()
         target_price = _extract_price_target_hint(user_text)
         if target_price:
             nearest = _closest_catalog_item_by_price(candidate_items, target_price)
@@ -3968,23 +8088,24 @@ def _enforce_catalog_truth_guard(
                 name = _item_label(dict(nearest))
                 price = _item_price_int(dict(nearest))
                 if name and price:
-                    return (
-                        f"Ближайшая модель по цене — {name} за {_format_rub_price(price)}."
-                    )
+                    return f"{name} {_format_rub_price(price)}".strip()
         min_price = _catalog_min_price(candidate_items)
         if min_price:
-            return f"По каталогу цены начинаются от {_format_rub_price(min_price)}."
+            return _format_rub_price(min_price)
 
     if asks_model_name:
+        if (
+            object_type_need in {"apartment", "house"}
+            and (not object_filter_restricted)
+            and (not object_type_has_evidence)
+            and (not has_specific_kw)
+        ):
+            return _neutralize_catalog_model_mentions(normalized, items)
         if selected_item is not None:
             selected_name = _item_label(dict(selected_item))
             selected_price = _item_price_int(dict(selected_item))
             if selected_name and selected_price:
-                return (
-                    f"Название модели — {selected_name}. "
-                    f"Цена по каталогу — {_format_rub_price(selected_price)}. "
-                    "Рассказать подробнее по характеристикам?"
-                )
+                return f"{selected_name} {_format_rub_price(selected_price)}".strip()
         target_price = _extract_price_target_hint(user_text)
         ref_item: Mapping[str, Any] | None = None
         if target_price:
@@ -3995,12 +8116,9 @@ def _enforce_catalog_truth_guard(
             name = _item_label(dict(ref_item))
             price = _item_price_int(dict(ref_item))
             if name and price:
-                return (
-                    f"Название модели — {name}. "
-                    f"Цена по каталогу — {_format_rub_price(price)}."
-                )
+                return f"{name} {_format_rub_price(price)}".strip()
             if name:
-                return f"Название модели — {name}. Рассказать подробнее?"
+                return str(name or "").strip()
 
     return normalized
 
@@ -4017,58 +8135,19 @@ def _ensure_concrete_variants_in_reply(
     items = _grounding_catalog_items(grounding)
     if not items:
         return base
-    # Do not override a valid persona step question (city/address/object/model clarifications).
-    for question in _extract_questions_from_text(base):
-        if any(
-            _question_covers_fact(question, fact)
-            for fact in ("city", "address", "object_type", "model")
-        ):
-            return base
-    needs_ctx = dict((grounding or {}).get("needs") or {})
-    needs_mirror = bool(
-        re.search(r"(?iu)\bзеркал\w*\b", str(user_text or ""))
-        or re.search(r"(?iu)\bзеркал\w*\b", " ".join(str(x) for x in (needs_ctx.get("keywords") or [])))
-    )
-
-    if "двухпанель" in _normalize_text(base):
-        mentioned = _mentioned_catalog_items_in_order(base, items)
-        invalid = [item for item in mentioned if not _catalog_item_is_two_panel(item)]
-        if invalid:
-            two_panel_items = [item for item in items if _catalog_item_is_two_panel(item)]
-            source = two_panel_items if two_panel_items else items
-            shortlist = _format_short_catalog_variants(source, limit=2)
-            if shortlist:
-                return f"Для этой задачи лучше двухпанельные варианты: {shortlist}. Какой ближе?"
-
     user_has_variants_intent = bool(_VARIANTS_USER_HINT_RE.search(str(user_text or "")))
     bot_promised_variants = bool(_VARIANTS_PROMISE_RE.search(base))
     has_unknown_model = _reply_mentions_unknown_model(base, items)
-    if not user_has_variants_intent and not bot_promised_variants:
-        if not has_unknown_model:
+    # Do not override a valid persona step question (city/address/object/model clarifications).
+    for question in _extract_questions_from_text(base):
+        if any(_question_covers_fact(question, fact) for fact in ("city", "address", "object_type")):
             return base
-    if _reply_mentions_catalog_item(base, items) and not has_unknown_model:
-        return base
-    # If answer already contains a meaningful priced shortlist, don't append duplicate tail.
-    if len(_extract_price_spans(base)) >= 2:
-        return base
-
-    source_items = list(items)
-    if needs_mirror:
-        mirror_items = _items_with_attribute(source_items, "зеркало")
-        if mirror_items:
-            source_items = mirror_items
-    shortlist = _format_short_catalog_variants(source_items, limit=2)
-    if not shortlist:
-        return base
-    if has_unknown_model:
-        return f"По каталогу могу предложить: {shortlist}. Какой вариант показать подробнее?"
-    if "?" in base:
-        suffix = f"Варианты из каталога: {shortlist}"
-    else:
-        suffix = f"Варианты из каталога: {shortlist}. Какой ближе?"
-    if suffix.lower() in base.lower():
-        return base
-    return f"{base} {suffix}".strip()
+        if _question_covers_fact(question, "model"):
+            # If client explicitly asks for variants/prices (or bot promised to show them),
+            # prefer concrete shortlist over another model-clarifying question.
+            if not (user_has_variants_intent or bot_promised_variants or has_unknown_model):
+                return base
+    return base
 
 
 def _rewrite_loses_context_anchors(
@@ -4091,7 +8170,7 @@ def _rewrite_loses_context_anchors(
         return True
 
     anchor_tokens: set[str] = set()
-    for item in (dialogue_tail or []):
+    for item in dialogue_tail or []:
         if str(item.get("role") or "").strip().lower() != "user":
             continue
         content = str(item.get("content") or "")
@@ -4153,7 +8232,7 @@ async def _audit_policy_block_requirements(
     system_prompt = (
         "Ты проверяешь блоки ответа менеджера на корректные зависимости от фактов клиента. "
         "Верни только JSON-объект формата: "
-        "{\"audited\":[{\"index\":0,\"requires\":[\"city\",\"address\"]}]}. "
+        '{"audited":[{"index":0,"requires":["city","address"]}]}. '
         "Для каждого блока укажи минимально необходимые facts, без которых блок нельзя отправлять. "
         "Если блок безопасен без фактов, верни пустой requires. "
         "Не добавляй вымышленные ключи: используй только осмысленные простые ключи facts (city,address,source,budget,model и т.п.)."
@@ -4243,7 +8322,7 @@ async def _audit_policy_block_allowance(
 
     system_prompt = (
         "Ты валидатор блоков ответа менеджера. Верни только JSON: "
-        "{\"audited\":[{\"index\":0,\"allow\":true,\"missing\":[\"address\"]}]}. "
+        '{"audited":[{"index":0,"allow":true,"missing":["address"]}]}. '
         "allow=false, если блок нельзя отправлять при текущих известных facts и правилах персоны. "
         "Запрещай любые утверждения/обещания, которые не подтверждены facts или требуют условий, которые не выполнены. "
         "Если у блока type=question и вопрос уместен, allow=true."
@@ -4292,74 +8371,16 @@ async def _audit_policy_block_allowance(
 
 
 def _fallback_semantic_plan(last_user_message: str) -> Dict[str, Any]:
-    text = (last_user_message or "").strip()
-    low = _normalize_text(text)
-    turn_intent = _classify_turn_intent(text)
-    if turn_intent == "offtopic":
-        return {
-            "_fallback": True,
-            "intent": "clarify",
-            "ack": "Понял.",
-            "core": "Верну диалог к рабочему запросу.",
-            "question": "",
-            "question_slot": "none",
-            "required_facts": [],
-            "facts_update": {},
-            "blocks": [
-                {"text": "Понял.", "requires": [], "type": "ack"},
-                {
-                    "text": "Давайте вернемся к вашему запросу. Что нужно по товару или услуге?",
-                    "requires": [],
-                    "type": "info",
-                },
-            ],
-        }
-    inferred_slot = "other"
-    if _MODEL_NAME_INTENT_RE.search(text) or (
-        low
-        and not _is_price_intent(text)
-        and not any(token in low for token in ("город", "район", "адрес", "квартир", "дом", "срок", "бюдж"))
-        and len([tok for tok in _FACT_TOKEN_RE.findall(low) if tok]) <= 5
-    ):
-        inferred_slot = "model"
-    if not text:
-        return {
-            "_fallback": True,
-            "intent": "clarify",
-            "ack": "Понял.",
-            "core": "Уточню запрос коротко.",
-            "question": "Уточните, пожалуйста, что именно нужно сейчас?",
-            "question_slot": "other",
-            "required_facts": [],
-            "facts_update": {},
-            "blocks": [
-                {"text": "Понял.", "requires": [], "type": "ack"},
-                {
-                    "text": "Уточните, пожалуйста, что именно нужно сейчас?",
-                    "requires": [],
-                    "type": "question",
-                    "question_key": "intent_detail",
-                },
-            ],
-        }
     return {
         "_fallback": True,
         "intent": "clarify",
-        "ack": "Понял.",
+        "ack": "",
         "core": "",
-        "question": "Уточните, пожалуйста, что именно нужно сейчас?",
-        "question_slot": inferred_slot,
+        "question": "",
+        "question_slot": "none",
         "required_facts": [],
         "facts_update": {},
-        "blocks": [
-            {"text": "Понял.", "requires": [], "type": "ack"},
-            {
-                "text": "Уточните, пожалуйста, что именно нужно сейчас?",
-                "requires": [],
-                "type": "question",
-                "question_key": "intent_detail",
-            },
-        ],
+        "blocks": [],
     }
 
 
@@ -4381,7 +8402,7 @@ async def _semantic_plan(
         if str(m.get("role") or "") in {"user", "assistant"}
     ][-8:]
     persona_chunks: list[str] = []
-    for item in (messages or []):
+    for item in messages or []:
         if str(item.get("role") or "").strip().lower() == "system":
             chunk = str(item.get("content") or "").strip()
             if chunk:
@@ -4391,30 +8412,36 @@ async def _semantic_plan(
         persona_context = persona_context[:6000]
     known_slots = dict(known_slots or {})
     known_facts = dict(known_facts or {})
-    forbidden_question_topics = [str(x) for x in (forbidden_question_topics or []) if str(x).strip()]
-    catalog_context = format_items_for_prompt([dict(item) for item in (grounding_items or [])[:5]], "₽")
+    forbidden_question_topics = [
+        str(x) for x in (forbidden_question_topics or []) if str(x).strip()
+    ]
+    catalog_context = format_items_for_prompt(
+        [dict(item) for item in (grounding_items or [])[:5]], "₽"
+    )
     if not (grounding_items or []):
         catalog_context = ""
     plan_system = (
         "Ты планировщик ответа менеджера. Верни только JSON-объект. "
         "Схема: {"
-        "\"intent\":\"greet|clarify|offer|answer|next_step\","
-        "\"ack\":\"короткое подтверждение\","
-        "\"core\":\"главная мысль ответа\","
-        "\"question\":\"один уместный вопрос или пусто\","
-        "\"question_slot\":\"location|object|model|budget|timeline|dimensions|contact|quantity|color|other|none\","
-        "\"required_facts\": [\"city\",\"address\",\"object_type\", ...],"
-        "\"facts_update\": {\"key\":\"value\", ...},"
-        "\"blocks\": ["
-        "{\"text\":\"фраза для ответа\",\"requires\":[\"fact_key\"],\"type\":\"ack|info|offer|question|cta\","
-        "\"question_key\":\"ключ факта для question, иначе пусто\"}"
+        '"intent":"greet|clarify|offer|answer|next_step",'
+        '"ack":"короткое подтверждение",'
+        '"core":"главная мысль ответа",'
+        '"question":"один уместный вопрос или пусто",'
+        '"question_slot":"location|object|model|budget|timeline|dimensions|contact|quantity|color|other|none",'
+        '"required_facts": ["city","address","object_type", ...],'
+        '"facts_update": {"key":"value", ...},'
+        '"blocks": ['
+        '{"text":"фраза для ответа","requires":["fact_key"],"type":"ack|info|offer|question|cta",'
+        '"question_key":"ключ факта для question, иначе пусто"}'
         "]"
         "}. "
         "Опирайся на правила и порядок из контекста персоны. "
-        "Если в персоне задан первый квалифицирующий шаг, следуй ему. "
-        "Не используй штампы: 'Спасибо, понял', 'Хороший выбор', 'Ваш запрос принят'. "
+        "Если в персоне задан первый квалифицирующий шаг, следуй ему, но сначала отвечай на текущий вопрос клиента. "
+        "Не используй штампы: 'Спасибо, понял', 'Понял', 'Поняла', 'Хороший выбор', 'Ваш запрос принят'. "
         "Не используй общую фразу 'Чем могу помочь?' как основной вопрос. "
+        "Не задавай вопрос, который не связан с последней репликой клиента. "
         "Если слот уже известен, не задавай вопрос про него повторно. "
+        "Не выходи за рамки каталога: не предлагай категории/товары, которых нет в catalog context. "
         "Для любой утверждающей фразы, которая зависит от условий (город, адрес, срок, скидка, источник и т.п.), "
         "обязательно укажи requires с нужными фактами. "
         "Заполни required_facts: это минимальные данные, которые нужно собрать по персоне до персонализированных утверждений/офферов. "
@@ -4465,7 +8492,9 @@ async def _render_from_semantic_plan(
     forbidden_question_topics: Sequence[str] | None = None,
 ) -> str:
     known_slots = dict(known_slots or {})
-    forbidden_question_topics = [str(x) for x in (forbidden_question_topics or []) if str(x).strip()]
+    forbidden_question_topics = [
+        str(x) for x in (forbidden_question_topics or []) if str(x).strip()
+    ]
     known_block = (
         "Известные данные клиента: " + json.dumps(known_slots, ensure_ascii=False)
         if known_slots
@@ -4480,6 +8509,7 @@ async def _render_from_semantic_plan(
         "Рендерни финальное сообщение менеджера строго по плану. "
         "1-3 коротких предложения, максимум 1 вопрос. "
         "Живой разговорный тон, без канцелярита и без шаблонов. "
+        "Не начинай ответ с 'Понял', 'Поняла', 'Спасибо, что уточнили'. "
         "Не начинай с повтора сущности клиента + подтверждения. "
         "Не начинай с оценочного клише после выбора клиента. "
         "Не переспрашивай уже известные данные. "
@@ -4565,75 +8595,254 @@ async def _audit_and_rewrite_persona_reply(
     answer: str,
     last_user_message: str,
     state: SalesState | None = None,
+    grounding: Mapping[str, Any] | None = None,
 ) -> str:
+    # Two-stage quality gate:
+    # 1) deterministic cleanup
+    # 2) LLM judge + optional bounded rewrite
     candidate = (answer or "").strip()
     if not candidate:
         return candidate
-    persona_context = ""
-    for msg in (prepared_messages or []):
-        if str(msg.get("role") or "").strip().lower() == "system":
-            persona_context = str(msg.get("content") or "").strip()
-            break
-    if len(persona_context) > 5000:
-        persona_context = persona_context[:5000]
+
     dialogue_tail = [
         {"role": str(m.get("role") or ""), "content": str(m.get("content") or "")}
         for m in (prepared_messages or [])
         if str(m.get("role") or "").strip().lower() in {"user", "assistant"}
     ][-6:]
-    system_prompt = (
-        "Ты QA-валидатор ответа менеджера. Проверь, что ответ следует правилам персоны и явным условиям "
-        "(особенно формулировкам с 'если', 'после', 'когда'). "
-        "Если в персоне есть правило вида 'после X обязательно Y', то при X в сообщении клиента "
-        "ответ обязан перейти к Y, без нового базового уточнения не по правилу. "
-        "Считай ошибкой старт ответа, где сначала повторяется сущность клиента (например город/район/модель), "
-        "а потом идёт подтверждение. "
-        "Считай ошибкой повтор того же уточняющего вопроса, который уже задавали ранее в диалоге. "
-        "Считай ошибкой оценочные клише в начале ответа после выбора клиента (вместо полезного действия). "
-        "Если ответ пропустил обязательный шаг, нарушил условие или звучит явно роботизированно — перепиши ответ. "
-        "Верни только JSON: {\"ok\":true|false,\"rewrite\":\"...\",\"issues\":[\"...\"]}. "
-        "rewrite должен быть 1-3 коротких предложения, максимум 1 вопрос."
+
+    # Deterministic cleanup only.
+    rewrite = _strip_instruction_leaks(candidate)
+    rewrite = quality._dedupe_repeated_blocks(rewrite)
+    rewrite = re.sub(r"[ \t]+", " ", rewrite)
+    rewrite = re.sub(r"\n{3,}", "\n\n", rewrite).strip()
+    if not rewrite:
+        return candidate
+
+    # Do not lose factual anchors from user context.
+    if _rewrite_loses_context_anchors(candidate, rewrite, dialogue_tail):
+        return candidate
+
+    # Do not drop contact artifacts if they already existed in answer.
+    original_artifacts: set[str] = set()
+    for token in _CONTACT_URL_RE.findall(candidate):
+        original_artifacts.add(token)
+    for token in _CONTACT_HANDLE_RE.findall(candidate):
+        original_artifacts.add(token)
+    for token in _CONTACT_PHONE_RE.findall(candidate):
+        original_artifacts.add(token.strip())
+    if original_artifacts and not all(artifact in rewrite for artifact in original_artifacts):
+        return candidate
+
+    # Keep substantive answer if cleanup accidentally over-shrunk text.
+    if len(rewrite) < 8 and len(candidate) > 24:
+        return candidate
+    if isinstance(state, SalesState) and _reply_has_repeated_question(rewrite, state):
+        # Rewriting should not reintroduce repeated question loops.
+        return candidate
+
+    candidate = rewrite
+
+    persona_context = ""
+    for message in prepared_messages or []:
+        if str(message.get("role") or "").strip().lower() != "system":
+            continue
+        chunk = str(message.get("content") or "").strip()
+        if chunk:
+            persona_context = chunk
+            break
+    if len(persona_context) > 5000:
+        persona_context = persona_context[:5000]
+    grounding_items = _grounding_catalog_items(grounding)
+    grounding_preview = format_items_for_prompt(
+        [dict(item) for item in list(grounding_items or [])[:6]], "₽"
     )
-    recent_questions = []
-    if isinstance(state, SalesState):
-        recent_questions = [str(q or "").strip() for q in (state.asked_questions or []) if str(q or "").strip()][-8:]
-    user_prompt = (
-        f"Контекст персоны:\n{persona_context}\n\n"
-        f"Последнее сообщение клиента: {last_user_message}\n"
-        f"Ранее заданные вопросы (последние): {json.dumps(recent_questions, ensure_ascii=False)}\n"
-        f"Короткая история диалога: {json.dumps(dialogue_tail, ensure_ascii=False)}\n"
-        f"Кандидат ответа: {candidate}"
+    selected_item = _selected_item_from_grounding(grounding, grounding_items)
+    selected_label = _item_label(dict(selected_item)) if isinstance(selected_item, Mapping) else ""
+    intent_flags = {
+        "price_intent": bool(_is_price_intent(last_user_message)),
+        "variants_intent": bool(_VARIANTS_USER_HINT_RE.search(str(last_user_message or ""))),
+        "repair_intent": bool(
+            _REPAIR_TURN_RE.match(str(last_user_message or ""))
+            or _CATALOG_UNAVAILABLE_RE.search(str(last_user_message or ""))
+        ),
+        "attribute_intent": bool(_extract_attribute_probe(str(last_user_message or ""))),
+    }
+
+    judge_prompt = (
+        "Ты quality-judge ответа менеджера. Верни только JSON: "
+        '{"ok":true|false,"rewrite_needed":true|false,"issues":["..."],'
+        '"needs":{"price":true|false,"variants":true|false,"attributes":true|false,"catalog_recovery":true|false}}. '
+        "Критерии: "
+        "1) ответ уместен последней реплике клиента, "
+        "2) нет повтора уже заданного вопроса, "
+        "3) нет служебной/инструктивной речи, "
+        "4) соблюдены ограничения персоны по тону и шагам, "
+        "5) нет неподтверждённых factual-утверждений, которых нет в grounded catalog context, "
+        "6) нет роботизированных стартов вроде 'Понял', 'Поняла', 'Спасибо, что уточнили', "
+        "7) если клиент просит варианты/цену/характеристики, ответ должен содержать конкретику из grounded catalog context, "
+        "8) максимум один вопрос в ответе. "
+        "9) если intent_flags.price_intent=true, ответ должен явно закрывать вопрос цены "
+        "(цена/диапазон/дешевле/альтернатива) без ухода в общие фразы. "
+        "10) если intent_flags.variants_intent=true, ответ должен показать конкретные варианты/модели "
+        "или сразу перейти к показу, без абстрактного ответа. "
+        "11) если intent_flags.repair_intent=true, ответ должен вернуть диалог к каталогу/вариантам, "
+        "а не зависать в пустом уточнении. "
+        "12) выстави needs.* на основе последней реплики клиента и хвоста диалога: "
+        "price=true если ждут ответ по цене/дешевле/диапазону; "
+        "variants=true если ждут показать/предложить варианты; "
+        "attributes=true если ждут характеристики/качество/параметры; "
+        "catalog_recovery=true если диалог нужно вернуть к каталогу/подбору после сбоя/непонимания. "
+        "Если ответ уже хороший — ok=true."
+    )
+    judge_user = (
+        f"Персона:\n{persona_context or 'нет'}\n\n"
+        f"Grounded catalog context:\n{grounding_preview or 'нет'}\n"
+        f"Selected item: {selected_label or 'нет'}\n\n"
+        f"Intent flags: {json.dumps(intent_flags, ensure_ascii=False)}\n\n"
+        f"Последняя реплика клиента: {last_user_message}\n"
+        f"Текущий ответ: {candidate}\n"
+        f"Хвост диалога: {json.dumps(dialogue_tail, ensure_ascii=False)}"
     )
     try:
-        resp = await _llm_call_with_deadline(
+        judge_resp = await _llm_call_with_deadline(
             create_fn,
             timeout_seconds=timeout_seconds,
             model=model,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": judge_prompt},
+                {"role": "user", "content": judge_user},
             ],
             temperature=0.0,
-            max_tokens=260,
+            max_tokens=120,
             response_format={"type": "json_object"},
             timeout=timeout_seconds,
         )
-        choices = getattr(resp, "choices", None)
-        if not (isinstance(choices, list) and choices):
+        judge_choices = getattr(judge_resp, "choices", None)
+        judge_payload: dict[str, Any] = {}
+        if isinstance(judge_choices, list) and judge_choices:
+            judge_msg = getattr(judge_choices[0], "message", None)
+            judge_payload = _safe_json_load(str(getattr(judge_msg, "content", "") or "")) or {}
+        judge_ok = bool(judge_payload.get("ok"))
+        rewrite_needed = bool(judge_payload.get("rewrite_needed"))
+        issues_raw = judge_payload.get("issues")
+        if isinstance(issues_raw, list):
+            issues = [str(item).strip() for item in issues_raw if str(item).strip()]
+        else:
+            issues = []
+        needs_payload = judge_payload.get("needs")
+        needs_map = needs_payload if isinstance(needs_payload, Mapping) else {}
+        needs_price = bool(needs_map.get("price")) or bool(intent_flags.get("price_intent"))
+        needs_variants = bool(needs_map.get("variants")) or bool(intent_flags.get("variants_intent"))
+        needs_recovery = bool(needs_map.get("catalog_recovery")) or bool(intent_flags.get("repair_intent"))
+        needs_attributes = bool(needs_map.get("attributes")) or bool(intent_flags.get("attribute_intent"))
+
+        candidate_low = _normalize_text(candidate)
+        has_price_specific = bool(_PRICE_INLINE_RE.search(candidate)) or bool(
+            re.search(r"(?iu)\b(цен|диапаз|дешев|альтернатив)\w*\b", candidate_low)
+        )
+        has_catalog_specific = has_price_specific or _reply_mentions_catalog_item(
+            candidate, grounding_items
+        )
+        if needs_variants and not has_catalog_specific:
+            rewrite_needed = True
+            judge_ok = False
+            issues.append("variants_without_catalog_specifics")
+        if needs_price and not has_price_specific:
+            rewrite_needed = True
+            judge_ok = False
+            issues.append("price_intent_without_price_specifics")
+        if needs_recovery:
+            has_repair_recovery = bool(
+                re.search(r"(?iu)\b(модел|вариант|каталог|цен|характерист)\w*\b", candidate_low)
+            ) or has_catalog_specific
+            if not has_repair_recovery:
+                rewrite_needed = True
+                judge_ok = False
+                issues.append("repair_intent_without_catalog_recovery")
+        if needs_attributes:
+            probe = _extract_attribute_probe(str(last_user_message or ""))
+            probe_norm = _normalize_text(probe)
+            attribute_terms: set[str] = set()
+            for item in list(grounding_items or [])[:4]:
+                for key, value in dict(item).items():
+                    key_norm = _normalize_text(key)
+                    if not key_norm or key_norm.startswith("_"):
+                        continue
+                    if key_norm in {"title", "name", "sku", "id", "url", "price"}:
+                        continue
+                    for token in _FACT_TOKEN_RE.findall(key_norm):
+                        if len(token) >= 4 and token not in _GENERIC_FACT_STOPWORDS:
+                            attribute_terms.add(token)
+                    val_norm = _normalize_text(value)
+                    for token in _FACT_TOKEN_RE.findall(val_norm):
+                        if len(token) >= 4 and token not in _GENERIC_FACT_STOPWORDS:
+                            attribute_terms.add(token)
+            has_attribute_terms = any(token in candidate_low for token in list(attribute_terms)[:30])
+            has_attribute_specific = (
+                bool(re.search(r"\d", candidate))
+                or (bool(probe_norm) and probe_norm in candidate_low)
+                or has_attribute_terms
+            )
+            if not has_attribute_specific:
+                rewrite_needed = True
+                judge_ok = False
+                issues.append("attribute_intent_without_specifics")
+        if judge_ok or not rewrite_needed:
             return candidate
-        msg = getattr(choices[0], "message", None)
-        payload = _safe_json_load(str(getattr(msg, "content", "") or ""))
-        if not isinstance(payload, dict):
-            return candidate
-        ok = bool(payload.get("ok"))
-        rewrite = str(payload.get("rewrite") or "").strip()
-        if ok or not rewrite:
-            return candidate
-        if _rewrite_loses_context_anchors(candidate, rewrite, dialogue_tail):
-            return candidate
-        return rewrite
+
+        rewrite_system = (
+            "Перепиши ответ менеджера строго в рамках смысла текущего ответа. "
+            "Не добавляй новые факты, цены или обещания. "
+            "Не используй стартовые шаблоны вроде 'Понял', 'Поняла', 'Спасибо, что уточнили'. "
+            "Если факт не подтверждён grounded catalog context, не утверждай его как факт. "
+            "Если клиент просит варианты/цену/характеристики, добавь конкретику из grounded catalog context. "
+            "Если intent_flags.price_intent=true, обязательно закрой вопрос цены (цена/диапазон/дешевле/альтернатива). "
+            "Если intent_flags.variants_intent=true, покажи конкретные варианты/модели или явно предложи показать варианты сейчас. "
+            "Если intent_flags.repair_intent=true, верни диалог к подбору из каталога с конкретикой. "
+            "Если needs.attributes=true, обязательно дай конкретные параметры из grounded context "
+            "(например толщина/материал/наполнение или другой подтверждённый атрибут). "
+            "Ответь на последнюю реплику клиента в живом тоне. "
+            "1-2 коротких предложения, максимум 1 вопрос."
+        )
+        rewrite_user = (
+            f"Персона:\n{persona_context or 'нет'}\n\n"
+            f"Grounded catalog context:\n{grounding_preview or 'нет'}\n"
+            f"Selected item: {selected_label or 'нет'}\n\n"
+            f"Intent flags: {json.dumps(intent_flags, ensure_ascii=False)}\n\n"
+            f"Needs: {json.dumps(needs_map, ensure_ascii=False)}\n\n"
+            f"Последняя реплика клиента: {last_user_message}\n"
+            f"Проблемы текущего ответа: {json.dumps(issues, ensure_ascii=False)}\n"
+            f"Текущий ответ: {candidate}\n"
+            "Сделай улучшенный ответ."
+        )
+        rewrite_resp = await _llm_call_with_deadline(
+            create_fn,
+            timeout_seconds=timeout_seconds,
+            model=model,
+            messages=[
+                {"role": "system", "content": rewrite_system},
+                {"role": "user", "content": rewrite_user},
+            ],
+            temperature=0.2,
+            max_tokens=180,
+            timeout=timeout_seconds,
+        )
+        rewrite_choices = getattr(rewrite_resp, "choices", None)
+        if isinstance(rewrite_choices, list) and rewrite_choices:
+            rewrite_msg = getattr(rewrite_choices[0], "message", None)
+            improved = str(getattr(rewrite_msg, "content", "") or "").strip()
+            if improved:
+                improved = _strip_instruction_leaks(improved)
+                improved = quality._dedupe_repeated_blocks(improved)
+                improved = re.sub(r"[ \t]+", " ", improved)
+                improved = re.sub(r"\n{3,}", "\n\n", improved).strip()
+                improved = _enforce_sentence_budget(improved, max_sentences=2)
+                if improved and not _rewrite_loses_context_anchors(candidate, improved, dialogue_tail):
+                    if not (isinstance(state, SalesState) and _reply_has_repeated_question(improved, state)):
+                        return improved
     except Exception:
         return candidate
+    return candidate
 
 
 def _apply_plan_alignment_to_state(
@@ -4746,7 +8955,7 @@ def extract_persona_hints(persona: str) -> PersonaHints:
                 break
         if not hints.greeting:
             for raw in lines:
-                if raw and not raw.startswith(('#', '-', '*')):
+                if raw and not raw.startswith(("#", "-", "*")):
                     hints.greeting = raw
                     break
 
@@ -4763,11 +8972,17 @@ def extract_persona_hints(persona: str) -> PersonaHints:
             except Exception:
                 pass
 
-    if any(token in persona_lower for token in ("коротко", "кратко", "лаконич", "brief", "concise", "short")):
+    if any(
+        token in persona_lower
+        for token in ("коротко", "кратко", "лаконич", "brief", "concise", "short")
+    ):
         hints.style_short = True
     if any(token in persona_lower for token in ("дружелюб", "тепл", "friendly", "улыб")):
         hints.style_friendly = True
-    if any(token in persona_lower for token in ("без смай", "без эмодзи", "без emoji", "без эмоджи", "без эмодзи")):
+    if any(
+        token in persona_lower
+        for token in ("без смай", "без эмодзи", "без emoji", "без эмоджи", "без эмодзи")
+    ):
         hints.no_emoji = True
 
     return hints
@@ -4813,14 +9028,13 @@ def load_persona_hints(tenant: int | None = None, channel: str | None = None) ->
 
 def load_sales_state(tenant: int | None, contact_id: int | None) -> SalesState:
     key = _state_key(tenant, contact_id)
-    if key in _STATE_CACHE:
-        return _STATE_CACHE[key]
     payload = _state_store_read(key)
     if payload:
         state = SalesState.from_dict(payload)
+        _STATE_CACHE[key] = state
     else:
+        _STATE_CACHE.pop(key, None)
         state = SalesState(tenant=int(tenant or 0), contact_id=int(contact_id or 0))
-    _STATE_CACHE[key] = state
     return state
 
 
@@ -4838,6 +9052,7 @@ def reset_sales_state(tenant: int | None, contact_id: int | None) -> None:
 
 
 # --------------------------- хранилище ключей (Redis) ------------------------
+
 
 def get_tenant_pubkey(tenant: int) -> str:
     return _with_sync_redis(
@@ -5014,7 +9229,7 @@ except Exception:
 
 Примеры стартовых сообщений:
 - «Здравствуйте! Чем могу помочь?»
-- «Здравствуйте! Подскажите, что нужно: консультация, расчёт или подбор?»
+- ""
 
 Скрипт диалога (шаги):
 - Понять запрос → уточнить параметр → предложить варианты → следующий шаг.
@@ -5223,7 +9438,9 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
     behavior["triggers"] = triggers
 
     # Настройка ожидания фото/файла после заданного вопроса.
-    photo_markers_raw = behavior.get("photo_expected_markers") or behavior.get("photo_markers") or []
+    photo_markers_raw = (
+        behavior.get("photo_expected_markers") or behavior.get("photo_markers") or []
+    )
     photo_markers: list[str] = []
     if isinstance(photo_markers_raw, (list, tuple, set)):
         for ph in photo_markers_raw:
@@ -5235,7 +9452,9 @@ def _normalize_tenant_config(cfg: dict[str, Any]) -> dict[str, Any]:
                 photo_markers.append(ph.strip())
     behavior["photo_expected_markers"] = photo_markers
     photo_reply_raw = behavior.get("photo_expected_reply") or behavior.get("photo_reply") or ""
-    behavior["photo_expected_reply"] = photo_reply_raw if isinstance(photo_reply_raw, str) else str(photo_reply_raw or "")
+    behavior["photo_expected_reply"] = (
+        photo_reply_raw if isinstance(photo_reply_raw, str) else str(photo_reply_raw or "")
+    )
     try:
         ttl_value = int(behavior.get("photo_expected_ttl") or 0)
     except Exception:
@@ -5461,9 +9680,7 @@ def _branding_for_tenant(tenant: int | None = None, channel: str | None = None) 
     brand = str(passport.get("brand") or "").strip()
     city = str(passport.get("city") or "").strip()
     whatsapp_link = str(
-        passport.get("whatsapp_link")
-        or integrations.get("whatsapp_link")
-        or ""
+        passport.get("whatsapp_link") or integrations.get("whatsapp_link") or ""
     ).strip()
     catalog_url = str(
         integrations.get("catalog_url")
@@ -5493,6 +9710,7 @@ def _branding_for_tenant(tenant: int | None = None, channel: str | None = None) 
         "CHANNEL": resolved_channel,
         "CURRENCY": currency,
     }
+
 
 # ------------------------------ промпты --------------------------------------
 PERSONA_MD = """# Персона «Универсальный продавец»
@@ -5650,12 +9868,11 @@ def _normalize_catalog_pdf_candidate(
         return None
 
     type_hint = str(candidate.get("type") or candidate.get("kind") or "").strip().lower()
-    mime_hint = str(
-        candidate.get("mime")
-        or candidate.get("mime_type")
-        or candidate.get("mimetype")
-        or ""
-    ).strip().lower()
+    mime_hint = (
+        str(candidate.get("mime") or candidate.get("mime_type") or candidate.get("mimetype") or "")
+        .strip()
+        .lower()
+    )
     extension = safe.suffix.lower()
     if type_hint and type_hint not in {"pdf", "document"}:
         return None
@@ -5663,12 +9880,15 @@ def _normalize_catalog_pdf_candidate(
         return None
 
     filename = str(candidate.get("original") or candidate.get("filename") or safe.name)
-    mime = str(
-        candidate.get("mime")
-        or candidate.get("mime_type")
-        or candidate.get("mimetype")
+    mime = (
+        str(
+            candidate.get("mime")
+            or candidate.get("mime_type")
+            or candidate.get("mimetype")
+            or "application/pdf"
+        ).strip()
         or "application/pdf"
-    ).strip() or "application/pdf"
+    )
     return {
         "relative_path": str(safe),
         "absolute_path": str(target),
@@ -5841,14 +10061,14 @@ _FIELD_SYNONYMS: Dict[str, List[str]] = {
         "цветвнутреннейпанели",
         "цветвнутренней",
         "цветснутри",
-        "цветвнутри",
+        "colorinside",
     ],
     "finish": [
         "finish",
         "coating",
         "цветнаружнойпанели",
         "цветнаружи",
-        "цветснаружи",
+        "coloroutside",
         "цветпокраски",
         "покраска",
         "наружнаяпокраска",
@@ -5860,11 +10080,27 @@ _FIELD_SYNONYMS: Dict[str, List[str]] = {
         "расцветка",
         "цветподбор",
     ],
+    "object_type": [
+        "objecttype",
+        "object",
+        "target",
+        "usage",
+        "назначение",
+        "типобъекта",
+        "типпомещения",
+        "типпомещ",
+        "помещение",
+        "длякого",
+        "длячего",
+        "application",
+    ],
 }
 
 
 _FIELD_TOKEN_MAP: Dict[str, List[str]] = {
-    key: sorted({_canonicalize_field_name(token) for token in tokens if token}, key=len, reverse=True)
+    key: sorted(
+        {_canonicalize_field_name(token) for token in tokens if token}, key=len, reverse=True
+    )
     for key, tokens in _FIELD_SYNONYMS.items()
 }
 
@@ -5986,10 +10222,10 @@ def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) ->
             else:
                 custom_aliases[key] = [str(aliases)]
 
-    for field, tokens in _FIELD_TOKEN_MAP.items():
-        if field in mapping:
+    for field_name, tokens in _FIELD_TOKEN_MAP.items():
+        if field_name in mapping:
             continue
-        preferred_aliases = custom_aliases.get(field, [])
+        preferred_aliases = custom_aliases.get(field_name, [])
         normalized_tokens = [
             _canonicalize_field_name(alias) for alias in preferred_aliases if alias
         ] + list(tokens)
@@ -5999,7 +10235,7 @@ def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) ->
             raw_names=preferred_aliases,
         )
         if column:
-            mapping[field] = column
+            mapping[field_name] = column
 
     for canonical, aliases in custom_aliases.items():
         key_norm = canonical.strip()
@@ -6023,7 +10259,10 @@ def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) ->
             if col in used_sources:
                 continue
             canon = sample_canon.get(col) or ""
-            if any(token in canon for token in ("цен", "price", "cost", "стоим", "руб", "uah", "usd", "eur")):
+            if any(
+                token in canon
+                for token in ("цен", "price", "cost", "стоим", "руб", "uah", "usd", "eur")
+            ):
                 mapping["price"] = col
                 used_sources.add(col)
                 break
@@ -6041,7 +10280,10 @@ def _prepare_field_mapping(meta: Dict[str, Any], items: List[Dict[str, Any]]) ->
             if col in used_sources:
                 continue
             canon = sample_canon.get(col) or ""
-            if any(token in canon for token in ("name", "товар", "пози", "model", "тип", "item", "наимен")):
+            if any(
+                token in canon
+                for token in ("name", "товар", "пози", "model", "тип", "item", "наимен")
+            ):
                 mapping["title"] = col
                 used_sources.add(col)
                 break
@@ -6055,7 +10297,9 @@ def _has_price_digits(value: Any) -> bool:
     if len(digits) >= 4:
         return True
     lowered = text.lower()
-    if len(digits) >= 3 and any(tok in lowered for tok in ("руб", "uah", "eur", "usd", "$", "€", "₽")):
+    if len(digits) >= 3 and any(
+        tok in lowered for tok in ("руб", "uah", "eur", "usd", "$", "€", "₽")
+    ):
         return True
     try:
         # Attempt to parse decimal values like "99.5"
@@ -6064,6 +10308,164 @@ def _has_price_digits(value: Any) -> bool:
         return True
     except Exception:
         return False
+
+
+def _normalize_csv_delimiter(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text == "\\t":
+        return "\t"
+    return text[0]
+
+
+def _csv_delimiter_candidates(sample: str, configured: Any) -> List[str]:
+    candidates: List[str] = []
+
+    def _append(delim: str | None) -> None:
+        if not delim:
+            return
+        if delim not in candidates:
+            candidates.append(delim)
+
+    _append(_normalize_csv_delimiter(configured))
+    try:
+        sniffed = csv.Sniffer().sniff(sample or "", delimiters=",;\t|")
+        _append(_normalize_csv_delimiter(getattr(sniffed, "delimiter", None)))
+    except Exception:
+        pass
+    for delim in (",", ";", "\t", "|"):
+        _append(delim)
+    return candidates or [","]
+
+
+def _read_csv_rows_with_delimiter(
+    path: pathlib.Path,
+    *,
+    encoding: str,
+    delimiter: str,
+    row_limit: int = 500,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    with open(path, "r", encoding=encoding, newline="") as fh:
+        reader = csv.reader(fh, delimiter=delimiter)
+        header: List[str] = []
+        for raw_header in reader:
+            if not raw_header or not any((cell or "").strip() for cell in raw_header):
+                continue
+            header = raw_header
+            break
+        if not header:
+            return [], []
+
+        normalized: List[str] = []
+        seen_headers: Dict[str, int] = {}
+        for idx_h, cell in enumerate(header):
+            name = (cell or "").strip().lstrip("\ufeff")
+            if not name:
+                name = f"column_{idx_h + 1}"
+            if name in seen_headers:
+                seen_headers[name] += 1
+                name = f"{name}_{seen_headers[name]}"
+            else:
+                seen_headers[name] = 0
+            normalized.append(name)
+
+        columns = normalized[:]
+        local_items: List[Dict[str, Any]] = []
+        for row in reader:
+            if not row or not any(
+                (val.strip() if isinstance(val, str) else str(val or "").strip()) for val in row
+            ):
+                continue
+            while len(columns) < len(row):
+                columns.append(f"column_{len(columns) + 1}")
+            record: Dict[str, Any] = {}
+            for idx_col, value in enumerate(row):
+                key = columns[idx_col]
+                clean = value.strip() if isinstance(value, str) else str(value or "").strip()
+                record[key] = clean
+            if any(record.values()):
+                local_items.append(record)
+            if len(local_items) >= max(1, int(row_limit)):
+                break
+    return columns, local_items
+
+
+def _score_csv_rows(columns: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> float:
+    if not columns or not rows:
+        return -1.0
+    col_count = max(1, len(columns))
+    row_count = len(rows)
+    non_empty_counts: List[int] = []
+    price_like_rows = 0
+    collapsed_blob_hits = 0
+    for row in rows:
+        values = [str(v or "").strip() for v in row.values()]
+        non_empty = [v for v in values if v]
+        non_empty_counts.append(len(non_empty))
+        if any(_has_price_digits(v) for v in non_empty):
+            price_like_rows += 1
+        if col_count == 1:
+            first = values[0] if values else ""
+            if any(token in first for token in (",", ";", "\t", "|")):
+                collapsed_blob_hits += 1
+
+    avg_non_empty = (sum(non_empty_counts) / len(non_empty_counts)) if non_empty_counts else 0.0
+    multi_field_ratio = (
+        sum(1 for val in non_empty_counts if val >= 2) / len(non_empty_counts)
+        if non_empty_counts
+        else 0.0
+    )
+    price_ratio = price_like_rows / max(1, row_count)
+    score = (
+        (col_count * 6.0)
+        + (avg_non_empty * 3.0)
+        + (multi_field_ratio * 20.0)
+        + (price_ratio * 15.0)
+        + (min(row_count, 500) / 25.0)
+    )
+    if col_count == 1:
+        blob_ratio = collapsed_blob_hits / max(1, row_count)
+        score -= 50.0 + (blob_ratio * 40.0)
+    return score
+
+
+def _read_csv_rows_best(
+    path: pathlib.Path,
+    *,
+    encoding: str,
+    delimiter: Any,
+    row_limit: int = 500,
+) -> List[Dict[str, Any]]:
+    try:
+        with open(path, "r", encoding=encoding, newline="") as fh:
+            sample = fh.read(4096)
+    except Exception:
+        sample = ""
+
+    best_rows: List[Dict[str, Any]] = []
+    best_score = float("-inf")
+    for cand_delim in _csv_delimiter_candidates(sample, delimiter):
+        try:
+            columns, rows = _read_csv_rows_with_delimiter(
+                path,
+                encoding=encoding,
+                delimiter=cand_delim,
+                row_limit=row_limit,
+            )
+        except UnicodeDecodeError:
+            raise
+        except Exception:
+            continue
+        if not rows:
+            continue
+        score = _score_csv_rows(columns, rows)
+        if score > best_score:
+            best_score = score
+            best_rows = rows
+    return best_rows
 
 
 def _normalize_catalog_item(record: Dict[str, Any], mapping: Dict[str, str]) -> Dict[str, Any]:
@@ -6127,12 +10529,56 @@ def _normalize_catalog_item(record: Dict[str, Any], mapping: Dict[str, str]) -> 
                 normalized["price"] = text
                 return
 
+    def _canonical_object_type_value(raw_value: Any) -> str:
+        low = _normalize_text(raw_value)
+        if not low:
+            return ""
+        is_apartment = bool(re.search(r"(?iu)\b(apartment|flat|квартир\w*|кв\.)\b", low))
+        is_house = bool(re.search(r"(?iu)\b(house|home|частн\w*|коттедж\w*|дом\w*)\b", low))
+        if is_apartment and not is_house:
+            return "apartment"
+        if is_house and not is_apartment:
+            return "house"
+        return ""
+
+    def _ensure_object_type() -> None:
+        direct = _canonical_object_type_value(normalized.get("object_type"))
+        if direct:
+            normalized["object_type"] = direct
+            return
+
+        probe_keys = (
+            "object_type",
+            "object",
+            "target",
+            "usage",
+            "назначение",
+            "тип помещения",
+            "тип помещения/объекта",
+            "тип объекта",
+            "помещение",
+        )
+        for key in probe_keys:
+            val = normalized.get(key)
+            kind = _canonical_object_type_value(val)
+            if kind:
+                normalized["object_type"] = kind
+                return
+            val = record.get(key)
+            kind = _canonical_object_type_value(val)
+            if kind:
+                normalized["object_type"] = kind
+                return
+
     _ensure_title()
     _ensure_price()
+    _ensure_object_type()
     return normalized
 
 
-def _normalize_catalog_items(items: List[Dict[str, Any]], meta: Dict[str, Any] | Any) -> List[Dict[str, Any]]:
+def _normalize_catalog_items(
+    items: List[Dict[str, Any]], meta: Dict[str, Any] | Any
+) -> List[Dict[str, Any]]:
     if not items:
         return items
     meta_dict = meta if isinstance(meta, dict) else {}
@@ -6143,7 +10589,9 @@ def _normalize_catalog_items(items: List[Dict[str, Any]], meta: Dict[str, Any] |
     return [_normalize_catalog_item(record, mapping) for record in items]
 
 
-def _apply_catalog_attribute_rules(items: List[Dict[str, Any]], persona_meta: Mapping[str, Any] | None) -> None:
+def _apply_catalog_attribute_rules(
+    items: List[Dict[str, Any]], persona_meta: Mapping[str, Any] | None
+) -> None:
     if not items or not isinstance(persona_meta, Mapping):
         return
     rules_section = persona_meta.get("catalog_tags") or persona_meta.get("catalog_attributes")
@@ -6200,9 +10648,17 @@ def _catalog_rule_matches(rule: Mapping[str, Any], item: Mapping[str, Any]) -> b
     all_rules = rule.get("all")
     matched = True
     if isinstance(any_rules, Sequence) and any_rules:
-        matched = any(_catalog_condition_matches(item, cond) for cond in any_rules if isinstance(cond, Mapping))
+        matched = any(
+            _catalog_condition_matches(item, cond)
+            for cond in any_rules
+            if isinstance(cond, Mapping)
+        )
     if matched and isinstance(all_rules, Sequence) and all_rules:
-        matched = all(_catalog_condition_matches(item, cond) for cond in all_rules if isinstance(cond, Mapping))
+        matched = all(
+            _catalog_condition_matches(item, cond)
+            for cond in all_rules
+            if isinstance(cond, Mapping)
+        )
     return bool(matched)
 
 
@@ -6218,19 +10674,30 @@ def _catalog_condition_matches(item: Mapping[str, Any], condition: Mapping[str, 
     else:
         values = [" ".join(str(val or "") for val in item.values())]
     lowered = [value.casefold() for value in values if value]
+    keyed = [_match_key(value) for value in values if value]
     contains = condition.get("contains")
     if contains:
         needles = contains
         if isinstance(needles, str):
             needles = [needles]
         if isinstance(needles, Sequence):
-            normalized_needles = [str(needle or "").strip().casefold() for needle in needles if needle]
+            normalized_needles = [
+                str(needle or "").strip().casefold() for needle in needles if needle
+            ]
+            keyed_needles = [_match_key(needle) for needle in needles if needle]
             for hay in lowered:
                 if any(needle in hay for needle in normalized_needles):
                     return True
+            for hay in keyed:
+                if any(needle and needle in hay for needle in keyed_needles):
+                    return True
     regex = condition.get("regex")
     if regex:
-        patterns = regex if isinstance(regex, Sequence) and not isinstance(regex, (str, bytes)) else [regex]
+        patterns = (
+            regex
+            if isinstance(regex, Sequence) and not isinstance(regex, (str, bytes))
+            else [regex]
+        )
         for pattern in patterns:
             try:
                 compiled = re.compile(str(pattern), re.IGNORECASE)
@@ -6241,10 +10708,18 @@ def _catalog_condition_matches(item: Mapping[str, Any], condition: Mapping[str, 
                     return True
     equals = condition.get("equals")
     if equals is not None:
-        eq_values = equals if isinstance(equals, Sequence) and not isinstance(equals, (str, bytes)) else [equals]
+        eq_values = (
+            equals
+            if isinstance(equals, Sequence) and not isinstance(equals, (str, bytes))
+            else [equals]
+        )
         normalized = [str(val or "").strip().casefold() for val in eq_values]
+        keyed_equals = [_match_key(val) for val in eq_values]
         for hay in lowered:
             if hay in normalized:
+                return True
+        for hay in keyed:
+            if hay and hay in keyed_equals:
                 return True
     return False
 
@@ -6328,8 +10803,8 @@ def _needs_block_matches(rule_needs: Mapping[str, Any], actual: Mapping[str, Any
 def _item_fields_match(item: Mapping[str, Any], requirements: Mapping[str, Any]) -> bool:
     if not isinstance(requirements, Mapping):
         return True
-    for field, expected in requirements.items():
-        value = item.get(field)
+    for field_name, expected in requirements.items():
+        value = item.get(field_name)
         if isinstance(expected, (list, tuple, set)):
             norm_expected = {str(val).casefold() for val in expected}
             if str(value).casefold() not in norm_expected:
@@ -6343,7 +10818,6 @@ def _item_fields_match(item: Mapping[str, Any], requirements: Mapping[str, Any])
 def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     candidates: List[tuple[pathlib.Path, Dict[str, Any]]] = []
-    has_custom_catalogs = False
     persona_meta: Dict[str, Any] = {}
 
     if tenant is not None:
@@ -6372,7 +10846,6 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                         csv_meta["path"] = raw_csv
                         merged_csv_meta = _merge_csv_mapping_meta(csv_meta, persona_meta)
                         candidates.append((csv_path, merged_csv_meta))
-                        has_custom_catalogs = True
                         # Continue processing original entry as fallback (PDF/Excel)
 
                     raw_path = entry.get("path")
@@ -6381,17 +10854,18 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                         continue
                     merged_meta = _merge_csv_mapping_meta(entry, persona_meta)
                     candidates.append((path, merged_meta))
-                    has_custom_catalogs = True
         except Exception:
             pass
         persona_csv_path = persona_catalog_csv(int(tenant))
         if persona_csv_path:
-            csv_delimiter = str(persona_meta.get("catalog_csv_delimiter") or ";").strip() or ";"
-            csv_encoding = str(persona_meta.get("catalog_csv_encoding") or "utf-8").strip() or "utf-8"
+            csv_delimiter = str(persona_meta.get("catalog_csv_delimiter") or "").strip()
+            csv_encoding = (
+                str(persona_meta.get("catalog_csv_encoding") or "utf-8").strip() or "utf-8"
+            )
             meta = _merge_csv_mapping_meta(
                 {
                     "type": "csv",
-                    "delimiter": csv_delimiter,
+                    "delimiter": csv_delimiter or None,
                     "encoding": csv_encoding,
                 },
                 persona_meta,
@@ -6402,10 +10876,11 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
             )
             if candidate_tuple not in candidates:
                 candidates.insert(0, candidate_tuple)
-            has_custom_catalogs = True
 
     if not candidates:
-        default_meta = _merge_csv_mapping_meta({"delimiter": ",", "encoding": "utf-8"}, persona_meta)
+        default_meta = _merge_csv_mapping_meta(
+            {"delimiter": ",", "encoding": "utf-8"}, persona_meta
+        )
         candidates.append((CATALOG_CSV, default_meta))
 
     # mtime/size-based cache key to avoid repeated heavy parsing
@@ -6425,11 +10900,14 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
                         stat_target = cand
             if stat_target.exists():
                 st = stat_target.stat()
-                key_fps.append((str(stat_target.resolve()), st.st_mtime, int(getattr(st, 'st_size', 0) or 0)))
+                key_fps.append(
+                    (str(stat_target.resolve()), st.st_mtime, int(getattr(st, "st_size", 0) or 0))
+                )
     except Exception:
         key_fps = []
     cache_key: Tuple[Optional[int], Tuple[Tuple[str, float, int], ...]] = (
-        (int(tenant) if tenant is not None else None), tuple(sorted(key_fps))
+        (int(tenant) if tenant is not None else None),
+        tuple(sorted(key_fps)),
     )
     cached = _CATALOG_CACHE.get(cache_key)
     if cached:
@@ -6504,7 +10982,9 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
 
                         index_path_obj = built_index.index_path
                         try:
-                            rel_index_path = str(index_path_obj.relative_to(tenant_dir(int(tenant))))
+                            rel_index_path = str(
+                                index_path_obj.relative_to(tenant_dir(int(tenant)))
+                            )
                         except Exception:
                             rel_index_path = str(index_path_obj)
 
@@ -6556,59 +11036,12 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
             used_items: List[Dict[str, Any]] = []
             for enc in enc_candidates or ["utf-8"]:
                 try:
-                    with open(path, "r", encoding=enc, newline="") as fh:
-                        local_delimiter = delimiter
-                        if not local_delimiter:
-                            sample = fh.read(2048)
-                            fh.seek(0)
-                            try:
-                                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-                                local_delimiter = dialect.delimiter
-                            except Exception:
-                                local_delimiter = ","
-
-                        reader = csv.reader(fh, delimiter=local_delimiter or ",")
-                        header: List[str] = []
-                        for raw_header in reader:
-                            if not raw_header or not any((cell or "").strip() for cell in raw_header):
-                                continue
-                            header = raw_header
-                            break
-                        if not header:
-                            continue
-
-                        normalized: List[str] = []
-                        seen_headers: Dict[str, int] = {}
-                        for idx_h, cell in enumerate(header):
-                            name = (cell or "").strip().lstrip("\ufeff")
-                            if not name:
-                                name = f"column_{idx_h + 1}"
-                            if name in seen_headers:
-                                seen_headers[name] += 1
-                                name = f"{name}_{seen_headers[name]}"
-                            else:
-                                seen_headers[name] = 0
-                            normalized.append(name)
-
-                        columns = normalized[:]
-                        local_items: List[Dict[str, Any]] = []
-                        for row in reader:
-                            if not row or not any((val.strip() if isinstance(val, str) else str(val or "").strip()) for val in row):
-                                continue
-                            while len(columns) < len(row):
-                                columns.append(f"column_{len(columns) + 1}")
-                            record: Dict[str, Any] = {}
-                            for idx_col, value in enumerate(row):
-                                key = columns[idx_col]
-                                if isinstance(value, str):
-                                    clean = value.strip()
-                                else:
-                                    clean = str(value or "").strip()
-                                record[key] = clean
-                            if any(record.values()):
-                                local_items.append(record)
-                            if len(local_items) >= 500:
-                                break
+                    local_items = _read_csv_rows_best(
+                        path,
+                        encoding=enc,
+                        delimiter=delimiter,
+                        row_limit=500,
+                    )
                     if local_items:
                         used_items = local_items
                         break
@@ -6636,16 +11069,7 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
     try:
         for it in items:
             if isinstance(it, dict):
-                parts: List[str] = []
-                for k in (
-                    "title","name","sku","id","brand","collection","category","series","model","color","material","decor","finish","tags","description","notes","features",
-                ):
-                    v = it.get(k)
-                    if isinstance(v, (list, tuple, set)):
-                        parts.extend(str(x) for x in v if x)
-                    elif v:
-                        parts.append(str(v))
-                it["_search_text"] = (" ".join(parts)).casefold().replace("ё", "е")
+                it["_search_text"] = _normalize_text(_collect_item_text(it))
     except Exception:
         pass
 
@@ -6658,7 +11082,9 @@ def _read_catalog(tenant: int | None = None) -> List[Dict[str, Any]]:
     return items
 
 
-def read_all_catalog(cfg: Optional[Dict[str, Any]] = None, tenant: int | None = None) -> List[Dict[str, Any]]:
+def read_all_catalog(
+    cfg: Optional[Dict[str, Any]] = None, tenant: int | None = None
+) -> List[Dict[str, Any]]:
     """Возвращает список позиций каталога для арендатора."""
     tenant_id: Optional[int] = None
     if tenant is not None:
@@ -6710,6 +11136,7 @@ def paginate_catalog_text(
         pages.append("\n".join([header, *chunk]))
     return pages
 
+
 NEEDS_STOPWORDS = {
     "нужно",
     "нужна",
@@ -6745,6 +11172,16 @@ NEEDS_STOPWORDS = {
     "пожалуйста",
     "дайте",
     "заказ",
+    "самый",
+    "самая",
+    "самое",
+    "самые",
+    "дорогой",
+    "дорогая",
+    "дешевый",
+    "дешевая",
+    "подороже",
+    "подешевле",
     "добрый",
     "вечер",
     "день",
@@ -7126,7 +11563,10 @@ def _enrich_catalog_color_aliases(
                 if tag not in tags:
                     tags.append(tag)
 
-SIZE_PATTERN = re.compile(r"(?P<value>\d{2,4})(?:\s|\-)?(?P<unit>см|mm|мм|cm|м|kg|кг|g|гр|ml|мл|l|л)", re.IGNORECASE)
+
+SIZE_PATTERN = re.compile(
+    r"(?P<value>\d{2,4})(?:\s|\-)?(?P<unit>см|mm|мм|cm|м|kg|кг|g|гр|ml|мл|l|л)", re.IGNORECASE
+)
 
 
 def _extract_budget(text: str) -> Optional[int]:
@@ -7175,12 +11615,31 @@ def _extract_budget(text: str) -> Optional[int]:
     return max(candidates)
 
 
+def _extract_price_order_intent(text: str) -> Optional[str]:
+    low = str(text or "").lower().replace("ё", "е")
+    if not low:
+        return None
+    if _MAX_PRICE_INTENT_RE.search(low):
+        return "desc"
+    if _MIN_PRICE_INTENT_RE.search(low) or ("подешев" in low) or ("дешев" in low):
+        return "asc"
+    return None
+
+
+def _looks_like_price_objection(text: str) -> bool:
+    low = _normalize_text(text)
+    if not low:
+        return False
+    return any(stem in low for stem in ("дорог", "дешев", "переплат", "цен"))
+
+
 def infer_user_needs(text: str) -> Dict[str, Any]:
     raw = text or ""
     lowered = raw.lower()
     needs: Dict[str, Any] = {}
+    is_address_like_turn = _looks_like_address_value(raw)
 
-    tokens = _tokenize_query(raw)
+    tokens = [] if is_address_like_turn else _tokenize_query(raw)
     keywords = [tok for tok in tokens if tok and tok not in NEEDS_STOPWORDS and not tok.isdigit()]
     if keywords:
         needs["keywords"] = keywords[:6]
@@ -7207,17 +11666,20 @@ def infer_user_needs(text: str) -> Dict[str, Any]:
     budget = _extract_budget(lowered)
     if budget:
         needs["budget_max"] = budget
+    price_order = _extract_price_order_intent(lowered)
+    if price_order:
+        needs["price_order"] = price_order
 
-    for stem, title in COLOR_STEMS.items():
-        if stem in lowered:
-            needs["color"] = title
-            break
+    if not is_address_like_turn:
+        for stem, title in COLOR_STEMS.items():
+            if stem in lowered:
+                needs["color"] = title
+                break
 
-    if "квартир" in lowered:
-        needs["object_type"] = "apartment"
-    elif "частн" in lowered and "дом" in lowered:
-        needs["object_type"] = "house"
-    elif "этаж" in lowered:
+    detected_object_type = _object_type_from_turn_text(lowered)
+    if detected_object_type:
+        needs["object_type"] = detected_object_type
+    elif re.search(r"(?iu)\bэтаж\w*\b", lowered):
         # Heuristic: floor mention most often indicates apartment context.
         needs["object_type"] = "apartment"
 
@@ -7230,8 +11692,8 @@ def infer_user_needs(text: str) -> Dict[str, Any]:
 
 
 def _value_matches(item: Dict[str, Any], fields: Tuple[str, ...], needle: str) -> bool:
-    for field in fields:
-        val = item.get(field)
+    for field_name in fields:
+        val = item.get(field_name)
         if not val:
             continue
         if isinstance(val, (list, tuple, set)):
@@ -7267,12 +11729,16 @@ def _score(item: Dict[str, Any], needs: Dict[str, Any]) -> float:
     size = needs.get("size") or needs.get("width")
     if size:
         size_str = _normalize_text(str(size))
-        if _value_matches(item, ("size", "width", "dimensions", "length", "height", "depth"), size_str):
+        if _value_matches(
+            item, ("size", "width", "dimensions", "length", "height", "depth"), size_str
+        ):
             s += 1.5
 
     color_tokens = needs.get("_color_tokens") or []
     if color_tokens:
-        item_color_aliases = set(str(alias) for alias in (item.get("_color_aliases") or []) if alias)
+        item_color_aliases = set(
+            str(alias) for alias in (item.get("_color_aliases") or []) if alias
+        )
         for token in color_tokens:
             if _value_matches(item, ("color", "finish", "shade", "title", "name", "tags"), token):
                 s += 0.8
@@ -7292,6 +11758,7 @@ def _score(item: Dict[str, Any], needs: Dict[str, Any]) -> float:
 
     return s
 
+
 _WORD_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", re.IGNORECASE)
 
 
@@ -7300,11 +11767,87 @@ def _normalize_text(value: Any) -> str:
     return text.casefold().replace("ё", "е")
 
 
+_LAT_TO_LAT = {chr(c): chr(c) for c in range(ord("a"), ord("z") + 1)}
+_CYR_TO_LAT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+
+def _match_key(value: Any) -> str:
+    text = _normalize_text(value)
+    out: List[str] = []
+    for ch in text:
+        if ch in _LAT_TO_LAT:
+            out.append(_LAT_TO_LAT[ch])
+            continue
+        mapped = _CYR_TO_LAT.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+            continue
+        if ch.isdigit():
+            out.append(ch)
+            continue
+        if ch in {" ", "-", "_", "/"}:
+            out.append(" ")
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
 def _collect_item_text(item: Dict[str, Any]) -> str:
     cached = item.get("_search_text")
     if isinstance(cached, str) and cached:
         return cached
     parts: List[str] = []
+    known_keys = {
+        "title",
+        "name",
+        "sku",
+        "id",
+        "brand",
+        "collection",
+        "category",
+        "series",
+        "model",
+        "color",
+        "material",
+        "decor",
+        "finish",
+        "tags",
+        "description",
+        "notes",
+        "features",
+    }
     for key in (
         "title",
         "name",
@@ -7331,6 +11874,20 @@ def _collect_item_text(item: Dict[str, Any]) -> str:
             parts.extend(str(v) for v in value if v)
         elif value:
             parts.append(str(value))
+    # Include additional populated fields from arbitrary CSV headers so retrieval
+    # can use tenant-specific attributes without hardcoding column names.
+    for key, value in item.items():
+        if key in known_keys or str(key).startswith("_"):
+            continue
+        if isinstance(value, (list, tuple, set)):
+            for val in value:
+                text = str(val or "").strip()
+                if text:
+                    parts.append(f"{key} {text}")
+        else:
+            text = str(value or "").strip()
+            if text:
+                parts.append(f"{key} {text}")
     return " ".join(parts)
 
 
@@ -7352,23 +11909,7 @@ def _tokenize_query(text: str | None) -> List[str]:
 
 
 def _tag_boost(item: Dict[str, Any]) -> float:
-    tags = item.get("tags")
-    if not tags:
-        return 0.0
-    if isinstance(tags, str):
-        normalized = _normalize_text(tags)
-        tags_iterable = [normalized]
-    else:
-        tags_iterable = [_normalize_text(tag) for tag in tags if tag]
-    bonus = 0.0
-    for tag in tags_iterable:
-        if "хит" in tag:
-            bonus += 0.4
-        if "новин" in tag:
-            bonus += 0.2
-        if "склад" in tag:
-            bonus += 0.1
-    return bonus
+    return 0.0
 
 
 def _text_match_score(item: Dict[str, Any], tokens: List[str]) -> float:
@@ -7404,98 +11945,41 @@ def _legacy_rank_catalog(
 ) -> List[Dict[str, Any]]:
     query_tokens = _tokenize_query(query)
     query_low = _normalize_text(query or "")
-    wants_noise = bool(_NOISE_NEED_RE.search(query_low) or needs.get("noise_priority"))
-    wants_insulation = bool(_INSULATION_NEED_RE.search(query_low) or needs.get("insulation_priority"))
+    wants_noise = False
+    wants_insulation = False
     object_type = str(needs.get("object_type") or "").strip().lower()
+    price_order = str(needs.get("price_order") or "").strip().lower()
+    if price_order not in {"asc", "desc"}:
+        price_order = ""
+    price_values = [_item_price_int(dict(item)) for item in items]
+    clean_prices = [int(v) for v in price_values if isinstance(v, int) and v > 0]
+    price_floor = min(clean_prices) if clean_prices else None
+    price_ceil = max(clean_prices) if clean_prices else None
 
     def _item_has_outer_mdf(item: Mapping[str, Any]) -> bool:
-        for raw_key, raw_val in item.items():
-            key = _normalize_text(raw_key)
-            val = _normalize_text(raw_val)
-            if not key or not val:
-                continue
-            if "мдф" in key and ("снаруж" in key or "наруж" in key):
-                if re.search(r"\d", val):
-                    return True
         return False
 
     def _item_has_thermal_break(item: Mapping[str, Any]) -> bool:
-        hay = _normalize_text(_collect_item_text(dict(item)))
-        if any(token in hay for token in ("термо", "терма", "винарит", "арктик")):
-            return True
-        for raw_key, raw_val in item.items():
-            key = _normalize_text(raw_key)
-            val = _normalize_text(raw_val)
-            if "терморазрыв" in key and val and val not in {"нет", "0", "false"}:
-                return True
         return False
 
     def _noise_preference_score(item: Dict[str, Any]) -> float:
-        if not wants_noise and not wants_insulation:
-            return 0.0
-        score = 0.0
-        hay = _normalize_text(_collect_item_text(item))
-        has_noise_feature = False
-        has_outer_mdf = _item_has_outer_mdf(item)
-        has_thermal_break = _item_has_thermal_break(item)
-        if has_outer_mdf:
-            score += 1.8
-            has_noise_feature = True
-        if any(token in hay for token in ("шумо", "шумк", "тих", "акуст")):
-            score += 2.5
-            has_noise_feature = True
-        contour_val: int | None = None
-        has_mdf_panel = has_outer_mdf
-        for raw_key, raw_val in item.items():
-            key = _normalize_text(raw_key)
-            val = _normalize_text(raw_val)
-            if not key or not val:
-                continue
-            if "мдф" in key and re.search(r"\d", val):
-                score += 1.2
-                has_noise_feature = True
-                has_mdf_panel = True
-            if "контур" in key and "уплотн" in key:
-                digits = re.findall(r"\d+", val)
-                if digits:
-                    try:
-                        contour_val = int(digits[0])
-                        if contour_val >= 2:
-                            score += 1.0
-                            has_noise_feature = True
-                    except Exception:
-                        pass
-            if "толщина полотна" in key:
-                digits = re.findall(r"\d+", val)
-                if digits:
-                    try:
-                        if int(digits[0]) >= 70:
-                            score += 0.8
-                            has_noise_feature = True
-                    except Exception:
-                        pass
-        if wants_insulation:
-            if has_outer_mdf:
-                score += 2.2
-            else:
-                score -= 5.0
-            # For apartments, prefer warm two-panel doors without thermal-break bias.
-            if object_type == "apartment" and has_thermal_break:
-                score -= 0.8
-        # If user asked for quiet/noise and item has no noise-related attributes,
-        # down-rank it so silent-focused models come first.
-        if not has_noise_feature:
-            score -= 8.0
-        if contour_val is not None and contour_val <= 1 and not has_mdf_panel:
-            score -= 2.0
-        return score
+        return 0.0
 
     def _total_score(item: Dict[str, Any]) -> float:
         base = _score(item, needs)
         matched = _text_match_score(item, query_tokens)
         tag_bonus = _tag_boost(item)
         noise_bonus = _noise_preference_score(item)
-        return base + matched + tag_bonus + noise_bonus
+        price_bias = 0.0
+        if price_order and price_floor is not None and price_ceil is not None and price_ceil > price_floor:
+            item_price = _item_price_int(dict(item))
+            if isinstance(item_price, int) and item_price > 0:
+                ratio = (item_price - price_floor) / max(1, (price_ceil - price_floor))
+                if price_order == "desc":
+                    price_bias = 3.0 * ratio
+                else:
+                    price_bias = 3.0 * (1.0 - ratio)
+        return base + matched + tag_bonus + noise_bonus + price_bias
 
     scored = sorted(items, key=_total_score, reverse=True)
     if limit <= 0:
@@ -7530,6 +12014,28 @@ def _merge_catalog_results(
     return base
 
 
+def _sort_catalog_by_price_order(
+    items: Sequence[Mapping[str, Any]],
+    order: str,
+) -> List[Dict[str, Any]]:
+    normalized_order = str(order or "").strip().lower()
+    if normalized_order not in {"asc", "desc"}:
+        return [dict(item) for item in items]
+    indexed = list(enumerate(items))
+
+    def _key(entry: Tuple[int, Mapping[str, Any]]) -> Tuple[int, int, int]:
+        idx, item = entry
+        price = _item_price_int(dict(item))
+        if not isinstance(price, int) or price <= 0:
+            return (1, 0, idx)
+        if normalized_order == "desc":
+            return (0, -price, idx)
+        return (0, price, idx)
+
+    indexed.sort(key=_key)
+    return [dict(item) for _, item in indexed]
+
+
 def search_catalog(
     needs: Dict[str, Any],
     limit: int = 5,
@@ -7537,6 +12043,9 @@ def search_catalog(
     query: str | None = None,
 ) -> List[Dict[str, Any]]:
     needs = dict(needs or {})
+    query_price_order = _extract_price_order_intent(str(query or ""))
+    if query_price_order and "price_order" not in needs:
+        needs["price_order"] = query_price_order
     items = _read_catalog(tenant)
     if not items:
         items = _read_catalog(None)
@@ -7550,6 +12059,14 @@ def search_catalog(
     filtered = _filter_catalog_items_by_rules(items, needs, persona_meta) if items else []
     if filtered:
         items = filtered
+
+    explicit_price_order = str(needs.get("price_order") or "").strip().lower()
+    if explicit_price_order in {"asc", "desc"} and items:
+        ranked = _legacy_rank_catalog(items, needs, 0, query)
+        ordered = _sort_catalog_by_price_order(ranked, explicit_price_order)
+        if limit <= 0:
+            return ordered
+        return ordered[:limit]
 
     advanced: List[Dict[str, Any]] = []
     if catalog_retriever and items:
@@ -7582,17 +12099,14 @@ def search_catalog(
 
     return _legacy_rank_catalog(items, needs, limit, query)
 
+
 def format_items_for_prompt(items: List[Dict[str, Any]], currency: str = "₽") -> str:
     if not items:
-        return "— подходящих позиций не найдено."
+        return ""
     out = []
     for idx, it in enumerate(items, start=1):
         title = (
-            it.get("title")
-            or it.get("name")
-            or it.get("sku")
-            or it.get("id")
-            or f"Позиция {idx}"
+            it.get("title") or it.get("name") or it.get("sku") or it.get("id") or f"Позиция {idx}"
         )
         raw_price = str(it.get("price") or "").strip()
         # Берём только первую числовую группу, чтобы не склеивать все цифры из строки/CSV.
@@ -7635,14 +12149,16 @@ def format_items_for_prompt(items: List[Dict[str, Any]], currency: str = "₽") 
         out.append(line)
     return "\n".join(out)
 
+
 def format_needs_for_prompt(needs: Dict[str, Any]) -> str:
     if not needs:
-        return "не распознано"
+        return ""
     parts = []
     for k in ["type", "width", "color", "budget_max"]:
         if k in needs:
             parts.append(f"{k}={needs[k]}")
-    return ", ".join(parts) if parts else "не распознано"
+    return ", ".join(parts) if parts else ""
+
 
 def pick_cta(contact_id: int, channel: str | None, stage: str = "intro") -> Dict[str, str]:
     opts = [
@@ -7675,7 +12191,7 @@ SPIN_TEMPLATES = {
 BANT_TEMPLATES = {
     "budget": [
         "В какой диапазон по {currency} хотите уложиться, чтобы я показал точные варианты?",
-        "Подскажите предел по стоимости, чтобы держать баланс цена/качество?",
+        "",
     ],
     "authority": [
         "Кого ещё стоит подключить к обсуждению, чтобы быстро согласовать заказ?",
@@ -7760,6 +12276,7 @@ def analyze_sentiment_delta(text: str) -> float:
 
     return max(-3.0, min(3.0, score))
 
+
 TIMELINE_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"сегодня|сейчас|в ближайшие сутки", re.IGNORECASE), "сегодня"),
     (re.compile(r"завтра", re.IGNORECASE), "завтра"),
@@ -7809,6 +12326,7 @@ CHALLENGER_PLAYBOOK = {
         },
     ],
 }
+
 
 class SalesConversationEngine:
     def __init__(
@@ -8043,12 +12561,12 @@ class SalesConversationEngine:
             return EMPATHY_POSITIVE_TEMPLATES[idx].format(focus=focus)
         visits = int((self.state.profile or {}).get("visits", 0))
         if visits > 1:
-            return "Рада снова помочь — учитываю прошлые пожелания."
+            return ""
         return ""
 
     def _format_price(self, price: Optional[int], currency: str) -> str:
         if price is None:
-            return "цена по запросу"
+            return ""
         return f"{price:,}".replace(",", " ") + f" {currency}"
 
     def _price_from_item(self, item: Dict[str, Any]) -> Optional[int]:
@@ -8110,14 +12628,18 @@ class SalesConversationEngine:
     def _benefit_hint(self, item: Dict[str, Any]) -> str:
         needs = self.state.needs
         if needs.get("budget_max"):
-            return "Укладывается в ваш бюджет и закрывает задачу без скрытых доплат."
+            return ""
         keywords = needs.get("keywords") or []
         if keywords:
-            return f"Помогает с {keywords[0]} и экономит время на выборе." if keywords else "Подходит под ваш запрос."
+            return (
+                f"Помогает с {keywords[0]} и экономит время на выборе."
+                if keywords
+                else "Подходит под ваш запрос."
+            )
         focus = needs.get("focus") or needs.get("type")
         if focus:
-            return f"Даёт готовое решение по направлению «{focus}»."
-        return "Экономит время и даёт предсказуемый результат."
+            return str(focus or "").strip()
+        return ""
 
     def _fab_block(self, items: List[Dict[str, Any]], currency: str) -> str:
         if not items:
@@ -8148,7 +12670,9 @@ class SalesConversationEngine:
             if value or asked_flag:
                 continue
             template = random.choice(BANT_TEMPLATES[key])
-            question = template.format(currency=currency, focus=focus, city=self.branding.get("CITY", ""))
+            question = template.format(
+                currency=currency, focus=focus, city=self.branding.get("CITY", "")
+            )
             self.state.bant[f"_asked_{key}"] = True
             return question
         return None
@@ -8186,9 +12710,13 @@ class SalesConversationEngine:
         return teach, tailor, control
 
     def _choose_social_proof(self, items: List[Dict[str, Any]]) -> Optional[str]:
-        template = SOCIAL_PROOF_TEMPLATES[self.state.social_proof_cursor % len(SOCIAL_PROOF_TEMPLATES)]
+        template = SOCIAL_PROOF_TEMPLATES[
+            self.state.social_proof_cursor % len(SOCIAL_PROOF_TEMPLATES)
+        ]
         self.state.social_proof_cursor += 1
-        return template.format(brand=self.branding.get("BRAND", "Бренд"), city=self.branding.get("CITY", ""))
+        return template.format(
+            brand=self.branding.get("BRAND", "Бренд"), city=self.branding.get("CITY", "")
+        )
 
     def _choose_scarcity(self, items: List[Dict[str, Any]]) -> Optional[str]:
         stock_values = []
@@ -8205,7 +12733,11 @@ class SalesConversationEngine:
         slot = "завтра"
         if self.state.bant.get("timeline"):
             slot = self.state.bant["timeline"]
-        stock_text = "несколько" if not stock_values else (str(min(stock_values)) if min(stock_values) > 0 else "последние")
+        stock_text = (
+            "несколько"
+            if not stock_values
+            else (str(min(stock_values)) if min(stock_values) > 0 else "последние")
+        )
         return template.format(stock=stock_text, city=self.branding.get("CITY", ""), slot=slot)
 
     def _choose_reciprocity(self) -> Optional[str]:
@@ -8225,20 +12757,21 @@ class SalesConversationEngine:
             return self.persona_hints.cta
         score = self.state.conversion_score
         timeline = self.state.bant.get("timeline")
-        handoff = (self.cfg.get("cta") or {}).get("handoff_wa") if isinstance(self.cfg, dict) else ""
+        handoff = (
+            (self.cfg.get("cta") or {}).get("handoff_wa") if isinstance(self.cfg, dict) else ""
+        )
         sentiment = self.state.sentiment_score
         if sentiment <= -1.2:
-            soothing = "Могу предложить более мягкий вариант или подключить эксперта по нюансам. Продолжим подбор?"
-            return soothing
+            return cta_primary or cta_fallback
         if score >= 1.5 and timeline:
-            return f"Зафиксирую запуск на {timeline}. Подтверждаем — оформляю?"
+            return str(timeline or "").strip()
         if sentiment >= 1.2 and score >= 1.0:
-            return "Готов сразу оформить заказ и зафиксировать цену. Даем старт?"
+            return cta_primary or cta_fallback
         if score <= -1:
-            return "Могу предложить более бюджетный пакет или рассрочку. Продолжаем подбор?"
+            return cta_fallback or cta_primary
         if self.channel_name.lower() == "avito" and handoff:
             return handoff
-        candidate = cta_primary or cta_fallback or "Готов подключиться и довести до заказа — двигаемся?"
+        candidate = cta_primary or cta_fallback
         return candidate
 
     def _personalized_greeting(self) -> str:
@@ -8246,12 +12779,11 @@ class SalesConversationEngine:
         greeting = (self.persona_hints.greeting or default_greeting).strip()
         if not greeting:
             greeting = default_greeting
-        friendly = False
         visits = int((self.state.profile or {}).get("visits", 0))
         if visits > 1:
             addon = "Рады снова вас видеть и продолжить подбор."
             if addon not in greeting:
-                if greeting.endswith(('.', '!', '…')):
+                if greeting.endswith((".", "!", "…")):
                     greeting = f"{greeting.rstrip('.')}. {addon}"
                 else:
                     greeting = f"{greeting}. {addon}"
@@ -8275,11 +12807,13 @@ class SalesConversationEngine:
 
         if pieces:
             joined = ", ".join(pieces)
-            return f"Помню ваши предпочтения по {joined} — покажу то, что действительно откликается."
+            return (
+                f"Помню ваши предпочтения по {joined} — покажу то, что действительно откликается."
+            )
 
         visits = int(profile.get("visits", 0) or 0)
         if visits > 1:
-            return "Учитываю прошлые диалоги и подберу обновлённые варианты."
+            return None
         return None
 
     def build_reply(
@@ -8291,7 +12825,9 @@ class SalesConversationEngine:
         last_user_text: str,
     ) -> str:
         self.register_recommendations(items)
-        max_questions_cfg = int((self.cfg.get("behavior", {}) or {}).get("max_clarifying_questions", 1))
+        max_questions_cfg = int(
+            (self.cfg.get("behavior", {}) or {}).get("max_clarifying_questions", 1)
+        )
         if self.persona_hints.max_questions is not None:
             try:
                 max_questions_cfg = max(0, int(self.persona_hints.max_questions))
@@ -8364,7 +12900,11 @@ class SalesConversationEngine:
             "closing",
         ]
 
-        cleaned = [message_parts[key].strip() for key in ordered_keys if message_parts[key] and message_parts[key].strip()]
+        cleaned = [
+            message_parts[key].strip()
+            for key in ordered_keys
+            if message_parts[key] and message_parts[key].strip()
+        ]
         if self.persona_hints.wants_short():
             prioritized = [
                 message_parts.get("greeting", ""),
@@ -8391,7 +12931,10 @@ class SalesConversationEngine:
                 bant_parts.append(f"{key}={self.state.bant[key]}")
         if not bant_parts:
             bant_parts.append("недостаточно данных")
-        spin_parts = [f"{stage.upper()}={self.state.spin.get(stage, 'pending')}" for stage in ("s", "p", "i", "n")]
+        spin_parts = [
+            f"{stage.upper()}={self.state.spin.get(stage, 'pending')}"
+            for stage in ("s", "p", "i", "n")
+        ]
         pending_question = self.pending_question()
         summary = [
             f"Needs: {needs_summary}",
@@ -8499,7 +13042,7 @@ def record_bot_reply(
     state = load_sales_state(tenant, contact_id)
     channel_name = (channel or brand["CHANNEL"]).strip() or "WhatsApp"
     hints = load_persona_hints(tenant, channel_name)
-    engine = SalesConversationEngine(state, brand, cfg, channel_name, persona_hints=hints)
+    SalesConversationEngine(state, brand, cfg, channel_name, persona_hints=hints)
     if reply:
         state.last_bot_reply = reply.strip()
         state.append_history("assistant", reply.strip())
@@ -8526,7 +13069,9 @@ def make_rule_based_reply(
 
     persona_hints = load_persona_hints(tenant, channel_name)
     state = load_sales_state(tenant, contact_id)
-    engine = SalesConversationEngine(state, branding, cfg, channel_name, persona_hints=persona_hints)
+    engine = SalesConversationEngine(
+        state, branding, cfg, channel_name, persona_hints=persona_hints
+    )
     engine.observe_user(last_user_text or "")
 
     needs = state.needs if state.needs else infer_user_needs(last_user_text or "")
@@ -8559,50 +13104,18 @@ async def build_llm_messages(
     if user_text and user_text != (state.last_user_text or "").strip():
         if state.pending_fact_key:
             _capture_pending_fact_answer(state, user_text)
-        if state.pending_slot:
-            _capture_pending_slot_answer(state, user_text)
-        _maybe_store_model_slot(state, tenant, user_text)
-        needs_update = infer_user_needs(user_text)
-        if needs_update:
-            if not isinstance(state.needs, dict):
-                state.needs = {}
-            for key, value in needs_update.items():
-                if value in (None, "", [], {}, ()):
-                    continue
-                if key == "keywords":
-                    existing = [str(x) for x in (state.needs.get("keywords") or []) if str(x).strip()]
-                    for token in value if isinstance(value, list) else [value]:
-                        token_str = str(token).strip()
-                        if token_str and token_str not in existing:
-                            existing.append(token_str)
-                    if existing:
-                        state.needs["keywords"] = existing[:8]
-                    continue
-                state.needs[key] = value
-                # Promote stable inferred facts into fact memory to avoid repeated clarifications.
-                canonical = _canonical_fact_key(key)
-                if canonical in {"city", "object_type"}:
-                    if not isinstance(state.facts, dict):
-                        state.facts = {}
-                    current_val = str(state.facts.get(canonical) or "").strip()
-                    candidate_val = _safe_short_text(str(value), 80)
-                    if canonical == "city":
-                        if not _is_plausible_city_text(candidate_val):
-                            continue
-                        if (not current_val) or (not _is_plausible_city_text(current_val)):
-                            state.facts[canonical] = candidate_val
-                    else:
-                        if not current_val:
-                            state.facts[canonical] = candidate_val
-        city_hint = _extract_city_hint(user_text)
+        city_hint = _extract_city_hint(user_text, allow_standalone=False)
+        if not city_hint:
+            city_hint = _extract_standalone_city_hint(user_text)
         if city_hint and _is_plausible_city_text(city_hint):
             if not isinstance(state.facts, dict):
                 state.facts = {}
-            city_val = _safe_short_text(city_hint, limit=80)
-            existing_city = str(state.facts.get("city") or "").strip()
-            if (not existing_city) or (not _is_plausible_city_text(existing_city)):
-                state.facts["city"] = city_val
-            if state.pending_fact_key == "city":
+            current_city = str(state.facts.get("city") or "").strip()
+            if not current_city or not _is_plausible_city_text(current_city):
+                city_value = _safe_short_text(city_hint, limit=80)
+                state.facts["city"] = city_value
+                state.known_slots["city"] = city_value
+            if _canonical_fact_key(state.pending_fact_key) == "city":
                 state.pending_fact_key = ""
         state.last_user_text = user_text
         state.append_history("user", user_text)
@@ -8650,6 +13163,8 @@ async def build_llm_messages(
         "- Не начинай ответ с повтора сущности клиента (город/район/модель/имя) + подтверждение.\n"
         "- После выбора клиента не используй оценочные клише. Вместо этого сразу давай конкретный следующий шаг.\n"
         "- Не начинай ответ с повтора города/района в формате «Уфа, понял».\n"
+        "- Не начинай ответ с «Понял», «Поняла», «Спасибо, что уточнили».\n"
+        "- Сначала отвечай на текущий вопрос клиента, потом задавай следующий уместный шаг.\n"
         "- Не закрывай диалог пустой фразой, всегда давай следующий полезный шаг.\n"
         "- Если факт/срок не подтвержден, честно скажи, что уточняешь."
     )
@@ -8670,10 +13185,22 @@ async def build_llm_messages(
             context_items = []
         if context_items:
             catalog_block = format_items_for_prompt(context_items, branding["CURRENCY"])
-            system_blocks.append(
-                "Релевантные позиции каталога:\n"
-                f"{catalog_block}"
+            system_blocks.append("Релевантные позиции каталога:\n" f"{catalog_block}")
+    if tenant is not None:
+        try:
+            catalog_preview = read_all_catalog(tenant=tenant)[:5]
+        except Exception:
+            catalog_preview = []
+        if catalog_preview:
+            preview_block = format_items_for_prompt(
+                [dict(item) for item in list(catalog_preview or [])[:5]],
+                branding["CURRENCY"],
             )
+            system_blocks.append(
+                "Работайте только в рамках каталога этого тенанта. "
+                "Не переходите в другие товарные категории и не придумывайте ассортимент вне каталога."
+            )
+            system_blocks.append("Примеры позиций из каталога:\n" f"{preview_block}")
 
     history_tail = [
         item
@@ -8727,7 +13254,9 @@ def _wrap_llm_reply(
                 plan_payload = plan.to_dict()  # type: ignore[attr-defined]
             except Exception:
                 plan_payload = None
-    return LLMReply(text, plan=plan_payload, raw_answer=raw_answer if raw_answer is not None else text)
+    return LLMReply(
+        text, plan=plan_payload, raw_answer=raw_answer if raw_answer is not None else text
+    )
 
 
 async def _direct_llm_reply(
@@ -8744,6 +13273,11 @@ async def _direct_llm_reply(
         create_fn = _resolve_chat_completion_callable(client)
         if not create_fn:
             raise RuntimeError("openai client missing chat.completions.create")
+        grounding = _build_reply_grounding(
+            tenant=tenant,
+            state=state,
+            user_text=last_user_message,
+        )
 
         variants: List[str] = []
         for _ in range(1):
@@ -8773,19 +13307,26 @@ async def _direct_llm_reply(
         elif len(variants) == 1:
             answer = variants[0]
         else:
-            answer = "\n\n".join([f"Вариант {idx}: {text}" for idx, text in enumerate(variants, start=1)])
+            answer = "\n\n".join(
+                [f"Вариант {idx}: {text}" for idx, text in enumerate(variants, start=1)]
+            )
+        answer = _enforce_catalog_price_grounding(answer, grounding=grounding)
+        answer = _enforce_catalog_truth_guard(
+            answer,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
         dummy_plan = planner.GeneratedPlan()
         enforcement_ctx = _make_enforcement_context(state, persona_hints, channel_name)
         existing_fp = set(enforcement_ctx.asked_fingerprints)
-        refined_answer = quality.enforce_plan_alignment(
-            answer,
-            dummy_plan,
-            persona_hints,
-            context=enforcement_ctx,
+        # Keep the base model answer and run only safety/quality guardrails.
+        refined_answer = answer
+        refined_answer = _enforce_catalog_price_grounding(refined_answer, grounding=grounding)
+        refined_answer = _enforce_catalog_truth_guard(
+            refined_answer,
+            grounding=grounding,
+            user_text=last_user_message,
         )
-        if not refined_answer.strip():
-            refined_answer = answer
-        refined_answer = _humanize_reply_text(refined_answer, state=state, persona_hints=persona_hints)
         refined_answer = _drop_repeated_questions_from_reply(refined_answer, state)
         persona_context = ""
         if messages and str(messages[0].get("role") or "").strip().lower() == "system":
@@ -8796,13 +13337,6 @@ async def _direct_llm_reply(
             fallback_context=persona_context,
         )
         known_facts = _state_facts_snapshot(state)
-        refined_answer = _apply_persona_sequence_obligations(
-            refined_answer,
-            persona_context=persona_rules_context,
-            last_user_message=last_user_message,
-            known_facts=known_facts,
-            state=state,
-        )
         refined_answer = _apply_persona_delivery_obligations(
             refined_answer,
             persona_context=persona_rules_context,
@@ -8813,7 +13347,36 @@ async def _direct_llm_reply(
         )
         refined_answer = _drop_repeated_questions_from_reply(refined_answer, state)
         refined_answer = _enforce_sentence_budget(refined_answer, max_sentences=3)
+        refined_answer = _enforce_catalog_price_grounding(refined_answer, grounding=grounding)
+        refined_answer = _enforce_catalog_truth_guard(
+            refined_answer,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
+        refined_answer = _normalize_catalog_name_case(refined_answer, grounding=grounding)
+        refined_answer = _dedupe_repeated_fact_sentences(refined_answer, state)
+        refined_answer = _strip_instruction_leaks(refined_answer)
+        refined_answer = _drop_repeated_questions_from_reply(refined_answer, state)
+        refined_answer = _enforce_sentence_budget(refined_answer, max_sentences=3)
+        refined_answer = await _audit_and_rewrite_persona_reply(
+            create_fn,
+            model=settings.OPENAI_MODEL,
+            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
+            prepared_messages=messages,
+            answer=refined_answer,
+            last_user_message=last_user_message,
+            state=state,
+            grounding=grounding,
+        )
+        refined_answer = _apply_base_answer_quality_floor(
+            refined_answer,
+            state=state,
+            persona_hints=persona_hints,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
         _apply_plan_alignment_to_state(state, enforcement_ctx, existing_fp)
+        _update_fact_memory(state, refined_answer)
         _remember_questions_from_reply(state, refined_answer)
         save_sales_state(state)
         result = _wrap_llm_reply(refined_answer, plan=dummy_plan, raw_answer=answer)
@@ -8827,12 +13390,7 @@ async def _direct_llm_reply(
         else:
             logger.exception("direct llm call failed", exc_info=exc)
 
-    fallback = _safe_minimal_fallback_reply(
-        tenant=tenant,
-        channel_name=channel_name,
-        contact_ref=contact_ref,
-        last_user_message=last_user_message,
-    )
+    fallback = _llm_unavailable_reply()
     return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
@@ -8892,6 +13450,7 @@ def _build_human_mode_messages(messages: List[Dict[str, str]]) -> List[Dict[str,
     style_guard = (
         "Следуй персоне буквально. "
         "Пиши живо и по-человечески, без канцелярита. "
+        "Не начинай ответ с 'Понял', 'Поняла', 'Спасибо, что уточнили'. "
         "Сообщение: 1-3 коротких предложения, максимум 1 вопрос."
     )
     merged_system = "\n\n".join(chunk for chunk in system_chunks if chunk)
@@ -8915,7 +13474,15 @@ async def _human_llm_reply(
     last_user_message: str,
 ) -> str:
     try:
+        create_fn = _resolve_chat_completion_callable(client)
+        if not create_fn:
+            raise RuntimeError("openai client missing chat.completions.create")
         human_messages = _build_human_mode_messages(messages)
+        grounding = _build_reply_grounding(
+            tenant=tenant,
+            state=state,
+            user_text=last_user_message,
+        )
         plan, answer = await planner.generate_sales_reply(
             human_messages,
             openai_module=client,
@@ -8926,12 +13493,21 @@ async def _human_llm_reply(
         answer = str(answer or "").strip()
         if not answer:
             raise RuntimeError("empty human llm answer")
-        answer = quality.enforce_plan_alignment(
+        answer = _enforce_catalog_price_grounding(answer, grounding=grounding)
+        answer = _enforce_catalog_truth_guard(
             answer,
-            plan,
-            persona_hints,
+            grounding=grounding,
+            user_text=last_user_message,
         )
-        refined = _humanize_reply_text(answer, state=state, persona_hints=persona_hints)
+        # Keep planner answer as-is; no deterministic style rewriting.
+        answer = str(answer or "").strip()
+        refined = answer
+        refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
+        refined = _enforce_catalog_truth_guard(
+            refined,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
         refined = _drop_repeated_questions_from_reply(refined, state)
         persona_context = ""
         if human_messages and str(human_messages[0].get("role") or "").strip().lower() == "system":
@@ -8942,13 +13518,6 @@ async def _human_llm_reply(
             fallback_context=persona_context,
         )
         known_facts = _state_facts_snapshot(state)
-        refined = _apply_persona_sequence_obligations(
-            refined,
-            persona_context=persona_rules_context,
-            last_user_message=last_user_message,
-            known_facts=known_facts,
-            state=state,
-        )
         refined = _apply_persona_delivery_obligations(
             refined,
             persona_context=persona_rules_context,
@@ -8959,6 +13528,35 @@ async def _human_llm_reply(
         )
         refined = _drop_repeated_questions_from_reply(refined, state)
         refined = _enforce_sentence_budget(refined, max_sentences=3)
+        refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
+        refined = _enforce_catalog_truth_guard(
+            refined,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
+        refined = _normalize_catalog_name_case(refined, grounding=grounding)
+        refined = _dedupe_repeated_fact_sentences(refined, state)
+        refined = _strip_instruction_leaks(refined)
+        refined = _drop_repeated_questions_from_reply(refined, state)
+        refined = _enforce_sentence_budget(refined, max_sentences=3)
+        refined = await _audit_and_rewrite_persona_reply(
+            create_fn,
+            model=settings.OPENAI_MODEL,
+            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
+            prepared_messages=human_messages,
+            answer=refined,
+            last_user_message=last_user_message,
+            state=state,
+            grounding=grounding,
+        )
+        refined = _apply_base_answer_quality_floor(
+            refined,
+            state=state,
+            persona_hints=persona_hints,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
+        _update_fact_memory(state, refined)
         _remember_questions_from_reply(state, refined)
         save_sales_state(state)
         result = _wrap_llm_reply(refined, plan=plan.to_dict(), raw_answer=answer)
@@ -8971,12 +13569,7 @@ async def _human_llm_reply(
             logger.warning("human llm quota/rate limited, fallback enabled")
         else:
             logger.exception("human llm failed", exc_info=exc)
-    fallback = _safe_minimal_fallback_reply(
-        tenant=tenant,
-        channel_name=channel_name,
-        contact_ref=contact_ref,
-        last_user_message=last_user_message,
-    )
+    fallback = _llm_unavailable_reply()
     return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
@@ -8990,287 +13583,485 @@ async def _single_llm_reply(
     tenant: int | None,
     last_user_message: str,
 ) -> str:
-    """
-    Unified reply pipeline:
-    one LLM call path for all tenants/channels to simplify behavior tuning.
-    """
+    def _default_policy() -> Dict[str, Any]:
+        return {
+            "action": "respond",
+            "intent": "general",
+            "respond_to_user_question_first": True,
+            "continue_flow": True,
+            "question_strategy": {
+                "should_ask": False,
+                "question_goal": "",
+                "question_fact_key": "",
+            },
+            "claims": [],
+            "fact_updates": [],
+            "selected_item_ref": "",
+            "reply_plan": {
+                "tone": "persona",
+                "brief": True,
+                "ack": True,
+            },
+        }
+
+    def _build_policy_grounding() -> Dict[str, Any]:
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def _append(items: Sequence[Mapping[str, Any]]) -> None:
+            for raw in items or []:
+                item = dict(raw)
+                identity = _catalog_item_identity(item)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                merged.append(item)
+
+        if state.last_items:
+            _append(state.last_items)
+        if tenant is not None:
+            try:
+                _append(search_catalog({}, limit=8, tenant=tenant, query=last_user_message))
+            except Exception:
+                pass
+            if not merged:
+                try:
+                    _append(read_all_catalog(tenant=tenant)[:8])
+                except Exception:
+                    pass
+
+        selected_item: Dict[str, Any] | None = None
+        selected_hint = str((state.facts or {}).get("model") or "").strip()
+        if selected_hint and merged:
+            matched = _best_catalog_item_match(selected_hint, merged)
+            if isinstance(matched, Mapping):
+                selected_item = dict(matched)
+        if selected_item is None and merged:
+            selected_item = dict(merged[0])
+        return {
+            "items": [dict(item) for item in merged[:8]],
+            "selected_item": dict(selected_item) if isinstance(selected_item, Mapping) else None,
+        }
+
+    def _coerce_policy(raw: Mapping[str, Any] | None) -> Dict[str, Any]:
+        plan = _default_policy()
+        if not isinstance(raw, Mapping):
+            return plan
+        plan["action"] = str(raw.get("action") or "respond").strip().lower() or "respond"
+        plan["intent"] = str(raw.get("intent") or "general").strip().lower() or "general"
+        plan["respond_to_user_question_first"] = bool(raw.get("respond_to_user_question_first", True))
+        plan["continue_flow"] = bool(raw.get("continue_flow", True))
+        qs_raw = raw.get("question_strategy")
+        if isinstance(qs_raw, Mapping):
+            plan["question_strategy"] = {
+                "should_ask": bool(qs_raw.get("should_ask", False)),
+                "question_goal": str(qs_raw.get("question_goal") or "").strip(),
+                "question_fact_key": _canonical_fact_key(str(qs_raw.get("question_fact_key") or "")) or "",
+            }
+        rp_raw = raw.get("reply_plan")
+        if isinstance(rp_raw, Mapping):
+            plan["reply_plan"] = {
+                "tone": str(rp_raw.get("tone") or "persona").strip() or "persona",
+                "brief": bool(rp_raw.get("brief", True)),
+                "ack": bool(rp_raw.get("ack", True)),
+            }
+        claims: List[Dict[str, Any]] = []
+        raw_claims = raw.get("claims")
+        if isinstance(raw_claims, Sequence):
+            for item in raw_claims[:16]:
+                if not isinstance(item, Mapping):
+                    continue
+                claims.append(
+                    {
+                        "type": str(item.get("type") or "").strip().lower(),
+                        "subject": str(item.get("subject") or "").strip(),
+                        "attribute": str(item.get("attribute") or "").strip(),
+                        "value": str(item.get("value") or "").strip(),
+                        "confidence": float(item.get("confidence") or 0.0),
+                    }
+                )
+        plan["claims"] = claims
+        updates: List[Dict[str, str]] = []
+        raw_updates = raw.get("fact_updates")
+        if isinstance(raw_updates, Sequence):
+            for item in raw_updates[:16]:
+                if not isinstance(item, Mapping):
+                    continue
+                fact_key = _canonical_fact_key(str(item.get("fact_key") or "")) or _normalize_fact_key(
+                    str(item.get("fact_key") or "")
+                )
+                value = _safe_short_text(str(item.get("value") or ""), 160)
+                if not fact_key or not value:
+                    continue
+                updates.append(
+                    {
+                        "fact_key": fact_key,
+                        "value": value,
+                        "source": str(item.get("source") or "model_inferred").strip() or "model_inferred",
+                    }
+                )
+        plan["fact_updates"] = updates
+        plan["selected_item_ref"] = str(raw.get("selected_item_ref") or "").strip()
+        return plan
+
+    def _match_grounded_item(
+        ref: str,
+        items: Sequence[Mapping[str, Any]],
+        selected_item: Mapping[str, Any] | None,
+    ) -> Dict[str, Any] | None:
+        value = str(ref or "").strip()
+        if not value and isinstance(selected_item, Mapping):
+            return dict(selected_item)
+        if not value:
+            return None
+        value_norm = _normalize_model_alias(value)
+        if not value_norm:
+            return None
+        for item in items:
+            item_map = dict(item)
+            identity = _normalize_model_alias(_catalog_item_identity(item_map))
+            if identity and identity == value_norm:
+                return item_map
+            for alias in _item_aliases(item_map):
+                alias_norm = _normalize_model_alias(alias)
+                if not alias_norm:
+                    continue
+                if alias_norm == value_norm or alias_norm in value_norm or value_norm in alias_norm:
+                    return item_map
+        strict = _strict_catalog_item_match(value, items)
+        if isinstance(strict, Mapping):
+            return dict(strict)
+        best = _best_catalog_item_match(value, items)
+        if isinstance(best, Mapping):
+            return dict(best)
+        return None
+
+    def _validate_policy_claims(
+        policy: Dict[str, Any],
+        grounding_map: Mapping[str, Any],
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
+        allowed_types = {
+            "catalog_attribute",
+            "catalog_price",
+            "catalog_item_identity",
+            "catalog_shortlist_offer",
+            "state_ack",
+            "business_rule",
+            "channel_action",
+            "handoff_action",
+            "soft_sales_claim",
+        }
+        items = [dict(item) for item in _grounding_catalog_items(grounding_map)]
+        selected_item = _selected_item_from_grounding(grounding_map, items)
+        validated: List[Dict[str, Any]] = []
+        dropped: List[str] = []
+
+        for raw in list(policy.get("claims") or []):
+            if not isinstance(raw, Mapping):
+                continue
+            claim_type = str(raw.get("type") or "").strip().lower()
+            if claim_type not in allowed_types:
+                dropped.append("unsupported_claim_type")
+                continue
+            subject = str(raw.get("subject") or "").strip()
+            attribute = str(raw.get("attribute") or "").strip()
+            value = str(raw.get("value") or "").strip()
+            target = _match_grounded_item(subject, items, selected_item)
+
+            if claim_type == "catalog_shortlist_offer":
+                if not items:
+                    dropped.append("shortlist_without_grounding")
+                    continue
+                validated.append(
+                    {
+                        "type": claim_type,
+                        "subject": subject,
+                        "attribute": "",
+                        "value": value,
+                        "confidence": float(raw.get("confidence") or 0.0),
+                    }
+                )
+                continue
+
+            if claim_type == "catalog_item_identity":
+                if not target:
+                    dropped.append("identity_without_match")
+                    continue
+                validated.append(
+                    {
+                        "type": claim_type,
+                        "subject": _display_item_label(target) or _item_label(target),
+                        "attribute": "",
+                        "value": value,
+                        "confidence": float(raw.get("confidence") or 0.0),
+                    }
+                )
+                continue
+
+            if claim_type == "catalog_price":
+                if not target:
+                    dropped.append("price_without_match")
+                    continue
+                price_value = _item_price_int(target)
+                if not isinstance(price_value, int) or price_value <= 0:
+                    dropped.append("price_without_numeric_value")
+                    continue
+                if value:
+                    spans = _extract_price_spans(value)
+                    claim_price = int(spans[0][2]) if spans else None
+                    if claim_price is not None and claim_price != int(price_value):
+                        dropped.append("price_value_mismatch")
+                        continue
+                validated.append(
+                    {
+                        "type": claim_type,
+                        "subject": _display_item_label(target) or _item_label(target),
+                        "attribute": "price",
+                        "value": _format_rub_price(int(price_value)),
+                        "confidence": float(raw.get("confidence") or 0.0),
+                    }
+                )
+                continue
+
+            if claim_type == "catalog_attribute":
+                if not target:
+                    dropped.append("attribute_without_match")
+                    continue
+                attr_norm = _normalize_text(attribute)
+                val_norm = _normalize_text(value)
+                resolved_attr = ""
+                resolved_val = ""
+                for k, v in dict(target).items():
+                    key = str(k or "").strip()
+                    val = str(v or "").strip()
+                    if not key or not val:
+                        continue
+                    key_norm = _normalize_text(key)
+                    if key_norm in {"title", "name", "id", "sku", "url", "price", "_search_text"}:
+                        continue
+                    attr_match = bool(attr_norm and (attr_norm in key_norm or key_norm in attr_norm))
+                    val_match = bool(val_norm and (val_norm in _normalize_text(val) or _normalize_text(val) in val_norm))
+                    if attr_norm and val_norm and not (attr_match and val_match):
+                        continue
+                    if attr_norm and not attr_match:
+                        continue
+                    if val_norm and not val_match:
+                        continue
+                    resolved_attr = key
+                    resolved_val = val
+                    break
+                if not resolved_attr:
+                    dropped.append("attribute_not_grounded")
+                    continue
+                validated.append(
+                    {
+                        "type": claim_type,
+                        "subject": _display_item_label(target) or _item_label(target),
+                        "attribute": resolved_attr,
+                        "value": resolved_val,
+                        "confidence": float(raw.get("confidence") or 0.0),
+                    }
+                )
+                continue
+
+            validated.append(
+                {
+                    "type": claim_type,
+                    "subject": subject,
+                    "attribute": attribute,
+                    "value": value,
+                    "confidence": float(raw.get("confidence") or 0.0),
+                }
+            )
+        return validated, dropped
+
+    def _apply_policy_state_updates(policy: Dict[str, Any], grounding_map: Mapping[str, Any]) -> None:
+        if not isinstance(state.facts, dict):
+            state.facts = {}
+        if not isinstance(state.known_slots, dict):
+            state.known_slots = {}
+
+        for item in list(policy.get("fact_updates") or []):
+            if not isinstance(item, Mapping):
+                continue
+            key = _canonical_fact_key(str(item.get("fact_key") or "")) or _normalize_fact_key(
+                str(item.get("fact_key") or "")
+            )
+            value = _safe_short_text(str(item.get("value") or ""), 160)
+            if not key or not value:
+                continue
+            state.facts[key] = value
+            if key in {"city", "address", "object_type", "model", "budget", "timeline", "contact", "quantity", "color"}:
+                state.known_slots[key] = value
+
+        selected_ref = str(policy.get("selected_item_ref") or "").strip()
+        if selected_ref:
+            items = [dict(item) for item in _grounding_catalog_items(grounding_map)]
+            selected = _selected_item_from_grounding(grounding_map, items)
+            matched = _match_grounded_item(selected_ref, items, selected)
+            if isinstance(matched, Mapping):
+                model_label = _display_item_label(matched) or _item_label(matched)
+                if model_label:
+                    state.facts["model"] = _safe_short_text(model_label, 180)
+                    state.known_slots["model"] = _safe_short_text(model_label, 120)
+                reorder: List[Dict[str, Any]] = [dict(matched)]
+                matched_identity = _catalog_item_identity(dict(matched))
+                for candidate in items:
+                    identity = _catalog_item_identity(dict(candidate))
+                    if identity == matched_identity:
+                        continue
+                    reorder.append(dict(candidate))
+                state.last_items = reorder[:8]
+
+    async def _llm_policy_decision(
+        create_fn: Any,
+        prepared_messages: List[Dict[str, str]],
+        known_facts: Mapping[str, str],
+        grounding_map: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        dialogue_tail = [
+            {"role": str(item.get("role") or ""), "content": str(item.get("content") or "")}
+            for item in prepared_messages
+            if str(item.get("role") or "").strip().lower() in {"user", "assistant"}
+        ][-10:]
+        grounding_preview = format_items_for_prompt(
+            [dict(item) for item in _grounding_catalog_items(grounding_map)[:5]],
+            "₽",
+        )
+        policy_system = (
+            "You are a policy planner for a sales chatbot. "
+            "Return JSON only with schema keys: "
+            "action,intent,respond_to_user_question_first,continue_flow,"
+            "question_strategy,claims,fact_updates,selected_item_ref,reply_plan. "
+            "question_strategy keys: should_ask,question_goal,question_fact_key. "
+            "claims item keys: type,subject,attribute,value,confidence. "
+            "fact_updates item keys: fact_key,value,source. "
+            "Allowed claim types: catalog_attribute,catalog_price,catalog_item_identity,"
+            "catalog_shortlist_offer,state_ack,business_rule,channel_action,handoff_action,soft_sales_claim. "
+            "Always prioritize current user turn over scripted next step."
+        )
+        policy_user = (
+            f"Known facts: {json.dumps(dict(known_facts or {}), ensure_ascii=False)}\n"
+            f"Grounded catalog preview:\n{grounding_preview or 'none'}\n"
+            f"Last user message: {last_user_message}\n"
+            f"Recent dialogue: {json.dumps(dialogue_tail, ensure_ascii=False)}"
+        )
+        try:
+            response = await _llm_call_with_deadline(
+                create_fn,
+                timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": policy_system},
+                    {"role": "user", "content": policy_user},
+                ],
+                temperature=0.0,
+                max_tokens=480,
+                response_format={"type": "json_object"},
+                timeout=settings.OPENAI_TIMEOUT_SECONDS,
+            )
+            choices = getattr(response, "choices", None)
+            if isinstance(choices, list) and choices:
+                msg = getattr(choices[0], "message", None)
+                parsed = _safe_json_load(str(getattr(msg, "content", "") or ""))
+                return _coerce_policy(parsed)
+        except Exception:
+            pass
+        return _default_policy()
+
+    async def _render_policy_reply(
+        create_fn: Any,
+        prepared_messages: List[Dict[str, str]],
+        policy: Mapping[str, Any],
+        grounding_map: Mapping[str, Any],
+    ) -> str:
+        grounding_preview = format_items_for_prompt(
+            [dict(item) for item in _grounding_catalog_items(grounding_map)[:6]],
+            "₽",
+        )
+        render_system = (
+            "Сформируй финальный ответ клиенту. "
+            "Сначала ответь на текущий смысл последней реплики, затем один уместный следующий шаг. "
+            "Следуй персоне и не используй служебные фразы. "
+            "Не начинай с «Понял/Поняла/Спасибо, что уточнили». "
+            "Не выдумывай товары/характеристики вне grounded catalog context. "
+            "1-3 коротких предложения, максимум 1 вопрос."
+        )
+        render_user = (
+            f"Политика (JSON): {json.dumps(dict(policy or {}), ensure_ascii=False)}\n\n"
+            f"Grounded catalog context:\n{grounding_preview or 'none'}\n\n"
+            f"Последняя реплика клиента: {last_user_message}"
+        )
+        response = await _llm_call_with_deadline(
+            create_fn,
+            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
+            model=settings.OPENAI_MODEL,
+            messages=[
+                prepared_messages[0] if prepared_messages else {"role": "system", "content": ""},
+                *prepared_messages[1:],
+                {"role": "system", "content": render_system},
+                {"role": "user", "content": render_user},
+            ],
+            temperature=settings.OPENAI_TEMPERATURE,
+            top_p=0.9,
+            max_tokens=220,
+            timeout=settings.OPENAI_TIMEOUT_SECONDS,
+        )
+        choices = getattr(response, "choices", None)
+        if not (isinstance(choices, list) and choices):
+            return ""
+        message = getattr(choices[0], "message", None)
+        return str(getattr(message, "content", "") or "").strip()
+
     try:
         create_fn = _resolve_chat_completion_callable(client)
         if not create_fn:
             raise RuntimeError("openai client missing chat.completions.create")
+
         prepared_messages = _build_human_mode_messages(messages)
-        grounding = _build_reply_grounding(tenant=tenant, state=state, user_text=last_user_message)
-        known_slots = dict(state.known_slots or {})
+        grounding = _build_policy_grounding()
         known_facts = _state_facts_snapshot(state)
-        turn_intent = _classify_turn_intent(last_user_message, known_facts=known_facts)
-        if turn_intent == "offtopic":
-            refined = "Давайте вернемся к вашему запросу. Что нужно по товару или услуге?"
-            refined = _humanize_reply_text(refined, state=state, persona_hints=persona_hints)
-            refined = _drop_repeated_questions_from_reply(refined, state)
-            state.pending_slot = ""
-            state.pending_fact_key = ""
-            state.last_plan = {"intent": "offtopic_redirect"}
-            _remember_questions_from_reply(state, refined)
-            save_sales_state(state)
-            result = _wrap_llm_reply(refined, plan={"intent": "offtopic_redirect"}, raw_answer=refined)
-            record_bot_reply(contact_ref, tenant, channel_name, str(result))
-            return result
-        semantic = await _semantic_plan(
-            create_fn,
-            model=settings.OPENAI_MODEL,
-            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-            messages=prepared_messages,
-            last_user_message=last_user_message,
-            known_slots=known_slots,
-            known_facts=known_facts,
-            forbidden_question_topics=grounding.get("forbid_question_topics") or [],
-            grounding_items=grounding.get("items") or [],
-        )
-        semantic_fallback = bool(semantic.get("_fallback"))
-        if semantic_fallback:
-            answer = await _render_direct_reply(
-                create_fn,
-                model=settings.OPENAI_MODEL,
-                timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-                prepared_messages=prepared_messages,
-            )
-            if not answer:
-                raise RuntimeError("empty llm direct fallback render")
-            answer = _enforce_catalog_price_grounding(answer, grounding=grounding)
-            answer = _dedupe_repeated_fact_sentences(answer, state)
-            refined = _humanize_reply_text(answer, state=state, persona_hints=persona_hints)
-            refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
-            refined = _dedupe_repeated_fact_sentences(refined, state)
-            refined = await _audit_and_rewrite_persona_reply(
-                create_fn,
-                model=settings.OPENAI_MODEL,
-                timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-                prepared_messages=prepared_messages,
-                answer=refined,
-                last_user_message=last_user_message,
-                state=state,
-            )
-            refined = _humanize_reply_text(refined, state=state, persona_hints=persona_hints)
-            refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
-            refined = _dedupe_repeated_fact_sentences(refined, state)
-            refined = _drop_repeated_questions_from_reply(refined, state)
-            refined = _ensure_urgent_same_day_ack(refined, last_user_message)
-            refined = _ensure_eta_guidance(refined, last_user_message)
-            refined = _enforce_catalog_truth_guard(
-                refined,
-                grounding=grounding,
-                user_text=last_user_message,
-            )
-            refined = _enforce_catalog_truth_guard(
-                refined,
-                grounding=grounding,
-                user_text=last_user_message,
-            )
-            refined = _normalize_catalog_name_case(refined, grounding=grounding)
-            refined = _humanize_reply_text(refined, state=state, persona_hints=persona_hints)
-            persona_context = ""
-            if prepared_messages and str(prepared_messages[0].get("role") or "") == "system":
-                persona_context = str(prepared_messages[0].get("content") or "")
-            persona_rules_context = _resolve_persona_rules_context(
-                tenant=tenant,
-                channel_name=channel_name,
-                fallback_context=persona_context,
-            )
-            refined = _apply_persona_sequence_obligations(
-                refined,
-                persona_context=persona_rules_context,
-                last_user_message=last_user_message,
-                known_facts=known_facts,
-                state=state,
-            )
-            known_facts = _state_facts_snapshot(state)
-            refined, forced_required_key = _enforce_next_required_fact_question(
-                refined,
-                state=state,
-                persona_context=persona_rules_context,
-                known_facts=known_facts,
-                user_text=last_user_message,
-                grounding=grounding,
-            )
-            refined = _ensure_dialog_greeting_on_first_reply(
-                refined,
-                state,
-                persona_context=persona_rules_context,
-            )
-            refined = _enforce_sentence_budget(refined, max_sentences=3)
-            refined = _apply_persona_delivery_obligations(
-                refined,
-                persona_context=persona_rules_context,
-                channel_name=channel_name,
-                last_user_message=last_user_message,
-                known_facts=known_facts,
-                state=state,
-            )
-            refined = _drop_repeated_questions_from_reply(refined, state)
-            state.pending_slot = ""
-            if forced_required_key and _extract_questions_from_text(refined):
-                state.pending_fact_key = _canonical_fact_key(forced_required_key)
-            else:
-                state.pending_fact_key = ""
-            state.last_plan = dict(semantic or {})
-            _update_fact_memory(state, refined)
-            _remember_questions_from_reply(state, refined)
-            save_sales_state(state)
-            result = _wrap_llm_reply(refined, plan=semantic, raw_answer=answer)
-            record_bot_reply(contact_ref, tenant, channel_name, str(result))
-            return result
-        semantic = _enforce_semantic_plan_guards(semantic, state=state, grounding=grounding)
-        facts_update = semantic.get("facts_update")
-        if isinstance(facts_update, Mapping):
-            _merge_fact_updates(state, facts_update)
-            known_facts = _state_facts_snapshot(state)
-        block_requires_override: Dict[int, List[str]] = {}
-        semantic_blocks = semantic.get("blocks")
         persona_context = ""
-        if prepared_messages and str(prepared_messages[0].get("role") or "") == "system":
+        if prepared_messages and str(prepared_messages[0].get("role") or "").strip().lower() == "system":
             persona_context = str(prepared_messages[0].get("content") or "")
         persona_rules_context = _resolve_persona_rules_context(
             tenant=tenant,
             channel_name=channel_name,
             fallback_context=persona_context,
         )
-        required_facts = _normalize_required_facts(semantic.get("required_facts"))
-        persona_required = _required_facts_from_persona_text(persona_rules_context)
-        for fact_key in persona_required:
-            canonical = _canonical_fact_key(fact_key)
-            if canonical and canonical not in required_facts:
-                required_facts.append(canonical)
-        if isinstance(semantic_blocks, list) and semantic_blocks:
-            block_requires_override = await _audit_policy_block_requirements(
-                create_fn,
-                model=settings.OPENAI_MODEL,
-                timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-                persona_context=persona_context,
-                blocks=semantic_blocks,
-                known_facts=known_facts,
-                last_user_message=last_user_message,
-            )
-            block_allowance_override = await _audit_policy_block_allowance(
-                create_fn,
-                model=settings.OPENAI_MODEL,
-                timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-                persona_context=persona_context,
-                blocks=semantic_blocks,
-                known_facts=known_facts,
-                last_user_message=last_user_message,
-            )
-        else:
-            block_allowance_override = {}
-        semantic["_audited_requires"] = dict(block_requires_override or {})
-        semantic["_audited_allowance"] = dict(block_allowance_override or {})
-        semantic["required_facts"] = list(required_facts)
-        composed_answer, next_question_key = _compose_reply_from_policy_blocks(
-            semantic,
-            state=state,
-            known_facts=known_facts,
-            required_facts=required_facts,
-            block_requires_override=block_requires_override,
-            block_allowance_override=block_allowance_override,
-        )
-        answer = composed_answer
+
+        policy = await _llm_policy_decision(create_fn, prepared_messages, known_facts, grounding)
+        validated_claims, dropped_claims = _validate_policy_claims(policy, grounding)
+        policy["claims"] = validated_claims
+        if dropped_claims:
+            policy["dropped_claims"] = dropped_claims
+
+        _apply_policy_state_updates(policy, grounding)
+        known_facts = _state_facts_snapshot(state)
+
+        answer = await _render_policy_reply(create_fn, prepared_messages, policy, grounding)
         if not answer:
-            answer = await _render_from_semantic_plan(
+            answer = await _render_direct_reply(
                 create_fn,
                 model=settings.OPENAI_MODEL,
                 timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
                 prepared_messages=prepared_messages,
-                plan=semantic,
-                known_slots=known_slots,
-                forbidden_question_topics=grounding.get("forbid_question_topics") or [],
             )
         if not answer:
             raise RuntimeError("empty llm render")
-        answer = _enforce_catalog_price_grounding(answer, grounding=grounding)
-        answer = _dedupe_repeated_fact_sentences(answer, state)
-        if not _render_passes_rubric(answer, state):
-            retry_system = (
-                "Перепиши ответ по-человечески. Коротко, без шаблонов, максимум 1 вопрос. "
-                "Запрещены фразы: 'Спасибо, понял', 'Хороший выбор', 'Ваш запрос принят'. "
-                "Не задавай повторный вопрос по уже известным данным."
-            )
-            retry_messages = list(prepared_messages)
-            retry_messages.append({"role": "system", "content": retry_system})
-            retry_messages.append(
-                {
-                    "role": "user",
-                    "content": "План ответа (JSON): " + json.dumps(semantic, ensure_ascii=False),
-                }
-            )
-            retry_resp = await _llm_call_with_deadline(
-                create_fn,
-                timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-                model=settings.OPENAI_MODEL,
-                messages=retry_messages,
-                max_tokens=180,
-                temperature=settings.OPENAI_TEMPERATURE,
-                top_p=0.9,
-                frequency_penalty=0.06,
-                presence_penalty=0.03,
-                timeout=settings.OPENAI_TIMEOUT_SECONDS,
-            )
-            retry_choices = getattr(retry_resp, "choices", None)
-            if isinstance(retry_choices, list) and retry_choices:
-                retry_msg = getattr(retry_choices[0], "message", None)
-                retry_answer = str(getattr(retry_msg, "content", "") or "").strip()
-                if retry_answer:
-                    answer = _enforce_catalog_price_grounding(retry_answer, grounding=grounding)
-                    answer = _dedupe_repeated_fact_sentences(answer, state)
-        refined = _humanize_reply_text(answer, state=state, persona_hints=persona_hints)
-        refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
-        refined = _dedupe_repeated_fact_sentences(refined, state)
-        refined = await _audit_and_rewrite_persona_reply(
-            create_fn,
-            model=settings.OPENAI_MODEL,
-            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
-            prepared_messages=prepared_messages,
-            answer=refined,
-            last_user_message=last_user_message,
+
+        refined = _apply_base_answer_quality_floor(
+            answer,
             state=state,
-        )
-        refined = _humanize_reply_text(refined, state=state, persona_hints=persona_hints)
-        refined = _enforce_catalog_price_grounding(refined, grounding=grounding)
-        refined = _dedupe_repeated_fact_sentences(refined, state)
-        refined = _drop_repeated_questions_from_reply(refined, state)
-        refined = _ensure_urgent_same_day_ack(refined, last_user_message)
-        refined = _ensure_eta_guidance(refined, last_user_message)
-        refined = _enforce_catalog_truth_guard(
-            refined,
+            persona_hints=persona_hints,
             grounding=grounding,
             user_text=last_user_message,
-        )
-        refined = _enforce_catalog_truth_guard(
-            refined,
-            grounding=grounding,
-            user_text=last_user_message,
-        )
-        refined = _normalize_catalog_name_case(refined, grounding=grounding)
-        refined = _humanize_reply_text(refined, state=state, persona_hints=persona_hints)
-        refined = _apply_persona_sequence_obligations(
-            refined,
-            persona_context=persona_rules_context,
-            last_user_message=last_user_message,
-            known_facts=known_facts,
-            state=state,
-        )
-        refined, forced_required_key = _enforce_next_required_fact_question(
-            refined,
-            state=state,
-            persona_context=persona_rules_context,
-            known_facts=known_facts,
-            user_text=last_user_message,
-            grounding=grounding,
         )
         refined = _ensure_dialog_greeting_on_first_reply(
             refined,
             state,
             persona_context=persona_rules_context,
         )
-        refined = _enforce_sentence_budget(refined, max_sentences=3)
         refined = _apply_persona_delivery_obligations(
             refined,
             persona_context=persona_rules_context,
@@ -9279,27 +14070,37 @@ async def _single_llm_reply(
             known_facts=known_facts,
             state=state,
         )
-        refined = _drop_repeated_questions_from_reply(refined, state)
+        refined = await _audit_and_rewrite_persona_reply(
+            create_fn,
+            model=settings.OPENAI_MODEL,
+            timeout_seconds=settings.OPENAI_TIMEOUT_SECONDS,
+            prepared_messages=prepared_messages,
+            answer=refined,
+            last_user_message=last_user_message,
+            state=state,
+            grounding=grounding,
+        )
+        refined = _apply_base_answer_quality_floor(
+            refined,
+            state=state,
+            persona_hints=persona_hints,
+            grounding=grounding,
+            user_text=last_user_message,
+        )
+
         actual_questions = _extract_questions_from_text(refined)
-        question_text = str(semantic.get("question") or "").strip()
-        question_slot = _normalize_slot_name(str(semantic.get("question_slot") or ""), question=question_text)
-        if actual_questions:
-            if question_text and question_slot and question_slot not in {"none", "other"}:
-                state.pending_slot = question_slot
-            else:
-                state.pending_slot = ""
-            if forced_required_key:
-                state.pending_fact_key = _canonical_fact_key(forced_required_key)
-            else:
-                state.pending_fact_key = _canonical_fact_key(next_question_key) if next_question_key else ""
-            _remember_questions_from_reply(state, refined)
+        question_strategy = policy.get("question_strategy")
+        if isinstance(question_strategy, Mapping) and bool(question_strategy.get("should_ask")) and actual_questions:
+            pending_key = _canonical_fact_key(str(question_strategy.get("question_fact_key") or "")) or ""
+            state.pending_fact_key = pending_key
         else:
-            state.pending_slot = ""
             state.pending_fact_key = ""
-        state.last_plan = dict(semantic or {})
+        state.pending_slot = ""
+        state.last_plan = dict(policy or {})
         _update_fact_memory(state, refined)
+        _remember_questions_from_reply(state, refined)
         save_sales_state(state)
-        result = _wrap_llm_reply(refined, plan=semantic, raw_answer=answer)
+        result = _wrap_llm_reply(refined, plan=dict(policy or {}), raw_answer=answer)
         record_bot_reply(contact_ref, tenant, channel_name, str(result))
         return result
     except APITimeoutError as exc:
@@ -9309,12 +14110,7 @@ async def _single_llm_reply(
             logger.warning("single llm quota/rate limited, fallback enabled")
         else:
             logger.exception("single llm failed", exc_info=exc)
-    fallback = _safe_minimal_fallback_reply(
-        tenant=tenant,
-        channel_name=channel_name,
-        contact_ref=contact_ref,
-        last_user_message=last_user_message,
-    )
+    fallback = _llm_unavailable_reply()
     return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
@@ -9334,7 +14130,7 @@ async def ask_llm(
             last = m.get("content") or ""
             break
 
-    channel_name = (channel or "whatsapp")
+    channel_name = channel or "whatsapp"
     contact_ref = int(contact_id or 0)
 
     if _is_unsubscribe_intent(last):
@@ -9352,57 +14148,18 @@ async def ask_llm(
     # Без ключа — быстрый локальный ответ
     client = _get_openai_client()
     if client is None:
-        fallback = _safe_minimal_fallback_reply(
-            tenant=tenant,
-            channel_name=channel_name,
-            contact_ref=contact_ref,
-            last_user_message=last,
-        )
+        fallback = _llm_unavailable_reply()
         return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
     try:
-        openai.api_key = settings.OPENAI_API_KEY  # type: ignore
+        if openai is not None:
+            openai.api_key = settings.OPENAI_API_KEY  # type: ignore
         persona_hints = load_persona_hints(tenant, channel_name)
         state = load_sales_state(tenant, contact_ref)
-        tenant_cfg = None
-        if tenant is not None:
-            try:
-                tenant_cfg = load_tenant(int(tenant))
-            except Exception:
-                tenant_cfg = None
         if last:
             if state.pending_fact_key:
                 _capture_pending_fact_answer(state, last)
-            if state.pending_slot:
-                _capture_pending_slot_answer(state, last)
-            _maybe_store_model_slot(state, tenant, last)
             save_sales_state(state)
-        known_facts = _state_facts_snapshot(state)
-        if _classify_turn_intent(last, known_facts=known_facts) == "offtopic":
-            redirect = "Давайте вернемся к вашему запросу. Что нужно по товару или услуге?"
-            redirect = _humanize_reply_text(redirect, state=state, persona_hints=persona_hints)
-            redirect = _drop_repeated_questions_from_reply(redirect, state)
-            redirect = _enforce_sentence_budget(redirect, max_sentences=3)
-            state.pending_slot = ""
-            state.pending_fact_key = ""
-            state.last_plan = {"intent": "offtopic_redirect"}
-            _remember_questions_from_reply(state, redirect)
-            save_sales_state(state)
-            result = _wrap_llm_reply(redirect, plan={"intent": "offtopic_redirect"}, raw_answer=redirect)
-            record_bot_reply(contact_ref, tenant, channel_name, str(result))
-            return result
-        brain_mode = _resolve_brain_mode(tenant, tenant_cfg)
-        if brain_mode == "classic":
-            return await _human_llm_reply(
-                client,
-                messages,
-                persona_hints,
-                state,
-                channel_name,
-                contact_ref,
-                tenant,
-                last,
-            )
         return await _single_llm_reply(
             client,
             messages,
@@ -9418,32 +14175,49 @@ async def ask_llm(
             logger.warning("ask_llm quota/rate limited, fallback enabled")
         else:
             logger.exception("ask_llm unified path failed", exc_info=exc)
-        fallback = _safe_minimal_fallback_reply(
-            tenant=tenant,
-            channel_name=channel_name,
-            contact_ref=contact_ref,
-            last_user_message=last,
-        )
+        fallback = _llm_unavailable_reply()
         return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
 
 
 __all__ = [
-    "Settings", "settings",
-    "tenant_config", "tenant_waweb_url", "tenant_whatsapp_provider",
+    "Settings",
+    "settings",
+    "tenant_config",
+    "tenant_waweb_url",
+    "tenant_whatsapp_provider",
     "ADMIN_COOKIE",
-    "get_tenant_pubkey", "set_tenant_pubkey",
+    "get_tenant_pubkey",
+    "set_tenant_pubkey",
     "http_json",
-    "tenant_dir", "ensure_tenant_files",
-    "read_tenant_config", "write_tenant_config",
-    "read_persona", "write_persona",
-    "load_tenant", "load_persona", "PersonaHints", "extract_persona_hints", "load_persona_hints",
-    "load_persona_structured", "persona_meta_config", "persona_catalog_pdf", "persona_catalog_csv",
+    "tenant_dir",
+    "ensure_tenant_files",
+    "read_tenant_config",
+    "write_tenant_config",
+    "read_persona",
+    "write_persona",
+    "load_tenant",
+    "load_persona",
+    "PersonaHints",
+    "extract_persona_hints",
+    "load_persona_hints",
+    "load_persona_structured",
+    "persona_meta_config",
+    "persona_catalog_pdf",
+    "persona_catalog_csv",
     "resolve_catalog_pdf_meta",
-    "build_llm_messages", "ask_llm",
+    "build_llm_messages",
+    "ask_llm",
     # helpers ниже могут понадобиться в других частях
-    "infer_user_needs", "search_catalog", "format_needs_for_prompt",
-    "format_items_for_prompt", "pick_cta",
-    "load_sales_state", "save_sales_state", "observe_user_message",
-    "record_bot_reply", "summarize_sales_state",
-    "read_all_catalog", "paginate_catalog_text",
+    "infer_user_needs",
+    "search_catalog",
+    "format_needs_for_prompt",
+    "format_items_for_prompt",
+    "pick_cta",
+    "load_sales_state",
+    "save_sales_state",
+    "observe_user_message",
+    "record_bot_reply",
+    "summarize_sales_state",
+    "read_all_catalog",
+    "paginate_catalog_text",
 ]
