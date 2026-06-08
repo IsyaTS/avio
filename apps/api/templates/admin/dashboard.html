@@ -45,8 +45,8 @@
                     <tr>
                         <th style="width: 160px;">Метка</th>
                         <th>Ключ</th>
-                        <th style="width: 220px;">Ссылка для клиента</th>
-                        <th style="width: 240px;">Действия</th>
+                        <th style="width: 220px;">Ссылка на ЛК</th>
+                        <th style="width: 320px;">Действия</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
@@ -83,7 +83,7 @@
         <h2 class="section-title" style="font-size: 1.35rem;">Подсказки</h2>
         <div class="hint">
             <ul style="margin:0; padding-left: 18px; display: grid; gap: 8px;">
-                <li>Используйте один ключ — ссылка на подключение всегда берётся из блока выше.</li>
+                <li>Основная клиентская ссылка ведёт в ЛК. Отдельная кнопка WhatsApp открывает страницу переподключения.</li>
                 <li>Если waweb потерял сессию, откройте QR и войдите заново в WhatsApp Business.</li>
                 <li>Перед созданием нового ключа удалите текущий, чтобы сохранить доступ.</li>
             </ul>
@@ -123,5 +123,5 @@
     "primary": primary_key,
     "public_base": public_base
 } | tojson }}</script>
-<script src="{{ static_url(request, 'js/admin-dashboard.js') }}" defer></script>
+<script src="{{ static_url(request, 'js/admin-dashboard.js') }}?v={{ ASSET_VERSION }}" defer></script>
 {% endblock %}

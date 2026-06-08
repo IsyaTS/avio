@@ -42,7 +42,7 @@ _TITLE_PRIORITY = (
     "товар",
     "название",
     "наимен",  # наименование
-    "пози",     # позиция
+    "пози",  # позиция
 )
 _PRICE_PRIORITY = (
     "price",
@@ -161,20 +161,34 @@ def normalize_price_value(raw: str) -> str:
 def _normalize_key_name(name: str) -> str:
     def _latin_to_cyrillic_lookalikes(s: str) -> str:
         # Map common Latin lookalikes to Cyrillic to unify keys like "BEC" -> "ВЕС"
-        mapping = str.maketrans({
-            "A": "А", "a": "а",
-            "B": "В", "b": "в",
-            "C": "С", "c": "с",
-            "E": "Е", "e": "е",
-            "H": "Н", "h": "н",
-            "K": "К", "k": "к",
-            "M": "М", "m": "м",
-            "O": "О", "o": "о",
-            "P": "Р", "p": "р",
-            "T": "Т", "t": "т",
-            "X": "Х", "x": "х",
-            "Y": "У", "y": "у",
-        })
+        mapping = str.maketrans(
+            {
+                "A": "А",
+                "a": "а",
+                "B": "В",
+                "b": "в",
+                "C": "С",
+                "c": "с",
+                "E": "Е",
+                "e": "е",
+                "H": "Н",
+                "h": "н",
+                "K": "К",
+                "k": "к",
+                "M": "М",
+                "m": "м",
+                "O": "О",
+                "o": "о",
+                "P": "Р",
+                "p": "р",
+                "T": "Т",
+                "t": "т",
+                "X": "Х",
+                "x": "х",
+                "Y": "У",
+                "y": "у",
+            }
+        )
         return s.translate(mapping)
 
     text = name.strip()
@@ -187,11 +201,36 @@ def _normalize_key_name(name: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     # Heuristic suffix trimming for Russian noun forms
     for suffix in (
-        "ыми", "ими", "ыми", "ями", "ами",
-        "ого", "его", "ому", "ему",
-        "ов", "ев", "ей", "ам", "ям", "ах", "ях",
-        "ой", "ом", "ую", "ую", "ая", "яя",
-        "а", "я", "у", "е", "ю", "ы", "и", "ь",
+        "ыми",
+        "ими",
+        "ыми",
+        "ями",
+        "ами",
+        "ого",
+        "его",
+        "ому",
+        "ему",
+        "ов",
+        "ев",
+        "ей",
+        "ам",
+        "ям",
+        "ах",
+        "ях",
+        "ой",
+        "ом",
+        "ую",
+        "ую",
+        "ая",
+        "яя",
+        "а",
+        "я",
+        "у",
+        "е",
+        "ю",
+        "ы",
+        "и",
+        "ь",
     ):
         if text.endswith(suffix) and len(text) > len(suffix) + 2:
             text = text[: -len(suffix)]
@@ -273,7 +312,9 @@ def _cluster_columns(items: Sequence[MutableMapping[str, str]]) -> Dict[str, str
     return mapping
 
 
-def _apply_column_mapping(items: Sequence[MutableMapping[str, str]], mapping: Mapping[str, str]) -> None:
+def _apply_column_mapping(
+    items: Sequence[MutableMapping[str, str]], mapping: Mapping[str, str]
+) -> None:
     if not mapping:
         return
     for item in items:
@@ -303,7 +344,6 @@ def _drop_columns(items: Sequence[MutableMapping[str, str]]) -> Tuple[Set[str], 
     drop: Set[str] = set()
     for key in keys:
         lower = key.lower()
-        normalized = _normalize_key_name(key)
         # Only drop explicitly banned technical columns; do not drop
         # generic characteristic/description-like columns automatically.
         if lower in banned_lower:
@@ -434,7 +474,9 @@ def _collect_column_frequencies(items: Sequence[Mapping[str, str]]) -> List[str]
     return sorted(freq.keys(), key=lambda name: (-freq[name], name.lower()))
 
 
-def _ensure_unique_titles(items: Sequence[MutableMapping[str, str]], attribute_columns: Sequence[str]) -> List[Tuple[str, str]]:
+def _ensure_unique_titles(
+    items: Sequence[MutableMapping[str, str]], attribute_columns: Sequence[str]
+) -> List[Tuple[str, str]]:
     """Ensure titles are unique by appending distinguishing details.
 
     If duplicates are found, try to append a short variant marker derived from

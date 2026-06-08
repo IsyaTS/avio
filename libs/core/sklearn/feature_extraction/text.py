@@ -6,7 +6,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, List, Sequence
 
 _WORD_RE = re.compile(r"[\w\-]+", re.UNICODE)
 

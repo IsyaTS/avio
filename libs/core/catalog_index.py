@@ -5,6 +5,7 @@ chunks so the bot can search within catalogs without manual conversion
 into CSV.  Indices are stored alongside tenant data to keep uploads and
 metadata colocated.
 """
+
 from __future__ import annotations
 
 import csv
@@ -14,12 +15,9 @@ import logging
 import math
 import re
 import json as _json
-import sys
 import time
 import uuid
-from collections import Counter, defaultdict
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -27,7 +25,6 @@ from libs.core.catalog.pipeline import (
     PipelineReport,
     clean_title as _clean_title,
     finalize_catalog_rows as _finalize_catalog_rows,
-    normalize_price_value as _normalize_price_value,
     sanitize_value as _sanitize_value,
     title_contains_forbidden as _title_contains_forbidden,
 )
@@ -44,16 +41,17 @@ class CatalogIndexError(RuntimeError):
 
 logger = logging.getLogger(__name__)
 
+
 def _decode_pdf_text(raw: bytes) -> str:
     mapping = {
-        ord('n'): '\n',
-        ord('r'): '\r',
-        ord('t'): '\t',
-        ord('b'): '\b',
-        ord('f'): '\f',
-        ord('('): '(',
-        ord(')'): ')',
-        ord('\\'): '\\',
+        ord("n"): "\n",
+        ord("r"): "\r",
+        ord("t"): "\t",
+        ord("b"): "\b",
+        ord("f"): "\f",
+        ord("("): "(",
+        ord(")"): ")",
+        ord("\\"): "\\",
     }
     result_chars: list[str] = []
     idx = 0
@@ -68,6 +66,7 @@ def _decode_pdf_text(raw: bytes) -> str:
         result_chars.append(chr(raw[idx]))
         idx += 1
     return "".join(result_chars)
+
 
 def _extract_pdf_pages(source: Path) -> list[tuple[int, str]]:
     if PdfReader is not None:
@@ -279,15 +278,31 @@ _TRAILING_LAST_LETTER_RE = re.compile(r"([A-Za-zА-Яа-яЁё])\s+([A-Za-zА-Я
 _MULTI_SPACE_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"\S+")
 _NUMBER_RE = re.compile(r"\d[\d\s.,]*")
+
+
 def _load_stop_phrases() -> List[str]:
     candidates: List[str] = [
         # built-ins
-        "watermark", "icecream", "editor", "trial", "demo",
-        "отредактирован", "активируйте", "оглавление", "контакты",
-        "гарантия", "доставка", "акция", "реклама",
-        "водяной знак", "убрать водяной знак", "pro версию",
+        "watermark",
+        "icecream",
+        "editor",
+        "trial",
+        "demo",
+        "отредактирован",
+        "активируйте",
+        "оглавление",
+        "контакты",
+        "гарантия",
+        "доставка",
+        "акция",
+        "реклама",
+        "водяной знак",
+        "убрать водяной знак",
+        "pro версию",
         # common catalog section headers (keep generic)
-        "памятка", "как замерить", "как узнать",
+        "памятка",
+        "как замерить",
+        "как узнать",
         "нас рекомендуют близким",
     ]
     try:
@@ -309,6 +324,7 @@ def _load_stop_phrases() -> List[str]:
             seen.add(low)
             uniq.append(low)
     return uniq
+
 
 _STOP_PHRASES = _load_stop_phrases()
 
@@ -340,23 +356,38 @@ _UNIT_REGEX = re.compile(r"\b(?:мм|см|cm|mm|kg|кг)\b", re.IGNORECASE)
 _LONG_DIGITS_RE = re.compile(r"\d{4,}")
 _PRICE_WINDOW = 2
 
+
 def _latin_to_cyrillic_lookalikes(s: str) -> str:
     if PdfReader is None:
         return s
-    mapping = str.maketrans({
-        "A": "А", "a": "а",
-        "B": "В", "b": "в",
-        "C": "С", "c": "с",
-        "E": "Е", "e": "е",
-        "H": "Н", "h": "н",
-        "K": "К", "k": "к",
-        "M": "М", "m": "м",
-        "O": "О", "o": "о",
-        "P": "Р", "p": "р",
-        "T": "Т", "t": "т",
-        "X": "Х", "x": "х",
-        "Y": "У", "y": "у",
-    })
+    mapping = str.maketrans(
+        {
+            "A": "А",
+            "a": "а",
+            "B": "В",
+            "b": "в",
+            "C": "С",
+            "c": "с",
+            "E": "Е",
+            "e": "е",
+            "H": "Н",
+            "h": "н",
+            "K": "К",
+            "k": "к",
+            "M": "М",
+            "m": "м",
+            "O": "О",
+            "o": "о",
+            "P": "Р",
+            "p": "р",
+            "T": "Т",
+            "t": "т",
+            "X": "Х",
+            "x": "х",
+            "Y": "У",
+            "y": "у",
+        }
+    )
     return s.translate(mapping)
 
 
@@ -417,7 +448,9 @@ def _build_block_lines(text: str) -> List[BlockLine]:
         leading_space = bool(cleaned[:1].isspace())
         stripped = cleaned.rstrip()
         clean_value = _sanitize_value(stripped)
-        lines.append(BlockLine(raw=raw_line, text=stripped, clean=clean_value, leading_space=leading_space))
+        lines.append(
+            BlockLine(raw=raw_line, text=stripped, clean=clean_value, leading_space=leading_space)
+        )
     return lines
 
 
@@ -473,10 +506,12 @@ def _split_embedded_pairs(value: str) -> Tuple[str, List[Tuple[str, str]]]:
                 base = prefix
             base_set = True
         extras.append((match.group(1).strip(), match.group(2).strip().rstrip(".;,*•")))
-        remaining = remaining[match.end():].lstrip()
+        remaining = remaining[match.end() :].lstrip()
         if not remaining:
             break
     return base.strip(), extras
+
+
 _EMBEDDED_PAIR_RE = re.compile(r"([^-\W\d_]{2,}(?:\s+[^-\W\d_]{2,})*)\s+(\d.+)")
 
 
@@ -551,7 +586,13 @@ def _parse_pairs(block: List[BlockLine]) -> Tuple[List[ParsedPair], Set[int]]:
                     value_parts.append(next_line.clean)
                     look_idx += 1
                 if value_parts:
-                    pairs.append(ParsedPair(key=key_raw, value=_sanitize_value(" ".join(value_parts)), line_index=base_idx))
+                    pairs.append(
+                        ParsedPair(
+                            key=key_raw,
+                            value=_sanitize_value(" ".join(value_parts)),
+                            line_index=base_idx,
+                        )
+                    )
                     idx = look_idx
                     continue
             idx += 1
@@ -572,7 +613,10 @@ def _parse_pairs(block: List[BlockLine]) -> Tuple[List[ParsedPair], Set[int]]:
                 stripped = next_line.text.lstrip()
                 if _line_has_pair(next_line.text):
                     break
-                if not (next_line.leading_space or (stripped and (not stripped[0].isalpha() or stripped[0].islower()))):
+                if not (
+                    next_line.leading_space
+                    or (stripped and (not stripped[0].isalpha() or stripped[0].islower()))
+                ):
                     break
                 consumed.add(look_idx)
                 value_parts.append(next_line.clean)
@@ -591,12 +635,12 @@ def _parse_pairs(block: List[BlockLine]) -> Tuple[List[ParsedPair], Set[int]]:
 
 
 def _is_currency_token(token: str) -> bool:
-    cleaned = token.strip().lower().strip('.').strip(',')
+    cleaned = token.strip().lower().strip(".").strip(",")
     return cleaned in _CURRENCY_TOKENS
 
 
 def _is_unit_token(token: str) -> bool:
-    cleaned = token.strip().lower().strip('.').strip(',')
+    cleaned = token.strip().lower().strip(".").strip(",")
     return cleaned in _UNIT_TOKENS
 
 
@@ -613,7 +657,11 @@ def _normalize_price_value(raw: str) -> str:
         # If tokens look like grouped thousands (e.g., "45 000" or "1 200 000"), join them.
         digit_tokens = [re.sub(r"\D", "", p) for p in parts]
         if all(t.isdigit() for t in digit_tokens):
-            if len(digit_tokens) >= 2 and all(len(t) == 3 for t in digit_tokens[1:]) and 1 <= len(digit_tokens[0]) <= 3:
+            if (
+                len(digit_tokens) >= 2
+                and all(len(t) == 3 for t in digit_tokens[1:])
+                and 1 <= len(digit_tokens[0]) <= 3
+            ):
                 cleaned = "".join(digit_tokens)
             else:
                 # Otherwise take the longest standalone token
@@ -623,6 +671,7 @@ def _normalize_price_value(raw: str) -> str:
             def score_part(p: str) -> tuple[int, int]:
                 digits = re.sub(r"\D", "", p)
                 return (len(digits), int(bool(re.search(r"[,\.]", p))))
+
             best = max(parts, key=score_part)
             cleaned = best
     cleaned = cleaned.replace(" ", "").replace(",", ".")
@@ -630,13 +679,13 @@ def _normalize_price_value(raw: str) -> str:
     cleaned = re.sub(r"[^0-9.]", "", cleaned)
     if not cleaned:
         return ""
-    if cleaned.count('.') > 1:
-        parts = cleaned.split('.')
+    if cleaned.count(".") > 1:
+        parts = cleaned.split(".")
         integer = parts[0] + "".join(parts[1:-1])
         fraction = parts[-1]
         cleaned = integer + (f".{fraction}" if fraction else "")
-    elif cleaned.count('.') == 1:
-        integer, fraction = cleaned.split('.')
+    elif cleaned.count(".") == 1:
+        integer, fraction = cleaned.split(".")
         if not fraction:
             cleaned = integer
         elif len(fraction) == 3:
@@ -672,6 +721,7 @@ def _select_price_candidate(block: List[BlockLine]) -> Optional[PriceCandidate]:
         except Exception:
             pass
         return False
+
     # Add explicit big-number candidates (e.g., "33 200") to avoid fragmented matches
     BIG_NUM_RE = re.compile(r"\b(?:\d{1,3}(?:[\u00a0\s]\d{3})+|\d{4,6})\b")
     for match in list(_NUMBER_RE.finditer(joined)) + list(BIG_NUM_RE.finditer(joined)):
@@ -682,12 +732,20 @@ def _select_price_candidate(block: List[BlockLine]) -> Optional[PriceCandidate]:
         # Skip numbers that are part of obvious dimension patterns
         if _is_dimension_context(start, end):
             continue
-        token_indices = [i for i, tok in enumerate(tokens) if tok.start() < end and tok.end() > start]
+        token_indices = [
+            i for i, tok in enumerate(tokens) if tok.start() < end and tok.end() > start
+        ]
         if not token_indices:
             continue
         token_start = token_indices[0]
         token_end = token_indices[-1]
-        context_range = range(max(0, token_start - _PRICE_WINDOW), min(len(tokens), token_end + _PRICE_WINDOW + 1)) if tokens else range(0, 0)
+        context_range = (
+            range(
+                max(0, token_start - _PRICE_WINDOW), min(len(tokens), token_end + _PRICE_WINDOW + 1)
+            )
+            if tokens
+            else range(0, 0)
+        )
         context_tokens = [tokens[i].group() for i in context_range] if tokens else []
         lower_tokens = [tok.lower() for tok in context_tokens]
         weight = 0.0
@@ -726,9 +784,13 @@ def _select_price_candidate(block: List[BlockLine]) -> Optional[PriceCandidate]:
                 hi_candidates.append(candidate)
         except Exception:
             pass
-        if best is None or candidate.weight > best.weight or (
-            math.isclose(candidate.weight, best.weight)
-            and float(candidate.normalized) > float(best.normalized)
+        if (
+            best is None
+            or candidate.weight > best.weight
+            or (
+                math.isclose(candidate.weight, best.weight)
+                and float(candidate.normalized) > float(best.normalized)
+            )
         ):
             best = candidate
     # If the chosen candidate is suspiciously small (<1000) but we saw plausible
@@ -752,24 +814,27 @@ def _is_title_candidate(text: str) -> bool:
         return False
     # Avoid generic section headers
     lowered = text.strip().lower()
-    if any(token in lowered for token in (
-        "характеристик",
-        "технические данные",
-        "параметр",
-        "количество",
-        "толщина",
-        "размер",
-        "ширина",
-        "высота",
-        "диаметр",
-        "цвет",
-        "замки",
-        "муар",
-        "кварц",
-        "материал",
-        "наполн",
-        "в наличии",
-    )):
+    if any(
+        token in lowered
+        for token in (
+            "характеристик",
+            "технические данные",
+            "параметр",
+            "количество",
+            "толщина",
+            "размер",
+            "ширина",
+            "высота",
+            "диаметр",
+            "цвет",
+            "замки",
+            "муар",
+            "кварц",
+            "материал",
+            "наполн",
+            "в наличии",
+        )
+    ):
         return False
     normalized = re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", text)
     digits = sum(ch.isdigit() for ch in normalized)
@@ -832,7 +897,9 @@ def _compute_block_score(
     return score
 
 
-def _build_product_block(chunk: CatalogChunk, block_lines: List[BlockLine], index: int) -> ProductBlock:
+def _build_product_block(
+    chunk: CatalogChunk, block_lines: List[BlockLine], index: int
+) -> ProductBlock:
     pairs, consumed = _parse_pairs(block_lines)
     title_candidates = _find_title_candidates(block_lines, consumed)
     price_candidate = _select_price_candidate(block_lines)
@@ -840,7 +907,9 @@ def _build_product_block(chunk: CatalogChunk, block_lines: List[BlockLine], inde
     chunk_title_candidate = _clean_title(chunk.title)
     if chunk_title_candidate:
         normalized_existing = {cand.lower() for _, cand in title_candidates}
-        if chunk_title_candidate.lower() not in normalized_existing and _is_title_candidate(chunk_title_candidate):
+        if chunk_title_candidate.lower() not in normalized_existing and _is_title_candidate(
+            chunk_title_candidate
+        ):
             title_candidates.append((-1, chunk_title_candidate))
         else:
             # Heuristic: salvage a leading Latin model marker when the chunk title
@@ -848,9 +917,15 @@ def _build_product_block(chunk: CatalogChunk, block_lines: List[BlockLine], inde
             m = re.match(r"^[A-Za-z0-9][A-Za-z0-9\-\s]{3,}", chunk.title.strip())
             if m:
                 prefix = _clean_title(m.group(0))
-                if prefix and prefix.lower() not in normalized_existing and _is_title_candidate(prefix):
+                if (
+                    prefix
+                    and prefix.lower() not in normalized_existing
+                    and _is_title_candidate(prefix)
+                ):
                     title_candidates.append((-1, prefix))
-    score = _compute_block_score(price_candidate, pairs, title_candidates, text, chunk_title_candidate)
+    score = _compute_block_score(
+        price_candidate, pairs, title_candidates, text, chunk_title_candidate
+    )
     return ProductBlock(
         chunk_id=chunk.chunk_id,
         chunk_page=chunk.page,
@@ -905,9 +980,23 @@ def _select_block_title(block: ProductBlock) -> str:
         if len(tokens) == 1:
             low = cleaned.lower()
             bad_single = {
-                "черный", "чёрный", "белый", "серый", "графит", "венге", "дуб",
-                "бук", "букле", "муар", "кварц", "лиственница", "лиственничная",
-                "царга", "панель", "панно", "зеркало",
+                "черный",
+                "чёрный",
+                "белый",
+                "серый",
+                "графит",
+                "венге",
+                "дуб",
+                "бук",
+                "букле",
+                "муар",
+                "кварц",
+                "лиственница",
+                "лиственничная",
+                "царга",
+                "панель",
+                "панно",
+                "зеркало",
             }
             if low in bad_single:
                 score -= 4.0
@@ -925,9 +1014,23 @@ def _select_block_title(block: ProductBlock) -> str:
             candidate = best[1]
             cand_tokens = [t for t in re.split(r"\s+", candidate) if t]
             bad_single = {
-                "черный", "чёрный", "белый", "серый", "графит", "венге", "дуб",
-                "бук", "букле", "муар", "кварц", "лиственница", "лиственничная",
-                "царга", "панель", "панно", "зеркало",
+                "черный",
+                "чёрный",
+                "белый",
+                "серый",
+                "графит",
+                "венге",
+                "дуб",
+                "бук",
+                "букле",
+                "муар",
+                "кварц",
+                "лиственница",
+                "лиственничная",
+                "царга",
+                "панель",
+                "панно",
+                "зеркало",
             }
             if len(cand_tokens) == 1 and candidate.lower() in bad_single:
                 chunk_title = _clean_title(block.chunk_title)
@@ -1009,15 +1112,15 @@ def _block_to_item(block: ProductBlock) -> Dict[str, str]:
 
         for pref in desc_prefixes:
             if lowered.startswith(pref) and len(lowered) > len(pref):
-                suffix = lowered[len(pref):]
+                suffix = lowered[len(pref) :]
                 return f"{pref}{suffix}"
         for pref in qty_prefixes:
             if lowered.startswith(pref) and len(lowered) > len(pref):
-                suffix = lowered[len(pref):]
+                suffix = lowered[len(pref) :]
                 # Drop common glue like 'вналичиипо' or 'по'
                 for glue in ("вналичиипо", "вналичии", "по"):
                     if suffix.startswith(glue):
-                        suffix = suffix[len(glue):]
+                        suffix = suffix[len(glue) :]
                 return suffix or lowered
         # Special handling for lock-related keys: collapse to either 'замков' or 'типзамков'
         if ("замк" in lowered) or ("замок" in lowered) or ("замки" in lowered):
@@ -1083,7 +1186,12 @@ def _write_csv(index_path: Path, header: List[str], rows: List[Dict[str, str]]) 
                 val = row.get(key, "")
                 text = str(val or "")
                 if text:
-                    text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+                    text = (
+                        text.replace("\r\n", " ")
+                        .replace("\r", " ")
+                        .replace("\n", " ")
+                        .replace("\t", " ")
+                    )
                     text = re.sub(r"\s+", " ", text).strip()
                 cleaned[key] = text
             writer.writerow(cleaned)
@@ -1095,6 +1203,7 @@ def _write_manifest(index_path: Path, data: Dict[str, Any]) -> Path:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest_path
+
 
 @dataclass(frozen=True)
 class CatalogIndex:
@@ -1115,11 +1224,11 @@ class CatalogIndex:
             "original_name": self.original_name,
             "generated_at": self.generated_at,
             "sha1": self.sha1,
-        "page_count": self.page_count,
-        "chunk_count": self.chunk_count,
-        "chunks": [chunk.to_dict() for chunk in self.chunks],
-        "index_path": str(self.index_path),
-    }
+            "page_count": self.page_count,
+            "chunk_count": self.chunk_count,
+            "chunks": [chunk.to_dict() for chunk in self.chunks],
+            "index_path": str(self.index_path),
+        }
 
 
 def _hash_file(path: Path) -> str:
@@ -1242,6 +1351,7 @@ def index_to_catalog_items(index: CatalogIndex) -> List[Dict[str, Any]]:
             blocks.append(block)
 
     total_blocks = len(blocks)
+
     def _has_inblock_title(block: ProductBlock) -> bool:
         return any(idx >= 0 for idx, _ in block.title_candidates)
 
@@ -1282,7 +1392,9 @@ def index_to_catalog_items(index: CatalogIndex) -> List[Dict[str, Any]]:
     if raw_items:
         # 1) Run normalization to get unique titles and merged column map
         try:
-            finalized_rows, pipeline_header, report = _finalize_catalog_rows(raw_items, keep_existing_ids=False)
+            finalized_rows, pipeline_header, report = _finalize_catalog_rows(
+                raw_items, keep_existing_ids=False
+            )
         except Exception:
             pipeline_header = ["id", "title", "price"]
             report = PipelineReport(items=len(raw_items), columns=pipeline_header)
@@ -1320,7 +1432,9 @@ def index_to_catalog_items(index: CatalogIndex) -> List[Dict[str, Any]]:
         report = PipelineReport(items=0, columns=header_rich)
         _write_csv(index.index_path, header_rich, [])
 
-    missing_price_blocks = [block for block in kept_blocks if not (block.price and block.price.weight > 0)]
+    missing_price_blocks = [
+        block for block in kept_blocks if not (block.price and block.price.weight > 0)
+    ]
     price_examples: List[Dict[str, Any]] = []
     if kept_blocks:
         missing_ratio = len(missing_price_blocks) / max(len(kept_blocks), 1)
@@ -1353,8 +1467,7 @@ def index_to_catalog_items(index: CatalogIndex) -> List[Dict[str, Any]]:
     }
     if report.duplicate_titles_fixed:
         manifest["duplicate_titles_fixed"] = [
-            {"from": original, "to": updated}
-            for original, updated in report.duplicate_titles_fixed
+            {"from": original, "to": updated} for original, updated in report.duplicate_titles_fixed
         ]
     if price_examples:
         manifest["price_missing_examples"] = price_examples

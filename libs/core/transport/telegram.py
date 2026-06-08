@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -25,10 +24,6 @@ _DEFAULT_WORKER_BASE = (
     else "http://worker:8000"
 )
 
-_client_lock = asyncio.Lock()
-_client: httpx.AsyncClient | None = None
-
-
 def _resolve_base_url() -> str:
     if core_settings is not None:
         candidate = getattr(core_settings, "WORKER_BASE_URL", "") or ""
@@ -44,14 +39,6 @@ def _resolve_base_url() -> str:
                 return cleaned.rstrip("/")
 
     return _DEFAULT_WORKER_BASE
-
-
-async def _get_client(timeout: float) -> httpx.AsyncClient:
-    global _client
-    async with _client_lock:
-        if _client is None or _client.is_closed:
-            _client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
-    return _client
 
 
 async def send(
@@ -145,14 +132,16 @@ async def send(
     url = f"{_resolve_base_url()}/send"
     request_headers = dict(headers or {})
 
+    request_timeout = httpx.Timeout(timeout, connect=min(timeout, 10.0))
     try:
-        client = await _get_client(timeout)
-        response = await client.post(
-            url,
-            json=payload,
-            headers=request_headers,
-            timeout=httpx.Timeout(timeout),
-        )
+        # Use a dedicated client per request for transport stability on large attachments.
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(
+                url,
+                json=payload,
+                headers=request_headers,
+                timeout=request_timeout,
+            )
     except httpx.HTTPError as exc:  # pragma: no cover - network issues
         logger.warning(
             "event=tg_transport_http_error tenant=%s error=%s",
@@ -165,12 +154,8 @@ async def send(
 
 
 async def aclose() -> None:
-    global _client
-    async with _client_lock:
-        client = _client
-        _client = None
-    if client is not None and not client.is_closed:
-        await client.aclose()
+    # Kept for backward compatibility with callers; no shared client to close.
+    return None
 
 
 __all__ = ["send", "aclose"]

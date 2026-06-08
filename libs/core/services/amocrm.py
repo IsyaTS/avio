@@ -68,7 +68,9 @@ def env_base_url(tenant_id: int | None = None) -> str:
     return ""
 
 
-def resolve_oauth_cfg(cfg: Mapping[str, Any] | None, tenant_id: int | None = None) -> dict[str, str]:
+def resolve_oauth_cfg(
+    cfg: Mapping[str, Any] | None, tenant_id: int | None = None
+) -> dict[str, str]:
     if env_oauth_configured(tenant_id):
         return {
             "client_id": _env_value(_ENV_CLIENT_ID, tenant_id),
@@ -352,7 +354,9 @@ def _merge_stage_hints(
     return merged
 
 
-def _pipeline_hint_map(amocrm_cfg: Mapping[str, Any] | None, pipeline_id: int) -> dict[int, list[str]]:
+def _pipeline_hint_map(
+    amocrm_cfg: Mapping[str, Any] | None, pipeline_id: int
+) -> dict[int, list[str]]:
     pipeline_id_val = _coerce_pipeline_id(pipeline_id)
     if pipeline_id_val <= 0 or not isinstance(amocrm_cfg, Mapping):
         return {}
@@ -375,7 +379,9 @@ def _merge_stages_for_pipeline(
     sanitized = _sanitize_stages_for_router(stages)
     if not sanitized:
         return []
-    existing_hint_map = _stage_hints_by_stage_id(amocrm_cfg.get("stages") if isinstance(amocrm_cfg, Mapping) else None)
+    existing_hint_map = _stage_hints_by_stage_id(
+        amocrm_cfg.get("stages") if isinstance(amocrm_cfg, Mapping) else None
+    )
     pipeline_hint_map = _pipeline_hint_map(amocrm_cfg, pipeline_id)
     return _merge_stage_hints(sanitized, pipeline_hint_map, existing_hint_map)
 
@@ -609,7 +615,7 @@ def _resolve_pipeline_id_for_channel(
     if channel_value == "avito":
         selected = _coerce_pipeline_id(amocrm_cfg.get("pipeline_id_avito"))
         return selected or fallback_pipeline_id
-    if channel_value in {"telegram", "max"}:
+    if channel_value in {"telegram", "max", "max_personal"}:
         selected = _coerce_pipeline_id(amocrm_cfg.get("pipeline_id_tgmax"))
         return selected or fallback_pipeline_id
     return fallback_pipeline_id
@@ -692,6 +698,7 @@ async def ensure_pipeline_stages(
     updated_cfg["integrations"] = integrations
     core_module.write_tenant_config(int(tenant_id), updated_cfg)
     return stages
+
 
 def mask_amocrm_cfg(
     cfg: Mapping[str, Any] | None,
@@ -843,7 +850,9 @@ def build_stages_from_statuses(statuses: Sequence[Mapping[str, Any]]) -> list[di
     return _build_default_stages(statuses)
 
 
-def _coerce_int(value: Any, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+def _coerce_int(
+    value: Any, default: int, *, min_value: int | None = None, max_value: int | None = None
+) -> int:
     try:
         parsed = int(value)
     except Exception:
@@ -900,11 +909,12 @@ def _normalize_rules_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
     )
     timeout_seconds = _coerce_float(
         options.get("stage_router_timeout_seconds"),
-        _coerce_float(getattr(core_module.settings, "OPENAI_TIMEOUT_SECONDS", 4.0), 4.0, min_value=2.0),
+        _coerce_float(
+            getattr(core_module.settings, "OPENAI_TIMEOUT_SECONDS", 4.0), 4.0, min_value=2.0
+        ),
         min_value=2.0,
         max_value=30.0,
     )
-    history_limit = _coerce_int(options.get("stage_router_history_limit"), 6, min_value=3, max_value=20)
     return {
         "stage_router_mode": mode,
         "stage_router_model": str(
@@ -957,7 +967,9 @@ def _parse_stage_router_decision(payload: Any) -> dict[str, Any] | None:
     reason = str(payload.get("reason") or "").strip()[:500]
     missing_fields_raw = payload.get("missing_fields")
     missing_fields: list[str] = []
-    if isinstance(missing_fields_raw, Sequence) and not isinstance(missing_fields_raw, (str, bytes)):
+    if isinstance(missing_fields_raw, Sequence) and not isinstance(
+        missing_fields_raw, (str, bytes)
+    ):
         for item in missing_fields_raw:
             value = str(item or "").strip()
             if value:
@@ -981,6 +993,32 @@ def _parse_stage_router_decision(payload: Any) -> dict[str, Any] | None:
         "missing_fields": missing_fields,
         "evidence": evidence,
     }
+
+
+def _parse_json_object_forgiving(content: str) -> Mapping[str, Any] | None:
+    text = str(content or "").strip()
+    if not text:
+        return None
+    candidates: list[str] = [text]
+    if text.startswith("```"):
+        stripped = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```\s*$", "", stripped, flags=re.IGNORECASE)
+        if stripped and stripped != text:
+            candidates.append(stripped.strip())
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace >= 0 and last_brace > first_brace:
+        fragment = text[first_brace : last_brace + 1].strip()
+        if fragment and fragment not in candidates:
+            candidates.append(fragment)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, Mapping):
+            return parsed
+    return None
 
 
 def _normalize_stage_fact_role(value: Any) -> str:
@@ -1106,7 +1144,9 @@ def _parse_stage_checks(payload: Any, *, allowed_targets: Sequence[int]) -> list
                 else:
                     quote = str(item or "").strip()
                     if quote:
-                        evidence.append({"quote": quote[:180], "source_role": "unknown", "is_new": False})
+                        evidence.append(
+                            {"quote": quote[:180], "source_role": "unknown", "is_new": False}
+                        )
         checks.append(
             {
                 "target_stage_index": target,
@@ -1115,6 +1155,11 @@ def _parse_stage_checks(payload: Any, *, allowed_targets: Sequence[int]) -> list
                 "reason": reason,
                 "missing_fields": missing,
                 "evidence": evidence,
+                "hints_satisfied": (
+                    None
+                    if raw.get("hints_satisfied") is None
+                    else bool(raw.get("hints_satisfied"))
+                ),
             }
         )
     return checks
@@ -1129,7 +1174,9 @@ def _stage_suggestion_signature(
     payload = {
         "target": int(target_stage_index),
         "missing": sorted(set(mf)),
-        "has_evidence": bool([str(x or "").strip() for x in (evidence or []) if str(x or "").strip()]),
+        "has_evidence": bool(
+            [str(x or "").strip() for x in (evidence or []) if str(x or "").strip()]
+        ),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return str(abs(hash(raw)))
@@ -1148,11 +1195,15 @@ def _supported_evidence(
         variants = {normalized}
         if normalized[-1] in {"а", "я", "ы", "и", "у", "е", "о", "ю"} and len(normalized) >= 3:
             variants.add(normalized[:-1])
-        if len(normalized) >= 5 and normalized.endswith(("ого", "ему", "ыми", "ами", "ях", "ах", "ов", "ев")):
+        if len(normalized) >= 5 and normalized.endswith(
+            ("ого", "ему", "ыми", "ами", "ях", "ах", "ов", "ев")
+        ):
             variants.add(normalized[:-2])
         return variants
 
-    source = " ".join([str(history_text or "").strip(), str(last_text or "").strip()]).strip().lower()
+    source = (
+        " ".join([str(history_text or "").strip(), str(last_text or "").strip()]).strip().lower()
+    )
     source = " ".join(source.split())
     if not source:
         return []
@@ -1168,7 +1219,7 @@ def _supported_evidence(
             continue
         last_tokens.update(_token_variants(token))
     supported: list[str] = []
-    for item in (evidence or []):
+    for item in evidence or []:
         raw_item = str(item or "").strip()
         value = " ".join(raw_item.lower().split())
         if len(value) < 3:
@@ -1258,7 +1309,9 @@ async def _decide_next_stage_llm(
     if not callable(create_fn):
         return None
 
-    current_index = _coerce_int(current_stage_index, 0, min_value=0, max_value=max(0, len(stages) - 1))
+    current_index = _coerce_int(
+        current_stage_index, 0, min_value=0, max_value=max(0, len(stages) - 1)
+    )
     max_jump = _coerce_int(options.get("stage_router_max_stage_jump"), 1, min_value=1, max_value=3)
     allowed_targets = list(range(current_index + 1, min(len(stages), current_index + max_jump + 1)))
 
@@ -1291,17 +1344,22 @@ async def _decide_next_stage_llm(
             text = str(item.get("text") or "").strip()
             if not text or role == "system":
                 continue
-            history_payload.append({"role": role if role != "unknown" else "lead", "text": text[:500]})
+            history_payload.append(
+                {"role": role if role != "unknown" else "lead", "text": text[:500]}
+            )
     if not history_payload and history_text:
         history_payload = _parse_stage_router_history_items(str(history_text).splitlines())
     messages = [
         {
             "role": "system",
             "content": (
-                "Ты анализатор автоперехода стадий amoCRM. Возвращай только JSON. "
+                "Ты анализатор автоперехода стадий amoCRM. Возвращай только JSON-объект без markdown. "
                 "Не используй системные сообщения как факт клиента. "
                 "Учитывай роли источника фактов: lead/manager/bot. "
                 "Для каждой allowed стадии оцени готовность через stage_checks и hints целевой стадии. "
+                "Hints — это правила допуска в стадию, а не цитаты; применяй их как критерии ready/missing_fields. "
+                "Если hints стадии не выполнены — ready=false и перечисли, чего не хватает, в missing_fields. "
+                "Пиши кратко: reason до 120 символов, missing_fields до 3 элементов, evidence до 2 коротких цитат. "
                 "Если доказательств недостаточно — ready=false и укажи missing_fields. "
                 "Не предлагай target_stage_index вне allowed_target_indexes."
             ),
@@ -1334,13 +1392,8 @@ async def _decide_next_stage_llm(
                                 "confidence": "float(0..1)",
                                 "reason": "short string",
                                 "missing_fields": ["field1", "field2"],
-                                "evidence": [
-                                    {
-                                        "quote": "short quote",
-                                        "source_role": "lead|manager|bot|system",
-                                        "is_new": "bool",
-                                    }
-                                ],
+                                "evidence": ["short quote"],
+                                "hints_satisfied": "bool|null",
                             }
                         ],
                     },
@@ -1349,7 +1402,9 @@ async def _decide_next_stage_llm(
             ),
         },
     ]
-    timeout_seconds = _coerce_float(options.get("stage_router_timeout_seconds"), 4.0, min_value=2.0, max_value=30.0)
+    timeout_seconds = _coerce_float(
+        options.get("stage_router_timeout_seconds"), 4.0, min_value=2.0, max_value=30.0
+    )
     model = str(options.get("stage_router_model") or "").strip() or "gpt-4o-mini"
     try:
         response = await asyncio.wait_for(
@@ -1357,7 +1412,7 @@ async def _decide_next_stage_llm(
                 create_fn,
                 model=model,
                 temperature=0,
-                max_tokens=220,
+                max_tokens=360,
                 response_format={"type": "json_object"},
                 messages=messages,
                 timeout=timeout_seconds,
@@ -1373,10 +1428,13 @@ async def _decide_next_stage_llm(
         content = ""
     if not content:
         return None
-    try:
-        raw = json.loads(content)
-    except Exception:
-        logger.warning("amocrm_stage_router_invalid_json content=%s", content[:300])
+    raw = _parse_json_object_forgiving(content)
+    if not isinstance(raw, Mapping):
+        logger.warning(
+            "amocrm_stage_router_invalid_json len=%s content=%s",
+            len(content),
+            content[:300],
+        )
         return None
     decision = _parse_stage_router_decision(raw)
     if not decision:
@@ -1405,21 +1463,26 @@ async def _decide_next_stage_llm(
             return {
                 "action": "NOOP",
                 "target_stage_index": -1,
-                "confidence": _coerce_float(decision.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
+                "confidence": _coerce_float(
+                    decision.get("confidence"), 0.0, min_value=0.0, max_value=1.0
+                ),
                 "reason": "move_with_missing_fields",
                 "missing_fields": list(decision.get("missing_fields") or []),
                 "evidence": list(decision.get("evidence") or []),
                 "stage_checks": stage_checks,
             }
         if stage_checks and not any(
-            int(item.get("target_stage_index") or -1) == target_stage_index and bool(item.get("ready"))
+            int(item.get("target_stage_index") or -1) == target_stage_index
+            and bool(item.get("ready"))
             for item in stage_checks
             if isinstance(item, Mapping)
         ):
             return {
                 "action": "NOOP",
                 "target_stage_index": -1,
-                "confidence": _coerce_float(decision.get("confidence"), 0.0, min_value=0.0, max_value=1.0),
+                "confidence": _coerce_float(
+                    decision.get("confidence"), 0.0, min_value=0.0, max_value=1.0
+                ),
                 "reason": "target_not_ready_by_stage_checks",
                 "missing_fields": list(decision.get("missing_fields") or []),
                 "evidence": list(decision.get("evidence") or []),
@@ -1455,6 +1518,7 @@ async def resolve_api_base_url(
     if api_domain:
         return f"https://{api_domain}".rstrip("/")
     return ""
+
 
 def _amocrm_name(value: Any, *, allow_at: bool) -> str | None:
     cleaned = sanitize_display_name(value)
@@ -1542,7 +1606,9 @@ async def amocrm_on_inbound_message(
                 attachments=list(attachments) if attachments else None,
             )
         except Exception:
-            logger.exception("amocrm_chat_enqueue_failed tenant=%s lead=%s direction=in", tenant_id, lead_id)
+            logger.exception(
+                "amocrm_chat_enqueue_failed tenant=%s lead=%s direction=in", tenant_id, lead_id
+            )
 
 
 async def amocrm_on_outbound_message(
@@ -1577,7 +1643,9 @@ async def amocrm_on_outbound_message(
                 attachments=list(attachments) if attachments else None,
             )
         except Exception:
-            logger.exception("amocrm_chat_enqueue_failed tenant=%s lead=%s direction=out", tenant_id, lead_id)
+            logger.exception(
+                "amocrm_chat_enqueue_failed tenant=%s lead=%s direction=out", tenant_id, lead_id
+            )
 
 
 async def _amocrm_on_message(
@@ -1595,7 +1663,9 @@ async def _amocrm_on_message(
     if not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
         return
     channel_value = str(channel or "").strip().lower()
-    chat_mode = channel_value in {"telegram", "avito"} and amocrm_chat.is_enabled(cfg, int(tenant_id))
+    chat_mode = channel_value in {"telegram", "avito"} and amocrm_chat.is_enabled(
+        cfg, int(tenant_id)
+    )
 
     token_entry = await amocrm_tokens.get(int(tenant_id))
     if not token_entry or not token_entry.access_token:
@@ -1623,11 +1693,14 @@ async def _amocrm_on_message(
         pipeline_id, stages = ensured
         cfg = core_module.read_tenant_config(int(tenant_id))
         amocrm_cfg = _amocrm_cfg(cfg) or amocrm_cfg
-    selected_pipeline_id = _resolve_pipeline_id_for_channel(
-        amocrm_cfg,
-        channel=channel_value,
-        fallback_pipeline_id=pipeline_id,
-    ) or pipeline_id
+    selected_pipeline_id = (
+        _resolve_pipeline_id_for_channel(
+            amocrm_cfg,
+            channel=channel_value,
+            fallback_pipeline_id=pipeline_id,
+        )
+        or pipeline_id
+    )
     # Always hydrate selected pipeline stages via per-pipeline cache refresh.
     # This keeps amoCRM stage hints/descriptions in sync even when legacy
     # top-level `stages` exists but is stale or missing hints.
@@ -1698,7 +1771,9 @@ async def _amocrm_on_message(
             last_text=last_text,
             history_text=history_text,
         )
-        existing_fields = await crm_fields.list_fields(int(tenant_id), int(lead_id), AMOCRM_PROVIDER)
+        existing_fields = await crm_fields.list_fields(
+            int(tenant_id), int(lead_id), AMOCRM_PROVIDER
+        )
         existing_map = {
             str(item.get("field_key")): str(item.get("field_value"))
             for item in existing_fields
@@ -1728,7 +1803,9 @@ async def _amocrm_on_message(
 
     if not extracted_map:
         try:
-            existing_fields = await crm_fields.list_fields(int(tenant_id), int(lead_id), AMOCRM_PROVIDER)
+            existing_fields = await crm_fields.list_fields(
+                int(tenant_id), int(lead_id), AMOCRM_PROVIDER
+            )
             existing_snapshot = {
                 str(item.get("field_key")): str(item.get("field_value"))
                 for item in existing_fields or []
@@ -1793,7 +1870,9 @@ async def _amocrm_on_message(
             provider_lead_id = link.get("provider_lead_id") if isinstance(link, Mapping) else None
 
     if (not link or not provider_lead_id) and is_inbound and phone_value:
-        resolved_contact_id, resolved_lead_id = await _resolve_existing_target_by_phone(client, phone_value)
+        resolved_contact_id, resolved_lead_id = await _resolve_existing_target_by_phone(
+            client, phone_value
+        )
         if resolved_lead_id:
             if not link:
                 await crm_links.create_link(
@@ -1882,7 +1961,9 @@ async def _amocrm_on_message(
                 contact_phone = await db_module.get_contact_phone_by_lead(int(lead_id))
             except Exception:
                 contact_phone = None
-        contact_name = sanitize_display_name(extracted_map.get("name")) or resolved_contact_name or lead_name
+        contact_name = (
+            sanitize_display_name(extracted_map.get("name")) or resolved_contact_name or lead_name
+        )
         # Guard against duplicate create_lead when multiple inbound messages arrive
         # before the first create_lead event is consumed by the worker.
         already_create_queued = await crm_outbox.has_recent_event_type(
@@ -1987,7 +2068,9 @@ async def _amocrm_on_message(
                     note_text = f"{prefix} {body}".strip()
             if notes_enabled:
                 extra_note = _build_note_text(
-                    template=str(notes_cfg.get("template") or "") if isinstance(notes_cfg, Mapping) else "",
+                    template=str(notes_cfg.get("template") or "")
+                    if isinstance(notes_cfg, Mapping)
+                    else "",
                     channel=channel,
                     last_text=last_text,
                     fields=extracted_map,
@@ -2167,7 +2250,9 @@ async def _amocrm_on_message(
     if stage_eval_enabled:
         options = _normalize_rules_options(amocrm_cfg)
         stage_mode = str(options.get("stage_router_mode") or "auto").strip().lower()
-        history_limit = _coerce_int(options.get("stage_router_history_limit"), 6, min_value=3, max_value=20)
+        history_limit = _coerce_int(
+            options.get("stage_router_history_limit"), 6, min_value=3, max_value=20
+        )
         history_text = ""
         history_items: list[dict[str, str]] = []
         try:
@@ -2209,10 +2294,12 @@ async def _amocrm_on_message(
         decision_evidence: list[str] = []
         supported_evidence: list[str] = []
         supported_stage_hints: list[str] = []
-        selected_stage_check: dict[str, Any] | None = None
+        selected_check_hints_satisfied: bool | None = None
         llm_decision: dict[str, Any] | None = None
         if stage_mode in {"auto", "semi_auto"} and current_message_role != "system":
-            max_jump = _coerce_int(options.get("stage_router_max_stage_jump"), 1, min_value=1, max_value=3)
+            max_jump = _coerce_int(
+                options.get("stage_router_max_stage_jump"), 1, min_value=1, max_value=3
+            )
             allowed_targets = list(
                 range(
                     int(current_stage_index) + 1,
@@ -2232,7 +2319,9 @@ async def _amocrm_on_message(
             )
             if llm_decision:
                 decision_source = "llm"
-                decision_action = str(llm_decision.get("action") or "NOOP").strip().upper() or "NOOP"
+                decision_action = (
+                    str(llm_decision.get("action") or "NOOP").strip().upper() or "NOOP"
+                )
                 decision_reason = str(llm_decision.get("reason") or "").strip()
                 decision_confidence = _coerce_float(
                     llm_decision.get("confidence"),
@@ -2256,7 +2345,9 @@ async def _amocrm_on_message(
                     history_text=history_text,
                 )
                 raw_stage_checks = llm_decision.get("stage_checks")
-                stage_checks = _parse_stage_checks(raw_stage_checks, allowed_targets=allowed_targets)
+                stage_checks = _parse_stage_checks(
+                    raw_stage_checks, allowed_targets=allowed_targets
+                )
                 if (
                     not stage_checks
                     and decision_action == "MOVE_STAGE"
@@ -2289,7 +2380,11 @@ async def _amocrm_on_message(
                     if target_idx in allowed_targets:
                         checks_by_target[target_idx] = dict(check)
                 threshold = _coerce_float(
-                    options.get("stage_router_confidence_auto" if stage_mode == "auto" else "stage_router_confidence_semi"),
+                    options.get(
+                        "stage_router_confidence_auto"
+                        if stage_mode == "auto"
+                        else "stage_router_confidence_semi"
+                    ),
                     0.72 if stage_mode == "auto" else 0.45,
                     min_value=0.0,
                     max_value=1.0,
@@ -2300,7 +2395,9 @@ async def _amocrm_on_message(
                         break
                     if not bool(check.get("ready")):
                         break
-                    check_conf = _coerce_float(check.get("confidence"), 0.0, min_value=0.0, max_value=1.0)
+                    check_conf = _coerce_float(
+                        check.get("confidence"), 0.0, min_value=0.0, max_value=1.0
+                    )
                     if check_conf < threshold:
                         break
                     check_missing = [
@@ -2309,6 +2406,24 @@ async def _amocrm_on_message(
                         if str(item or "").strip()
                     ]
                     if check_missing:
+                        break
+                    target_stage_cfg = (
+                        stages[target_idx]
+                        if 0 <= int(target_idx) < len(stages)
+                        else None
+                    )
+                    stage_hints = (
+                        _flatten_stage_hints(target_stage_cfg.get("hints"))
+                        if isinstance(target_stage_cfg, Mapping)
+                        else []
+                    )
+                    raw_hints_satisfied = check.get("hints_satisfied")
+                    hints_satisfied = (
+                        None
+                        if raw_hints_satisfied is None
+                        else bool(raw_hints_satisfied)
+                    )
+                    if stage_hints and hints_satisfied is False:
                         break
                     check_evidence_items = check.get("evidence")
                     evidence_quotes: list[str] = []
@@ -2338,13 +2453,15 @@ async def _amocrm_on_message(
                     if not check_supported and not has_new_evidence:
                         break
                     next_stage = int(target_idx)
-                    selected_stage_check = dict(check)
                     decision_confidence = check_conf
                     decision_reason = str(check.get("reason") or decision_reason or "").strip()
                     decision_missing_fields = check_missing
                     decision_evidence = list(evidence_quotes)
+                    selected_check_hints_satisfied = hints_satisfied
                     if check_supported:
                         supported_evidence = list(check_supported)
+                    if stage_hints and (hints_satisfied is not False):
+                        supported_stage_hints = list(stage_hints)
                 if next_stage is None and decision_action in {"ASK_MANAGER", "NOOP"}:
                     next_stage = None
                 if next_stage is not None:
@@ -2356,12 +2473,10 @@ async def _amocrm_on_message(
             if isinstance(candidate, Mapping):
                 next_rule_type = str(candidate.get("type") or "").strip().lower()
                 stage_hints = _flatten_stage_hints(candidate.get("hints"))
-                if stage_hints:
-                    supported_stage_hints = _supported_evidence(
-                        stage_hints,
-                        last_text=last_text,
-                        history_text=history_text,
-                    )
+                if stage_hints and not supported_stage_hints and not decision_missing_fields:
+                    # Hints are stage rules; when check is ready without missing_fields,
+                    # consider them satisfied even if no lexical overlap with the hint text itself.
+                    supported_stage_hints = list(stage_hints)
         logger.info(
             "amocrm_stage_eval tenant=%s lead_id=%s mode=%s source=%s action=%s current=%s inbound=%s next=%s conf=%.2f rule=%s reason=%s missing=%s evidence=%s supported_evidence=%s supported_hints=%s text_len=%s",
             tenant_id,
@@ -2403,45 +2518,65 @@ async def _amocrm_on_message(
                         last_move_ts = int(float(extracted_map.get("__stage_last_move_ts") or 0))
                     except Exception:
                         last_move_ts = 0
-                    max_jump = _coerce_int(options.get("stage_router_max_stage_jump"), 1, min_value=1, max_value=3)
+                    max_jump = _coerce_int(
+                        options.get("stage_router_max_stage_jump"), 1, min_value=1, max_value=3
+                    )
                     jump = max(0, int(next_stage) - int(current_stage_index))
                     if jump > max_jump:
                         guard_passed = False
                         guard_reason = f"guard_max_jump:{jump}>{max_jump}"
-                    if cooldown_seconds > 0 and last_move_ts > 0 and (now_ts - last_move_ts) < cooldown_seconds:
+                    if (
+                        cooldown_seconds > 0
+                        and last_move_ts > 0
+                        and (now_ts - last_move_ts) < cooldown_seconds
+                    ):
                         guard_passed = False
                         guard_reason = "guard_cooldown_active"
-                    if _is_terminal_stage(stage_cfg) and not bool(options.get("stage_router_allow_terminal_auto")):
+                    if _is_terminal_stage(stage_cfg) and not bool(
+                        options.get("stage_router_allow_terminal_auto")
+                    ):
                         guard_passed = False
                         guard_reason = "guard_terminal_denied"
                     threshold = _coerce_float(
-                        options.get("stage_router_confidence_auto" if stage_mode == "auto" else "stage_router_confidence_semi"),
+                        options.get(
+                            "stage_router_confidence_auto"
+                            if stage_mode == "auto"
+                            else "stage_router_confidence_semi"
+                        ),
                         0.72 if stage_mode == "auto" else 0.45,
                         min_value=0.0,
                         max_value=1.0,
                     )
                     if decision_source == "llm" and decision_confidence < threshold:
                         guard_passed = False
-                        guard_reason = f"guard_low_confidence:{decision_confidence:.2f}<{threshold:.2f}"
+                        guard_reason = (
+                            f"guard_low_confidence:{decision_confidence:.2f}<{threshold:.2f}"
+                        )
                     if decision_source == "llm" and decision_missing_fields:
                         guard_passed = False
-                        guard_reason = "guard_missing_fields:" + ", ".join(decision_missing_fields[:4])
+                        guard_reason = "guard_missing_fields:" + ", ".join(
+                            decision_missing_fields[:4]
+                        )
                     combined_signal_text = " ".join(
                         [
                             str(last_text or "").strip(),
                             " ".join(decision_evidence),
                         ]
                     ).strip()
-                    structured_signal = _has_contact_signal(combined_signal_text) or _has_schedule_signal(
+                    structured_signal = _has_contact_signal(
                         combined_signal_text
-                    )
-                    if decision_source == "llm" and not supported_evidence and not structured_signal:
+                    ) or _has_schedule_signal(combined_signal_text)
+                    if (
+                        decision_source == "llm"
+                        and not supported_evidence
+                        and not structured_signal
+                    ):
                         guard_passed = False
                         guard_reason = "guard_no_supported_evidence"
                     if decision_source == "llm":
                         stage_hints = _flatten_stage_hints(stage_cfg.get("hints"))
                         if stage_hints:
-                            if not supported_stage_hints and not structured_signal and not supported_evidence:
+                            if selected_check_hints_satisfied is False:
                                 guard_passed = False
                                 guard_reason = "guard_stage_hints_not_met"
                     if guard_reason:
@@ -2511,12 +2646,21 @@ async def _amocrm_on_message(
                             decision_missing_fields,
                             supported_evidence,
                         )
-                        prev_sig = str(extracted_map.get("__stage_last_suggestion_sig") or "").strip()
+                        prev_sig = str(
+                            extracted_map.get("__stage_last_suggestion_sig") or ""
+                        ).strip()
                         try:
-                            prev_sig_ts = int(float(extracted_map.get("__stage_last_suggestion_ts") or 0))
+                            prev_sig_ts = int(
+                                float(extracted_map.get("__stage_last_suggestion_ts") or 0)
+                            )
                         except Exception:
                             prev_sig_ts = 0
-                        if prev_sig and prev_sig == suggestion_sig and cooldown_seconds > 0 and (now_ts - prev_sig_ts) < cooldown_seconds:
+                        if (
+                            prev_sig
+                            and prev_sig == suggestion_sig
+                            and cooldown_seconds > 0
+                            and (now_ts - prev_sig_ts) < cooldown_seconds
+                        ):
                             suggestion_sig = ""
                         missing_part = ""
                         if decision_missing_fields:
@@ -2528,13 +2672,17 @@ async def _amocrm_on_message(
                             f"Причина: {decision_reason or '—'}"
                             f"{missing_part}"
                         ).strip()
-                        is_dup = True if not suggestion_sig else await crm_outbox.has_recent_event(
-                            int(tenant_id),
-                            AMOCRM_PROVIDER,
-                            int(lead_id),
-                            "add_note",
-                            {"text": suggestion_text},
-                            window_seconds=max(60, cooldown_seconds or 60),
+                        is_dup = (
+                            True
+                            if not suggestion_sig
+                            else await crm_outbox.has_recent_event(
+                                int(tenant_id),
+                                AMOCRM_PROVIDER,
+                                int(lead_id),
+                                "add_note",
+                                {"text": suggestion_text},
+                                window_seconds=max(60, cooldown_seconds or 60),
+                            )
                         )
                         if not is_dup and suggestion_sig:
                             await crm_outbox.enqueue(

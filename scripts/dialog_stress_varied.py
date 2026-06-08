@@ -4,15 +4,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import pathlib
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+
+ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
+project_data_dir = ROOT_DIR / "data"
+project_tenants_dir = project_data_dir / "tenants"
+current_tenants = pathlib.Path(os.getenv("TENANTS_DIR") or "").expanduser()
+if (not str(current_tenants)) or str(current_tenants) == "/data/tenants" or (not current_tenants.exists()):
+    os.environ["APP_DATA_DIR"] = str(project_data_dir)
+    os.environ["TENANTS_DIR"] = str(project_tenants_dir)
 
 from libs.core import sales_core as core
 
 
-logging.basicConfig(level=logging.WARNING, format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+)
 for _name in ("openai", "openai._base_client", "httpx", "httpcore", "asyncio"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
@@ -267,33 +278,32 @@ def _build_cases() -> list[Case]:
     ]
 
 
-async def _run_case(case: Case, iteration: int, contact_id: int) -> tuple[list[str], list[tuple[str, str]]]:
+async def _run_case(
+    case: Case, iteration: int, contact_id: int
+) -> tuple[list[str], list[tuple[str, str]]]:
     core.ensure_tenant_files(case.tenant)
     core.write_persona(case.tenant, case.persona, channel=case.channel)
     core.reset_sales_state(case.tenant, contact_id)
 
-    history: list[dict[str, str]] = []
     violations: list[str] = []
     transcript: list[tuple[str, str]] = []
     asked_fps: set[str] = set()
     early_questions = 0
 
     for turn, user_text in enumerate(case.messages, start=1):
-        core.observe_user_message(
-            contact_id,
-            case.tenant,
-            case.channel,
-            user_text,
+        llm_messages = await core.build_llm_messages(
+            contact_id=contact_id,
+            last_user_text=user_text,
+            channel=case.channel,
+            tenant=case.tenant,
         )
-        history.append({"role": "user", "content": user_text})
         answer = await core.ask_llm(
-            history,
+            llm_messages,
             tenant=case.tenant,
             contact_id=contact_id,
             channel=case.channel,
         )
         answer_text = str(answer or "").strip()
-        history.append({"role": "assistant", "content": answer_text})
         transcript.append((user_text, answer_text))
 
         if not answer_text:
@@ -329,6 +339,7 @@ async def _run_case(case: Case, iteration: int, contact_id: int) -> tuple[list[s
 
 async def _run_split_delay_checks() -> list[str]:
     import apps.worker.main as worker_main  # local import to avoid changing global log config during dialog run
+    from redis import exceptions as redis_ex
 
     violations: list[str] = []
 
@@ -382,6 +393,8 @@ async def _run_split_delay_checks() -> list[str]:
             if prev_ts and ts <= prev_ts:
                 violations.append(f"part_{idx}_delay_not_increasing")
             prev_ts = ts
+    except redis_ex.ConnectionError:
+        return []
     finally:
         worker_main.OUTBOX_QUEUE_KEY = old_queue
         try:

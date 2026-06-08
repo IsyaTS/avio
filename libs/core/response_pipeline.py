@@ -7,8 +7,32 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
+from libs.core.learning.service import prepare_runtime_policy_hint
+from libs.core.services.contextual_prompt_builder import build_contextual_cases_block_for_runtime
 from libs.core.sales_core import ask_llm, build_llm_messages, read_tenant_config, tenant_dir
 from libs.core.common import default_fallback_reply
+from libs.core.training import dialog_retriever
+from libs.core.training import retriever as training_retriever
+
+_LOCATION_INTENT_RE = re.compile(r"\b(?:где|адрес|магазин|посмотреть|находитесь|выбрать|шоурум)\b", re.I)
+_CITY_HINT_RE = re.compile(r"\b(?:уф[аеыу]?|стерлитамак[аеу]?|салават[аеу]?|ишимба[йеяю]|оренбург[аеу]?|казан[ьи]|в городе|мой город|наш город|район)\b", re.I)
+_UNSAFE_LOCATION_REPLY_RE = re.compile(
+    r"(?:\b(?:уф[аеыу]?|стерлитамак[аеу]?|салават[аеу]?|ишимба[йеяю]|оренбург[аеу]?|казан[ьи]|коммунистическая|менделеева|скидк|телеграм|telegram|ватсап|whatsapp)\b|\b(?:адрес|магазин|филиал|выезд|доставк|телефон)\w*\b|@\w+|\d[\d\s().+-]{6,}\d)",
+    re.I,
+)
+_UNSAFE_CONCRETE_LOCATION_REPLY_RE = re.compile(
+    r"(?:\b(?:уф[аеыу]?|стерлитамак[аеу]?|салават[аеу]?|ишимба[йеяю]|оренбург[аеу]?|казан[ьи]|коммунистическая|менделеева|скидк|телеграм|telegram|ватсап|whatsapp)\b|\b(?:адрес|филиал|выезд|доставк|телефон)\w*\b|@\w+|\d[\d\s().+-]{6,}\d)",
+    re.I,
+)
+_LOCATION_OR_CATALOG_PROMISE_RE = re.compile(
+    r"\b(?:каталог\w*|магазин\w*|посмотреть|показать|отправ(?:лю|им|ить)|пришл(?:ю|ем|ите)|скин(?:у|ем|уть))\b",
+    re.I,
+)
+_CITY_CLARIFICATION_REPLY_RE = re.compile(
+    r"(?:\b(?:в\s+)?каком\s+городе\b|\b(?:подскажите|уточните|напишите|назовите)\b[^\n?.!]{0,80}\bгород\b|\bгород\b[^\n?.!]{0,80}\?)",
+    re.I,
+)
+_CITY_CLARIFICATION_FALLBACK = "Здравствуйте. Подскажите, пожалуйста, в каком городе хотите посмотреть каталог?"
 
 
 @dataclass
@@ -170,6 +194,14 @@ def _system_prompt_only(messages: Sequence[Mapping[str, Any]]) -> dict[str, str]
     return {"role": "system", "content": ""}
 
 
+def _append_system_block(message: dict[str, str], block: str) -> None:
+    text = str(block or "").strip()
+    if not text:
+        return
+    system_text = str(message.get("content") or "").strip()
+    message["content"] = f"{system_text}\n\n{text}".strip()
+
+
 async def run_response_pipeline(
     *,
     tenant_id: int,
@@ -193,9 +225,61 @@ async def run_response_pipeline(
         base_messages = []
 
     messages: list[dict[str, str]] = [_system_prompt_only(base_messages)]
+    try:
+        contextual_ctx = await build_contextual_cases_block_for_runtime(
+            tenant_id=int(tenant_id),
+            user_text=user_text,
+            history=normalized_history,
+            contact_id=contact_id,
+            channel=channel,
+            log_fn=log_fn,
+        )
+    except Exception:
+        contextual_ctx = {"enabled": False, "applied": False, "block": ""}
+    contextual_block = str(contextual_ctx.get("block") or "").strip()
+    if contextual_block:
+        _append_system_block(messages[0], contextual_block)
+
+    try:
+        dialog_block = _build_dialog_training_block(
+            tenant_id=int(tenant_id),
+            user_text=user_text,
+        )
+    except Exception:
+        dialog_block = ""
+    if dialog_block:
+        _append_system_block(messages[0], dialog_block)
+
+    examples_block = ""
+    if _legacy_pair_training_enabled(int(tenant_id)) or not _dialog_dataset_available(int(tenant_id)):
+        try:
+            examples_block = await training_retriever.build_examples_block_async(
+                int(tenant_id),
+                user_text,
+            )
+        except Exception:
+            examples_block = ""
+    if examples_block:
+        _append_system_block(messages[0], examples_block)
+
+    try:
+        policy_ctx = await prepare_runtime_policy_hint(
+            tenant_id=tenant_id,
+            lead_id=contact_id,
+            channel=channel,
+            user_text=user_text,
+            normalized_history=normalized_history,
+            log_fn=log_fn,
+        )
+    except Exception:
+        policy_ctx = {"enabled": False, "policy_block": ""}
+    policy_block = str(policy_ctx.get("policy_block") or "").strip()
+    if policy_block:
+        _append_system_block(messages[0], policy_block)
     messages.extend(normalized_history)
     messages.append({"role": "user", "content": user_text})
 
+    source = "llm"
     try:
         if timeout_seconds and timeout_seconds > 0:
             reply = await asyncio.wait_for(
@@ -211,6 +295,7 @@ async def run_response_pipeline(
                 % (channel, tenant_id, contact_id or 0, float(timeout_seconds or 0))
             )
         reply = ""
+        source = "fallback_timeout"
     except Exception as exc:
         if log_fn:
             log_fn(
@@ -218,9 +303,16 @@ async def run_response_pipeline(
                 % (channel, tenant_id, contact_id or 0, exc)
             )
         reply = ""
+        source = "fallback_error"
     reply_text = str(reply or "").strip()
     if not reply_text:
         reply_text = default_fallback_reply(tenant_id)
+        if source == "llm":
+            source = "fallback_empty"
+    guarded_reply = _guard_unsafe_dialog_training_reply(user_text=user_text, reply_text=reply_text)
+    if guarded_reply != reply_text:
+        reply_text = guarded_reply
+        source = "guarded_location_context"
 
     photos: list[PipelinePhoto] = []
     auto_enabled, max_count = _photo_auto_config(tenant_id)
@@ -239,4 +331,98 @@ async def run_response_pipeline(
                 )
             )
 
-    return PipelineResult(reply_text=reply_text, photos=photos)
+    return PipelineResult(reply_text=reply_text, photos=photos, source=source)
+
+
+def _build_dialog_training_block(*, tenant_id: int, user_text: str) -> str:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = {}
+    learning = cfg.get("learning") if isinstance(cfg, Mapping) else {}
+    dialog_cfg = learning.get("dialog_dataset") if isinstance(learning, Mapping) else {}
+    if not (isinstance(dialog_cfg, Mapping) and dialog_cfg.get("enabled") is True):
+        return ""
+    try:
+        top_k = int((dialog_cfg or {}).get("top_k", 2)) if isinstance(dialog_cfg, Mapping) else 2
+    except Exception:
+        top_k = 2
+    try:
+        min_score = float((dialog_cfg or {}).get("min_score", 0.08)) if isinstance(dialog_cfg, Mapping) else 0.08
+    except Exception:
+        min_score = 0.08
+    try:
+        max_chars = int((dialog_cfg or {}).get("max_prompt_chars", 3500)) if isinstance(dialog_cfg, Mapping) else 3500
+    except Exception:
+        max_chars = 3500
+    return dialog_retriever.build_dialog_examples_block(
+        int(tenant_id),
+        user_text,
+        tenant_dir_fn=tenant_dir,
+        top_k=max(1, min(3, top_k)),
+        min_score=max(0.0, min(1.0, min_score)),
+        max_chars=max(800, min(6000, max_chars)),
+    )
+
+
+def _legacy_pair_training_enabled(tenant_id: int) -> bool:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = {}
+    learning = cfg.get("learning") if isinstance(cfg, Mapping) else {}
+    if not isinstance(learning, Mapping):
+        return False
+    return bool(learning.get("legacy_pairs_enabled") or learning.get("pair_examples_enabled"))
+
+
+def _dialog_dataset_available(tenant_id: int) -> bool:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+    except Exception:
+        cfg = {}
+    learning = cfg.get("learning") if isinstance(cfg, Mapping) else {}
+    dialog_cfg = learning.get("dialog_dataset") if isinstance(learning, Mapping) else {}
+    if not (isinstance(dialog_cfg, Mapping) and dialog_cfg.get("enabled") is True):
+        return False
+    try:
+        return dialog_retriever.ensure_dialog_index(int(tenant_id), tenant_dir_fn=tenant_dir) is not None
+    except Exception:
+        return False
+
+
+def _guard_unsafe_dialog_training_reply(*, user_text: str, reply_text: str) -> str:
+    query = str(user_text or "")
+    reply = str(reply_text or "").strip()
+    if not query.strip() or not reply:
+        return reply
+    if not _LOCATION_INTENT_RE.search(query):
+        return reply
+    if _CITY_HINT_RE.search(query):
+        return reply
+    lowered_reply = reply.lower()
+    has_city_clarification = bool(_CITY_CLARIFICATION_REPLY_RE.search(lowered_reply))
+    if _is_low_value_location_reply(reply):
+        return _CITY_CLARIFICATION_FALLBACK
+    if _UNSAFE_CONCRETE_LOCATION_REPLY_RE.search(reply):
+        return default_fallback_reply()
+    if _LOCATION_OR_CATALOG_PROMISE_RE.search(reply):
+        return _CITY_CLARIFICATION_FALLBACK
+    if has_city_clarification:
+        return reply
+    if not _UNSAFE_LOCATION_REPLY_RE.search(reply):
+        return reply
+    return default_fallback_reply()
+
+
+def _is_low_value_location_reply(reply_text: str) -> bool:
+    reply = str(reply_text or "").strip()
+    if not reply or "?" in reply:
+        return False
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9@]+", reply)
+    if len(words) > 5:
+        return False
+    low = reply.lower()
+    if any(marker in low for marker in ("гермес", "айдар", "двери", "каталог")):
+        return True
+    return False

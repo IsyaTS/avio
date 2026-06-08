@@ -57,4 +57,4 @@ if not any(isinstance(finder, _SalesCoreStableFinder) for finder in sys.meta_pat
     sys.meta_path.insert(0, _SalesCoreStableFinder())
 
 
-from . import common  # re-export for backwards compatibility
+from . import common as common  # re-export for backwards compatibility

@@ -140,3 +140,42 @@ def test_public_catalog_csv_accepts_global_and_tenant_keys(tmp_path, monkeypatch
     assert denied.status_code == 401
 
     client.close()
+
+
+def test_catalog_csv_path_falls_back_to_catalogs_dir_when_metadata_missing(tmp_path, monkeypatch):
+    tenant = 77
+    tenant_root = tmp_path / str(tenant)
+    catalogs_dir = tenant_root / "catalogs"
+    catalogs_dir.mkdir(parents=True, exist_ok=True)
+    sample = catalogs_dir / "catalog.csv"
+    sample.write_text("name;price\nChair;100\n", encoding="utf-8")
+
+    monkeypatch.setattr(client_module.C, "tenant_dir", lambda _tenant: str(tenant_root))
+    monkeypatch.setattr(
+        client_module.C,
+        "read_tenant_config",
+        lambda _tenant: {"passport": {"public_key": "k"}, "integrations": {}},
+    )
+
+    path, encoding, relative = client_module._catalog_csv_path(tenant)
+    assert path == sample
+    assert encoding == "utf-8-sig"
+    assert relative == "catalogs/catalog.csv"
+
+
+def test_catalog_csv_path_prefers_catalog_csv_over_other_discovered_files(tmp_path, monkeypatch):
+    tenant = 88
+    tenant_root = tmp_path / str(tenant)
+    catalogs_dir = tenant_root / "catalogs"
+    catalogs_dir.mkdir(parents=True, exist_ok=True)
+    preferred = catalogs_dir / "catalog.csv"
+    preferred.write_text("name;price\nPreferred;1\n", encoding="utf-8")
+    (catalogs_dir / "zeta.csv").write_text("name;price\nOther;2\n", encoding="utf-8")
+
+    monkeypatch.setattr(client_module.C, "tenant_dir", lambda _tenant: str(tenant_root))
+    monkeypatch.setattr(client_module.C, "read_tenant_config", lambda _tenant: {"integrations": {}})
+
+    path, encoding, relative = client_module._catalog_csv_path(tenant)
+    assert path == preferred
+    assert encoding == "utf-8-sig"
+    assert relative == "catalogs/catalog.csv"

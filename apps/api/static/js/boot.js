@@ -8,8 +8,6 @@
     uploadCatalog: '/pub/catalog/upload',
     csvGet: '/pub/catalog/csv',
     csvSave: '/pub/catalog/csv',
-    trainingUpload: '/pub/training/upload',
-    trainingStatus: '/pub/training/status',
   };
   function safeLocation() {
     if (typeof window !== 'undefined' && window.location) {
@@ -195,8 +193,6 @@
       uploadCatalog: typeof urls.upload_catalog === 'string' && urls.upload_catalog ? urls.upload_catalog : DEFAULT_CLIENT_ENDPOINTS.uploadCatalog,
       csvGet: typeof urls.csv_get === 'string' && urls.csv_get ? urls.csv_get : DEFAULT_CLIENT_ENDPOINTS.csvGet,
       csvSave: typeof urls.csv_save === 'string' && urls.csv_save ? urls.csv_save : DEFAULT_CLIENT_ENDPOINTS.csvSave,
-      trainingUpload: typeof urls.training_upload === 'string' && urls.training_upload ? urls.training_upload : DEFAULT_CLIENT_ENDPOINTS.trainingUpload,
-      trainingStatus: typeof urls.training_status === 'string' && urls.training_status ? urls.training_status : DEFAULT_CLIENT_ENDPOINTS.trainingStatus,
     };
 
     if (typeof window === 'undefined') {
@@ -323,14 +319,7 @@
   const currentScript = document.currentScript;
   const scriptVersion = extractVersion(currentScript && currentScript.getAttribute('src'));
   const bootStartedAt = Date.now();
-  window.__EXPORT_BOOT_TS__ = bootStartedAt;
-
-  function setExportLoadedFlag(value) {
-    if (value === false && window.__EXPORT_LOADED__ === true) {
-      return;
-    }
-    window.__EXPORT_LOADED__ = value;
-  }
+  window.__CLIENT_BOOT_TS__ = bootStartedAt;
 
   let clientSettingsBootCalled = false;
 
@@ -352,28 +341,6 @@
 
   function handleDomReady() {
     try {
-      let button = document.getElementById('export-download');
-      if (button && button.dataset && button.dataset.bound) {
-        const clone = button.cloneNode(true);
-        delete clone.dataset.bound;
-        button.replaceWith(clone);
-        button = clone;
-      }
-
-      if (!button) {
-        window.__EXPORT_BIND_OK__ = false;
-        setExportLoadedFlag(false);
-        console.info('boot ok');
-        return;
-      }
-
-      if (button.dataset) {
-        delete button.dataset.bound;
-      }
-
-      window.__EXPORT_BIND_OK__ = false;
-      setExportLoadedFlag(false);
-
       console.info('boot ok');
     } finally {
       callClientSettingsBoot();

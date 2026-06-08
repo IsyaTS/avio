@@ -1,0 +1,17 @@
+[
+  {
+    "name": "price_question_answer_first",
+    "requires_answer_first": true,
+    "must_include": "цена",
+    "must_not_include": ["подскажите ваш бюджет", "в каком городе"],
+    "no_fake_facts": true,
+    "max_questions": 1
+  },
+  {
+    "name": "repair_turn_no_stage_loop",
+    "requires_answer_first": false,
+    "must_not_include": ["давайте начнем сначала", "уточните бюджет"],
+    "no_fake_facts": true,
+    "max_questions": 1
+  }
+]

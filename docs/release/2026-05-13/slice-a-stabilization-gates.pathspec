@@ -1,0 +1,16 @@
+.github/workflows/ci.yml
+AGENTS.md
+README.md
+ARCHITECTURE.md
+RUNBOOK.md
+docs/worktree_release_audit_2026-05-13.md
+docs/release/2026-05-13/
+scripts/critical_smoke.py
+scripts/release_scope_guard.py
+scripts/runtime_log_guard.py
+scripts/ui_http_smoke.py
+tests/test_critical_smoke.py
+tests/test_release_scope_guard.py
+tests/test_runtime_log_guard.py
+tests/test_ui_http_smoke.py
+tools/create_project_snapshot.py

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from libs.core import db as db_module
 
@@ -39,7 +39,9 @@ async def ensure_schema() -> None:
         try:
             await exec_fn(stmt)
         except Exception:
-            logger.exception("avito_job_applications_ensure_failed statement=%s", stmt.strip().split("\n", 1)[0])
+            logger.exception(
+                "avito_job_applications_ensure_failed statement=%s", stmt.strip().split("\n", 1)[0]
+            )
             raise
 
 
@@ -71,11 +73,17 @@ async def store_event(
             payload_json,
         )
     except Exception:
-        logger.exception("avito_job_applications_store_failed account=%s app=%s", avito_account_id, application_id)
+        logger.exception(
+            "avito_job_applications_store_failed account=%s app=%s",
+            avito_account_id,
+            application_id,
+        )
         raise
 
 
-async def list_recent_ids(avito_account_id: int, *, period_days: int = 30, limit: int = 500) -> list[str]:
+async def list_recent_ids(
+    avito_account_id: int, *, period_days: int = 30, limit: int = 500
+) -> list[str]:
     fetch_fn = getattr(db_module, "_fetch", None)
     if not fetch_fn:
         return []

@@ -190,12 +190,12 @@ class _RouterHarness:
 
     async def list_recent_inbound_texts(self, _tenant_id: int, lead_id: int, *, limit: int = 6) -> list[str]:
         state = self._state(lead_id)
-        items = state.history[-max(1, int(limit)) :]
+        items = state.history[-max(1, int(limit)):]
         return list(items)
 
     async def list_recent_stage_router_texts(self, _tenant_id: int, lead_id: int, *, limit: int = 6) -> list[str]:
         state = self._state(lead_id)
-        items = state.history[-max(1, int(limit)) :]
+        items = state.history[-max(1, int(limit)):]
         return [f"client: {text}" for text in items]
 
     async def decide_next_stage(self, *_args, **_kwargs) -> dict[str, Any] | None:

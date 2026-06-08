@@ -2,12 +2,22 @@
 {% block content %}
   <section class="auth-wrap">
     <div class="auth-card">
-      <h1>{{ title or "Сообщение" }}</h1>
-      <p class="lead">{{ message or "Готово." }}</p>
+      <h1 class="auth-title">{{ title or "Сообщение" }}</h1>
+      <p class="auth-lead">{{ message or "Готово." }}</p>
       <div class="auth-links">
         <a href="/login">Войти</a>
         <a href="/register">Регистрация</a>
       </div>
     </div>
   </section>
+  {% if metric_goal %}
+    <script>
+      (function () {
+        if (typeof window === "undefined") return;
+        var ymFn = window.ym;
+        if (typeof ymFn !== "function") return;
+        ymFn(106385155, "reachGoal", "{{ metric_goal }}");
+      })();
+    </script>
+  {% endif %}
 {% endblock %}

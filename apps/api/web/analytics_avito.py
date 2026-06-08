@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
-import base64
-import hashlib
-import hmac
+import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request
 from fastapi.encoders import jsonable_encoder
@@ -26,7 +25,7 @@ from . import common
 
 router = APIRouter(tags=["analytics"])
 logger = logging.getLogger("app.web.analytics_avito")
-_STATE_TTL = 600
+_STATE_TTL = 4 * 60 * 60
 
 
 async def _ensure_schema() -> None:
@@ -45,29 +44,27 @@ async def _ensure_schema_or_503() -> JSONResponse | None:
     return None
 
 
-def _state_secret() -> str:
-    return (
-        (core_module.settings.WEBHOOK_SECRET or "").strip()
-        or (core_module.settings.ADMIN_TOKEN or "").strip()
-        or (core_module.settings.AVITO_CLIENT_SECRET or "").strip()
-    )
-
-
 def _build_state_token(tenant_id: int, k: str | None) -> str:
-    payload = {"tenant": tenant_id, "k": k, "ts": int(datetime.now(tz=timezone.utc).timestamp())}
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    secret = _state_secret().encode("utf-8")
-    sig = hmac.new(secret, body, hashlib.sha256).hexdigest()
-    body_b64 = base64.urlsafe_b64encode(body).decode("utf-8").rstrip("=")
-    return f"a1.{body_b64}.{sig}"
+    return secrets.token_hex(16)
 
 
 def _analytics_redirect(request: Request) -> str:
-    fallback = (getattr(core_module.settings, "AVITO_REDIRECT_URL", "") or "").strip()
-    if fallback:
-        return fallback
+    explicit = (os.getenv("AVITO_ANALYTICS_REDIRECT_URI") or "").strip()
+    if explicit:
+        return explicit
+    generic = (
+        os.getenv("AVITO_REDIRECT_URL")
+        or getattr(core_module.settings, "AVITO_REDIRECT_URL", "")
+        or ""
+    ).strip()
+    if generic:
+        parsed = urlsplit(generic)
+        if parsed.scheme and parsed.netloc:
+            return urlunsplit(
+                (parsed.scheme, parsed.netloc, "/v1/oauth/avito-analytics/callback", "", "")
+            )
     base = str(request.base_url).rstrip("/")
-    return f"{base}/v1/oauth/avito/callback"
+    return f"{base}/v1/oauth/avito-analytics/callback"
 
 
 def _parse_calc_params(request: Request) -> dict[str, Any]:
@@ -120,7 +117,11 @@ def _set_analytics_account(tenant_id: int, account_id: int, display_name: str | 
     if not isinstance(cfg, dict):
         cfg = {}
     integrations = cfg.setdefault("integrations", {})
-    avito_cfg = integrations.get("avito_analytics") if isinstance(integrations.get("avito_analytics"), Mapping) else {}
+    avito_cfg = (
+        integrations.get("avito_analytics")
+        if isinstance(integrations.get("avito_analytics"), Mapping)
+        else {}
+    )
     updated = dict(avito_cfg)
     updated["account_id"] = int(account_id)
     if display_name:
@@ -132,7 +133,7 @@ def _set_analytics_account(tenant_id: int, account_id: int, display_name: str | 
 
 @router.get("/v1/oauth/avito-analytics/status")
 async def avito_analytics_status(request: Request, tenant: int, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -144,12 +145,17 @@ async def avito_analytics_status(request: Request, tenant: int, k: str | None = 
     if account_id:
         token = await tokens_repo.get(int(account_id))
         connected = bool(token and token.refresh_token)
-    return {"ok": True, "connected": connected, "account_id": account_id, "display_name": cfg.get("display_name")}
+    return {
+        "ok": True,
+        "connected": connected,
+        "account_id": account_id,
+        "display_name": cfg.get("display_name"),
+    }
 
 
 @router.get("/v1/oauth/avito-analytics/authorize")
 async def avito_analytics_authorize(request: Request, tenant: int, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -172,11 +178,20 @@ async def avito_analytics_authorize(request: Request, tenant: int, k: str | None
         scope=avito_analytics_client.DEFAULT_SCOPES,
         redirect_uri=redirect_uri,
     )
+    logger.info(
+        "avito_analytics_authorize tenant=%s state=%s ttl=%s redirect_uri=%s",
+        tenant_id,
+        state,
+        _STATE_TTL,
+        redirect_uri,
+    )
     return JSONResponse({"authorize_url": authorize_url})
 
 
 @router.get("/v1/oauth/avito-analytics/callback")
-async def avito_analytics_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+async def avito_analytics_callback(
+    request: Request, code: str | None = None, state: str | None = None, error: str | None = None
+):
     if error:
         return HTMLResponse("Avito OAuth error: " + str(error))
     if not state:
@@ -192,7 +207,9 @@ async def avito_analytics_callback(request: Request, code: str | None = None, st
     if not raw_state:
         return HTMLResponse("Avito OAuth error: state_missing")
     try:
-        payload = json.loads(raw_state.decode("utf-8") if isinstance(raw_state, (bytes, bytearray)) else raw_state)
+        payload = json.loads(
+            raw_state.decode("utf-8") if isinstance(raw_state, (bytes, bytearray)) else raw_state
+        )
     except Exception:
         payload = {}
     tenant_id = payload.get("tenant")
@@ -266,7 +283,7 @@ async def avito_analytics_callback(request: Request, code: str | None = None, st
             obtained_at=obtained_at,
             raw_payload=sanitized_payload,
         )
-    except EncryptionError as exc:
+    except EncryptionError:
         return HTMLResponse("Avito OAuth error: encryption_error")
     except Exception:
         logger.exception("avito_analytics_token_store_failed account_id=%s", account_id)
@@ -274,12 +291,14 @@ async def avito_analytics_callback(request: Request, code: str | None = None, st
 
     _set_analytics_account(int(tenant_id), int(account_id), display_name)
     redirect_key = payload.get("k") or ""
-    return RedirectResponse(url=f"/pub/analytics/avito?tenant={tenant_id}&k={redirect_key}", status_code=303)
+    return RedirectResponse(
+        url=f"/pub/analytics/avito?tenant={tenant_id}&k={redirect_key}", status_code=303
+    )
 
 
 @router.post("/v1/oauth/avito-analytics/disconnect")
 async def avito_analytics_disconnect(request: Request, tenant: int, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, _ = auth
@@ -301,8 +320,16 @@ async def avito_analytics_disconnect(request: Request, tenant: int, k: str | Non
 
 
 @router.get("/v1/analytics/avito/report")
-async def avito_report(request: Request, tenant: int, k: str | None = None, period: int = 7, sla: int = 15, fast: int = 1, force: int = 0):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_report(
+    request: Request,
+    tenant: int,
+    k: str | None = None,
+    period: int = 7,
+    sla: int = 15,
+    fast: int = 1,
+    force: int = 0,
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -332,8 +359,10 @@ async def avito_report(request: Request, tenant: int, k: str | None = None, peri
 
 
 @router.get("/v1/analytics/avito/items")
-async def avito_items(request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_items(
+    request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -343,13 +372,19 @@ async def avito_items(request: Request, tenant: int, k: str | None = None, perio
     account_id, _ = _get_analytics_account_id(int(tenant_id))
     if not account_id:
         return JSONResponse({"detail": "analytics_not_authorized"}, status_code=401)
-    report = await analytics_service.build_report(int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast))
-    return JSONResponse({"ok": True, "items": jsonable_encoder((report.get("listings") or {}).get("items") or [])})
+    report = await analytics_service.build_report(
+        int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast)
+    )
+    return JSONResponse(
+        {"ok": True, "items": jsonable_encoder((report.get("listings") or {}).get("items") or [])}
+    )
 
 
 @router.get("/v1/analytics/avito/stats")
-async def avito_stats(request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_stats(
+    request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -359,13 +394,22 @@ async def avito_stats(request: Request, tenant: int, k: str | None = None, perio
     account_id, _ = _get_analytics_account_id(int(tenant_id))
     if not account_id:
         return JSONResponse({"detail": "analytics_not_authorized"}, status_code=401)
-    report = await analytics_service.build_report(int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast))
+    report = await analytics_service.build_report(
+        int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast)
+    )
     return JSONResponse({"ok": True, "stats": jsonable_encoder(report.get("stats") or {})})
 
 
 @router.get("/v1/analytics/avito/messenger")
-async def avito_messenger(request: Request, tenant: int, k: str | None = None, period: int = 7, sla: int = 15, fast: int = 1):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_messenger(
+    request: Request,
+    tenant: int,
+    k: str | None = None,
+    period: int = 7,
+    sla: int = 15,
+    fast: int = 1,
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -375,13 +419,21 @@ async def avito_messenger(request: Request, tenant: int, k: str | None = None, p
     account_id, _ = _get_analytics_account_id(int(tenant_id))
     if not account_id:
         return JSONResponse({"detail": "analytics_not_authorized"}, status_code=401)
-    report = await analytics_service.build_report(int(account_id), tenant_id=int(tenant_id), period_days=int(period), sla_minutes=int(sla), fast=bool(fast))
+    report = await analytics_service.build_report(
+        int(account_id),
+        tenant_id=int(tenant_id),
+        period_days=int(period),
+        sla_minutes=int(sla),
+        fast=bool(fast),
+    )
     return JSONResponse({"ok": True, "messenger": jsonable_encoder(report.get("messaging") or {})})
 
 
 @router.get("/v1/analytics/avito/spend")
-async def avito_spend(request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_spend(
+    request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     schema_err = await _ensure_schema_or_503()
@@ -391,13 +443,17 @@ async def avito_spend(request: Request, tenant: int, k: str | None = None, perio
     account_id, _ = _get_analytics_account_id(int(tenant_id))
     if not account_id:
         return JSONResponse({"detail": "analytics_not_authorized"}, status_code=401)
-    report = await analytics_service.build_report(int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast))
+    report = await analytics_service.build_report(
+        int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast)
+    )
     return JSONResponse({"ok": True, "spend": jsonable_encoder(report.get("spend") or {})})
 
 
 @router.get("/v1/analytics/avito/calls")
-async def avito_calls(request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1):
-    auth = _authorize_public_settings_request(request, tenant, k)
+async def avito_calls(
+    request: Request, tenant: int, k: str | None = None, period: int = 7, fast: int = 1
+):
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     await _ensure_schema()
@@ -405,13 +461,15 @@ async def avito_calls(request: Request, tenant: int, k: str | None = None, perio
     account_id, _ = _get_analytics_account_id(int(tenant_id))
     if not account_id:
         return JSONResponse({"detail": "analytics_not_authorized"}, status_code=401)
-    report = await analytics_service.build_report(int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast))
+    report = await analytics_service.build_report(
+        int(account_id), tenant_id=int(tenant_id), period_days=int(period), fast=bool(fast)
+    )
     return JSONResponse({"ok": True, "calls": jsonable_encoder(report.get("calls") or {})})
 
 
 @router.get("/pub/analytics/avito", response_class=HTMLResponse)
 async def avito_ui(request: Request, tenant: int, k: str | None = None):
-    auth = _authorize_public_settings_request(request, tenant, k)
+    auth = await _authorize_public_settings_request(request, tenant, k)
     if isinstance(auth, Response):
         return auth
     tenant_id, _ = auth

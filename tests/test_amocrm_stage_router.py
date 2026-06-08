@@ -82,7 +82,9 @@ def test_decide_next_stage_llm_accepts_allowed_target(monkeypatch: pytest.Monkey
             "evidence": ["Город: Уфа"],
         }
     )
-    monkeypatch.setattr(amocrm_service.core_module, "_get_openai_client", lambda: _FakeClient(payload))
+    monkeypatch.setattr(
+        amocrm_service.core_module, "_get_openai_client", lambda: _FakeClient(payload)
+    )
     stages = [
         {"name": "Первичный", "amo_stage_id": 10, "type": "open"},
         {"name": "Квалификация", "amo_stage_id": 11, "type": "open"},
@@ -115,7 +117,9 @@ def test_decide_next_stage_llm_rejects_out_of_range_target(monkeypatch: pytest.M
             "evidence": ["подтверждение"],
         }
     )
-    monkeypatch.setattr(amocrm_service.core_module, "_get_openai_client", lambda: _FakeClient(payload))
+    monkeypatch.setattr(
+        amocrm_service.core_module, "_get_openai_client", lambda: _FakeClient(payload)
+    )
     stages = [
         {"name": "Первичный", "amo_stage_id": 10, "type": "open"},
         {"name": "Квалификация", "amo_stage_id": 11, "type": "open"},
@@ -136,7 +140,9 @@ def test_decide_next_stage_llm_rejects_out_of_range_target(monkeypatch: pytest.M
     assert decision["action"] == "NOOP"
 
 
-def test_decide_next_stage_llm_rejects_move_with_missing_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decide_next_stage_llm_rejects_move_with_missing_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = json.dumps(
         {
             "action": "MOVE_STAGE",
@@ -147,7 +153,9 @@ def test_decide_next_stage_llm_rejects_move_with_missing_fields(monkeypatch: pyt
             "evidence": ["цена интересует"],
         }
     )
-    monkeypatch.setattr(amocrm_service.core_module, "_get_openai_client", lambda: _FakeClient(payload))
+    monkeypatch.setattr(
+        amocrm_service.core_module, "_get_openai_client", lambda: _FakeClient(payload)
+    )
     stages = [
         {"name": "Новый", "amo_stage_id": 10, "type": "open"},
         {"name": "Город уточнён", "amo_stage_id": 11, "type": "open"},
@@ -166,6 +174,22 @@ def test_decide_next_stage_llm_rejects_move_with_missing_fields(monkeypatch: pyt
     assert decision is not None
     assert decision["action"] == "NOOP"
     assert decision["reason"] == "move_with_missing_fields"
+
+
+def test_parse_json_object_forgiving_accepts_fenced_json() -> None:
+    raw = """```json
+{"action":"NOOP","target_stage_index":-1,"confidence":0.2,"reason":"insufficient"}
+```"""
+    parsed = amocrm_service._parse_json_object_forgiving(raw)
+    assert isinstance(parsed, dict)
+    assert parsed.get("action") == "NOOP"
+
+
+def test_parse_json_object_forgiving_extracts_first_object() -> None:
+    raw = 'text prefix {"action":"MOVE_STAGE","target_stage_index":1,"confidence":0.9,"reason":"ok"} tail'
+    parsed = amocrm_service._parse_json_object_forgiving(raw)
+    assert isinstance(parsed, dict)
+    assert parsed.get("target_stage_index") == 1
 
 
 def test_supported_evidence_allows_fuzzy_overlap() -> None:
@@ -233,7 +257,12 @@ def test_ensure_pipeline_config_cached_path_restores_hints(monkeypatch: pytest.M
                 "stages_by_pipeline": {
                     "10401938": {
                         "stages": [
-                            {"name": "Новый чат", "amo_stage_id": 82213562, "type": "", "hints": []},
+                            {
+                                "name": "Новый чат",
+                                "amo_stage_id": 82213562,
+                                "type": "",
+                                "hints": [],
+                            },
                             {
                                 "name": "Город уточнён",
                                 "amo_stage_id": 82213570,
@@ -249,7 +278,9 @@ def test_ensure_pipeline_config_cached_path_restores_hints(monkeypatch: pytest.M
     }
     writes: list[dict] = []
     monkeypatch.setattr(amocrm_service.time, "time", lambda: int(10**9) + 30)
-    monkeypatch.setattr(amocrm_service.core_module, "write_tenant_config", lambda tenant, data: writes.append(data))
+    monkeypatch.setattr(
+        amocrm_service.core_module, "write_tenant_config", lambda tenant, data: writes.append(data)
+    )
 
     result = asyncio.run(
         amocrm_service.ensure_pipeline_config(
@@ -363,7 +394,9 @@ def _patch_amocrm_router_context(
     monkeypatch.setattr(amocrm_service.amocrm_core, "AmoCRMClient", _FakeAmoClient)
     monkeypatch.setattr(amocrm_service, "ensure_lead_phone_field_id", _noop_async)
     monkeypatch.setattr(amocrm_service.db_module, "list_recent_inbound_texts", _fake_recent_texts)
-    monkeypatch.setattr(amocrm_service.db_module, "list_recent_stage_router_texts", _fake_recent_texts)
+    monkeypatch.setattr(
+        amocrm_service.db_module, "list_recent_stage_router_texts", _fake_recent_texts
+    )
     monkeypatch.setattr(amocrm_service.crm_fields, "list_fields", _as_async_return([]))
     monkeypatch.setattr(amocrm_service.crm_fields, "upsert_field", _noop_async)
     monkeypatch.setattr(amocrm_service.crm_links, "get_link", _fake_get_link)
@@ -372,7 +405,9 @@ def _patch_amocrm_router_context(
     monkeypatch.setattr(amocrm_service.crm_outbox, "enqueue", _fake_enqueue)
     monkeypatch.setattr(amocrm_service.crm_outbox, "has_recent_event", _as_async_return(False))
     monkeypatch.setattr(amocrm_service, "_remote_entity_exists", _as_async_return(True))
-    monkeypatch.setattr(amocrm_service, "_resolve_lead_names", _as_async_return(("Lead #1", "Lead #1")))
+    monkeypatch.setattr(
+        amocrm_service, "_resolve_lead_names", _as_async_return(("Lead #1", "Lead #1"))
+    )
     monkeypatch.setattr(amocrm_service, "_decide_next_stage_llm", _fake_decide)
     monkeypatch.setattr(
         amocrm_service,
@@ -634,7 +669,9 @@ def test_amocrm_stage_router_auto_skips_duplicate_move_stage(
         supported_evidence=["Уфа"],
     )
 
-    async def _has_recent_event(_tenant: int, _provider: str, _lead: int, event: str, *_args, **_kwargs) -> bool:
+    async def _has_recent_event(
+        _tenant: int, _provider: str, _lead: int, event: str, *_args, **_kwargs
+    ) -> bool:
         return event == "move_stage"
 
     monkeypatch.setattr(amocrm_service.crm_outbox, "has_recent_event", _has_recent_event)

@@ -1,34 +1,26 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
-import base64
 import logging
 import math
-import mimetypes
 import os
 import pathlib
-import re
 import hashlib
 import hmac
 import time
 import uuid
 import random
 import secrets
-import html
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping, Optional, Sequence
-
-import qrcode
-from qrcode.image.svg import SvgImage
+from typing import Any, Iterable, Mapping, Sequence
 
 from fastapi import APIRouter, Request, UploadFile, BackgroundTasks, HTTPException, Query, File
-from starlette.datastructures import UploadFile as StarletteUploadFile
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, Response, HTMLResponse, FileResponse
+from fastapi.responses import (
+    JSONResponse,
+    Response,
+    HTMLResponse,
+)
 import httpx
-import urllib.request
-import urllib.error
 
 
 from libs.core import catalog as catalog_module
@@ -53,6 +45,27 @@ from redis import exceptions as redis_ex
 
 from . import client as C
 from . import auth_utils
+from .services import avito_oauth_runtime
+from .services import avito_oauth_routes
+from .services import avito_public_runtime
+from .services import avito_webhook_runtime
+from .services import amocrm_avatar_runtime
+from .services import amocrm_public_runtime
+from .services import catalog_file_parse_runtime
+from .services import catalog_public_runtime
+from .services import max_public_runtime
+from .services import public_avatar_runtime
+from .services import public_auth_runtime
+from .services import client_assets_runtime
+from .services import public_photos_runtime
+from .services import public_request_runtime
+from .services import settings_public_runtime
+from .services import tg_public_runtime
+from .services import tg_proxy_runtime
+from .services import tg_slots_runtime
+from .services import wa_public_runtime
+from .services import wa_qr_runtime
+from .services import avito_callback_html
 from libs.core.message_envelope import content_fingerprint, text_or_placeholder
 from libs.core.db import (
     find_lead_by_peer,
@@ -64,13 +77,33 @@ from libs.core.db import (
 from libs.core.integrations import amocrm as amocrm_integration
 from libs.core.integrations import avito
 from libs.core.integrations import max as max_integration
+from libs.core.transport import max_personal as max_personal_transport
 from libs.core.repo import amocrm_tokens
 from libs.core.repo import crm_links
 from libs.core.services import amocrm as amocrm_service
 from libs.core.services import amocrm_chat as amocrm_chat_service
+from libs.core.services.avito_oauth_tokens import (
+    AvitoTokenPayloadError,
+    build_token_update_payload,
+)
+from libs.core.services.avito_oauth_state import resolve_tenant_from_state
+from libs.core.services import avito_webhook_events
+from libs.core.services import max_personal_service
+from libs.core.services.tenant_config_merge import (
+    build_public_settings_get_config,
+    build_public_settings_save_config,
+)
+from libs.core.learning.service import capture_intervention_episode
 from libs.core.repo import crm_chat_links
 from libs.core import db as db_module
 from libs.core.transport import telegram as telegram_transport
+from libs.core.lib.numbers import coerce_int as _coerce_int_shared
+from libs.core.lib.tg_slots import (
+    TG_SLOT_MAX,
+    TG_SLOT_MIN,
+    normalize_tg_slot as _normalize_tg_slot_shared,
+    virtual_tenant_id as _virtual_tenant_id_shared,
+)
 from libs.core.common import (
     AVITO_BOT_ECHO_TTL_SECONDS,
     HANDOFF_SILENCE_TTL_SECONDS,
@@ -95,12 +128,42 @@ class TgWorkerCallError(RuntimeError):
         message = f"{url}: {detail}" if detail else url
         super().__init__(message)
 
+
 templates = _templates
 
 logger = logging.getLogger(__name__)
 wa_logger = logging.getLogger("wa")
 # Unified incoming transport log channel
 message_in_logger = logging.getLogger("app.web.message_in")
+
+
+async def _capture_manager_intervention(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    manager_message_id: int | None,
+    source_event: str,
+) -> None:
+    if not manager_message_id:
+        return
+    try:
+        await capture_intervention_episode(
+            tenant_id=int(tenant_id),
+            lead_id=int(lead_id),
+            channel=str(channel or ""),
+            source_event=source_event,
+            manager_message_id=int(manager_message_id),
+            log_fn=lambda msg: logger.info(msg),
+        )
+    except Exception:
+        logger.exception(
+            "learning_v2_capture_failed tenant=%s lead_id=%s channel=%s source_event=%s",
+            tenant_id,
+            lead_id,
+            channel,
+            source_event,
+        )
 _deprecated_hits: dict[str, float] = {}
 # Avoid duplicate logging of WA messages via root logger handlers
 wa_logger.propagate = False
@@ -122,11 +185,12 @@ WA_QR_CACHE_TTL_MIN = 30  # seconds
 WA_QR_CACHE_TTL_MAX = 60  # seconds
 
 AVITO_STATE_PREFIX = "oauth:avito:state:"
-AVITO_STATE_TTL = 600  # seconds
+AVITO_STATE_TTL = 4 * 3600  # seconds
 
 router = APIRouter()
 oauth_router = APIRouter(prefix="/v1/oauth/avito", tags=["avito_oauth"])
 max_router = APIRouter(prefix="/v1/max", tags=["max"])
+max_personal_router = APIRouter(prefix="/v1/max-personal", tags=["max_personal"])
 
 CATALOG_VIEW_TEMPLATE = "catalog/view.html"
 PHOTO_MAX_BYTES = 24 * 1024 * 1024  # Avito limit (24 MB) sets global cap
@@ -146,103 +210,27 @@ def _qr_cache_ttl() -> int:
 
 
 INCOMING_QUEUE_KEY = getattr(webhook_module, "INCOMING_QUEUE_KEY", "inbox:message_in")
-TG_SLOT_MIN = 1
-TG_SLOT_MAX = 5
-TG_SLOT_MULTIPLIER = 1000
 
 
 def _normalize_tg_slot(value: Any) -> int:
-    try:
-        slot = int(value)
-    except Exception:
-        return TG_SLOT_MIN
-    if slot < TG_SLOT_MIN:
-        return TG_SLOT_MIN
-    if slot > TG_SLOT_MAX:
-        return TG_SLOT_MAX
-    return slot
+    return _normalize_tg_slot_shared(value)
 
 
 def _tg_slot_tenant(tenant_id: int, slot: int) -> int:
-    normalized = _normalize_tg_slot(slot)
-    if normalized == TG_SLOT_MIN:
-        return int(tenant_id)
-    return int(tenant_id) * TG_SLOT_MULTIPLIER + normalized
+    return _virtual_tenant_id_shared(tenant_id, slot)
 
 
-def _avatar_initials(label: str) -> str:
-    tokens = [chunk for chunk in re.split(r"\s+", str(label or "").strip()) if chunk]
-    if not tokens:
-        return "A"
-    if len(tokens) == 1:
-        value = tokens[0][:2]
-    else:
-        value = f"{tokens[0][:1]}{tokens[1][:1]}"
-    return value.upper()
-
-
-def _avatar_fill(seed: str) -> str:
-    palette = (
-        "#2563eb",
-        "#0f766e",
-        "#c2410c",
-        "#475569",
-        "#7c3aed",
-        "#0f172a",
+def _tg_slots_deps() -> tg_slots_runtime.TgSlotsDeps:
+    return tg_slots_runtime.TgSlotsDeps(
+        slot_min=TG_SLOT_MIN,
+        slot_max=TG_SLOT_MAX,
+        normalize_slot_fn=_normalize_tg_slot,
     )
-    digest = hashlib.sha1(str(seed or "avatar").encode("utf-8")).hexdigest()
-    return palette[int(digest[:2], 16) % len(palette)]
-
-
-def _avatar_text_for_channel(label: str, channel: str) -> str:
-    if str(channel or "").strip().lower() == "avito":
-        clean = str(label or "").strip()
-        if clean.startswith("@"):
-            clean = clean[1:]
-        return (clean[:1] or "A").upper()
-    return _avatar_initials(label)
-
-
-def _avatar_fill_for_channel(label: str, channel: str) -> str:
-    if str(channel or "").strip().lower() == "avito":
-        return "#7cc35b"
-    return _avatar_fill(str(channel or "") + ":" + str(label or ""))
 
 
 def _tg_slots_config(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
-    telegram_cfg = cfg.get("telegram") if isinstance(cfg, Mapping) else None
-    if not isinstance(telegram_cfg, Mapping):
-        telegram_cfg = {}
-    raw_multi = telegram_cfg.get("multi_slot_enabled")
-    if isinstance(raw_multi, bool):
-        multi_mode = raw_multi
-    elif isinstance(raw_multi, str):
-        multi_mode = raw_multi.strip().lower() in {"1", "true", "yes", "on"}
-    else:
-        multi_mode = True
-    slot_enabled_raw = telegram_cfg.get("slot_enabled")
-    slot_enabled: dict[str, bool] = {}
-    if isinstance(slot_enabled_raw, Mapping):
-        for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
-            raw_flag = slot_enabled_raw.get(str(slot), slot_enabled_raw.get(slot))
-            if isinstance(raw_flag, bool):
-                slot_enabled[str(slot)] = raw_flag
-            elif isinstance(raw_flag, str):
-                slot_enabled[str(slot)] = raw_flag.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                slot_enabled[str(slot)] = True
-    else:
-        for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
-            slot_enabled[str(slot)] = True
-    slot_count_raw = telegram_cfg.get("slot_count")
-    slot_count = _normalize_tg_slot(slot_count_raw)
-    return {
-        "multi_mode": bool(multi_mode),
-        "slot_enabled": slot_enabled,
-        "slot_count": int(slot_count),
-        "slot_min": TG_SLOT_MIN,
-        "slot_max": TG_SLOT_MAX,
-    }
+    return tg_slots_runtime.tg_slots_config(cfg, _tg_slots_deps())
+
 
 async def _is_recent_bot_echo(
     tenant: int,
@@ -318,14 +306,97 @@ def _resolve_client_key(request: Request | None) -> str:
 
 
 def _avito_state_key(state: str) -> str:
-    return f"{AVITO_STATE_PREFIX}{state}"
+    return avito_public_runtime.state_key(state, prefix=AVITO_STATE_PREFIX)
+
+
+AVITO_STATE_COOKIE = "avito_oauth_state"
+
+
+def _avito_state_secret() -> str:
+    return avito_public_runtime.state_secret(settings)
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return avito_public_runtime.b64url_encode(raw)
+
+
+def _b64url_decode(raw: str) -> bytes:
+    return avito_public_runtime.b64url_decode(raw)
+
+
+def _build_avito_oauth_state(tenant_id: int) -> str:
+    return avito_public_runtime.build_oauth_state(
+        tenant_id,
+        settings_module=settings,
+        time_module=time,
+        secrets_module=secrets,
+    )
+
+
+def _avito_state_cookie_domain() -> str | None:
+    return avito_public_runtime.state_cookie_domain(settings)
+
+
+def _avito_oauth_public_origin(request: Request) -> str:
+    return avito_public_runtime.oauth_public_origin(
+        request,
+        settings_module=settings,
+        public_base_url_fn=common.public_base_url,
+    )
+
+
+def _avito_oauth_redirect_entry_url(request: Request, tenant_id: int, key: str | None) -> str:
+    return avito_public_runtime.oauth_redirect_entry_url(
+        request,
+        tenant_id,
+        key,
+        settings_module=settings,
+        public_base_url_fn=common.public_base_url,
+    )
+
+
+def _set_avito_state_cookie(response: Response, request: Request, state: str) -> None:
+    avito_public_runtime.set_state_cookie(
+        response,
+        request,
+        state,
+        settings_module=settings,
+        cookie_name=AVITO_STATE_COOKIE,
+        ttl_seconds=AVITO_STATE_TTL,
+    )
+
+
+def _clear_avito_state_cookie(response: Response) -> None:
+    avito_public_runtime.clear_state_cookie(
+        response,
+        settings_module=settings,
+        cookie_name=AVITO_STATE_COOKIE,
+    )
+
+
+def _verify_avito_oauth_state(state: str) -> dict[str, Any] | None:
+    return avito_public_runtime.verify_oauth_state(
+        state,
+        settings_module=settings,
+        ttl_seconds=AVITO_STATE_TTL,
+        coerce_int_fn=_coerce_int,
+        time_module=time,
+    )
+
+
+def _delete_avito_states_for_tenant(client: Any, tenant_id: int) -> int:
+    """Keep one active OAuth state per tenant to avoid stale-tab callbacks."""
+    return avito_public_runtime.delete_states_for_tenant(
+        client,
+        tenant_id,
+        prefix=AVITO_STATE_PREFIX,
+        coerce_int_fn=_coerce_int,
+        json_module=json,
+    )
 
 
 def _amocrm_state_secret() -> str:
-    return (
-        (settings.WEBHOOK_SECRET or "").strip()
-        or (settings.ADMIN_TOKEN or "").strip()
-    )
+    return (settings.WEBHOOK_SECRET or "").strip() or (settings.ADMIN_TOKEN or "").strip()
 
 
 async def _read_amocrm_webhook_payload(request: Request) -> dict[str, Any]:
@@ -358,122 +429,90 @@ def _extract_amocrm_uninstall_info(payload: Mapping[str, Any]) -> tuple[int | No
     return account_id_val, subdomain_val
 
 
+def _amocrm_public_runtime_deps() -> amocrm_public_runtime.AmoCRMPublicDeps:
+    from apps.worker.main import send_avito  # local import to avoid circular startup edge
+
+    return amocrm_public_runtime.AmoCRMPublicDeps(
+        authorize_public_settings_request_fn=_authorize_public_settings_request,
+        read_tenant_config_fn=common.read_tenant_config,
+        write_tenant_config_fn=common.write_tenant_config,
+        amocrm_service_module=amocrm_service,
+        amocrm_integration_module=amocrm_integration,
+        amocrm_tokens_module=amocrm_tokens,
+        amocrm_chat_service_module=amocrm_chat_service,
+        common_module=common,
+        logger=logger,
+        uuid_module=uuid,
+        time_module=time,
+        urlencode_fn=urlencode,
+        state_secret_fn=_amocrm_state_secret,
+        httpx_module=httpx,
+        os_module=os,
+        json_module=json,
+        datetime_cls=datetime,
+        timezone_utc=timezone.utc,
+        timedelta_cls=timedelta,
+        quote_plus_fn=quote_plus,
+        no_store_headers_fn=_no_store_headers,
+        read_amocrm_webhook_payload_fn=_read_amocrm_webhook_payload,
+        extract_amocrm_uninstall_info_fn=_extract_amocrm_uninstall_info,
+        crm_chat_links_module=crm_chat_links,
+        crm_links_module=crm_links,
+        db_module=db_module,
+        get_lead_dialog_metadata_fn=get_lead_dialog_metadata,
+        get_lead_peer_fn=get_lead_peer,
+        content_fingerprint_fn=content_fingerprint,
+        text_or_placeholder_fn=text_or_placeholder,
+        redis_queue=_redis_queue,
+        settings_module=settings,
+        avito_bot_echo_key_fn=avito_bot_echo_key,
+        avito_bot_echo_ttl_seconds=AVITO_BOT_ECHO_TTL_SECONDS,
+        normalize_echo_text_fn=normalize_echo_text,
+        telegram_transport_module=telegram_transport,
+        insert_message_out_fn=insert_message_out,
+        capture_manager_intervention_fn=_capture_manager_intervention,
+        handoff_silence_key_fn=handoff_silence_key,
+        handoff_silence_meta_key_fn=handoff_silence_meta_key,
+        handoff_silence_ttl_seconds=HANDOFF_SILENCE_TTL_SECONDS,
+        redis_error_type=redis_ex.RedisError,
+        send_avito_fn=send_avito,
+    )
+
+
+def _amocrm_avatar_deps() -> amocrm_avatar_runtime.AmoCRMAvatarDeps:
+    return amocrm_avatar_runtime.AmoCRMAvatarDeps(
+        read_tenant_config_fn=common.read_tenant_config,
+        amocrm_chat_service_module=amocrm_chat_service,
+        hmac_module=hmac,
+        tg_call_fn=_tg_call,
+        tg_worker_call_error_type=TgWorkerCallError,
+        no_store_headers_fn=_no_store_headers,
+        chat_avatar_fn=chat_avatar,
+        get_tenant_pubkey_fn=common.get_tenant_pubkey,
+    )
+
+
+def _public_settings_runtime_deps() -> settings_public_runtime.PublicSettingsDeps:
+    return settings_public_runtime.PublicSettingsDeps(
+        authorize_public_settings_request_fn=_authorize_public_settings_request,
+        common_module=common,
+        build_get_config_fn=build_public_settings_get_config,
+        build_save_config_fn=build_public_settings_save_config,
+        amocrm_service_module=amocrm_service,
+        amocrm_tokens_module=amocrm_tokens,
+        datetime_cls=datetime,
+        timezone_utc=timezone.utc,
+        logger=logger,
+        no_store_headers_fn=_no_store_headers,
+    )
+
+
 def _avito_public_payload(raw: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(raw, Mapping):
-        return {"connected": False}
-    access = str(raw.get("access_token") or "").strip()
-    expires_at = raw.get("expires_at")
-    try:
-        expires_at_int = int(expires_at)
-    except Exception:
-        expires_at_int = None
-    obtained_at = raw.get("obtained_at")
-    try:
-        obtained_at_int = int(obtained_at)
-    except Exception:
-        obtained_at_int = None
-    info = {
-        "connected": bool(access),
-        "expires_at": expires_at_int,
-        "obtained_at": obtained_at_int,
-    }
-    scope = raw.get("scope")
-    if isinstance(scope, str) and scope.strip():
-        info["scope"] = scope.strip()
-    account_id = raw.get("account_id")
-    if account_id is not None:
-        try:
-            info["account_id"] = int(account_id)
-        except Exception:
-            info["account_id"] = str(account_id)
-    return info
+    return avito_public_runtime.public_payload(raw)
 
 
 def _avito_callback_html(ok: bool, message: str, payload: Mapping[str, Any]) -> str:
-    safe_message = html.escape(message, quote=False)
-    try:
-        data_json = json.dumps(dict(payload), ensure_ascii=False)
-    except Exception:
-        data_json = json.dumps({"source": "avito-oauth", "ok": ok})
-    status_class = "success" if ok else "error"
-    return f"""<!doctype html>
-<html lang="ru">
-  <head>
-    <meta charset="utf-8">
-    <title>Avito OAuth</title>
-    <style>
-      body {{
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        padding: 32px;
-        background: #f9fafb;
-        color: #111827;
-      }}
-      .card {{
-        max-width: 460px;
-        margin: 0 auto;
-        padding: 24px;
-        background: #fff;
-        border-radius: 12px;
-        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
-      }}
-      .card h1 {{
-        margin: 0 0 12px;
-        font-size: 20px;
-        font-weight: 700;
-      }}
-      .card p {{
-        margin: 0 0 16px;
-        line-height: 1.5;
-      }}
-      .status {{
-        display: inline-block;
-        padding: 6px 12px;
-        border-radius: 999px;
-        font-size: 13px;
-        font-weight: 600;
-      }}
-      .status.success {{
-        background: #dcfce7;
-        color: #166534;
-      }}
-      .status.error {{
-        background: #fee2e2;
-        color: #b91c1c;
-      }}
-      .hint {{
-        font-size: 13px;
-        color: #6b7280;
-      }}
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <div class="status {status_class}">{'Успешно' if ok else 'Ошибка'}</div>
-      <h1>Avito OAuth</h1>
-      <p>{safe_message}</p>
-      <p class="hint">Окно закроется автоматически. Если этого не произошло — закройте его вручную.</p>
-    </div>
-    <script>
-      (function() {{
-        var payload = {data_json};
-        try {{
-          if (typeof payload === 'object' && payload) {{
-            payload.source = 'avito-oauth';
-            payload.ok = { 'true' if ok else 'false' };
-          }}
-          if (window.opener && window.opener !== window) {{
-            window.opener.postMessage(payload, '*');
-          }}
-        }} catch (err) {{}}
-        setTimeout(function() {{
-          try {{
-            window.close();
-          }} catch (err) {{}}
-        }}, 2000);
-      }})();
-    </script>
-  </body>
-</html>"""
+    return avito_callback_html.render_avito_callback_html(ok, message, payload)
 
 
 @router.post("/webhook/avito")
@@ -503,463 +542,33 @@ async def avito_webhook(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "processed": processed})
 
 
-
 async def _handle_avito_webhook_event(event: Mapping[str, Any], request: Request) -> bool:
-    payload_raw = event.get("payload")
-    payload = payload_raw if isinstance(payload_raw, Mapping) else {}
-
-    tenant: Optional[int] = None
-    account_id = _coerce_int(
-        payload.get("account_id")
-        or event.get("account_id")
-        or (payload.get("account") or {}).get("id")
-        or (event.get("account") or {}).get("id")
+    return await avito_webhook_runtime.handle_avito_webhook_event(
+        event,
+        request,
+        deps=avito_webhook_runtime.AvitoWebhookDeps(
+            avito_webhook_events_module=avito_webhook_events,
+            logger=logger,
+            json_module=json,
+            avito_module=avito,
+            coerce_int_fn=_coerce_int,
+            find_lead_by_peer_fn=find_lead_by_peer,
+            redis_queue=_redis_queue,
+            content_fingerprint_fn=content_fingerprint,
+            avito_bot_echo_key_fn=avito_bot_echo_key,
+            normalize_echo_text_fn=normalize_echo_text,
+            is_recent_bot_echo_fn=_is_recent_bot_echo,
+            time_module=time,
+            handoff_silence_key_fn=handoff_silence_key,
+            handoff_silence_meta_key_fn=handoff_silence_meta_key,
+            handoff_silence_ttl_seconds=HANDOFF_SILENCE_TTL_SECONDS,
+            db_module=db_module,
+            insert_message_out_fn=insert_message_out,
+            capture_manager_intervention_fn=_capture_manager_intervention,
+            amocrm_service_module=amocrm_service,
+            process_incoming_fn=process_incoming,
+        ),
     )
-    logger.warning("avito_webhook_received raw_event=%s", json.dumps(event, ensure_ascii=False))
-
-    value_raw = payload.get("value") or event.get("value") or {}
-    value = value_raw if isinstance(value_raw, Mapping) else {}
-    if not value:
-        logger.warning("avito_webhook_skip reason=no_value tenant=%s account_id=%s raw_event=%s", tenant, account_id, json.dumps(event, ensure_ascii=False))
-        return False
-
-    content_raw = value.get("content") if isinstance(value.get("content"), Mapping) else {}
-
-    chat_candidate = (
-        value.get("chat_id")
-        or value.get("conversation_id")
-        or payload.get("chat_id")
-        or payload.get("conversation_id")
-        or event.get("chat_id")
-    )
-    if isinstance(chat_candidate, Mapping):
-        chat_candidate = chat_candidate.get("id")
-    # Some Avito payloads ship chat_id at the root level.
-    if not chat_candidate:
-        chat_candidate = event.get("chat_id")
-    chat_id = str(chat_candidate).strip() if chat_candidate else ""
-    if not chat_id:
-        logger.warning(
-            "avito_webhook_skip reason=no_chat account_id=%s tenant=%s raw_event=%s",
-            account_id,
-            tenant,
-            json.dumps(event, ensure_ascii=False),
-        )
-        return False
-
-    if account_id is None:
-        resolved_tenant, resolved_account = await avito.resolve_tenant_by_chat(chat_id)
-        if resolved_tenant is not None and resolved_account is not None:
-            tenant = int(resolved_tenant)
-            account_id = int(resolved_account)
-        else:
-            account_id = _coerce_int(
-                (payload.get("value") or {}).get("user_id")
-                or payload.get("user_id")
-                or event.get("user_id")
-            )
-
-    if account_id is not None and tenant is None:
-        tenant = avito.find_tenant_by_account(account_id)
-
-    if tenant is None:
-        tenant = _coerce_int(payload.get("tenant") or event.get("tenant"))
-    if tenant is None:
-        tenant = _coerce_int(request.query_params.get("tenant") or request.query_params.get("t"))
-    if tenant is None or tenant <= 0:
-        logger.warning(
-            "avito_webhook_skip reason=unknown_tenant account_id=%s chat_id=%s raw_event=%s",
-            account_id,
-            chat_id,
-            json.dumps(event, ensure_ascii=False),
-        )
-        return False
-
-    tenant = int(tenant)
-    if account_id is None:
-        integration = avito.get_integration(tenant)
-        if integration:
-            account_id = _coerce_int(integration.get("account_id"))
-
-    message_type = str(value.get("type") or "").strip().lower()
-    text_candidate = ""
-    if isinstance(content_raw, Mapping):
-        text_candidate = content_raw.get("text") or ""
-    if not text_candidate:
-        text_candidate = value.get("text") or payload.get("text") or ""
-    text = str(text_candidate or "").strip()
-
-    attachments: list[dict[str, Any]] = []
-    if isinstance(content_raw, Mapping):
-        if message_type == "image":
-            image = content_raw.get("image") if isinstance(content_raw.get("image"), Mapping) else {}
-            sizes_raw = image.get("sizes")
-            sizes: list[Mapping[str, Any]] = []
-            if isinstance(sizes_raw, list):
-                sizes = [entry for entry in sizes_raw if isinstance(entry, Mapping)]
-            url = ""
-            for entry in sizes:
-                if entry.get("url"):
-                    url = entry["url"]
-            if not url and isinstance(sizes_raw, Mapping):
-                for entry in sizes_raw.values():
-                    if isinstance(entry, str) and entry:
-                        url = entry
-                        break
-            if url:
-                attachments.append({"type": "image", "url": url, "name": image.get("name") or "image"})
-            if not text:
-                text = "__image__"
-        elif message_type == "voice":
-            voice = content_raw.get("voice") if isinstance(content_raw.get("voice"), Mapping) else {}
-            voice_url = (
-                voice.get("url")
-                or voice.get("download_url")
-                or voice.get("file_url")
-                or voice.get("media_url")
-            )
-            voice_id = voice.get("voice_id") or voice.get("id")
-            if voice_url:
-                attachments.append(
-                    {
-                        "type": "voice",
-                        "url": str(voice_url),
-                        "name": str(voice.get("name") or "voice.ogg"),
-                        "mime": str(voice.get("mime") or "audio/mp4"),
-                        "voice_id": str(voice_id or "").strip() or None,
-                    }
-                )
-            elif voice_id:
-                resolved_voice_url = ""
-                try:
-                    resolved_voice_url = await avito.resolve_voice_url(
-                        int(tenant),
-                        str(voice_id),
-                        account_id=account_id,
-                    )
-                except Exception as exc:
-                    logger.info(
-                        "avito_voice_url_resolve_failed tenant=%s account_id=%s chat_id=%s voice_id=%s error=%s",
-                        tenant,
-                        account_id,
-                        chat_id,
-                        voice_id,
-                        exc,
-                    )
-                attachment_payload: dict[str, Any] = {
-                    "type": "voice",
-                    "url": str(resolved_voice_url or voice_id),
-                    "name": str(voice.get("name") or "voice.mp4"),
-                    "mime": str(voice.get("mime") or "audio/mp4"),
-                    "voice_id": str(voice_id),
-                }
-                attachments.append(attachment_payload)
-            if not text:
-                text = "__voice__"
-    if message_type == "image" and not text:
-        text = "__image__"
-
-    message_id = value.get("id") or event.get("event_id") or event.get("id")
-    message_id_str = str(message_id) if message_id is not None else None
-
-    avito_user_id = _coerce_int(
-        content_raw.get("author_id")
-        or value.get("author_id")
-        or value.get("sender_id")
-        or payload.get("user_id")
-    )
-    manager_outgoing = False
-    if account_id is not None and avito_user_id is not None and avito_user_id == account_id:
-        lead_id = avito.stable_lead_id(account_id, chat_id)
-        try:
-            resolved = await find_lead_by_peer(int(tenant), "avito", chat_id)
-        except Exception:
-            resolved = None
-        if resolved and resolved.get("id"):
-            lead_id = int(resolved["id"])
-        dedup_message_id = str(message_id_str or "").strip()
-        dedup_token = dedup_message_id
-        if not dedup_token:
-            created_hint = str(
-                value.get("created")
-                or content_raw.get("created")
-                or payload.get("created")
-                or value.get("published_at")
-                or payload.get("published_at")
-                or ""
-            ).strip()
-            dedup_token = f"fp:{content_fingerprint(text, attachments)}:{created_hint}"
-        if dedup_token:
-            dedup_seen = False
-            if _redis_queue is not None:
-                try:
-                    dedup_ttl = 7 * 24 * 3600 if dedup_message_id else 180
-                    dedup_key = "avito:manager:outgoing:dedup:%s:%s:%s" % (
-                        int(tenant),
-                        str(chat_id),
-                        dedup_token,
-                    )
-                    accepted = await _redis_queue.set(
-                        dedup_key,
-                        "1",
-                        ex=dedup_ttl,
-                        nx=True,
-                    )
-                    dedup_seen = not bool(accepted)
-                except Exception:
-                    logger.debug(
-                        "avito_outgoing_dedup_cache_failed tenant=%s chat_id=%s",
-                        tenant,
-                        chat_id,
-                        exc_info=True,
-                    )
-            if not dedup_seen and dedup_message_id:
-                fetchrow = getattr(db_module, "_fetchrow", None)
-                if fetchrow:
-                    try:
-                        row = await fetchrow(
-                            """
-                            SELECT 1
-                            FROM messages
-                            WHERE tenant_id = $1
-                              AND lead_id = $2
-                              AND direction = 1
-                              AND provider_msg_id = $3
-                              AND COALESCE(source, '') = 'manager'
-                            LIMIT 1
-                            """,
-                            int(tenant),
-                            int(lead_id),
-                            dedup_message_id,
-                        )
-                        dedup_seen = bool(row)
-                    except Exception:
-                        logger.debug(
-                            "avito_outgoing_dedup_db_check_failed tenant=%s chat_id=%s lead_id=%s",
-                            tenant,
-                            chat_id,
-                            lead_id,
-                            exc_info=True,
-                        )
-            if dedup_seen:
-                logger.info(
-                    "avito_webhook_manager_outgoing_dedup tenant=%s account_id=%s chat_id=%s lead_id=%s dedup_id=%s",
-                    tenant,
-                    account_id,
-                    chat_id,
-                    lead_id,
-                    dedup_token,
-                )
-                return False
-        echo_detected = False
-        if _redis_queue is not None:
-            try:
-                echo_key = avito_bot_echo_key(int(tenant), chat_id)
-                echo_payload = await _redis_queue.get(echo_key)
-                if echo_payload:
-                    try:
-                        payload = json.loads(echo_payload)
-                    except Exception:
-                        payload = {}
-                    cached_text = ""
-                    cached_extra: list[str] = []
-                    if isinstance(payload, Mapping):
-                        cached_text = normalize_echo_text(str(payload.get("text") or ""))
-                        extra_raw = payload.get("extra")
-                        if isinstance(extra_raw, list):
-                            cached_extra = [
-                                normalize_echo_text(str(entry or ""))
-                                for entry in extra_raw
-                                if str(entry or "").strip()
-                            ]
-                    incoming_text = normalize_echo_text(text)
-                    if cached_text and incoming_text and cached_text == incoming_text:
-                        echo_detected = True
-                    elif cached_extra and incoming_text and incoming_text in cached_extra:
-                        echo_detected = True
-                if not echo_detected and text:
-                    echo_detected = await _is_recent_bot_echo(int(tenant), int(lead_id), text)
-                if not echo_detected:
-                    timestamp = int(time.time())
-                    await _redis_queue.set(
-                        handoff_silence_key(int(tenant), int(lead_id)),
-                        str(timestamp),
-                        ex=HANDOFF_SILENCE_TTL_SECONDS,
-                    )
-                    meta_key = handoff_silence_meta_key(int(tenant), int(lead_id))
-                    if meta_key:
-                        payload = {"reason": "manager_outgoing", "ts": timestamp}
-                        await _redis_queue.set(
-                            meta_key,
-                            json.dumps(payload, ensure_ascii=False),
-                            ex=HANDOFF_SILENCE_TTL_SECONDS,
-                        )
-            except Exception:
-                logger.debug(
-                    "handoff_flag_set_failed tenant=%s chat_id=%s", tenant, chat_id, exc_info=True
-                )
-        else:
-            logger.debug("handoff_flag_set_skipped_no_redis tenant=%s lead_id=%s", tenant, lead_id)
-        logger.info(
-            "avito_webhook_manager_outgoing tenant=%s account_id=%s chat_id=%s",
-            tenant,
-            account_id,
-            chat_id,
-        )
-        manager_outgoing = True
-        if text or attachments:
-            logger.info(
-                "avito_outgoing_eval tenant=%s chat_id=%s echo=%s text_len=%s attachments=%s",
-                tenant,
-                chat_id,
-                int(bool(echo_detected)),
-                len(text or ""),
-                len(attachments),
-            )
-            if not echo_detected and _redis_queue is not None:
-                try:
-                    fp = content_fingerprint(text, attachments)
-                    amo_echo_key = "amocrm:manager:echo:%s:%s:%s" % (
-                        int(tenant),
-                        int(lead_id),
-                        fp,
-                    )
-                    if await _redis_queue.get(amo_echo_key):
-                        echo_detected = True
-                        logger.info(
-                            "avito_outgoing_skipped_amocrm_echo tenant=%s chat_id=%s lead_id=%s",
-                            tenant,
-                            chat_id,
-                            lead_id,
-                        )
-                    if not echo_detected:
-                        amo_echo_chat_key = "amocrm:manager:echo:chat:%s:%s:%s" % (
-                            int(tenant),
-                            str(chat_id),
-                            fp,
-                        )
-                        if await _redis_queue.get(amo_echo_chat_key):
-                            echo_detected = True
-                            logger.info(
-                                "avito_outgoing_skipped_amocrm_echo_chat tenant=%s chat_id=%s lead_id=%s",
-                                tenant,
-                                chat_id,
-                                lead_id,
-                            )
-                except Exception:
-                    logger.debug(
-                        "avito_outgoing_amocrm_echo_check_failed tenant=%s chat_id=%s",
-                        tenant,
-                        chat_id,
-                        exc_info=True,
-                    )
-            if not echo_detected:
-                display_text = text
-                if not display_text and attachments:
-                    display_text = "Вложение"
-                try:
-                    stored_id = await insert_message_out(
-                        lead_id,
-                        display_text,
-                        message_id_str,
-                        status="sent",
-                        tenant_id=int(tenant),
-                        channel="avito",
-                        is_bot=False,
-                        attachments=attachments or None,
-                        source="manager",
-                    )
-                    logger.info(
-                        "avito_outgoing_stored tenant=%s chat_id=%s lead_id=%s msg_id=%s",
-                        tenant,
-                        chat_id,
-                        lead_id,
-                        stored_id,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "avito_outgoing_store_failed tenant=%s chat_id=%s error=%s",
-                        tenant,
-                        chat_id,
-                        exc,
-                    )
-                try:
-                    await amocrm_service.amocrm_on_outbound_message(
-                        int(tenant),
-                        int(lead_id),
-                        text=display_text or "",
-                        channel="avito",
-                        attachments=attachments or None,
-                        source_role="manager",
-                    )
-                except Exception:
-                    logger.exception(
-                        "avito_outgoing_amocrm_sync_failed tenant=%s chat_id=%s lead_id=%s",
-                        tenant,
-                        chat_id,
-                        lead_id,
-                    )
-            else:
-                logger.info(
-                    "avito_outgoing_skipped_echo tenant=%s chat_id=%s",
-                    tenant,
-                    chat_id,
-                )
-            # Skip processing bot/manager echoes to avoid double replies.
-            return False
-
-    avito_login = None
-    login_candidate = value.get("author_login") or payload.get("user_login")
-    if isinstance(login_candidate, str) and login_candidate.strip():
-        avito_login = login_candidate.strip()
-
-    if not text and not attachments:
-        logger.info("avito_webhook_skip reason=empty_message tenant=%s account_id=%s chat_id=%s raw_event=%s", tenant, account_id, chat_id, json.dumps(event, ensure_ascii=False))
-        return False
-
-    lead_id = avito.stable_lead_id(account_id, chat_id)
-
-    incoming_body: dict[str, Any] = {
-        "provider": "avito",
-        "channel": "avito",
-        "tenant": tenant,
-        "tenant_id": tenant,
-        "manager": manager_outgoing,
-        "out": manager_outgoing,
-        "account_id": account_id,
-        "chat_id": chat_id,
-        "lead_id": lead_id,
-        "avito_user_id": avito_user_id,
-        "avito_login": avito_login,
-        "source": {"type": "avito", "tenant": tenant, "account_id": account_id, "chat_id": chat_id},
-        "message": {
-            "id": message_id_str,
-            "message_id": message_id_str,
-            "text": text,
-            "chat_id": chat_id,
-            "direction": message_type,
-            "attachments": attachments,
-            "author_id": avito_user_id,
-        },
-        "attachments": attachments,
-        "peer": chat_id,
-        "auto_reply_handled": False,
-    }
-
-    created_at = value.get("created") or content_raw.get("created") or payload.get("created")
-    if created_at is not None:
-        incoming_body["message"]["created_at"] = created_at
-    published_at = value.get("published_at") or payload.get("published_at")
-    if published_at is not None:
-        incoming_body["message"]["published_at"] = published_at
-
-    lead_contacts = {"avito": {"peer": chat_id}}
-    if avito_login:
-        lead_contacts["avito"]["contact"] = avito_login
-    incoming_body["lead_contacts"] = lead_contacts
-
-    await process_incoming(incoming_body, request)
-    return True
 
 
 async def _ensure_avito_webhook(tenant: int, request: Request) -> None:
@@ -972,120 +581,52 @@ async def _ensure_avito_webhook(tenant: int, request: Request) -> None:
         logger.exception("avito_webhook_register_failed tenant=%s", tenant)
     else:
         if not success:
-            logger.warning("avito_webhook_register_failed tenant=%s error=unexpected_response", tenant)
+            logger.warning(
+                "avito_webhook_register_failed tenant=%s error=unexpected_response", tenant
+            )
 
 
 @router.get("/connect/avito")
 def connect_avito(tenant: int, request: Request, k: str | None = None, key: str | None = None):
-    tenant_id = int(tenant)
-    access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
-    if not common.valid_key(tenant_id, access_key):
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
-
-    common.ensure_tenant_files(tenant_id)
-    cfg = common.read_tenant_config(tenant_id) or {}
-    passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
-    brand = ""
-    if isinstance(passport, dict):
-        brand = str(passport.get("brand") or "").strip()
-
-    avito_integration = avito.get_integration(tenant_id)
-    avito_info = _avito_public_payload(avito_integration)
-
-    behavior = cfg.setdefault("behavior", {})
-    changed_behavior = False
-    if behavior.get("auto_reply") is not True:
-        behavior["auto_reply"] = True
-        changed_behavior = True
-    if behavior.get("auto_reply_enabled") is not True:
-        behavior["auto_reply_enabled"] = True
-        changed_behavior = True
-    if changed_behavior:
-        try:
-            common.write_tenant_config(tenant_id, cfg)
-        except Exception:
-            logger.exception("avito_behavior_update_failed tenant=%s", tenant_id)
-
-    primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
-    resolved_key = primary_key or access_key
-
-    settings_link = ""
-    try:
-        raw_settings = request.url_for("client_settings", tenant=str(tenant_id))
-        if resolved_key:
-            settings_link = common.public_url(
-                request,
-                f"{raw_settings}?k={quote_plus(resolved_key)}",
-            )
-    except Exception:
-        settings_link = ""
-
-    context = {
-        "request": request,
-        "tenant": tenant_id,
-        "key": resolved_key,
-        "tenant_key": access_key,
-        "subtitle": brand,
-        "passport": passport if isinstance(passport, Mapping) else {},
-        "avito": avito_info,
-        "settings_link": settings_link,
-    }
-    return render_template("connect/avito.html", context)
+    return avito_public_runtime.connect_avito(
+        tenant,
+        request,
+        k=k,
+        key=key,
+        deps=avito_public_runtime.AvitoConnectDeps(
+            common_module=common,
+            avito_module=avito,
+            logger=logger,
+            render_template_fn=render_template,
+            quote_plus_fn=quote_plus,
+        ),
+    )
 
 
 def _tg_base_url() -> str:
-    candidates = [
-        os.getenv("TG_WORKER_URL"),
-        os.getenv("TGWORKER_URL"),
-        getattr(settings, "TG_WORKER_URL", None),
-        getattr(settings, "TGWORKER_BASE_URL", None),
-        getattr(settings, "WORKER_BASE_URL", None),
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        cleaned = str(candidate).strip()
-        if cleaned:
-            return cleaned.rstrip("/") or getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
-    return getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
+    return tg_proxy_runtime.base_url(os, settings)
 
 
 def _resolve_tg_base() -> str:
     global TG_WORKER_BASE
-    base = _tg_base_url()
-    if TG_WORKER_BASE != base:
-        TG_WORKER_BASE = base
+    TG_WORKER_BASE = tg_proxy_runtime.resolve_base(TG_WORKER_BASE, _tg_base_url())
     return TG_WORKER_BASE
 
 
 def _tg_make_url(path: str) -> str:
-    if not path:
-        return _resolve_tg_base()
-    lowered = path.lower()
-    if lowered.startswith("http://") or lowered.startswith("https://"):
-        return path
-    if not path.startswith("/"):
-        path = f"/{path}"
-    return f"{_resolve_tg_base()}{path}"
+    return tg_proxy_runtime.make_url(path, base=_resolve_tg_base())
 
 
 _TG_HTTP_CLIENT: httpx.AsyncClient | None = None
 
 
 def _tg_admin_headers() -> dict[str, str]:
-    token = (
-        os.getenv("ADMIN_TOKEN")
-        or os.getenv("TGWORKER_ADMIN_TOKEN")
-        or getattr(settings, "ADMIN_TOKEN", "")
-        or ""
-    ).strip()
-    return {"X-Admin-Token": token} if token else {}
+    return tg_proxy_runtime.admin_headers(os, settings)
 
 
 def _tg_client() -> httpx.AsyncClient:
     global _TG_HTTP_CLIENT
-    if _TG_HTTP_CLIENT is None or _TG_HTTP_CLIENT.is_closed:
-        _TG_HTTP_CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    _TG_HTTP_CLIENT = tg_proxy_runtime.client(_TG_HTTP_CLIENT, httpx)
     return _TG_HTTP_CLIENT
 
 
@@ -1099,43 +640,23 @@ async def _tg_call(
     route: str | None = None,
     peer: Any | None = None,
 ) -> tuple[int, httpx.Response]:
-    url = _tg_make_url(path)
-    base_headers = _tg_admin_headers()
-    request_kwargs: dict[str, Any] = {
-        "params": dict(params or {}),
-        "headers": base_headers,
-        "follow_redirects": False,
-        "timeout": httpx.Timeout(timeout),
-    }
-    if json is not None:
-        request_kwargs["json"] = dict(json)
-    try:
-        client = _tg_client()
-        response = await client.request(method.upper(), url, **request_kwargs)
-    except httpx.HTTPError as exc:  # pragma: no cover - network failures
-        detail = str(exc)
-        logger.warning(
-            "event=tg_proxy_error route=%s url=%s status=error detail=%s",
-            route or path,
-            url,
-            detail,
-        )
-        raise TgWorkerCallError(url, detail) from exc
-
-    status_code = int(getattr(response, "status_code", 0) or 0)
-    peer_info = "-" if peer is None else str(peer)
-    log_args = (route or path, url, status_code, peer_info)
-    if status_code == 401:
-        logger.warning(
-            "event=tg_proxy_response route=%s url=%s status=%s peer=%s unauthorized",
-            *log_args,
-        )
-    else:
-        logger.info(
-            "event=tg_proxy_response route=%s url=%s status=%s peer=%s",
-            *log_args,
-        )
-    return status_code, response
+    return await tg_proxy_runtime.call(
+        method,
+        path,
+        params=params,
+        json_payload=json,
+        timeout=timeout,
+        route=route,
+        peer=peer,
+        deps=tg_proxy_runtime.TgProxyCallDeps(
+            make_url_fn=_tg_make_url,
+            admin_headers_fn=_tg_admin_headers,
+            client_fn=_tg_client,
+            httpx_module=httpx,
+            logger=logger,
+            worker_call_error_type=TgWorkerCallError,
+        ),
+    )
 
 
 def _log_deprecated(route: str) -> None:
@@ -1144,57 +665,18 @@ def _log_deprecated(route: str) -> None:
     if last is None or now - last >= 3600:
         _deprecated_hits[route] = now
         logger.warning("deprecated_endpoint route=%s", route)
+
+
 def _stringify_detail(value: bytes | bytearray | str | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            return value.decode("utf-8", errors="ignore")
-        except Exception:
-            return ""
-    return str(value)
-
-
-_JSON_DBL_PASSWORD = re.compile(r'("password"\s*:\s*")([^"\\]*)(")', re.IGNORECASE)
-_JSON_SGL_PASSWORD = re.compile(r"('password'\s*:\s*')([^'\\]*)(')", re.IGNORECASE)
-_QUERY_PASSWORD = re.compile(r'(password\s*=\s*)([^&\s]+)', re.IGNORECASE)
+    return tg_proxy_runtime.stringify_detail(value)
 
 
 def _mask_sensitive_detail(detail: str | None) -> str:
-    if not detail:
-        return ""
-    masked = str(detail)
-    masked = _JSON_DBL_PASSWORD.sub(lambda m: f"{m.group(1)}******{m.group(3)}", masked)
-    masked = _JSON_SGL_PASSWORD.sub(lambda m: f"{m.group(1)}******{m.group(3)}", masked)
-    masked = _QUERY_PASSWORD.sub(r"\1******", masked)
-    return masked
+    return tg_proxy_runtime.mask_sensitive_detail(detail)
 
 
 def _extract_json_detail(body: bytes | bytearray | str | None) -> str | None:
-    if body is None:
-        return None
-    data: Any
-    payload = body
-    if isinstance(payload, (bytes, bytearray)):
-        try:
-            payload = payload.decode("utf-8")
-        except Exception:
-            return None
-    if isinstance(payload, str):
-        payload = payload.strip()
-        if not payload:
-            return None
-        try:
-            data = json.loads(payload)
-        except Exception:
-            return None
-    else:
-        data = payload
-    if isinstance(data, dict):
-        detail = data.get("detail")
-        if isinstance(detail, str):
-            return detail
-    return None
+    return tg_proxy_runtime.extract_json_detail(body, json_module=json)
 
 
 def _log_tg_proxy(
@@ -1206,21 +688,14 @@ def _log_tg_proxy(
     error: str | None = None,
     force: bool | None = None,
 ) -> None:
-    detail_raw = error if error is not None else _stringify_detail(body)
-    detail = _mask_sensitive_detail(detail_raw)
-    log_fn = logger.info if 200 <= int(status or 0) < 300 else logger.warning
-    tenant_value = "-" if tenant is None else tenant
-    if route == "/pub/tg/password":
-        log_fn("tg_proxy route=%s tenant=%s tg_code=%s", route, tenant_value, status)
-        return
-    force_fragment = " force=%s" % ("1" if force else "0") if force is not None else ""
-    log_fn(
-        "tg_proxy route=%s tenant=%s tg_code=%s%s detail=%s",
+    tg_proxy_runtime.log_tg_proxy(
+        logger,
         route,
-        tenant_value,
+        tenant,
         status,
-        force_fragment,
-        detail or "",
+        body,
+        error=error,
+        force=force,
     )
 
 
@@ -1256,9 +731,7 @@ def _password_attempt_key(tenant_id: int, token: str) -> str:
     return f"tenant:{int(tenant_id)}:twofa_attempts:{digest}"
 
 
-def _build_public_tg_qr_url(
-    tenant_id: int, key: str | None, qr_id: str | None = None
-) -> str:
+def _build_public_tg_qr_url(tenant_id: int, key: str | None, qr_id: str | None = None) -> str:
     parts: list[tuple[str, str]] = [("tenant", str(tenant_id))]
     normalized_key = _normalize_public_token(key)
     if normalized_key:
@@ -1323,9 +796,23 @@ def _client_identifier(request: Request) -> str:
         return str(host)
     return "-"
 
+
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
 CSV_ENCODING_CANDIDATES = ["utf-8", "utf-8-sig", "cp1251", "windows-1251", "koi8-r"]
+
+
+def _catalog_parse_deps() -> catalog_file_parse_runtime.CatalogParseDeps:
+    return catalog_file_parse_runtime.CatalogParseDeps(
+        encoding_candidates=CSV_ENCODING_CANDIDATES,
+        load_workbook_fn=load_workbook,
+        normalize_catalog_items_fn=_normalize_catalog_items,
+        settings=settings,
+        pipeline_cls=CatalogMiniPipeline,
+        catalog_index_module=catalog_index,
+        catalog_index_error=CatalogIndexError,
+        logger=logger,
+    )
 
 
 def _coerce_tenant(raw: int | str | None) -> int:
@@ -1342,219 +829,45 @@ def _coerce_tenant(raw: int | str | None) -> int:
 
 
 def _normalize_headers(raw: Iterable[Any]) -> list[str]:
-    normalized: list[str] = []
-    seen: dict[str, int] = {}
-    for idx, cell in enumerate(raw):
-        text = "" if cell is None else str(cell)
-        clean = text.strip().lstrip("\ufeff")
-        if not clean:
-            clean = f"column_{idx + 1}"
-        if clean in seen:
-            seen[clean] += 1
-            clean = f"{clean}_{seen[clean]}"
-        else:
-            seen[clean] = 0
-        normalized.append(clean)
-    if not normalized:
-        normalized.append("title")
-    return normalized
+    return catalog_file_parse_runtime.normalize_headers(raw)
 
 
 def _relative_to(path: pathlib.Path, root: pathlib.Path) -> str:
-    try:
-        return str(path.relative_to(root))
-    except Exception:
-        return str(path)
+    return catalog_file_parse_runtime.relative_to(path, root)
 
 
 def _make_safe_filename(filename: str, ext: str, *, fallback: str) -> str:
-    base = pathlib.Path(filename).stem or fallback
-    base = re.sub(r"[^0-9A-Za-z._-]+", "_", base)
-    base = base.strip("._") or fallback
-    return f"{base}{ext}"
+    return catalog_file_parse_runtime.make_safe_filename(filename, ext, fallback=fallback)
 
 
 def _stringify(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return str(value)
+    return catalog_file_parse_runtime.stringify(value)
 
 
 def _strip_bom(text: str) -> str:
-    if not text:
-        return ""
-    if text[0] == "\ufeff":
-        return text.lstrip("\ufeff")
-    return text
-
-
-_DELIMITER_CANDIDATES = [";", ",", "\t"]
+    return catalog_file_parse_runtime.strip_bom(text)
 
 
 def _detect_csv_delimiter(text: str) -> str:
-    if not isinstance(text, str) or not text:
-        return ","
-
-    first_line = ""
-    for raw_line in io.StringIO(text):
-        candidate = raw_line.strip("\r\n")
-        if candidate:
-            first_line = _strip_bom(candidate)
-            break
-
-    if not first_line:
-        return ","
-
-    best = ","
-    best_count = -1
-    best_idx = len(_DELIMITER_CANDIDATES)
-    for idx, delimiter in enumerate(_DELIMITER_CANDIDATES):
-        count = first_line.count(delimiter)
-        if count > best_count or (count == best_count and count > 0 and idx < best_idx):
-            best = delimiter
-            best_count = count
-            best_idx = idx
-
-    if best_count <= 0:
-        return ","
-    return best
+    return catalog_file_parse_runtime.detect_csv_delimiter(text)
 
 
 def _read_csv_bytes(raw: bytes) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    encoding_used: str | None = None
-    text: str | None = None
-    for encoding in CSV_ENCODING_CANDIDATES:
-        try:
-            text = raw.decode(encoding)
-            encoding_used = encoding
-            break
-        except UnicodeDecodeError:
-            continue
-    if text is None or encoding_used is None:
-        raise ValueError("encoding_detection_failed")
-
-    delimiter = _detect_csv_delimiter(text)
-
-    stream = io.StringIO(text)
-    reader = csv.reader(stream, delimiter=delimiter)
-    header: list[str] | None = None
-    for row in reader:
-        if not row:
-            continue
-        meaningful = [(_stringify(cell)) for cell in row if _stringify(cell)]
-        if not meaningful:
-            continue
-        header = _normalize_headers(row)
-        break
-    records: list[dict[str, str]] = []
-    if header is None:
-        header = ["title"]
-    for row in reader:
-        if not row:
-            continue
-        cleaned = [_stringify(value) for value in row]
-        non_empty = [cell for cell in cleaned if cell]
-        if not non_empty:
-            continue
-        if len(non_empty) == 1 and non_empty[0] == ".":
-            continue
-        while len(header) < len(row):
-            header.append(f"column_{len(header) + 1}")
-        record: dict[str, str] = {}
-        for idx, value in enumerate(row):
-            key = header[idx]
-            record[key] = _stringify(value)
-        if any(record.values()):
-            records.append(record)
-
-    meta = {
-        "type": "csv",
-        "encoding": encoding_used,
-        "delimiter": delimiter,
-        "columns": header,
-    }
-    normalized = _normalize_catalog_items(records, meta)
-    return normalized, meta
+    return catalog_file_parse_runtime.read_csv_bytes(raw, _catalog_parse_deps())
 
 
 def _read_excel_bytes(raw: bytes) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    if load_workbook is None:
-        raise RuntimeError("excel_support_unavailable")
-
-    workbook = load_workbook(filename=io.BytesIO(raw), read_only=True, data_only=True)
-    try:
-        sheet = workbook.active
-        header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        if not header_row:
-            header = ["title"]
-        else:
-            header = _normalize_headers(header_row)
-        records: list[dict[str, str]] = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            if row is None:
-                continue
-            record: dict[str, str] = {}
-            values = list(row)
-            while len(header) < len(values):
-                header.append(f"column_{len(header) + 1}")
-            for idx, value in enumerate(values):
-                key = header[idx]
-                record[key] = _stringify(value)
-            if any(record.values()):
-                records.append(record)
-    finally:
-        workbook.close()
-
-    meta = {
-        "type": "excel",
-        "columns": header,
-        "sheet": sheet.title if sheet is not None else "Sheet1",
-        "encoding": "utf-8-sig",
-        "delimiter": ";",
-    }
-    normalized = _normalize_catalog_items(records, meta)
-    return normalized, meta
+    return catalog_file_parse_runtime.read_excel_bytes(raw, _catalog_parse_deps())
 
 
 def _calc_price_coverage(rows: Sequence[Mapping[str, Any]]) -> float:
-    if not rows:
-        return 0.0
-    filled = sum(1 for row in rows if str(row.get("price") or "").strip())
-    return filled / len(rows)
+    return catalog_file_parse_runtime.calc_price_coverage(rows)
 
 
-def _resolve_job_metrics(meta: Mapping[str, Any] | None, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    metrics: dict[str, Any] = {
-        "items_found": len(rows),
-        "pages_total": 0,
-        "pages_skipped_no_price": 0,
-        "table_pages": 0,
-        "median_price": None,
-        "low_price_rate": 0.0,
-        "price_coverage": _calc_price_coverage(rows),
-    }
-    if isinstance(meta, Mapping):
-        extraction = meta.get("extraction")
-        if isinstance(extraction, Mapping):
-            for key in ("pages_total", "pages_skipped_no_price", "table_pages"):
-                value = extraction.get(key)
-                if isinstance(value, (int, float)):
-                    metrics[key] = int(value)
-            if extraction.get("median_price") is not None:
-                metrics["median_price"] = extraction.get("median_price")
-            value = extraction.get("low_price_rate")
-            if isinstance(value, (int, float)):
-                metrics["low_price_rate"] = float(value)
-            value = extraction.get("price_coverage")
-            if isinstance(value, (int, float)):
-                metrics["price_coverage"] = float(value)
-            value = extraction.get("items_found")
-            if isinstance(value, (int, float)):
-                metrics["items_found"] = int(value)
-    metrics["items_found"] = len(rows)
-    return metrics
+def _resolve_job_metrics(
+    meta: Mapping[str, Any] | None, rows: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    return catalog_file_parse_runtime.resolve_job_metrics(meta, rows)
 
 
 def _process_pdf(
@@ -1565,75 +878,18 @@ def _process_pdf(
     saved_rel_path: pathlib.Path,
     original_name: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
-    table_engine = getattr(settings, "PDF_TABLES_ENGINE", "plumber")
-    render_dpi = int(getattr(settings, "PDF_RENDER_DPI", 220) or 220)
-    pipeline = CatalogMiniPipeline(
-        table_engine=table_engine,
-        render_dpi=render_dpi,
-        ocr_fallback=bool(getattr(settings, "PDF_OCR_FALLBACK", False)),
+    return catalog_file_parse_runtime.process_pdf(
+        tenant=tenant,
+        saved_path=saved_path,
+        tenant_root=tenant_root,
+        saved_rel_path=saved_rel_path,
+        original_name=original_name,
+        deps=_catalog_parse_deps(),
     )
-
-    try:
-        items = pipeline.extract_items(str(saved_path))
-        extraction_metrics = dict(getattr(pipeline, "metrics", {}))
-    except Exception as exc:
-        logger.warning("catalog_miniprog_failed", exc_info=exc)
-        items = []
-        extraction_metrics = {}
-
-    meta: dict[str, Any] = {
-        "type": "pdf",
-        "source_path": str(saved_rel_path),
-        "original": original_name,
-        "encoding": "utf-8-sig",
-        "delimiter": ";",
-        "pipeline_mode": "mini",
-        "preserve_page_column": True,
-        "extraction": extraction_metrics,
-    }
-
-    normalized = _normalize_catalog_items(items, meta)
-    job_metrics = _resolve_job_metrics(meta, normalized)
-    meta["extraction"] = job_metrics
-
-    indexes_dir = tenant_root / "indexes"
-    indexes_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        built_index = catalog_index.build_pdf_index(
-            saved_path,
-            output_dir=indexes_dir,
-            source_relpath=str(saved_rel_path),
-            original_name=original_name,
-        )
-    except Exception as exc:
-        logger.exception("catalog_pdf_index_failed tenant=%s file=%s", tenant, saved_path, exc_info=True)
-        raise CatalogIndexError("index_build_failed") from exc
-
-    try:
-        rel_index = str(built_index.index_path.relative_to(tenant_root))
-    except Exception:
-        rel_index = str(built_index.index_path)
-
-    meta.update(
-        {
-            "index_path": rel_index,
-            "indexed_at": built_index.generated_at,
-            "chunk_count": built_index.chunk_count,
-            "sha1": built_index.sha1,
-            "page_count": built_index.page_count,
-        }
-    )
-    return normalized, meta, rel_index
 
 
 def _coerce_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        candidate = int(str(value).strip())
-    except Exception:
-        return None
-    return candidate
+    return _coerce_int_shared(value)
 
 
 def _find_telegram_user_id(value: Any) -> int | None:
@@ -1681,104 +937,35 @@ def _find_username(value: Any) -> str | None:
 
 @router.get("/connect/wa")
 def connect_wa(tenant: int, request: Request, k: str | None = None):
-    query_candidate = k or request.query_params.get("k") or ""
-    guard = _ensure_valid_qr_request(tenant, query_candidate, request, query_param_only=True)
-    if guard is None:
-        return _invalid_key_response()
-
-    tenant_id, resolved = guard
-    tenant_id = int(tenant_id)
-    resolved_key = resolved or ""
-
-    if not resolved_key:
-        items = common.list_keys(tenant_id)
-        if items:
-            resolved_key = items[0].get("key", "")
-
-    common.ensure_tenant_files(tenant_id)
-    cfg = common.read_tenant_config(tenant_id)
-    persona = common.read_persona(tenant_id)
-    passport = cfg.get("passport", {})
-    subtitle = passport.get("brand") or "Подключение WhatsApp" if passport else "Подключение WhatsApp"
-    persona_preview = "\n".join((persona or "").splitlines()[:6])
-
-    settings_link = ""
-    if resolved_key:
-        raw_settings = request.url_for('client_settings', tenant=str(tenant_id))
-        settings_link = common.public_url(request, f"{raw_settings}?k={quote_plus(resolved_key)}")
-
-    context = {
-        "request": request,
-        "tenant": tenant_id,
-        "key": resolved_key,
-        "k": resolved_key,
-        "timestamp": int(time.time()),
-        "passport": passport,
-        "persona_preview": persona_preview,
-        "title": "Подключение WhatsApp",
-        "subtitle": subtitle,
-        "settings_link": settings_link,
-        "public_base": common.public_base_url(request),
-    }
-    return render_template("connect/wa.html", context)
+    return wa_public_runtime.connect_wa(
+        tenant,
+        request,
+        k=k,
+        deps=wa_public_runtime.WaConnectDeps(
+            ensure_valid_qr_request_fn=_ensure_valid_qr_request,
+            invalid_key_response_fn=_invalid_key_response,
+            common_module=common,
+            render_template_fn=render_template,
+            quote_plus_fn=quote_plus,
+            time_module=time,
+        ),
+    )
 
 
 @router.get("/connect/tg")
 def connect_tg(tenant: int, request: Request, k: str | None = None, key: str | None = None):
-    tenant = int(tenant)
-    access_key = (k or key or request.query_params.get("k") or request.query_params.get("key") or "").strip()
-    if not common.valid_key(tenant, access_key):
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
-
-    common.ensure_tenant_files(tenant)
-    cfg = common.read_tenant_config(tenant)
-    passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
-    brand = ""
-    if isinstance(passport, dict):
-        brand = str(passport.get("brand") or "").strip()
-
-    persona_text = common.read_persona(tenant)
-    persona_preview = ""
-    if persona_text:
-        lines = str(persona_text).splitlines()
-        persona_preview = "\n".join(lines[:6]).strip()
-
-    primary_key = (common.get_tenant_pubkey(tenant) or "").strip()
-    resolved_key = primary_key or access_key
-
-    public_key = getattr(settings, "PUBLIC_KEY", "")
-    encoded_public_key = quote_plus(public_key)
-    tg_qr_url = f"/pub/tg/qr.png?k={encoded_public_key}" if public_key else "/pub/tg/qr.png"
-    tg_status_url = f"/pub/tg/status?k={encoded_public_key}" if public_key else "/pub/tg/status"
-    tg_start_url = f"/pub/tg/start?k={encoded_public_key}" if public_key else "/pub/tg/start"
-    tg_twofa_url = f"/pub/tg/2fa?k={encoded_public_key}" if public_key else "/pub/tg/2fa"
-
-    tg_connect_config = {
-        "tenant": tenant,
-        "key": public_key or resolved_key,
-        "urls": {
-            "public_key": public_key,
-            "tg_status": "/pub/tg/status",
-            "tg_status_url": tg_status_url,
-            "tg_start": "/pub/tg/start",
-            "tg_start_url": tg_start_url,
-            "tg_qr_png": tg_qr_url,
-            "tg_2fa": "/pub/tg/2fa",
-            "tg_2fa_url": tg_twofa_url,
-            "tg_password": "/pub/tg/2fa",
-        },
-    }
-
-    context = {
-        "request": request,
-        "tenant": tenant,
-        "key": public_key or resolved_key,
-        "tenant_key": access_key,
-        "subtitle": brand,
-        "persona_preview": persona_preview,
-        "tg_connect_config": tg_connect_config,
-    }
-    return render_template("connect/tg.html", context)
+    return tg_public_runtime.connect_tg(
+        tenant,
+        request,
+        k=k,
+        key=key,
+        deps=tg_public_runtime.TgConnectDeps(
+            common_module=common,
+            settings_module=settings,
+            render_template_fn=render_template,
+            quote_plus_fn=quote_plus,
+        ),
+    )
 
 
 @router.get("/pub/wa/status")
@@ -1787,51 +974,25 @@ async def wa_status(
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
-    if ok is None:
-        response = _invalid_key_response()
-        return _as_head_response(response, request)
-    tenant_id, validated_key = ok
-
-    cached_qr_id, redis_failed = _get_last_qr_id(int(tenant_id))
-    qr_id_override = None if redis_failed else cached_qr_id
-    if redis_failed:
-        wa_logger.info("wa_qr_cache_unavailable tenant=%s", tenant_id)
-
-    provider = common.whatsapp_provider(int(tenant_id))
-    if provider == "baileys":
-        snapshot = await _wabaileys_status_impl(int(tenant_id))
-    else:
-        snapshot = await _wa_status_impl(int(tenant_id))
-
-    result = _compose_public_wa_response(
-        int(tenant_id),
-        validated_key,
-        status_snapshot=snapshot,
-        qr_id_override=qr_id_override,
+    return await wa_public_runtime.wa_status(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=wa_public_runtime.WaStatusDeps(
+            ensure_valid_qr_request_fn=_ensure_valid_qr_request,
+            invalid_key_response_fn=_invalid_key_response,
+            as_head_response_fn=_as_head_response,
+            common_module=common,
+            get_last_qr_id_fn=_get_last_qr_id,
+            normalize_qr_id_fn=_normalize_qr_id,
+            status_fn=_wa_status_impl,
+            baileys_status_fn=_wabaileys_status_impl,
+            compose_response_fn=_compose_public_wa_response,
+            build_qr_url_fn=_build_public_wa_qr_url,
+            no_store_headers_fn=_no_store_headers,
+            wa_logger=wa_logger,
+        ),
     )
-
-    effective_qr_id = None
-    if qr_id_override:
-        effective_qr_id = _normalize_qr_id(qr_id_override)
-    if not effective_qr_id:
-        effective_qr_id = _normalize_qr_id(result.get("qr_id"))
-
-    if effective_qr_id:
-        result["qr_id"] = effective_qr_id
-        if validated_key:
-            result["qr_url"] = _build_public_wa_qr_url(
-                int(tenant_id), validated_key, effective_qr_id
-            )
-    else:
-        result.pop("qr_id", None)
-        if result.get("need_qr") and validated_key:
-            result.setdefault("state", "qr")
-            result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
-        elif not result.get("need_qr"):
-            result.pop("qr_url", None)
-
-    return JSONResponse(result, headers=_no_store_headers())
 
 
 @router.get("/pub/wa/start")
@@ -1840,145 +1001,43 @@ async def wa_start(
     tenant: int = Query(..., description="Tenant identifier"),
     k: str = Query(..., description="PUBLIC_KEY access token"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
-    if ok is None:
-        return _invalid_key_response()
-    tenant_id, validated_key = ok
-
-    webhook = common.webhook_url()
-    provider = common.whatsapp_provider(int(tenant_id))
-    if provider == "baileys":
-        payload = {"tenant": int(tenant_id), "webhookUrl": webhook}
-        try:
-            response = await common.wabaileys_post("/sessions/start", payload)
-        except Exception:
-            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
-        if response.status_code < 200 or response.status_code >= 400:
-            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
-        response_data = {}
-    else:
-        payload = {"tenant_id": int(tenant_id), "webhook_url": webhook}
-        try:
-            response = await common.wa_post(
-                f"/session/{int(tenant_id)}/start",
-                payload,
-                tenant=int(tenant_id),
-            )
-        except Exception:
-            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
-
-        status_code = int(getattr(response, "status_code", 0) or 0)
-        if status_code < 200 or status_code >= 400:
-            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
-
-        try:
-            response_data = response.json()
-        except Exception:
-            response_data = {}
-        if not isinstance(response_data, dict):
-            response_data = {}
-
-    qr_id_value, redis_failed = _get_last_qr_id(int(tenant_id))
-    if redis_failed:
-        wa_logger.info("wa_qr_cache_unavailable tenant=%s", tenant_id)
-        qr_id_value = None
-    elif not qr_id_value:
-        qr_id_value = _normalize_qr_id(response_data.get("qr_id") or response_data.get("qrId"))
-
-    if provider == "baileys":
-        status_snapshot = await _wabaileys_status_impl(int(tenant_id))
-    else:
-        status_snapshot = await _wa_status_impl(int(tenant_id))
-
-    result = _compose_public_wa_response(
-        int(tenant_id),
-        validated_key,
-        status_snapshot=status_snapshot,
-        qr_id_override=qr_id_value,
+    return await wa_public_runtime.wa_start(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=wa_public_runtime.WaStartDeps(
+            ensure_valid_qr_request_fn=_ensure_valid_qr_request,
+            invalid_key_response_fn=_invalid_key_response,
+            common_module=common,
+            get_last_qr_id_fn=_get_last_qr_id,
+            normalize_qr_id_fn=_normalize_qr_id,
+            derive_state_fn=_derive_wa_state,
+            status_fn=_wa_status_impl,
+            baileys_status_fn=_wabaileys_status_impl,
+            build_qr_url_fn=_build_public_wa_qr_url,
+            no_store_headers_fn=_no_store_headers,
+            wa_logger=wa_logger,
+        ),
     )
-    if result.get("need_qr") and not result.get("qr_url"):
-        result["qr_url"] = _build_public_wa_qr_url(int(tenant_id), validated_key)
-    if result.get("need_qr") and result.get("state") != "qr":
-        result["state"] = "qr"
-
-    return JSONResponse(result, headers=_no_store_headers())
 
 
 async def _wa_status_impl(tenant: int) -> dict:
-    cached_qr_id, redis_failed = _get_last_qr_id(int(tenant))
-
-    code, raw = common.http(
-        "GET", f"{common.wa_base_url(int(tenant))}/session/{int(tenant)}/status", timeout=3.0
-    )
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-
-    state_value, need_qr_flag = _derive_wa_state(data)
-    qr_id_value = _normalize_qr_id(data.get("qr_id") or data.get("qrId"))
-    if qr_id_value is None and cached_qr_id and not redis_failed:
-        qr_id_value = cached_qr_id
-
-    ready_flag = _truthy_flag(data.get("ready"))
-    connected_flag = _truthy_flag(data.get("connected"))
-    qr_flag = _truthy_flag(data.get("qr"))
-    last_value = data.get("last")
-
-    payload: dict[str, Any] = {
-        "ok": True,
-        "state": state_value,
-        "status_code": int(code or 0),
-        "raw": data,
-        "need_qr": need_qr_flag,
-    }
-    payload["ready"] = bool(data.get("ready")) if "ready" in data else ready_flag
-    payload["connected"] = (
-        bool(data.get("connected")) if "connected" in data else connected_flag or ready_flag
-    )
-    payload["qr"] = bool(data.get("qr")) if "qr" in data else qr_flag
-    if redis_failed:
-        payload["qr_cache_unavailable"] = True
-    if last_value is not None:
-        payload["last"] = last_value
-    if qr_id_value is not None:
-        payload["qr_id"] = qr_id_value
-    return payload
+    return await wa_public_runtime.legacy_status_impl(tenant, deps=_wa_status_impl_deps())
 
 
 async def _wabaileys_status_impl(tenant: int) -> dict:
-    code, raw = common.wabaileys_http(
-        "GET", f"/sessions/status?tenant={int(tenant)}", timeout=3.0
+    return await wa_public_runtime.baileys_status_impl(tenant, deps=_wa_status_impl_deps())
+
+
+def _wa_status_impl_deps() -> wa_public_runtime.WaStatusImplDeps:
+    return wa_public_runtime.WaStatusImplDeps(
+        common_module=common,
+        json_module=json,
+        get_last_qr_id_fn=_get_last_qr_id,
+        normalize_qr_id_fn=_normalize_qr_id,
+        derive_state_fn=_derive_wa_state,
+        truthy_flag_fn=_truthy_flag,
     )
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    session = data.get("session")
-    if not isinstance(session, Mapping):
-        session = {}
-    qr_block = session.get("qr") if isinstance(session.get("qr"), Mapping) else {}
-    state_value = str(session.get("status") or "") or None
-    connected_flag = bool(session.get("connected"))
-    need_qr_flag = not connected_flag
-    qr_id_value = session.get("qr_id") or qr_block.get("id") or qr_block.get("raw")
-    normalized: dict[str, Any] = {
-        "ok": bool(data.get("ok")),
-        "state": state_value,
-        "connected": connected_flag,
-        "ready": connected_flag,
-        "qr": bool(qr_block),
-        "need_qr": need_qr_flag,
-        "qr_id": qr_id_value,
-        "raw": session,
-    }
-    if qr_block:
-        normalized["qr_meta"] = qr_block
-    return normalized
 
 
 def _build_public_wa_qr_url(tenant: int, key: str, qr_id: str | None = None) -> str:
@@ -1988,50 +1047,24 @@ def _build_public_wa_qr_url(tenant: int, key: str, qr_id: str | None = None) -> 
     return f"/pub/wa/qr.svg?{urlencode(params, doseq=False)}"
 
 
+def _wa_qr_deps() -> wa_qr_runtime.WaQrDeps:
+    return wa_qr_runtime.WaQrDeps(
+        common_module=common,
+        settings=settings,
+        client_config_module=C,
+        redis_error_type=redis_ex.RedisError,
+        logger=wa_logger,
+        no_store_headers_fn=_no_store_headers,
+        qr_cache_ttl_fn=_qr_cache_ttl,
+    )
+
+
 def _normalize_qr_id(value: Any) -> str | None:
-    if value is None:
-        return None
-    candidate = value
-    if isinstance(candidate, (bytes, bytearray)):
-        try:
-            candidate = candidate.decode("utf-8", errors="ignore")
-        except Exception:
-            candidate = bytes(candidate).decode("utf-8", errors="ignore")
-    if isinstance(candidate, bool):
-        candidate = int(candidate)
-    if isinstance(candidate, (int,)):
-        return str(candidate)
-    if isinstance(candidate, float):
-        if not math.isfinite(candidate):
-            return None
-        if candidate.is_integer():
-            return str(int(candidate))
-        return str(int(candidate))
-    text = str(candidate).strip()
-    if not text:
-        return None
-    return text
+    return wa_qr_runtime.normalize_qr_id(value)
 
 
 def _derive_wa_state(data: Mapping[str, Any] | None) -> tuple[str | None, bool]:
-    if not isinstance(data, Mapping):
-        return None, False
-    state_value = data.get("state")
-    if state_value is not None:
-        state_value = str(state_value)
-    ready_flag = _truthy_flag(data.get("ready"))
-    need_qr_flag = _truthy_flag(data.get("need_qr"))
-    qr_flag = _truthy_flag(data.get("qr"))
-    if state_value is None:
-        if ready_flag:
-            state_value = "ready"
-        elif need_qr_flag or qr_flag:
-            state_value = "qr"
-        elif data.get("last") is not None:
-            state_value = str(data.get("last"))
-    if not need_qr_flag:
-        need_qr_flag = not ready_flag and (qr_flag or state_value == "qr")
-    return state_value, need_qr_flag
+    return wa_qr_runtime.derive_wa_state(data)
 
 
 def _compose_public_wa_response(
@@ -2041,197 +1074,56 @@ def _compose_public_wa_response(
     status_snapshot: Mapping[str, Any] | None = None,
     qr_id_override: str | None = None,
 ) -> dict[str, Any]:
-    state_value: str | None = None
-    need_qr_flag = False
-    qr_id_value = qr_id_override
-    raw_snapshot: Mapping[str, Any] | None = None
+    return wa_public_runtime.compose_public_wa_response(
+        tenant,
+        key,
+        status_snapshot=status_snapshot,
+        qr_id_override=qr_id_override,
+        deps=wa_public_runtime.WaResponseDeps(
+            normalize_qr_id_fn=_normalize_qr_id,
+            derive_state_fn=_derive_wa_state,
+            build_qr_url_fn=_build_public_wa_qr_url,
+        ),
+    )
 
-    result: dict[str, Any] = {"ok": True}
-
-    if isinstance(status_snapshot, Mapping):
-        raw_snapshot_candidate = status_snapshot.get("raw")
-        if isinstance(raw_snapshot_candidate, Mapping):
-            raw_snapshot = raw_snapshot_candidate
-        else:
-            raw_snapshot = status_snapshot
-        state_candidate = status_snapshot.get("state")
-        if state_candidate is not None:
-            state_value = str(state_candidate)
-        need_qr_flag = bool(status_snapshot.get("need_qr"))
-        if qr_id_value is None:
-            qr_id_value = _normalize_qr_id(status_snapshot.get("qr_id"))
-
-        for snapshot_key, value in status_snapshot.items():
-            if snapshot_key == "raw":
-                continue
-            if snapshot_key == "ok":
-                result["ok"] = bool(value)
-                continue
-            result[snapshot_key] = value
-
-    derived_state, derived_need_qr = _derive_wa_state(raw_snapshot)
-    if state_value is None:
-        state_value = derived_state
-    if not need_qr_flag:
-        need_qr_flag = derived_need_qr
-    if qr_id_value is None and raw_snapshot is not None:
-        qr_id_value = _normalize_qr_id(
-            raw_snapshot.get("qr_id") or raw_snapshot.get("qrId")
-        )
-
-    if need_qr_flag and state_value != "qr":
-        state_value = "qr"
-    if state_value is not None:
-        state_value = str(state_value)
-
-    qr_url_value: str | None = None
-    if key:
-        if qr_id_value:
-            qr_url_value = _build_public_wa_qr_url(int(tenant), key, qr_id_value)
-        elif need_qr_flag:
-            qr_url_value = _build_public_wa_qr_url(int(tenant), key)
-
-    result.setdefault("tenant", int(tenant))
-    if state_value is not None:
-        result["state"] = state_value
-    elif "state" in result and result["state"] is None:
-        result.pop("state", None)
-
-    result["need_qr"] = bool(need_qr_flag)
-
-    if qr_id_value is not None:
-        result["qr_id"] = qr_id_value
-    else:
-        result.pop("qr_id", None)
-
-    if qr_url_value is not None:
-        result["qr_url"] = qr_url_value
-    else:
-        result.pop("qr_url", None)
-
-    return result
 
 def _fetch_qr_bytes(url: str, timeout: float = 6.0):
-    req = urllib.request.Request(url, method="GET")
-    # Propagate waweb auth token if configured
-    try:
-        token = getattr(C, "WA_WEB_TOKEN", "") or getattr(C, "WA_INTERNAL_TOKEN", "") or ""
-        if token:
-            req.add_header("X-Auth-Token", token)
-    except Exception:
-        pass
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read()
-            ctype = resp.headers.get("Content-Type", "")
-            try:
-                wa_logger.info("qr_upstream ok code=%s ctype=%s len=%s", getattr(resp, 'status', 200), ctype, len(body or b""))
-            except Exception:
-                pass
-            return resp.status, ctype, body
-    except urllib.error.HTTPError as e:
-        try:
-            data = e.read()
-        except Exception:
-            data = b""
-        try:
-            wa_logger.info("qr_upstream http_error code=%s len=%s", getattr(e, 'code', 0), len(data or b""))
-        except Exception:
-            pass
-        return e.code, "", data
-    except Exception as exc:  # pragma: no cover
-        try:
-            wa_logger.exception("qr_upstream failed: %s", exc)
-        except Exception:
-            pass
-        return 0, "", b""
+    return wa_qr_runtime.fetch_qr_bytes(url, _wa_qr_deps(), timeout=timeout)
 
 
 def _build_qr_candidates(tenant: int, cache_bust: int) -> list[tuple[str, str]]:
-    base = common.wa_base_url(int(tenant) if tenant is not None else None).rstrip("/")
-    ts_param = f"ts={cache_bust}"
-    return [
-        (f"{base}/session/{tenant}/qr?format=svg&{ts_param}", "tenant_query_svg"),
-        (f"{base}/session/{tenant}/qr.svg?{ts_param}", "tenant_ext_svg"),
-        (f"{base}/session/{tenant}/qr.png?{ts_param}", "tenant_ext_png"),
-        (f"{base}/session/qr?format=svg&{ts_param}", "global_query_svg"),
-        (f"{base}/session/qr.svg?{ts_param}", "global_ext_svg"),
-        (f"{base}/session/qr?format=png&{ts_param}", "global_query_png"),
-        (f"{base}/session/qr.png?{ts_param}", "global_ext_png"),
-    ]
+    return wa_qr_runtime.build_qr_candidates(tenant, cache_bust, _wa_qr_deps())
 
 
 def _proxy_qr_with_fallbacks(tenant: int) -> Response:
-    if common.whatsapp_provider(int(tenant)) == "baileys":
-        return _proxy_baileys_qr(tenant)
-    wa_logger.info("qr_fetch start tenant=%s", tenant)
-    if getattr(settings, "WA_PREFETCH_START", True):
-        try:
-            hook = common.webhook_url()
-            payload = json.dumps({"tenant_id": int(tenant), "webhook_url": hook}, ensure_ascii=False).encode("utf-8")
-            code, _ = common.http(
-                "POST",
-                f"{common.wa_base_url(int(tenant))}/session/{int(tenant)}/start",
-                body=payload,
-                timeout=4.0,
-            )
-            wa_logger.info("qr_prefetch_start code=%s", code)
-        except Exception:
-            wa_logger.info("qr_prefetch_start_failed")
+    return wa_qr_runtime.proxy_qr_with_fallbacks(tenant, _wa_qr_deps())
 
-    attempts_raw = getattr(settings, "WA_QR_FETCH_ATTEMPTS", 1) or 1
-    try:
-        attempts = max(1, int(attempts_raw))
-    except (TypeError, ValueError):
-        attempts = 1
-    delay_raw = getattr(settings, "WA_QR_FETCH_RETRY_DELAY", 0.0) or 0.0
-    try:
-        retry_delay = max(0.0, float(delay_raw))
-    except (TypeError, ValueError):
-        retry_delay = 0.0
 
-    last_status = 0
-    last_stage = ""
-    last_body_present = False
-    last_content_type = ""
+def _prefetch_qr_session_start(tenant: int) -> None:
+    wa_qr_runtime.prefetch_qr_session_start(tenant, _wa_qr_deps())
 
-    for attempt in range(attempts):
-        cache_bust = int(time.time() * 1000)
-        candidates = _build_qr_candidates(tenant, cache_bust)
-        for url, stage in candidates:
-            wa_logger.info("qr_fetch url=%s stage=%s attempt=%s", url, stage, attempt + 1)
-            status, ctype, body = _fetch_qr_bytes(url)
-            last_status, last_stage = status, stage
-            last_body_present = bool(body)
-            last_content_type = (ctype or "").lower()
-            wa_logger.info("upstream status=%s stage=%s attempt=%s", status, stage, attempt + 1)
-            if int(status or 0) == 200 and last_content_type.startswith("image/") and body:
-                headers = {
-                    "Cache-Control": "no-store",
-                    "X-Debug-Stage": f"served_qr:{stage}",
-                }
-                wa_logger.info("return=200 len=%s ctype=%s stage=%s attempt=%s", len(body or b""), ctype, stage, attempt + 1)
-                return StreamingResponse(io.BytesIO(body), media_type=ctype, headers=headers)
-        if attempt + 1 < attempts and retry_delay:
-            wa_logger.info("qr_fetch_retry sleep=%s attempt=%s", retry_delay, attempt + 1)
-            try:
-                time.sleep(retry_delay)
-            except Exception:
-                wa_logger.info("qr_fetch_retry_sleep_failed attempt=%s", attempt + 1)
 
-    headers = _no_store_headers()
-    headers["Cache-Control"] = "no-store"
-    if int(last_status or 0) in (204, 404) or (
-        int(last_status or 0) == 200 and (not last_body_present or not last_content_type.startswith("image/"))
-    ):
-        stage_label = last_stage or "unknown"
-        headers["X-Debug-Stage"] = f"no_content:{stage_label}"
-        wa_logger.info("return=204 stage=%s status=%s", last_stage, last_status)
-        return Response(status_code=204, headers=headers)
+def _qr_fetch_retry_settings() -> tuple[int, float]:
+    return wa_qr_runtime.qr_fetch_retry_settings(_wa_qr_deps())
 
-    headers["X-Debug-Stage"] = f"bad_gateway:{last_stage}" if last_stage else "bad_gateway"
-    wa_logger.info("return=502 stage=%s status=%s", last_stage, last_status)
-    return JSONResponse({"error": "wa_unavailable"}, status_code=502, headers=headers)
+
+def _try_fetch_qr_candidate(tenant: int, attempt: int) -> dict[str, Any]:
+    return wa_qr_runtime.try_fetch_qr_candidate(tenant, attempt, _wa_qr_deps())
+
+
+def _qr_fetch_error_response(
+    last_status: int,
+    last_stage: str,
+    last_body_present: bool,
+    last_content_type: str,
+) -> Response:
+    return wa_qr_runtime.qr_fetch_error_response(
+        last_status,
+        last_stage,
+        last_body_present,
+        last_content_type,
+        _wa_qr_deps(),
+    )
 
 
 def _ensure_valid_qr_request(
@@ -2241,217 +1133,53 @@ def _ensure_valid_qr_request(
     *,
     query_param_only: bool = False,
 ) -> tuple[int, str] | None:
-    try:
-        tenant_id = _coerce_tenant(raw_tenant)
-    except ValueError:
-        return None
-
-    if request is not None and _admin_token_valid(request):
-        items = common.list_keys(tenant_id)
-        if items:
-            return tenant_id, items[0].get("key", "") or ""
-        primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
-        return tenant_id, primary_key
-
-    candidate = _resolve_public_key_candidate(
+    return public_auth_runtime.ensure_valid_public_access(
+        raw_tenant,
         raw_key,
         request,
         query_param_only=query_param_only,
+        deps=public_auth_runtime.PublicAccessDeps(
+            coerce_tenant_fn=_coerce_tenant,
+            admin_token_valid_fn=_admin_token_valid,
+            list_keys_fn=common.list_keys,
+            get_tenant_pubkey_fn=common.get_tenant_pubkey,
+            resolve_public_key_candidate_fn=_resolve_public_key_candidate,
+            expected_public_key_value_fn=_expected_public_key_value,
+            valid_key_fn=common.valid_key,
+        ),
     )
-    if not candidate:
-        return None
-
-    expected = _expected_public_key_value()
-    if expected and candidate == expected:
-        items = common.list_keys(tenant_id)
-        if items:
-            return tenant_id, items[0].get("key", candidate)
-        primary_key = (common.get_tenant_pubkey(tenant_id) or "").strip()
-        return tenant_id, primary_key or candidate
-
-    if common.valid_key(tenant_id, candidate):
-        items = common.list_keys(tenant_id)
-        if items:
-            return tenant_id, items[0].get("key", candidate)
-        return tenant_id, candidate
-
-    return None
 
 
 def _get_last_qr_id(tenant: int) -> tuple[str | None, bool]:
-    key = f"wa:qr:last:{tenant}"
-    try:
-        client = common.redis_client()
-        value = client.get(key)
-    except redis_ex.RedisError:
-        return None, True
-    if not value:
-        return None, False
-    normalized = _normalize_qr_id(value)
-    return normalized, False
+    return wa_qr_runtime.get_last_qr_id(tenant, _wa_qr_deps())
 
 
 def _load_cached_qr_entry(tenant: int, qr_id: str) -> tuple[dict[str, Any] | None, bool]:
-    key = f"wa:qr:{tenant}:{qr_id}"
-    try:
-        client = common.redis_client()
-        raw = client.get(key)
-    except redis_ex.RedisError:
-        return None, True
-    entry: dict[str, Any] | None = None
-    if raw is None:
-        try:
-            svg_value, png_value, txt_value = client.mget(
-                f"{key}:svg",
-                f"{key}:png",
-                f"{key}:txt",
-            )
-        except redis_ex.RedisError:
-            return None, True
-        interim: dict[str, Any] = {}
-        if svg_value:
-            interim["qr_svg"] = svg_value
-        if png_value:
-            interim["qr_png"] = png_value
-        if txt_value:
-            interim["qr_text"] = txt_value
-        if interim:
-            entry = interim
-        else:
-            return None, False
-    if isinstance(raw, bytes):
-        raw = raw.decode('utf-8', errors='ignore')
-    if entry is None:
-        if isinstance(raw, str):
-            stripped = raw.strip()
-            if not stripped:
-                return None, False
-            try:
-                parsed = json.loads(stripped)
-            except Exception:
-                parsed = None
-            if isinstance(parsed, dict):
-                entry = parsed
-            else:
-                if '<svg' in stripped.lower():
-                    entry = {'qr_svg': stripped}
-                else:
-                    entry = {'qr_text': stripped}
-        elif isinstance(raw, dict):
-            entry = raw
-    if entry is None:
-        return None, False
-    result: dict[str, Any] = dict(entry)
-    result.setdefault('tenant', tenant)
-    result.setdefault('ts', qr_id)
-    if isinstance(result.get('qr_svg'), str) and not result['qr_svg'].strip():
-        result.pop('qr_svg', None)
-    if isinstance(result.get('qr_png'), str) and not result['qr_png'].strip():
-        result.pop('qr_png', None)
-    if isinstance(result.get('qr_text'), str) and not result['qr_text'].strip():
-        result.pop('qr_text', None)
-    return result, False
+    return wa_qr_runtime.load_cached_qr_entry(tenant, qr_id, _wa_qr_deps())
 
 
 def _resolve_cached_qr(tenant: int) -> tuple[str | None, dict[str, Any] | None, bool]:
-    qr_id, redis_failed = _get_last_qr_id(tenant)
-    if redis_failed:
-        return None, None, True
-    if not qr_id:
-        return None, None, False
-    entry, entry_failed = _load_cached_qr_entry(tenant, qr_id)
-    if entry_failed:
-        return None, None, True
-    if entry is None:
-        return None, None, False
-    return qr_id, entry, False
+    return wa_qr_runtime.resolve_cached_qr(tenant, _wa_qr_deps())
 
 
 def _load_cached_svg(tenant: int, qr_id: str) -> tuple[str | None, bool]:
-    key = f"wa:qr:{tenant}:{qr_id}:svg"
-    try:
-        client = common.redis_client()
-        cached = client.get(key)
-    except redis_ex.RedisError:
-        return None, True
-    if cached:
-        candidate = cached
-        if isinstance(candidate, (bytes, bytearray)):
-            candidate = bytes(candidate).decode("utf-8", errors="ignore")
-        candidate_str = str(candidate).strip()
-        if candidate_str:
-            return candidate_str, False
-    entry, failed = _load_cached_qr_entry(tenant, qr_id)
-    if failed:
-        return None, True
-    if entry is None:
-        return None, False
-    svg_value = entry.get("qr_svg") if isinstance(entry, dict) else None
-    if isinstance(svg_value, str) and svg_value.strip():
-        return svg_value, False
-    qr_text = entry.get("qr_text") if isinstance(entry, dict) else None
-    if isinstance(qr_text, str) and qr_text.strip():
-        rendered = _render_qr_svg_from_text(qr_text.strip())
-        if rendered:
-            try:
-                _cache_qr_payload(
-                    tenant,
-                    qr_id,
-                    {"qr_svg": rendered, "qr_text": qr_text.strip()},
-                    include_last=False,
-                )
-            except Exception:
-                wa_logger.info("wa_qr_cache_update_failed tenant=%s qr_id=%s", tenant, qr_id)
-            return rendered, False
-    return None, False
+    return wa_qr_runtime.load_cached_svg(tenant, qr_id, _wa_qr_deps())
 
 
 def _qr_expired_response(qr_id: str | None = None) -> JSONResponse:
-    headers = _no_store_headers()
-    if qr_id:
-        headers["X-WA-QR-ID"] = str(qr_id)
-    return JSONResponse({"error": "qr_expired"}, status_code=410, headers=headers)
+    return wa_qr_runtime.qr_expired_response(_no_store_headers, qr_id)
 
 
 def _as_head_response(response: Response, request: Request) -> Response:
-    if request.method.upper() != "HEAD":
-        return response
-
-    headers = dict(response.headers.items())
-    media_type = response.media_type or headers.get("content-type") or headers.get("Content-Type")
-    return Response(status_code=response.status_code, headers=headers, media_type=media_type)
+    return wa_qr_runtime.as_head_response(response, request)
 
 
 def _render_qr_svg_from_text(qr_text: str) -> str | None:
-    if not qr_text:
-        return None
-    qr = qrcode.QRCode(
-        error_correction=qrcode.constants.ERROR_CORRECT_Q,
-        box_size=8,
-        border=2,
-    )
-    qr.add_data(qr_text)
-    qr.make(fit=True)
-    img = qr.make_image(image_factory=SvgImage)
-    buf = io.BytesIO()
-    img.save(buf)
-    return buf.getvalue().decode("utf-8")
+    return wa_qr_runtime.render_qr_svg_from_text(qr_text)
 
 
 def _render_qr_png_bytes(qr_text: str) -> bytes | None:
-    if not qr_text:
-        return None
-    qr = qrcode.QRCode(
-        error_correction=qrcode.constants.ERROR_CORRECT_Q,
-        box_size=10,
-        border=2,
-    )
-    qr.add_data(qr_text)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="#000000", back_color="#FFFFFF").convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    return wa_qr_runtime.render_qr_png_bytes(qr_text)
 
 
 def _cache_qr_payload(
@@ -2461,84 +1189,47 @@ def _cache_qr_payload(
     *,
     include_last: bool = True,
 ) -> None:
-    if not qr_id:
-        return
-    data = dict(entry or {})
-    data.setdefault("tenant", tenant)
-    data.setdefault("qr_id", qr_id)
-    data.setdefault("ts", data.get("ts") or data.get("timestamp") or qr_id)
+    wa_qr_runtime.cache_qr_payload(
+        tenant,
+        qr_id,
+        entry,
+        _wa_qr_deps(),
+        include_last=include_last,
+    )
 
-    svg_value = data.get("qr_svg")
-    if isinstance(svg_value, str):
-        svg_value = svg_value.strip() or None
-    else:
-        svg_value = None
 
-    png_value = data.get("qr_png") or data.get("qr_png_base64")
-    raw_png_bytes = data.get("qr_png_bytes")
-    if png_value is None and isinstance(raw_png_bytes, (bytes, bytearray)):
-        png_value = base64.b64encode(raw_png_bytes).decode("utf-8")
-    if isinstance(png_value, (bytes, bytearray)):
-        png_value = base64.b64encode(png_value).decode("utf-8")
-    elif isinstance(png_value, str):
-        png_value = png_value.strip() or None
-    else:
-        png_value = None
+def _normalize_qr_cache_values(
+    tenant: int,
+    qr_id: str,
+    entry: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None, str | None, str | None]:
+    return wa_qr_runtime.normalize_qr_cache_values(tenant, qr_id, entry)
 
-    txt_value = data.get("qr_text") or data.get("txt")
-    if isinstance(txt_value, str):
-        txt_value = txt_value.strip() or None
-    else:
-        txt_value = None
 
-    serialisable = dict(data)
-    if svg_value is None:
-        serialisable.pop("qr_svg", None)
-    else:
-        serialisable["qr_svg"] = svg_value
-    serialisable.pop("qr_png_bytes", None)
-    if png_value is None:
-        serialisable.pop("qr_png", None)
-    else:
-        serialisable["qr_png"] = png_value
-    if txt_value is None:
-        serialisable.pop("qr_text", None)
-    else:
-        serialisable["qr_text"] = txt_value
-
-    try:
-        json_payload = json.dumps(serialisable, ensure_ascii=False)
-    except (TypeError, ValueError):
-        json_payload = None
-
-    try:
-        client = common.redis_client()
-        pipe = client.pipeline()
-        wrote = False
-        ttl = _qr_cache_ttl()
-        if json_payload is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}", ttl, json_payload)
-            wrote = True
-        if svg_value is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}:svg", ttl, svg_value)
-            wrote = True
-        if png_value is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}:png", ttl, png_value)
-            wrote = True
-        if txt_value is not None:
-            pipe.setex(f"wa:qr:{tenant}:{qr_id}:txt", ttl, txt_value)
-            wrote = True
-        if include_last:
-            pipe.setex(f"wa:qr:last:{tenant}", ttl, qr_id)
-            wrote = True
-        if wrote:
-            pipe.execute()
-    except redis_ex.RedisError:
-        wa_logger.info("wa_qr_cache_write_skip tenant=%s qr_id=%s", tenant, qr_id)
+def _write_qr_cache_values(
+    tenant: int,
+    qr_id: str,
+    *,
+    json_payload: str | None,
+    svg_value: str | None,
+    png_value: str | None,
+    txt_value: str | None,
+    include_last: bool,
+) -> None:
+    wa_qr_runtime.write_qr_cache_values(
+        tenant,
+        qr_id,
+        json_payload=json_payload,
+        svg_value=svg_value,
+        png_value=png_value,
+        txt_value=txt_value,
+        include_last=include_last,
+        deps=_wa_qr_deps(),
+    )
 
 
 def _persist_qr_entry(tenant: int, qr_id: str, entry: Mapping[str, Any]) -> None:
-    _cache_qr_payload(tenant, qr_id, entry, include_last=True)
+    wa_qr_runtime.persist_qr_entry(tenant, qr_id, entry, _wa_qr_deps())
 
 
 async def _resolve_tenant_and_key(
@@ -2549,66 +1240,14 @@ async def _resolve_tenant_and_key(
     query_keys: tuple[str, ...] = ("key", "k"),
     allow_body: bool = True,
 ) -> tuple[int | str | None, str | None]:
-    tenant_candidate: int | str | None = raw_tenant
-    key_candidate: str | None = raw_key
-
-    if request is not None:
-        if tenant_candidate is None:
-            tenant_candidate = request.query_params.get("tenant")
-        if not key_candidate:
-            for query_key in query_keys:
-                value = request.query_params.get(query_key)
-                if value:
-                    key_candidate = value
-                    break
-        if not key_candidate:
-            cookies = getattr(request, "cookies", None) or {}
-            key_candidate = cookies.get("client_key")
-
-        needs_body = (
-            allow_body and request.method.upper() in {"POST", "PUT", "PATCH"}
-        )
-        if needs_body and (tenant_candidate is None or not key_candidate):
-            try:
-                raw_body = await request.body()
-            except Exception:
-                raw_body = b""
-
-            payload: dict[str, Any] = {}
-            if raw_body:
-                try:
-                    decoded = raw_body.decode("utf-8")
-                except UnicodeDecodeError:
-                    decoded = ""
-                if decoded:
-                    try:
-                        data = json.loads(decoded)
-                    except json.JSONDecodeError:
-                        data = {}
-                    if isinstance(data, dict):
-                        payload.update(data)
-
-            if not payload:
-                try:
-                    form = await request.form()
-                except Exception:
-                    form = None
-                if form is not None:
-                    payload = {}
-                    for form_key, value in form.multi_items():
-                        if form_key not in payload:
-                            payload[form_key] = value
-
-            if tenant_candidate is None:
-                tenant_candidate = payload.get("tenant")
-            if not key_candidate:
-                for query_key in query_keys:
-                    value = payload.get(query_key)
-                    if value:
-                        key_candidate = value
-                        break
-
-    return tenant_candidate, key_candidate
+    return await public_request_runtime.resolve_tenant_and_key(
+        request,
+        raw_tenant,
+        raw_key,
+        query_keys=query_keys,
+        allow_body=allow_body,
+        json_module=json,
+    )
 
 
 def require_client_key(
@@ -2628,21 +1267,11 @@ def require_client_key(
 
 
 def _normalize_public_token(value: str | None) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+    return public_auth_runtime.normalize_public_token(value)
 
 
 def _expected_public_key_value() -> str:
-    env_public = _normalize_public_token(os.getenv("PUBLIC_KEY"))
-    if env_public:
-        return env_public
-
-    env_admin = _normalize_public_token(os.getenv("ADMIN_TOKEN"))
-    if env_admin:
-        return env_admin
-
-    return _normalize_public_token(getattr(settings, "ADMIN_TOKEN", ""))
+    return public_auth_runtime.expected_public_key_value(settings)
 
 
 def _resolve_public_key_candidate(
@@ -2651,17 +1280,11 @@ def _resolve_public_key_candidate(
     *,
     query_param_only: bool = False,
 ) -> str:
-    candidate = _normalize_public_token(key_candidate)
-    if request is None:
-        return candidate
-
-    if query_param_only:
-        return _normalize_public_token(request.query_params.get("k"))
-
-    if not candidate:
-        return _normalize_public_token(request.query_params.get("k"))
-
-    return candidate
+    return public_auth_runtime.resolve_public_key_candidate(
+        key_candidate,
+        request,
+        query_param_only=query_param_only,
+    )
 
 
 def _ensure_public_key(
@@ -2670,15 +1293,12 @@ def _ensure_public_key(
     *,
     query_param_only: bool = False,
 ) -> str | None:
-    candidate = _resolve_public_key_candidate(
+    return public_auth_runtime.ensure_public_key(
         key_candidate,
         request,
         query_param_only=query_param_only,
+        expected_key_fn=_expected_public_key_value,
     )
-    expected = _expected_public_key_value()
-    if expected and candidate and candidate == expected:
-        return candidate
-    return None
 
 
 def _invalid_key_response() -> JSONResponse:
@@ -2776,9 +1396,6 @@ def _tg_unavailable_response(
     return JSONResponse(body, status_code=502, headers=headers)
 
 
-_UPSTREAM_HEADER_MAP = {"content-type": "Content-Type", "retry-after": "Retry-After"}
-
-
 def _passthrough_upstream_response(
     route: str,
     tenant_id: int | str | None,
@@ -2789,56 +1406,25 @@ def _passthrough_upstream_response(
     include_no_store: bool = True,
     force: bool | None = None,
 ) -> Response:
-    status_code = int(getattr(upstream, "status_code", 0) or 0)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-    if 200 <= status_code < 300:
-        detail = None
-    else:
-        detail = (
-            _stringify_detail(body_bytes)
-            or _stringify_detail(getattr(upstream, "text", ""))
-            or f"status_{status_code}"
-        )
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=detail, force=force)
-
-    if status_code <= 0:
-        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
-
-    headers: dict[str, str] = {}
-    if include_no_store:
-        headers.update(_no_store_headers())
-    headers["X-Telegram-Upstream-Status"] = str(status_code)
-
-    upstream_headers = getattr(upstream, "headers", {}) or {}
-    for name, value in upstream_headers.items():
-        if not value:
-            continue
-        lowered = name.lower()
-        mapped = _UPSTREAM_HEADER_MAP.get(lowered)
-        if mapped:
-            headers[mapped] = value
-
-    default_content_type = success_content_type if 200 <= status_code < 300 else error_content_type
-    if default_content_type and "Content-Type" not in headers:
-        headers["Content-Type"] = default_content_type
-
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
+    return tg_proxy_runtime.passthrough_upstream_response(
+        route,
+        tenant_id,
+        upstream,
+        no_store_headers_fn=_no_store_headers,
+        log_tg_proxy_fn=_log_tg_proxy,
+        success_content_type=success_content_type,
+        error_content_type=error_content_type,
+        include_no_store=include_no_store,
+        force=force,
+    )
 
 
 def _proxy_headers(headers: Mapping[str, str] | None, status_code: int) -> dict[str, str]:
-    allowed = {"content-type", "cache-control"}
-    result: dict[str, str] = {}
-    for name, value in (headers or {}).items():
-        if not value:
-            continue
-        if name.lower() in allowed:
-            result[name] = value
-    result["Cache-Control"] = NO_STORE_CACHE_VALUE
-    result["Pragma"] = "no-cache"
-    result["Expires"] = "0"
-    result["X-Telegram-Upstream-Status"] = str(status_code)
-    return result
+    return tg_proxy_runtime.proxy_headers(
+        headers,
+        status_code,
+        no_store_value=NO_STORE_CACHE_VALUE,
+    )
 
 
 def _truthy_flag(value: Any) -> bool:
@@ -2872,127 +1458,27 @@ async def wa_qr_svg(
     k: str = Query(..., description="PUBLIC_KEY access token"),
     qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
-    if ok is None:
-        response = _invalid_key_response()
-        return _as_head_response(response, request)
-    tenant_id, _ = ok
-    provider = common.whatsapp_provider(int(tenant_id))
-    if provider == "baileys":
-        response = _proxy_baileys_qr(int(tenant_id))
-        return _as_head_response(response, request)
-
-    requested_id = _normalize_qr_id(qr_id) if qr_id is not None else None
-    query_params = request.query_params
-    force_value = query_params.get("force")
-    bypass_cache = False
-    if "t" in query_params:
-        bypass_cache = True
-    elif force_value is not None:
-        force_normalized = str(force_value).strip().lower()
-        bypass_cache = force_normalized not in ("", "0", "false")
-
-    redis_failed = False
-    if not requested_id:
-        requested_id, redis_failed = _get_last_qr_id(tenant_id)
-    if redis_failed:
-        headers = _no_store_headers()
-        if requested_id:
-            headers["X-WA-QR-ID"] = str(requested_id)
-        response = JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
-        return _as_head_response(response, request)
-
-    cached_svg: str | None = None
-    if requested_id and not bypass_cache:
-        cached_svg, redis_failed = _load_cached_svg(tenant_id, requested_id)
-        if redis_failed:
-            headers = _no_store_headers({"X-WA-QR-ID": str(requested_id)})
-            response = JSONResponse({"error": "wa_cache_error"}, status_code=500, headers=headers)
-            return _as_head_response(response, request)
-
-    svg_value: str | None = cached_svg if not bypass_cache else None
-
-    if bypass_cache and not svg_value:
-        fallback_headers: dict[str, str] = {}
-        if getattr(common, "WA_INTERNAL_TOKEN", ""):
-            fallback_headers["X-Auth-Token"] = common.WA_INTERNAL_TOKEN
-        timeout = httpx.Timeout(3.0, connect=2.0)
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.get(
-                    f"{common.wa_base_url(int(tenant_id))}/session/{int(tenant_id)}/qr.svg",
-                    headers=fallback_headers,
-                )
-        except httpx.HTTPError as exc:
-            wa_logger.info(
-                "wa_qr_upstream_error tenant=%s reason=%s",
-                tenant_id,
-                getattr(exc, "__class__", type(exc)).__name__,
-            )
-            response = JSONResponse({"error": "wa_unavailable"}, status_code=502)
-            return _as_head_response(response, request)
-
-        status_code = int(response.status_code or 0)
-        if status_code == 404:
-            response = _qr_expired_response(requested_id)
-            return _as_head_response(response, request)
-        if 400 <= status_code < 500:
-            wa_logger.info(
-                "wa_qr_upstream_status tenant=%s status=%s",
-                tenant_id,
-                status_code,
-            )
-            response = _qr_expired_response(requested_id)
-            return _as_head_response(response, request)
-        if status_code < 200 or status_code >= 300:
-            wa_logger.info(
-                "wa_qr_upstream_status tenant=%s status=%s",
-                tenant_id,
-                status_code,
-            )
-            response = JSONResponse({"error": "wa_unavailable"}, status_code=502)
-            return _as_head_response(response, request)
-
-        svg_candidate = response.text.strip()
-        if not svg_candidate or not svg_candidate.lstrip().startswith("<svg"):
-            wa_logger.info("wa_qr_upstream_invalid tenant=%s", tenant_id)
-            response = JSONResponse({"error": "wa_unavailable"}, status_code=502)
-            return _as_head_response(response, request)
-
-        svg_value = svg_candidate
-        upstream_qr_id = _normalize_qr_id(
-            response.headers.get("X-WA-QR-ID")
-            or response.headers.get("X-Wa-Qr-Id")
-            or requested_id
-        )
-        if upstream_qr_id:
-            requested_id = upstream_qr_id
-
-        if requested_id:
-            try:
-                _cache_qr_payload(
-                    tenant_id,
-                    requested_id,
-                    {"qr_svg": svg_value},
-                    include_last=True,
-                )
-            except Exception:
-                wa_logger.info(
-                    "wa_qr_cache_store_failed tenant=%s qr_id=%s",
-                    tenant_id,
-                    requested_id,
-                )
-
-    if not svg_value:
-        response = _qr_expired_response(requested_id)
-        return _as_head_response(response, request)
-
-    headers = {"Content-Type": "image/svg+xml"}
-    headers.update(_no_store_headers())
-    if requested_id:
-        headers["X-WA-QR-ID"] = str(requested_id)
-    response = Response(content=svg_value, media_type="image/svg+xml", headers=headers)
-    return _as_head_response(response, request)
+    return await wa_public_runtime.wa_qr_svg(
+        request,
+        tenant=tenant,
+        key=k,
+        qr_id=qr_id,
+        deps=wa_public_runtime.WaPublicDeps(
+            ensure_valid_qr_request_fn=_ensure_valid_qr_request,
+            invalid_key_response_fn=_invalid_key_response,
+            as_head_response_fn=_as_head_response,
+            common_module=common,
+            proxy_baileys_qr_fn=_proxy_baileys_qr,
+            normalize_qr_id_fn=_normalize_qr_id,
+            get_last_qr_id_fn=_get_last_qr_id,
+            no_store_headers_fn=_no_store_headers,
+            load_cached_svg_fn=_load_cached_svg,
+            httpx_module=httpx,
+            wa_logger=wa_logger,
+            qr_expired_response_fn=_qr_expired_response,
+            cache_qr_payload_fn=_cache_qr_payload,
+        ),
+    )
 
 
 @router.get("/pub/tg/slots")
@@ -3042,35 +1528,33 @@ async def tg_slots_save(
     except Exception:
         payload = {}
     cfg = common.read_tenant_config(int(tenant_id)) or {}
-    telegram_cfg = cfg.get("telegram")
-    if not isinstance(telegram_cfg, dict):
-        telegram_cfg = {}
-        cfg["telegram"] = telegram_cfg
-    if isinstance(payload, Mapping):
-        raw_multi = payload.get("multi_mode")
-        if isinstance(raw_multi, bool):
-            telegram_cfg["multi_slot_enabled"] = raw_multi
-        elif isinstance(raw_multi, str):
-            telegram_cfg["multi_slot_enabled"] = raw_multi.strip().lower() in {"1", "true", "yes", "on"}
-        raw_slot_count = payload.get("slot_count")
-        telegram_cfg["slot_count"] = _normalize_tg_slot(raw_slot_count)
-        raw_slot_enabled = payload.get("slot_enabled")
-        normalized_enabled: dict[str, bool] = {}
-        if isinstance(raw_slot_enabled, Mapping):
-            for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
-                value = raw_slot_enabled.get(str(slot), raw_slot_enabled.get(slot))
-                if isinstance(value, bool):
-                    normalized_enabled[str(slot)] = value
-                elif isinstance(value, str):
-                    normalized_enabled[str(slot)] = value.strip().lower() in {"1", "true", "yes", "on"}
-                else:
-                    normalized_enabled[str(slot)] = True
-        else:
-            for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
-                normalized_enabled[str(slot)] = True
-        telegram_cfg["slot_enabled"] = normalized_enabled
+    tg_slots_runtime.apply_tg_slots_payload(cfg, payload, _tg_slots_deps())
     common.write_tenant_config(int(tenant_id), cfg)
     return JSONResponse({"ok": True, **_tg_slots_config(cfg)}, headers=_no_store_headers())
+
+
+def _tg_public_deps() -> tg_public_runtime.TgPublicDeps:
+    return tg_public_runtime.TgPublicDeps(
+        log_deprecated_fn=_log_deprecated,
+        resolve_tenant_and_key_fn=_resolve_tenant_and_key,
+        authorize_public_settings_request_fn=_authorize_public_settings_request,
+        tg_slot_tenant_fn=_tg_slot_tenant,
+        log_public_tg_request_fn=_log_public_tg_request,
+        client_identifier_fn=_client_identifier,
+        log_tg_proxy_fn=_log_tg_proxy,
+        no_store_headers_fn=_no_store_headers,
+        register_password_attempt_fn=_register_password_attempt,
+        tg_call_fn=_tg_call,
+        tg_worker_call_error_type=TgWorkerCallError,
+        resolve_qr_identifier_fn=_resolve_qr_identifier,
+        quote_fn=quote,
+        common_module=common,
+        resolve_tg_base_fn=_resolve_tg_base,
+        extract_json_detail_fn=_extract_json_detail,
+        stringify_detail_fn=_stringify_detail,
+        proxy_headers_fn=_proxy_headers,
+        json_module=json,
+    )
 
 
 @router.api_route("/pub/tg/start", methods=["GET", "POST"])
@@ -3080,66 +1564,14 @@ async def tg_start(
     k: str | None = None,
     slot: int = Query(1, ge=1, le=TG_SLOT_MAX),
 ):
-    route = "/pub/tg/start"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+    return await tg_public_runtime.start(
+        "/pub/tg/start",
         request,
         tenant,
         k,
-        query_keys=("k",),
         allow_body=request.method.upper() == "POST",
-    )
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, validated_key = auth
-    tg_tenant_id = _tg_slot_tenant(tenant_id, slot)
-    _log_public_tg_request(route, tenant_id, validated_key or "session")
-
-    fallback_paths = ["/qr/start", "/rpc/start", "/session/start"]
-    payload = {"tenant": tg_tenant_id}
-    last_error: str | None = None
-    upstream: httpx.Response | None = None
-    last_status: int | None = None
-
-    for candidate in fallback_paths:
-        try:
-            status_code, response = await _tg_call("POST", candidate, json=payload, timeout=5.0)
-        except TgWorkerCallError as exc:
-            last_error = exc.detail
-            continue
-        upstream = response
-        last_status = status_code
-        break
-
-    if upstream is None:
-        reason = last_error or "tg_unavailable"
-        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-        _log_tg_proxy(route, tenant_id, 502, None, error=reason)
-        return JSONResponse(
-            {"error": "tg_unavailable", "detail": reason},
-            status_code=502,
-            headers=headers,
-        )
-
-    status_code = int(last_status or upstream.status_code)
-    body_bytes = bytes(upstream.content or b"")
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
-
-    if 200 <= status_code < 300:
-        content_type = upstream.headers.get("content-type")
-        if content_type:
-            headers["Content-Type"] = content_type
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-        return Response(content=body_bytes, status_code=status_code, headers=headers)
-
-    detail_text = upstream.text if hasattr(upstream, "text") else ""
-    reason = detail_text.strip() or f"status_{status_code}"
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=reason)
-    headers["Content-Type"] = "application/json"
-    return JSONResponse(
-        {"error": "tg_upstream", "detail": reason},
-        status_code=status_code,
-        headers=headers,
+        slot=slot,
+        deps=_tg_public_deps(),
     )
 
 
@@ -3150,123 +1582,14 @@ async def _handle_tg_twofa(
     key: str | None,
     slot: int = 1,
 ) -> Response:
-    _log_deprecated(route)
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(request, tenant, key)
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, validated_key = auth
-    tg_tenant_id = _tg_slot_tenant(tenant_id, slot)
-    _log_public_tg_request(route, tenant_id, validated_key or "session")
-
-    client_token = _client_identifier(request)
-
-    password_value: str | None = None
-    try:
-        data = await request.json()
-    except Exception:
-        data = None
-    if isinstance(data, dict) and "password" in data:
-        candidate = data.get("password")
-        if isinstance(candidate, str):
-            password_value = candidate
-    if password_value is None:
-        try:
-            form = await request.form()
-        except Exception:
-            form = None
-        if form is not None:
-            candidate = form.get("password")
-            if isinstance(candidate, str):
-                password_value = candidate
-
-    password_text = (password_value or "").strip()
-    if not password_text:
-        _log_tg_proxy(route, tenant_id, 400, None, error="password_required")
-        return JSONResponse({"error": "password_required"}, status_code=400, headers=_no_store_headers())
-
-    allowed, retry_after = _register_password_attempt(tg_tenant_id, client_token)
-    if not allowed:
-        headers = _no_store_headers()
-        if retry_after and retry_after > 0:
-            headers["Retry-After"] = str(int(retry_after))
-        _log_tg_proxy(route, tenant_id, 429, None, error="flood_wait")
-        body = {"error": "flood_wait"}
-        if retry_after and retry_after > 0:
-            body["retry_after"] = int(retry_after)
-        return JSONResponse(body, status_code=429, headers=headers)
-
-    fallback_paths = ["/2fa", "/rpc/twofa.submit"]
-    upstream: httpx.Response | None = None
-    last_error: str | None = None
-    last_status: int | None = None
-    payload_body = {"tenant": tg_tenant_id, "password": password_text}
-
-    for candidate in fallback_paths:
-        try:
-            status_code, response = await _tg_call("POST", candidate, json=payload_body, timeout=5.0)
-        except TgWorkerCallError as exc:
-            last_error = exc.detail
-            continue
-        upstream = response
-        last_status = status_code
-        break
-
-    if upstream is None:
-        reason = last_error or "tg_unavailable"
-        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-        _log_tg_proxy(route, tenant_id, 502, None, error=reason)
-        return JSONResponse({"error": "tg_unavailable", "detail": reason}, status_code=502, headers=headers)
-
-    status_code = int(last_status or upstream.status_code)
-    body_bytes = bytes(getattr(upstream, "content", b"") or b"")
-
-    try:
-        payload = upstream.json()
-    except ValueError:
-        payload = {}
-
-    error_code = str(payload.get("error") or "").strip()
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code or "-")})
-
-    if status_code <= 0:
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error="tg_unavailable")
-        headers["Content-Type"] = "application/json"
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers)
-
-    if status_code == 401 or error_code == "bad_password":
-        response = {"error": "bad_password"}
-        detail = payload.get("detail")
-        if detail:
-            response["detail"] = detail
-        _log_tg_proxy(route, tenant_id, 401, body_bytes, error="bad_password")
-        headers["Content-Type"] = "application/json"
-        return JSONResponse(response, status_code=401, headers=headers)
-
-    if status_code == 409 and error_code:
-        _log_tg_proxy(route, tenant_id, 409, body_bytes, error=error_code)
-        headers["Content-Type"] = "application/json"
-        return JSONResponse({"error": error_code}, status_code=409, headers=headers)
-
-    if not (200 <= status_code < 300):
-        failure = error_code or payload.get("detail") or f"status_{status_code}"
-        _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=failure)
-        headers["Content-Type"] = "application/json"
-        return JSONResponse({"error": failure}, status_code=502, headers=headers)
-
-    state_value = str(payload.get("state") or payload.get("status") or "").strip()
-    needs_twofa = bool(state_value == "need_2fa" or payload.get("needs_2fa"))
-    response_payload = {
-        "authorized": bool(payload.get("authorized")),
-        "state": state_value,
-        "needs_2fa": needs_twofa,
-        "last_error": payload.get("last_error"),
-        "expires_at": payload.get("expires_at"),
-        "ok": bool(payload.get("ok", True)),
-    }
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-    headers["Content-Type"] = "application/json"
-    return JSONResponse(response_payload, headers=headers)
+    return await tg_public_runtime.handle_twofa(
+        route,
+        request,
+        tenant,
+        key,
+        slot=slot,
+        deps=_tg_public_deps(),
+    )
 
 
 @router.post("/pub/tg/2fa")
@@ -3332,6 +1655,7 @@ async def tg_restart(
 
     return _passthrough_upstream_response(route, tenant_id, upstream, force=True)
 
+
 @router.get("/pub/tg/status")
 async def tg_status(
     request: Request,
@@ -3339,55 +1663,14 @@ async def tg_status(
     k: str | None = None,
     slot: int = Query(1, ge=1, le=TG_SLOT_MAX),
 ):
-    route = "/pub/tg/status"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+    return await tg_public_runtime.status(
+        "/pub/tg/status",
         request,
         tenant,
         k,
-        query_keys=("k",),
-        allow_body=False,
+        slot=slot,
+        deps=_tg_public_deps(),
     )
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, validated_key = auth
-    tg_tenant_id = _tg_slot_tenant(tenant_id, slot)
-    _log_public_tg_request(route, tenant_id, validated_key or "session")
-
-    fallback_paths = ["/status", "/rpc/status", "/session/status"]
-    params = {"tenant": tg_tenant_id}
-    last_error: str | None = None
-    upstream: httpx.Response | None = None
-    last_status: int | None = None
-
-    for candidate in fallback_paths:
-        try:
-            status_code, response = await _tg_call("GET", candidate, params=params, timeout=5.0)
-        except TgWorkerCallError as exc:
-            last_error = exc.detail
-            continue
-        if not (200 <= status_code < 300):
-            detail_text = response.text if hasattr(response, "text") else ""
-            last_error = detail_text.strip() or f"status_{status_code}"
-            continue
-        upstream = response
-        last_status = status_code
-        break
-
-    if upstream is None:
-        reason = last_error or "tg_unavailable"
-        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-        _log_tg_proxy(route, tenant_id, 502, None, error=reason)
-        return JSONResponse({"error": "tg_unavailable", "detail": reason}, status_code=502, headers=headers)
-
-    status_code = int(last_status or upstream.status_code)
-    body_bytes = bytes(upstream.content or b"")
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
-    content_type = upstream.headers.get("content-type")
-    if content_type:
-        headers["Content-Type"] = content_type
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
 @router.get("/pub/tg/qr.png")
@@ -3398,64 +1681,15 @@ async def tg_qr_png(
     k: str | None = None,
     slot: int = Query(1, ge=1, le=TG_SLOT_MAX),
 ):
-    route = "/pub/tg/qr.png"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+    return await tg_public_runtime.qr_png(
+        "/pub/tg/qr.png",
         request,
         tenant,
+        qr_id,
         k,
-        query_keys=("k",),
-        allow_body=False,
+        slot=slot,
+        deps=_tg_public_deps(),
     )
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    tg_tenant_id = _tg_slot_tenant(tenant_id, slot)
-
-    qr_identifier = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
-    if not qr_identifier:
-        _log_tg_proxy(route, tenant_id, 400, None, error="missing_qr_id")
-        return JSONResponse({"error": "missing_qr_id"}, status_code=400, headers=_no_store_headers())
-
-    safe_qr = quote(qr_identifier, safe="")
-    base_params = {"tenant": tg_tenant_id}
-    fallback_paths: list[tuple[str, dict[str, Any]]] = [
-        ("/qr/png", {**base_params, "qr_id": qr_identifier}),
-        (f"/session/qr/{safe_qr}.png", dict(base_params)),
-    ]
-
-    upstream: httpx.Response | None = None
-    last_status: int | None = None
-    last_error: str | None = None
-
-    for candidate, params in fallback_paths:
-        try:
-            status_code, response = await _tg_call("GET", candidate, params=params, timeout=5.0)
-        except TgWorkerCallError as exc:
-            last_error = exc.detail
-            continue
-        if not (200 <= status_code < 300):
-            detail_text = response.text if hasattr(response, "text") else ""
-            last_error = detail_text.strip() or f"status_{status_code}"
-            continue
-        upstream = response
-        last_status = status_code
-        break
-
-    if upstream is None:
-        reason = last_error or "tg_unavailable"
-        headers = _no_store_headers({"X-Telegram-Upstream-Status": "-"})
-        _log_tg_proxy(route, tenant_id, 502, None, error=reason)
-        return JSONResponse({"error": "tg_unavailable", "detail": reason}, status_code=502, headers=headers)
-
-    status_code = int(last_status or upstream.status_code)
-    body_bytes = bytes(upstream.content or b"")
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
-    headers["Cache-Control"] = "no-store"
-    content_type = upstream.headers.get("content-type") or "image/png"
-    headers["Content-Type"] = content_type
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
 @router.get("/pub/tg/media/{peer_id}/{message_id}")
@@ -3466,42 +1700,15 @@ async def tg_media(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    route = "/pub/tg/media"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+    return await tg_public_runtime.proxy_tg_resource(
+        "/pub/tg/media",
         request,
         tenant,
         k,
-        query_keys=("k",),
-        allow_body=False,
+        resource_path_fn=lambda tenant_id: f"/media/{tenant_id}/{int(str(peer_id))}/{int(str(message_id))}",
+        deps=_tg_public_deps(),
+        timeout=15.0,
     )
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, validated_key = auth
-    _log_public_tg_request(route, tenant_id, validated_key or "session")
-    try:
-        peer_val = int(str(peer_id))
-        msg_val = int(str(message_id))
-    except Exception:
-        return JSONResponse({"error": "bad_params"}, status_code=400, headers=_no_store_headers())
-
-    try:
-        status_code, response = await _tg_call(
-            "GET",
-            f"/media/{tenant_id}/{peer_val}/{msg_val}",
-            timeout=15.0,
-        )
-    except TgWorkerCallError as exc:
-        _log_tg_proxy(route, tenant_id, 502, None, error=exc.detail)
-        return JSONResponse({"error": "tg_unavailable", "detail": exc.detail}, status_code=502, headers=_no_store_headers())
-
-    body_bytes = bytes(response.content or b"")
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
-    content_type = response.headers.get("content-type")
-    if content_type:
-        headers["Content-Type"] = content_type
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
 @router.get("/pub/tg/avatar/{peer_id}")
@@ -3511,39 +1718,15 @@ async def tg_avatar(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    route = "/pub/tg/avatar"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+    return await tg_public_runtime.proxy_tg_resource(
+        "/pub/tg/avatar",
         request,
         tenant,
         k,
-        query_keys=("k",),
-        allow_body=False,
+        resource_path_fn=lambda tenant_id: f"/avatar/{tenant_id}/{int(str(peer_id))}",
+        deps=_tg_public_deps(),
+        timeout=15.0,
     )
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, validated_key = auth
-    _log_public_tg_request(route, tenant_id, validated_key or "session")
-    try:
-        peer_val = int(str(peer_id))
-    except Exception:
-        return JSONResponse({"error": "bad_params"}, status_code=400, headers=_no_store_headers())
-    try:
-        status_code, response = await _tg_call(
-            "GET",
-            f"/avatar/{tenant_id}/{peer_val}",
-            timeout=15.0,
-        )
-    except TgWorkerCallError as exc:
-        _log_tg_proxy(route, tenant_id, 502, None, error=exc.detail)
-        return JSONResponse({"error": "tg_unavailable", "detail": exc.detail}, status_code=502, headers=_no_store_headers())
-    body_bytes = bytes(response.content or b"")
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
-    content_type = response.headers.get("content-type")
-    if content_type:
-        headers["Content-Type"] = content_type
-    _log_tg_proxy(route, tenant_id, status_code, body_bytes, error=None)
-    return Response(content=body_bytes, status_code=status_code, headers=headers)
 
 
 @router.get("/pub/chat/avatar/{lead_id}")
@@ -3570,50 +1753,16 @@ async def chat_avatar(
         lead_ref = int(str(lead_id))
     except Exception:
         return JSONResponse({"error": "bad_params"}, status_code=400, headers=_no_store_headers())
-    meta = await get_lead_dialog_metadata(lead_ref)
-    if not meta or int(meta.get("tenant_id") or 0) != int(tenant_id):
-        return JSONResponse({"error": "not_found"}, status_code=404, headers=_no_store_headers())
-    display_name = (
-        str(meta.get("contact") or "").strip()
-        or str(meta.get("title") or "").strip()
-        or str(meta.get("avito_login") or "").strip()
-        or str(meta.get("telegram_username") or "").strip()
-        or f"Lead {lead_ref}"
+    return await public_avatar_runtime.chat_avatar_response(
+        tenant_id=int(tenant_id),
+        lead_id=lead_ref,
+        deps=public_avatar_runtime.PublicAvatarDeps(
+            get_lead_dialog_metadata_fn=get_lead_dialog_metadata,
+            resolve_avito_profile_fn=avito.resolve_chat_participant_profile,
+            no_store_headers_fn=_no_store_headers,
+            http_client_cls=httpx.AsyncClient,
+        ),
     )
-    channel = str(meta.get("channel") or "").strip().lower()
-    if channel == "avito":
-        try:
-            live_profile = await avito.resolve_chat_participant_profile(
-                int(tenant_id),
-                account_id=int(str(meta.get("source_real_id") or "").strip() or 0) or None,
-                chat_id=str(meta.get("peer") or "").strip(),
-                author_id=int(str(meta.get("avito_user_id") or "").strip() or 0) or None,
-            )
-        except Exception:
-            live_profile = {}
-        avatar_url = str((live_profile or {}).get("avatar") or "").strip()
-        if avatar_url:
-            try:
-                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                    upstream = await client.get(avatar_url)
-                if upstream.status_code == 200 and upstream.content:
-                    headers = _no_store_headers()
-                    headers["Content-Type"] = upstream.headers.get("content-type", "image/png")
-                    return Response(content=upstream.content, status_code=200, headers=headers)
-            except Exception:
-                pass
-    initials = html.escape(_avatar_text_for_channel(display_name, channel))
-    fill = _avatar_fill_for_channel(display_name, channel)
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">'
-        f'<rect width="128" height="128" rx="64" fill="{fill}"/>'
-        f'<text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" '
-        f'font-family="Inter, Arial, sans-serif" font-size="42" font-weight="700" fill="#ffffff">{initials}</text>'
-        f"</svg>"
-    )
-    headers = _no_store_headers()
-    headers["Content-Type"] = "image/svg+xml"
-    return Response(content=svg, status_code=200, headers=headers)
 
 
 @router.get("/pub/tg/qr.txt")
@@ -3625,77 +1774,15 @@ async def tg_qr_txt(
     key: str | None = None,
     slot: int = Query(1, ge=1, le=TG_SLOT_MAX),
 ):
-    route = "/pub/tg/qr.txt"
-    tenant_candidate, key_candidate = await _resolve_tenant_and_key(
+    return await tg_public_runtime.qr_txt(
+        "/pub/tg/qr.txt",
         request,
         tenant,
+        qr_id,
         k or key,
-        query_keys=("k", "key"),
-        allow_body=False,
+        slot=slot,
+        deps=_tg_public_deps(),
     )
-    auth = await _authorize_public_settings_request(request, tenant_candidate, key_candidate)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, validated_key = auth
-    tg_tenant_id = _tg_slot_tenant(tenant_id, slot)
-    _log_public_tg_request(route, tenant_id, validated_key or "session")
-
-    qr_value = _resolve_qr_identifier(qr_id, request.query_params.get("id"))
-    if not qr_value:
-        _log_tg_proxy(route, tenant_id, 400, None, error="missing_qr_id")
-        return JSONResponse(
-            {"error": "missing_qr_id"},
-            status_code=400,
-            headers=_no_store_headers(),
-        )
-
-    safe_qr = quote(qr_value, safe="")
-    status_code, body, headers = common.tg_http(
-        "GET",
-        f"{_resolve_tg_base()}/session/qr/{safe_qr}.txt?tenant={tg_tenant_id}",
-        timeout=15.0,
-    )
-    body_bytes = body if isinstance(body, (bytes, bytearray)) else ("" if body is None else str(body)).encode("utf-8")
-    detail_from_json = _extract_json_detail(body_bytes)
-    if status_code == 200:
-        detail = None
-    elif detail_from_json:
-        detail = detail_from_json
-    else:
-        detail = _stringify_detail(body_bytes) or f"status_{status_code}"
-
-    _log_tg_proxy("/pub/tg/qr.txt", None, status_code, body_bytes, error=detail)
-
-    if status_code <= 0:
-        return JSONResponse(
-            {"error": "tg_unavailable"},
-            status_code=502,
-            headers=_no_store_headers({"X-Telegram-Upstream-Status": str(status_code)}),
-        )
-
-    if status_code == 404:
-        detail_value = detail_from_json or "qr_not_found"
-        headers_out = _proxy_headers(headers or {}, status_code)
-        headers_out.update(_no_store_headers())
-        if not body_bytes:
-            body_bytes = json.dumps({"detail": detail_value}).encode("utf-8")
-        media_type = headers_out.get("Content-Type") or "application/json"
-        return Response(
-            content=body_bytes,
-            status_code=status_code,
-            headers=headers_out,
-            media_type=media_type,
-        )
-
-    if status_code != 200:
-        headers_out = _proxy_headers(headers or {}, status_code)
-        headers_out.update(_no_store_headers())
-        return JSONResponse({"error": "tg_unavailable"}, status_code=502, headers=headers_out)
-
-    response_headers = _proxy_headers(headers or {}, status_code)
-    response_headers.update(_no_store_headers())
-    response_headers.setdefault("Content-Type", "text/plain; charset=utf-8")
-    return Response(content=body_bytes, status_code=status_code, headers=response_headers)
 
 
 @router.api_route("/pub/tg/logout", methods=["GET", "POST"])
@@ -3735,91 +1822,19 @@ def wa_qr_png(
     k: str = Query(..., description="PUBLIC_KEY access token"),
     qr_id: str | None = Query(None, description="Explicit QR identifier from status"),
 ):
-    ok = _ensure_valid_qr_request(tenant, k, request, query_param_only=True)
-    if ok is None:
-        return _invalid_key_response()
-    tenant_id, _ = ok
-
-    requested_id = (qr_id or "").strip()
-    redis_failed = False
-    if not requested_id:
-        requested_id, redis_failed = _get_last_qr_id(tenant_id)
-    if redis_failed:
-        return JSONResponse({"error": "wa_cache_unavailable"}, status_code=503)
-    if not requested_id:
-        return _qr_expired_response()
-
-    entry, redis_failed = _load_cached_qr_entry(tenant_id, requested_id)
-    if redis_failed:
-        return JSONResponse({"error": "wa_cache_unavailable"}, status_code=503)
-
-    png_value = entry.get("qr_png") if isinstance(entry, dict) else None
-    binary: bytes | None = None
-    mutated = False
-    if isinstance(png_value, str) and png_value.strip():
-        normalized = png_value.split(",")[-1].strip()
-        try:
-            binary = base64.b64decode(normalized, validate=False)
-        except Exception:
-            binary = None
-            wa_logger.warning("wa_qr_cache_invalid_png tenant=%s qr_id=%s", tenant_id, requested_id)
-
-    if binary is None:
-        qr_text = entry.get("qr_text") if isinstance(entry, dict) else None
-        if isinstance(qr_text, str) and qr_text.strip():
-            binary = _render_qr_png_bytes(qr_text.strip())
-            if binary:
-                entry["qr_png"] = base64.b64encode(binary).decode("ascii")
-                mutated = True
-
-    if binary is None:
-        return _qr_expired_response(requested_id)
-
-    if mutated:
-        try:
-            entry_to_store = dict(entry)
-            _persist_qr_entry(tenant_id, requested_id, entry_to_store)
-        except Exception:
-            wa_logger.info("wa_qr_cache_update_failed tenant=%s qr_id=%s format=png", tenant_id, requested_id)
-
-    headers = _no_store_headers()
-    headers["X-WA-QR-ID"] = requested_id
-    return Response(content=binary, media_type="image/png", headers=headers)
+    return wa_qr_runtime.wa_qr_png_response(
+        request=request,
+        tenant=tenant,
+        key=k,
+        qr_id=qr_id,
+        ensure_valid_qr_request_fn=_ensure_valid_qr_request,
+        invalid_key_response_fn=_invalid_key_response,
+        deps=_wa_qr_deps(),
+    )
 
 
 def _proxy_baileys_qr(tenant: int) -> Response:
-    wa_logger.info("qr_fetch start tenant=%s provider=baileys", tenant)
-    code, raw = common.wabaileys_http(
-        "GET", f"/sessions/status?tenant={int(tenant)}", timeout=3.0
-    )
-    if int(code or 0) < 200 or int(code or 0) >= 300:
-        return Response(b"", media_type="image/svg+xml", status_code=int(code or 0) or 502)
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {}
-    session = data.get("session")
-    if not isinstance(session, Mapping):
-        session = {}
-    qr_block = session.get("qr") if isinstance(session.get("qr"), Mapping) else {}
-    if not qr_block:
-        return Response(b"", media_type="image/svg+xml", status_code=404)
-    qr_id = str(qr_block.get("id") or qr_block.get("raw") or "")
-    headers = _no_store_headers()
-    if qr_id:
-        headers["X-WA-QR-ID"] = qr_id
-    svg_blob = qr_block.get("svg")
-    if isinstance(svg_blob, str) and svg_blob.strip():
-        return Response(svg_blob.encode("utf-8"), media_type="image/svg+xml", headers=headers)
-    png_blob = qr_block.get("png")
-    if isinstance(png_blob, str) and png_blob.strip():
-        try:
-            binary = base64.b64decode(png_blob, validate=True)
-        except Exception:
-            binary = b""
-        if binary:
-            return Response(binary, media_type="image/png", headers=headers)
-    return Response(b"", media_type="image/svg+xml", status_code=404)
+    return wa_qr_runtime.proxy_baileys_qr(tenant, _wa_qr_deps())
 
 
 @router.get("/pub/wa/restart")
@@ -3832,112 +1847,22 @@ async def wa_restart(
 
     Security: requires a valid public access key `k` for the tenant.
     """
-
-    ok = _ensure_valid_qr_request(tenant, k, request)
-    if ok is None:
-        return _invalid_key_response()
-    tenant_id, _ = ok
-
-    wa_logger.info("wa_restart click tenant=%s", tenant_id)
-
-    try:
-        webhook = common.webhook_url()
-        provider = common.whatsapp_provider(int(tenant_id))
-        if provider == "baileys":
-            start_payload = {"tenant": int(tenant_id), "webhookUrl": webhook, "force": True}
-            response = await common.wabaileys_post("/sessions/start", start_payload)
-            if 200 <= response.status_code < 400:
-                return JSONResponse({"ok": True})
-            return JSONResponse({"error": "wa_unavailable"}, status_code=502)
-
-        start_payload = json.dumps({"tenant_id": tenant_id, "webhook_url": webhook}, ensure_ascii=False).encode("utf-8")
-        empty_payload = json.dumps({}, ensure_ascii=False).encode("utf-8")
-
-        code_restart, _ = common.http(
-            "POST",
-            f"{common.wa_base_url(tenant_id)}/session/{tenant_id}/restart",
-            body=start_payload,
-        )
-        if 200 <= int(code_restart or 0) < 300:
-            wa_logger.info("wa_restart success tenant=%s stage=tenant_restart code=%s", tenant_id, code_restart)
-            return JSONResponse({"ok": True})
-
-        code_logout, _ = common.http(
-            "POST",
-            f"{common.wa_base_url(tenant_id)}/session/{tenant_id}/logout",
-            body=empty_payload,
-        )
-        code_start, _ = common.http(
-            "POST",
-            f"{common.wa_base_url(tenant_id)}/session/{tenant_id}/start",
-            body=start_payload,
-        )
-        if 200 <= int(code_start or 0) < 300:
-            wa_logger.info(
-                "wa_restart success tenant=%s stage=tenant_logout_start logout=%s start=%s",
-                tenant_id,
-                code_logout,
-                code_start,
-            )
-            return JSONResponse({"ok": True})
-
-        code_global_restart, _ = common.http(
-            "POST",
-            f"{common.wa_base_url(None)}/session/restart",
-            body=start_payload,
-        )
-        if 200 <= int(code_global_restart or 0) < 300:
-            wa_logger.info(
-                "wa_restart success tenant=%s stage=global_restart code=%s",
-                tenant_id,
-                code_global_restart,
-            )
-            return JSONResponse({"ok": True})
-
-        code_global_start, _ = common.http(
-            "POST",
-            f"{common.wa_base_url(None)}/session/start",
-            body=start_payload,
-        )
-        if 200 <= int(code_global_start or 0) < 300:
-            wa_logger.info(
-                "wa_restart success tenant=%s stage=global_start code=%s",
-                tenant_id,
-                code_global_start,
-            )
-            return JSONResponse({"ok": True})
-
-        wa_logger.info(
-            "wa_restart failed tenant=%s codes=%s",
-            tenant_id,
-            {
-                "tenant_restart": code_restart,
-                "tenant_logout": code_logout,
-                "tenant_start": code_start,
-                "global_restart": code_global_restart,
-                "global_start": code_global_start,
-            },
-        )
-        return JSONResponse({"error": "wa_unavailable"}, status_code=502)
-    except Exception as exc:  # pragma: no cover
-        try:
-            wa_logger.exception("wa_restart_failed: %s", exc)
-        except Exception:
-            pass
-        return JSONResponse({"error": "wa_unavailable"}, status_code=502)
+    return await wa_public_runtime.wa_restart(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=wa_public_runtime.WaRestartDeps(
+            ensure_valid_qr_request_fn=_ensure_valid_qr_request,
+            invalid_key_response_fn=_invalid_key_response,
+            common_module=common,
+            json_module=json,
+            wa_logger=wa_logger,
+        ),
+    )
 
 
 def _resolve_public_settings_key(request: Request, key_candidate: str | None) -> str:
-    candidate = (key_candidate or "").strip()
-    if candidate:
-        return candidate
-
-    query_value = (request.query_params.get("k") or "").strip()
-    if query_value:
-        return query_value
-
-    cookies = getattr(request, "cookies", None) or {}
-    return (cookies.get("client_key") or "").strip()
+    return public_auth_runtime.resolve_public_settings_key(request, key_candidate)
 
 
 async def _authorize_public_settings_request(
@@ -3945,446 +1870,183 @@ async def _authorize_public_settings_request(
     tenant: int | str | None,
     key_candidate: str | None,
 ) -> tuple[int, str] | Response:
-    user = await auth_utils.get_current_user(request)
-    session_tenant = int(user.get("tenant_id") or 0) if isinstance(user, dict) else 0
-    if session_tenant > 0:
-        if tenant is None or str(tenant).strip() == "":
-            tenant_id = session_tenant
-            resolved_key = _resolve_public_settings_key(request, key_candidate)
-            if not resolved_key:
-                resolved_key = (C.get_tenant_pubkey(int(tenant_id)) or "").strip()
-                if not resolved_key:
-                    keys = C.list_keys(int(tenant_id))
-                    resolved_key = (keys[0].get("key") if keys else "") or ""
-            return tenant_id, resolved_key
-        try:
-            tenant_id = _coerce_tenant(tenant)
-        except ValueError as exc:
-            return JSONResponse({"detail": str(exc)}, status_code=400)
-        if int(tenant_id) == int(session_tenant):
-            resolved_key = _resolve_public_settings_key(request, key_candidate)
-            if not resolved_key:
-                resolved_key = (C.get_tenant_pubkey(int(tenant_id)) or "").strip()
-                if not resolved_key:
-                    keys = C.list_keys(int(tenant_id))
-                    resolved_key = (keys[0].get("key") if keys else "") or ""
-            return tenant_id, resolved_key
-
-    try:
-        tenant_id = _coerce_tenant(tenant)
-    except ValueError as exc:
-        return JSONResponse({"detail": str(exc)}, status_code=400)
-
-    resolved_key = _resolve_public_settings_key(request, key_candidate)
-
-    if not auth_utils.magic_link_enabled():
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    if not resolved_key or not common.valid_key(tenant_id, resolved_key):
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
-
-    return tenant_id, resolved_key
+    return await public_auth_runtime.authorize_public_settings_request(
+        request,
+        tenant,
+        key_candidate,
+        public_auth_runtime.PublicAuthDeps(
+            get_current_user_fn=auth_utils.get_current_user,
+            coerce_tenant_fn=_coerce_tenant,
+            resolve_public_settings_key_fn=_resolve_public_settings_key,
+            get_tenant_pubkey_fn=getattr(C, "get_tenant_pubkey", common.get_tenant_pubkey),
+            list_keys_fn=getattr(C, "list_keys", common.list_keys),
+            magic_link_enabled_fn=auth_utils.magic_link_enabled,
+            valid_key_fn=common.valid_key,
+            settings=settings,
+        ),
+    )
 
 
-@oauth_router.get("/status")
-async def avito_oauth_status(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-
-    tenant_id, _ = auth
-    integration = avito.get_integration(int(tenant_id)) or {}
-    authorized = False
-    if integration:
-        try:
-            _, integration = await avito.ensure_access_token(int(tenant_id))
-            authorized = True
-        except avito.AvitoOAuthError:
-            authorized = False
-        except Exception:
-            logger.exception("avito_oauth_status_failed tenant=%s", tenant_id)
-            integration = avito.get_integration(int(tenant_id)) or {}
-    account_id = _coerce_int(integration.get("account_id")) if integration else None
-    account_login_raw = integration.get("account_login") if integration else None
-    account_login: str | None = None
-    if isinstance(account_login_raw, str):
-        candidate = account_login_raw.strip()
-        if candidate:
-            account_login = candidate
-
-    access_token = str(integration.get("access_token") or "").strip()
-    expires_value = _coerce_int(integration.get("expires_at")) if integration else None
-    configured_flag = bool(access_token)
-    if not configured_flag and integration:
-        account_id_candidate = integration.get("account_id")
-        configured_flag = configured_flag or _coerce_int(account_id_candidate) is not None
-    # "connected" must mean "ready to use right now".
-    # Otherwise the UI shows Avito as active while amoCRM Inbox sends already fail
-    # on expired/invalid OAuth refresh tokens.
-    connected_flag = bool(authorized)
-    body = {
-        "authorized": bool(authorized),
-        "connected": connected_flag,
-        "configured": configured_flag,
-        "expires_at": expires_value,
-        "account_id": account_id,
-        "account_login": account_login,
-    }
-    return JSONResponse(body)
+def _avito_oauth_deps() -> avito_oauth_runtime.AvitoOAuthDeps:
+    return avito_oauth_runtime.AvitoOAuthDeps(
+        authorize_public_settings_request_fn=_authorize_public_settings_request,
+        coerce_int_fn=_coerce_int,
+        avito_module=avito,
+        logger=logger,
+        common_module=common,
+        json_module=json,
+        redis_error_type=redis_ex.RedisError,
+        avito_state_ttl=AVITO_STATE_TTL,
+        avito_state_cookie=AVITO_STATE_COOKIE,
+        avito_state_key_fn=_avito_state_key,
+        build_avito_oauth_state_fn=_build_avito_oauth_state,
+        avito_oauth_redirect_entry_url_fn=_avito_oauth_redirect_entry_url,
+        set_avito_state_cookie_fn=_set_avito_state_cookie,
+        avito_callback_html_fn=_avito_callback_html,
+        clear_avito_state_cookie_fn=_clear_avito_state_cookie,
+        verify_avito_oauth_state_fn=_verify_avito_oauth_state,
+        resolve_tenant_from_state_fn=resolve_tenant_from_state,
+        build_token_update_payload_fn=build_token_update_payload,
+        avito_token_payload_error=AvitoTokenPayloadError,
+    )
 
 
-@oauth_router.get("/authorize")
-async def avito_oauth_authorize(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-
-    tenant_id, _ = auth
-    state = uuid.uuid4().hex
-    state_payload = json.dumps({"tenant": tenant_id})
-    state_key = _avito_state_key(state)
-    try:
-        client = common.redis_client()
-        client.setex(state_key, AVITO_STATE_TTL, state_payload)
-    except redis_ex.RedisError:
-        logger.exception("avito_oauth_state_store_failed tenant=%s", tenant_id)
-        return JSONResponse({"detail": "state_store_failed"}, status_code=503)
-
-    authorize_url = avito.build_authorize_url(state=state)
-    return JSONResponse({"authorize_url": authorize_url})
+avito_oauth_routes.register_routes(oauth_router, _avito_oauth_deps)
 
 
-@oauth_router.get("/callback")
+async def avito_oauth_authorize(
+    request: Request,
+    tenant: int | None = None,
+    k: str | None = None,
+    redirect: bool = False,
+):
+    return await avito_oauth_runtime.oauth_authorize(
+        request, tenant=tenant, key=k, redirect=redirect, deps=_avito_oauth_deps()
+    )
+
+
 async def avito_oauth_callback(
     request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
 ):
-    if error:
-        return HTMLResponse(_avito_callback_html(False, error, {}))
-
-    if not state:
-        return HTMLResponse(_avito_callback_html(False, "missing_state", {}))
-
-    try:
-        client = common.redis_client()
-    except redis_ex.RedisError:
-        logger.exception("avito_oauth_state_fetch_failed state=%s", state)
-        return HTMLResponse(_avito_callback_html(False, "state_unavailable", {}))
-
-    state_key = _avito_state_key(state)
-    try:
-        raw_value = client.get(state_key)
-    except redis_ex.RedisError:
-        logger.exception("avito_oauth_state_fetch_failed state=%s", state)
-        return HTMLResponse(_avito_callback_html(False, "state_unavailable", {}))
-    finally:
-        try:
-            client.delete(state_key)
-        except Exception:
-            pass
-
-    tenant_id = None
-    if isinstance(raw_value, bytes):
-        try:
-            raw_value = raw_value.decode("utf-8")
-        except Exception:
-            raw_value = None
-    if isinstance(raw_value, str):
-        try:
-            payload = json.loads(raw_value)
-        except Exception:
-            payload = None
-        if isinstance(payload, Mapping):
-            tenant_id = _coerce_int(payload.get("tenant"))
-
-    if tenant_id is None:
-        return HTMLResponse(_avito_callback_html(False, "invalid_state", {}))
-
-    if not code:
-        return HTMLResponse(
-            _avito_callback_html(False, "missing_code", {"tenant": tenant_id})
-        )
-
-    try:
-        token_payload = await avito.exchange_code_for_token(int(tenant_id), code)
-    except avito.AvitoOAuthError as exc:
-        message = str(exc) or "token_exchange_failed"
-        return HTMLResponse(
-            _avito_callback_html(False, message, {"tenant": tenant_id})
-        )
-    except Exception:
-        logger.exception("avito_oauth_exchange_failed tenant=%s", tenant_id)
-        return HTMLResponse(
-            _avito_callback_html(False, "token_exchange_failed", {"tenant": tenant_id})
-        )
-
-    access_token = str(token_payload.get("access_token") or "").strip()
-    refresh_token = str(token_payload.get("refresh_token") or "").strip()
-    if not access_token:
-        return HTMLResponse(
-            _avito_callback_html(False, "access_token_missing", {"tenant": tenant_id})
-        )
-
-    now = int(time.time())
-    update_payload: dict[str, Any] = {
-        "access_token": access_token,
-        "refresh_token": refresh_token or None,
-        "obtained_at": now,
-    }
-    expires_at = token_payload.get("expires_at")
-    if expires_at is not None:
-        try:
-            update_payload["expires_at"] = int(expires_at)
-        except Exception:
-            update_payload["expires_at"] = None
-    else:
-        expires_in = token_payload.get("expires_in")
-        try:
-            exp_value = int(expires_in)
-        except Exception:
-            exp_value = None
-        if exp_value and exp_value > 0:
-            update_payload["expires_at"] = now + exp_value
-        else:
-            update_payload["expires_at"] = None
-    scope_value = token_payload.get("scope")
-    if isinstance(scope_value, str) and scope_value.strip():
-        update_payload["scope"] = scope_value.strip()
-
-    try:
-        common.ensure_tenant_files(int(tenant_id))
-    except Exception:
-        logger.exception("avito_oauth_store_failed tenant=%s", tenant_id)
-        return HTMLResponse(
-            _avito_callback_html(False, "token_store_failed", {"tenant": tenant_id})
-        )
-
-    try:
-        avito.update_integration(int(tenant_id), update_payload)
-    except Exception:
-        logger.exception("avito_oauth_store_failed tenant=%s", tenant_id)
-        return HTMLResponse(
-            _avito_callback_html(False, "token_store_failed", {"tenant": tenant_id})
-        )
-
-    try:
-        await avito.sync_account_info(int(tenant_id))
-    except avito.AvitoOAuthError as exc:
-        logger.warning(
-            "avito_account_sync_failed tenant=%s error=%s", tenant_id, exc
-        )
-    except Exception:
-        logger.exception("avito_account_sync_failed tenant=%s", tenant_id)
-
-    try:
-        target_url = common.public_url(request, "/webhook/avito")
-        success = await avito.ensure_webhook(int(tenant_id), target_url)
-        if not success:
-            logger.warning(
-                "avito_webhook_register_failed tenant=%s error=unexpected_response",
-                tenant_id,
-            )
-    except avito.AvitoOAuthError as exc:
-        logger.warning("avito_webhook_register_failed tenant=%s error=%s", tenant_id, exc)
-    except Exception:
-        logger.exception("avito_webhook_register_failed tenant=%s", tenant_id)
-
-    return HTMLResponse(_avito_callback_html(True, "ok", {"tenant": tenant_id}))
-
-
-@oauth_router.post("/disconnect")
-async def avito_oauth_disconnect(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-
-    tenant_id, _ = auth
-    reset_payload = {
-        "access_token": None,
-        "refresh_token": None,
-        "expires_at": None,
-        "obtained_at": None,
-        "account_id": None,
-        "account_login": None,
-    }
-    try:
-        target_url = common.public_url(request, "/webhook/avito")
-        await avito.delete_webhook(int(tenant_id), target_url)
-        legacy_url = common.public_url(
-            request, f"/webhook/avito?tenant={int(tenant_id)}"
-        )
-        if legacy_url != target_url:
-            await avito.delete_webhook(int(tenant_id), legacy_url)
-    except avito.AvitoOAuthError:
-        logger.warning("avito_webhook_delete_failed tenant=%s reason=oauth", tenant_id)
-    except Exception:
-        logger.exception("avito_webhook_delete_failed tenant=%s", tenant_id)
-    try:
-        common.ensure_tenant_files(int(tenant_id))
-    except Exception:
-        logger.exception("avito_oauth_disconnect_failed tenant=%s", tenant_id)
-        return JSONResponse({"detail": "disconnect_failed"}, status_code=500)
-    try:
-        avito.update_integration(int(tenant_id), reset_payload)
-    except Exception:
-        logger.exception("avito_oauth_disconnect_failed tenant=%s", tenant_id)
-        return JSONResponse({"detail": "disconnect_failed"}, status_code=500)
-
-    return JSONResponse({"ok": True})
-
-
-@oauth_router.post("/webhook")
-async def avito_oauth_webhook(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-
-    tenant_id, _ = auth
-    try:
-        await avito.ensure_access_token(int(tenant_id))
-    except avito.AvitoOAuthError as exc:
-        return JSONResponse(
-            {"detail": "oauth_not_authorized", "reason": str(exc) or "oauth_error"},
-            status_code=400,
-        )
-    except Exception:
-        logger.exception("avito_oauth_token_check_failed tenant=%s", tenant_id)
-        return JSONResponse({"detail": "oauth_error"}, status_code=500)
-
-    target_url = common.public_url(request, "/webhook/avito")
-    try:
-        success = await avito.ensure_webhook(int(tenant_id), target_url)
-    except avito.AvitoOAuthError as exc:
-        logger.warning(
-            "avito_webhook_register_failed tenant=%s error=%s", tenant_id, exc
-        )
-        return JSONResponse({"detail": "webhook_register_failed"}, status_code=400)
-    except Exception:
-        logger.exception("avito_webhook_register_failed tenant=%s", tenant_id)
-        return JSONResponse({"detail": "webhook_register_failed"}, status_code=500)
-
-    if not success:
-        return JSONResponse({"detail": "webhook_register_failed"}, status_code=502)
-
-    return JSONResponse({"ok": True})
+    return await avito_oauth_runtime.oauth_callback(
+        request, code=code, state=state, error=error, deps=_avito_oauth_deps()
+    )
 
 
 def _max_webhook_url(request: Request, tenant_id: int, secret: str) -> str:
-    token_param = secret.strip()
-    tail = f"/webhook/max?tenant={int(tenant_id)}"
-    if token_param:
-        tail = f"{tail}&token={token_param}"
-    return common.public_url(request, tail)
+    return max_public_runtime.max_webhook_url(
+        request,
+        tenant_id,
+        secret,
+        public_url_fn=common.public_url,
+    )
+
+
+def _max_personal_callback_url(request: Request, tenant_id: int, secret: str) -> str:
+    return max_public_runtime.max_personal_callback_url(
+        request,
+        tenant_id,
+        secret,
+        public_url_fn=common.public_url,
+    )
+
+
+def _max_public_deps() -> max_public_runtime.MaxPublicDeps:
+    return max_public_runtime.MaxPublicDeps(
+        authorize_fn=_authorize_public_settings_request,
+        max_integration=max_integration,
+        logger=logger,
+        public_url_fn=common.public_url,
+        secrets_module=secrets,
+        time_module=time,
+    )
+
+
+def _max_personal_deps() -> max_public_runtime.MaxPersonalDeps:
+    return max_public_runtime.MaxPersonalDeps(
+        authorize_fn=_authorize_public_settings_request,
+        service=max_personal_service,
+        transport=max_personal_transport,
+        refresh_status_fn=_max_personal_refresh_status,
+        callback_url_fn=_max_personal_callback_url,
+    )
 
 
 @max_router.get("/status")
 async def max_status(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    integration = max_integration.get_integration(int(tenant_id)) or {}
-    token = str(integration.get("bot_token") or integration.get("token") or "").strip()
-    secret = str(integration.get("webhook_secret") or "").strip()
-    webhook_url = _max_webhook_url(request, int(tenant_id), secret) if secret else ""
-    return JSONResponse(
-        {
-            "connected": bool(token),
-            "webhook_url": webhook_url,
-            "webhook_secret_set": bool(secret),
-            "webhook_registered": bool(integration.get("webhook_registered")),
-        }
-    )
+    return await max_public_runtime.max_status(request, tenant, k, _max_public_deps())
 
 
 @max_router.post("/connect")
 async def max_connect(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    raw_token = payload.get("token") or payload.get("bot_token") or payload.get("access_token") or ""
-    token = str(raw_token or "").strip()
-    if not token:
-        return JSONResponse({"detail": "token_required"}, status_code=400)
-
-    integration = max_integration.get_integration(int(tenant_id)) or {}
-    secret = str(integration.get("webhook_secret") or "").strip()
-    if not secret:
-        secret = secrets.token_urlsafe(18)
-
-    max_integration.update_integration(
-        int(tenant_id),
-        {
-            "bot_token": token,
-            "webhook_secret": secret,
-            "connected_at": int(time.time()),
-        },
-    )
-
-    webhook_url = _max_webhook_url(request, int(tenant_id), secret)
-    webhook_ok = False
-    try:
-        webhook_ok = await max_integration.ensure_webhook(int(tenant_id), webhook_url)
-    except Exception as exc:
-        logger.warning("max_webhook_register_failed tenant=%s error=%s", tenant_id, exc)
-        webhook_ok = False
-
-    try:
-        max_integration.update_integration(
-            int(tenant_id),
-            {
-                "webhook_registered": bool(webhook_ok),
-                "webhook_registered_at": int(time.time()) if webhook_ok else None,
-            },
-        )
-    except Exception:
-        logger.exception("max_webhook_state_update_failed tenant=%s", tenant_id)
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "connected": True,
-            "webhook_url": webhook_url,
-            "webhook_ok": bool(webhook_ok),
-        }
-    )
+    return await max_public_runtime.max_connect(request, tenant, k, _max_public_deps())
 
 
 @max_router.post("/disconnect")
 async def max_disconnect(request: Request, tenant: int | None = None, k: str | None = None):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    integration = max_integration.get_integration(int(tenant_id)) or {}
-    secret = str(integration.get("webhook_secret") or "").strip()
-    webhook_url = _max_webhook_url(request, int(tenant_id), secret) if secret else ""
-    if webhook_url:
-        try:
-            await max_integration.delete_webhook(int(tenant_id), webhook_url)
-        except Exception as exc:
-            logger.warning("max_webhook_delete_failed tenant=%s error=%s", tenant_id, exc)
+    return await max_public_runtime.max_disconnect(request, tenant, k, _max_public_deps())
 
-    max_integration.update_integration(
-        int(tenant_id),
-        {
-            "bot_token": None,
-            "token": None,
-            "webhook_registered": False,
-            "webhook_registered_at": None,
-            "webhook_secret": None,
-        },
+
+async def _max_personal_refresh_status(tenant_id: int) -> dict[str, Any] | None:
+    return await max_public_runtime.refresh_max_personal_status(
+        tenant_id,
+        max_public_runtime.MaxPersonalDeps(
+            authorize_fn=_authorize_public_settings_request,
+            service=max_personal_service,
+            transport=max_personal_transport,
+            refresh_status_fn=_max_personal_refresh_status,
+            callback_url_fn=_max_personal_callback_url,
+        ),
     )
-    return JSONResponse({"ok": True})
+
+
+@max_personal_router.get("/status")
+async def max_personal_status(request: Request, tenant: int | None = None, k: str | None = None):
+    return await max_public_runtime.max_personal_status(request, tenant, k, _max_personal_deps())
+
+
+@max_personal_router.post("/connect")
+async def max_personal_connect(request: Request, tenant: int | None = None, k: str | None = None):
+    return await max_public_runtime.max_personal_connect(request, tenant, k, _max_personal_deps())
+
+
+@max_personal_router.post("/session/start")
+async def max_personal_session_start(
+    request: Request, tenant: int | None = None, k: str | None = None
+):
+    return await max_personal_connect(request, tenant=tenant, k=k)
+
+
+@max_personal_router.get("/session/qr")
+async def max_personal_session_qr(request: Request, tenant: int | None = None, k: str | None = None):
+    return await max_public_runtime.max_personal_session_qr(request, tenant, k, _max_personal_deps())
+
+
+@max_personal_router.post("/session/logout")
+async def max_personal_session_logout(
+    request: Request, tenant: int | None = None, k: str | None = None
+):
+    return await max_public_runtime.max_personal_session_logout(
+        request,
+        tenant,
+        k,
+        _max_personal_deps(),
+    )
+
+
+@max_personal_router.post("/disconnect")
+async def max_personal_disconnect(
+    request: Request, tenant: int | None = None, k: str | None = None
+):
+    return await max_public_runtime.max_personal_disconnect(request, tenant, k, _max_personal_deps())
+
+
+@max_personal_router.post("/send")
+async def max_personal_send(request: Request, tenant: int | None = None, k: str | None = None):
+    return await max_public_runtime.max_personal_send(request, tenant, k, _max_personal_deps())
 
 
 @router.get("/pub/integrations/amocrm/oauth/start")
@@ -4394,34 +2056,13 @@ async def amocrm_oauth_start(
     tenant: int | None = None,
     k: str | None = None,
 ):
-    tenant_val = tenant_id or tenant
-    auth = await _authorize_public_settings_request(request, tenant_val, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-    cfg = common.read_tenant_config(tenant_id)
-    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg) or {}
-    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
-    client_id = str(oauth_cfg.get("client_id") or "").strip()
-    client_secret = str(oauth_cfg.get("client_secret") or "").strip()
-    if not client_id or not client_secret:
-        return JSONResponse({"detail": "oauth_not_configured"}, status_code=400)
-    auth_base_url = amocrm_service.resolve_auth_url(amocrm_cfg, int(tenant_id))
-    redirect_url = str(oauth_cfg.get("redirect_url") or "").strip()
-    if not redirect_url:
-        redirect_url = str(request.url_for("amocrm_oauth_callback"))
-    state_payload = {
-        "tenant_id": int(tenant_id),
-        "k": key,
-        "nonce": uuid.uuid4().hex,
-        "ts": int(time.time()),
-    }
-    state = amocrm_integration.build_oauth_state(state_payload, _amocrm_state_secret())
-    params = {"client_id": client_id, "state": state, "mode": "post_message"}
-    if redirect_url:
-        params["redirect_uri"] = redirect_url
-    authorize_url = f"{auth_base_url}/oauth?{urlencode(params)}"
-    return RedirectResponse(authorize_url)
+    return await amocrm_public_runtime.oauth_start(
+        request,
+        tenant_id=tenant_id,
+        tenant=tenant,
+        key=k,
+        deps=_amocrm_public_runtime_deps(),
+    )
 
 
 @router.get("/pub/integrations/amocrm/oauth/callback", name="amocrm_oauth_callback")
@@ -4430,164 +2071,12 @@ async def amocrm_oauth_callback(
     code: str | None = None,
     state: str | None = None,
 ):
-    if not code:
-        return HTMLResponse("AmoCRM OAuth error: missing_code")
-    payload = amocrm_integration.verify_oauth_state(state or "", _amocrm_state_secret())
-    if not payload:
-        return HTMLResponse("AmoCRM OAuth error: invalid_state")
-    tenant_id = payload.get("tenant_id")
-    key = payload.get("k")
-    auth = await _authorize_public_settings_request(request, tenant_id, key)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-    cfg = common.read_tenant_config(tenant_id)
-    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg) or {}
-    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
-    client_id = str(oauth_cfg.get("client_id") or "").strip()
-    client_secret = str(oauth_cfg.get("client_secret") or "").strip()
-    if not client_id or not client_secret:
-        return HTMLResponse("AmoCRM OAuth error: oauth_not_configured")
-    base_url = amocrm_service.resolve_base_url(amocrm_cfg, int(tenant_id))
-    auth_base_url = amocrm_service.resolve_auth_url(amocrm_cfg, int(tenant_id))
-    subdomain_hint = (
-        request.query_params.get("referer")
-        or request.query_params.get("account")
-        or request.query_params.get("subdomain")
-        or request.headers.get("referer")
-        or request.headers.get("origin")
-        or ""
+    return await amocrm_public_runtime.oauth_callback(
+        request,
+        code=code,
+        state=state,
+        deps=_amocrm_public_runtime_deps(),
     )
-    subdomain_hint = amocrm_service._extract_subdomain(str(subdomain_hint))
-    if subdomain_hint:
-        auth_base_url = f"https://{subdomain_hint}.amocrm.ru"
-    redirect_url = str(oauth_cfg.get("redirect_url") or "").strip()
-    payload_data = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "grant_type": "authorization_code",
-        "code": code,
-    }
-    if redirect_url:
-        payload_data["redirect_uri"] = redirect_url
-    token_url = f"{auth_base_url}/oauth2/access_token"
-    fallback_url = f"{base_url}/oauth2/access_token" if base_url else ""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(token_url, json=payload_data)
-        if (
-            response.status_code >= 400
-            and fallback_url
-            and auth_base_url.rstrip("/") != base_url.rstrip("/")
-        ):
-            response = await client.post(fallback_url, json=payload_data)
-    if response.status_code >= 400:
-        detail = ""
-        try:
-            data = response.json()
-            if isinstance(data, Mapping):
-                detail = str(
-                    data.get("hint")
-                    or data.get("detail")
-                    or data.get("title")
-                    or data.get("error")
-                    or ""
-                ).strip()
-        except Exception:
-            detail = (response.text or "").strip()
-        detail = detail[:200]
-        suffix = f": {detail}" if detail else ""
-        return HTMLResponse(f"AmoCRM OAuth error: token_exchange_failed{suffix}")
-    try:
-        token_payload = response.json()
-    except json.JSONDecodeError:
-        return HTMLResponse("AmoCRM OAuth error: token_invalid_json")
-    access_token = str(token_payload.get("access_token") or "").strip()
-    refresh_token = str(token_payload.get("refresh_token") or "").strip()
-    expires_in = token_payload.get("expires_in")
-    expires_at = None
-    if isinstance(expires_in, (int, float)):
-        expires_at = datetime.now(tz=timezone.utc) + timedelta(seconds=int(expires_in))
-    obtained_at = datetime.now(tz=timezone.utc)
-    try:
-        await amocrm_tokens.ensure_schema()
-        await amocrm_tokens.upsert(
-            int(tenant_id),
-            access_token=access_token,
-            refresh_token=refresh_token or None,
-            expires_at=expires_at,
-            obtained_at=obtained_at,
-            raw_payload=token_payload if isinstance(token_payload, Mapping) else None,
-        )
-    except Exception:
-        logger.exception("amocrm_oauth_token_store_failed tenant=%s", tenant_id)
-        return HTMLResponse("AmoCRM OAuth error: token_store_failed")
-    if isinstance(cfg, dict):
-        integrations = cfg.get("integrations")
-        if not isinstance(integrations, dict):
-            integrations = {}
-        amocrm_cfg = integrations.get("amocrm")
-        if not isinstance(amocrm_cfg, dict):
-            amocrm_cfg = {}
-        amocrm_cfg["enabled"] = True
-        amocrm_cfg["mode"] = "oauth"
-        if isinstance(token_payload, Mapping):
-            api_domain = token_payload.get("api_domain")
-            if api_domain:
-                amocrm_cfg["api_domain"] = api_domain
-        if subdomain_hint:
-            amocrm_cfg["subdomain"] = amocrm_cfg.get("subdomain") or subdomain_hint
-        integrations["amocrm"] = amocrm_cfg
-        cfg["integrations"] = integrations
-        cfg = amocrm_chat_service.ensure_chat_cfg_in_tenant(cfg, int(tenant_id)) or cfg
-        common.write_tenant_config(tenant_id, cfg)
-    try:
-        oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
-        api_domain = str(token_payload.get("api_domain") or "").strip()
-        api_base = base_url or (f"https://{api_domain}" if api_domain else "")
-        if api_base:
-            client = amocrm_integration.AmoCRMClient(
-                tenant_id=int(tenant_id),
-                base_url=api_base,
-                client_id=str(oauth_cfg.get("client_id") or ""),
-                client_secret=str(oauth_cfg.get("client_secret") or ""),
-                redirect_url=str(oauth_cfg.get("redirect_url") or ""),
-            )
-            account_payload = await client.get_account()
-            if isinstance(account_payload, Mapping):
-                account_id = account_payload.get("id")
-                subdomain = account_payload.get("subdomain")
-                if isinstance(cfg, dict):
-                    integrations = cfg.get("integrations")
-                    if not isinstance(integrations, dict):
-                        integrations = {}
-                    amocrm_cfg = integrations.get("amocrm")
-                    if not isinstance(amocrm_cfg, dict):
-                        amocrm_cfg = {}
-                    amocrm_cfg["enabled"] = True
-                    amocrm_cfg["mode"] = "oauth"
-                    if account_id is not None:
-                        amocrm_cfg["account_id"] = account_id
-                    if subdomain:
-                        amocrm_cfg["subdomain"] = amocrm_cfg.get("subdomain") or subdomain
-                    integrations["amocrm"] = amocrm_cfg
-                    cfg["integrations"] = integrations
-                    cfg = amocrm_chat_service.ensure_chat_cfg_in_tenant(cfg, int(tenant_id)) or cfg
-                    common.write_tenant_config(tenant_id, cfg)
-                    await amocrm_service.ensure_pipeline_config(int(tenant_id), cfg, client)
-                    await amocrm_service.ensure_lead_phone_field_id(int(tenant_id), cfg, client)
-                    try:
-                        cfg = await amocrm_chat_service.ensure_connected(
-                            int(tenant_id),
-                            cfg=cfg,
-                            webhook_base_url=str(common.public_base_url(request) or "").rstrip("/"),
-                        )
-                    except Exception:
-                        logger.exception("amocrm_chat_connect_after_oauth_failed tenant=%s", tenant_id)
-    except Exception:
-        logger.exception("amocrm_account_fetch_failed tenant=%s", tenant_id)
-    redirect_url = request.url_for("client_settings", tenant=str(tenant_id))
-    redirect = common.public_url(request, f"{redirect_url}?k={quote_plus(str(key))}#/channels?amocrm=1")
-    return RedirectResponse(redirect)
 
 
 @router.get("/pub/integrations/amocrm/status")
@@ -4596,113 +2085,12 @@ async def amocrm_status(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    cfg = common.read_tenant_config(tenant_id)
-    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg) or {}
-    entry = await amocrm_tokens.get(int(tenant_id))
-    connected = bool(entry and entry.access_token)
-    expires_at_ts = None
-    base_url = None
-    if entry and entry.expires_at:
-        expires_at_ts = int(entry.expires_at.timestamp())
-        if entry.expires_at <= datetime.now(tz=timezone.utc):
-            if amocrm_cfg:
-                base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id), entry)
-            if base_url and entry.refresh_token:
-                oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg or {}, tenant_id)
-                client = amocrm_service.amocrm_core.AmoCRMClient(
-                    tenant_id=int(tenant_id),
-                    base_url=base_url,
-                    client_id=str(oauth_cfg.get("client_id") or ""),
-                    client_secret=str(oauth_cfg.get("client_secret") or ""),
-                    redirect_url=str(oauth_cfg.get("redirect_url") or ""),
-                )
-                try:
-                    refreshed = await client.refresh_tokens()
-                    if refreshed and refreshed.expires_at:
-                        expires_at_ts = int(refreshed.expires_at.timestamp())
-                    connected = bool(refreshed and refreshed.access_token)
-                except Exception:
-                    connected = False
-            else:
-                connected = False
-    if connected and amocrm_cfg and not base_url:
-        try:
-            base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id), entry)
-        except Exception:
-            base_url = None
-
-    pipelines_cache: list[dict[str, Any]] = []
-    raw_pipelines_cache = amocrm_cfg.get("pipelines_cache")
-    if isinstance(raw_pipelines_cache, list):
-        for item in raw_pipelines_cache:
-            if not isinstance(item, Mapping):
-                continue
-            try:
-                pid = int(item.get("id") or 0)
-            except Exception:
-                pid = 0
-            if pid <= 0:
-                continue
-            name = str(item.get("name") or "").strip() or f"Воронка {pid}"
-            pipelines_cache.append({"id": pid, "name": name})
-
-    if connected and not pipelines_cache and amocrm_cfg and base_url:
-        try:
-            oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, tenant_id)
-            client = amocrm_service.amocrm_core.AmoCRMClient(
-                tenant_id=int(tenant_id),
-                base_url=base_url,
-                client_id=str(oauth_cfg.get("client_id") or ""),
-                client_secret=str(oauth_cfg.get("client_secret") or ""),
-                redirect_url=str(oauth_cfg.get("redirect_url") or ""),
-            )
-            pipelines_payload = await client.get_pipelines()
-            pipelines = amocrm_service._extract_embedded_list(pipelines_payload, "pipelines")
-            for item in pipelines:
-                if not isinstance(item, Mapping):
-                    continue
-                try:
-                    pid = int(item.get("id") or 0)
-                except Exception:
-                    pid = 0
-                if pid <= 0:
-                    continue
-                name = str(item.get("name") or "").strip() or f"Воронка {pid}"
-                pipelines_cache.append({"id": pid, "name": name})
-            if pipelines_cache:
-                updated_cfg = dict(cfg) if isinstance(cfg, Mapping) else {}
-                integrations = updated_cfg.get("integrations")
-                if not isinstance(integrations, dict):
-                    integrations = {}
-                amocrm_cfg_copy = dict(amocrm_cfg)
-                amocrm_cfg_copy["pipelines_cache"] = pipelines_cache
-                amocrm_cfg_copy["pipelines_cached_at"] = int(time.time())
-                integrations["amocrm"] = amocrm_cfg_copy
-                updated_cfg["integrations"] = integrations
-                common.write_tenant_config(tenant_id, updated_cfg)
-        except Exception:
-            logger.exception("amocrm_status_pipelines_fetch_failed tenant=%s", tenant_id)
-
-    payload = {
-        "connected": connected,
-        "expires_at": expires_at_ts,
-        "last_error": entry.last_error if entry else None,
-        "chat": amocrm_chat_service.mask_chat_cfg(cfg, tenant_id),
-        "pipelines": pipelines_cache,
-    }
-    payload["chat"]["connected"] = bool(payload["chat"].get("scope_id"))
-    chat_cfg = cfg
-    if payload["chat"].get("enabled") or payload["chat"].get("env_configured") or payload["chat"].get("channel_id"):
-        payload["chat"]["webhook_url"] = amocrm_chat_service.build_webhook_url(
-            str(common.public_base_url(request) or "").rstrip("/"),
-            chat_cfg,
-            tenant_id,
-        )
-    return JSONResponse(payload, headers=_no_store_headers())
+    return await amocrm_public_runtime.oauth_status(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_amocrm_public_runtime_deps(),
+    )
 
 
 async def _amocrm_chat_webhook_impl(
@@ -4711,432 +2099,12 @@ async def _amocrm_chat_webhook_impl(
     token: str | None = None,
     scope_id: str | None = None,
 ):
-    payload = await _read_amocrm_webhook_payload(request)
-    try:
-        logger.info(
-            "amocrm_chat_webhook_received keys=%s token_present=%s scope_present=%s",
-            sorted(payload.keys()) if isinstance(payload, Mapping) else [],
-            int(bool(str(token or "").strip())),
-            int(bool(str(scope_id or "").strip())),
-        )
-    except Exception:
-        pass
-    tenant_id = amocrm_chat_service.find_tenant_by_webhook_token(token)
-    if tenant_id is None:
-        tenant_id = amocrm_chat_service.find_tenant_by_scope_id(scope_id)
-    if tenant_id is None and scope_id:
-        scope_link = await crm_chat_links.find_by_scope_id(
-            amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
-            scope_id,
-        )
-        if scope_link:
-            tenant_id = int(scope_link.get("tenant_id") or 0) or None
-    if tenant_id is None:
-        account_id, subdomain = _extract_amocrm_uninstall_info(payload)
-        tenant_id = amocrm_service.find_tenant_by_account(account_id, subdomain)
-    if tenant_id is None:
-        return JSONResponse({"ok": False, "detail": "tenant_not_found"}, status_code=404)
-    cfg = common.read_tenant_config(int(tenant_id))
-    expected = amocrm_chat_service.build_webhook_path_token(cfg, int(tenant_id))
-    token_value = str(token or "").strip()
-    if expected and token_value and token_value != expected:
-        return JSONResponse({"ok": False, "detail": "invalid_token"}, status_code=403)
-    message = amocrm_chat_service.extract_webhook_message(payload)
-    logger.info(
-        "amocrm_chat_webhook_message tenant=%s event=%s chat=%s conversation=%s message=%s text_len=%s",
-        tenant_id,
-        str(message.get("event_type") or ""),
-        str(message.get("external_chat_id") or ""),
-        str(message.get("external_conversation_id") or ""),
-        str(message.get("external_message_id") or ""),
-        len(str(message.get("text") or "")),
+    return await amocrm_public_runtime.chat_webhook(
+        request,
+        token=token,
+        scope_id=scope_id,
+        deps=_amocrm_public_runtime_deps(),
     )
-    if str(message.get("event_type") or "").strip().lower() not in {"", "new_message"}:
-        return JSONResponse({"ok": True, "skipped": "unsupported_event"})
-    text = str(message.get("text") or "").strip()
-    attachments = message.get("attachments") if isinstance(message, Mapping) else None
-    attachment_list = [att for att in (attachments or []) if isinstance(att, dict)]
-    external_message_id = str(message.get("external_message_id") or "").strip()
-    dedup_message_id = external_message_id
-    if not dedup_message_id:
-        dedup_message_id = f"fp:{content_fingerprint(text, attachment_list)}"
-    if _redis_queue is not None:
-        try:
-            dedup_scope = (
-                str(message.get("external_conversation_id") or "").strip()
-                or str(message.get("external_chat_id") or "").strip()
-                or "global"
-            )
-            dedup_ttl = 86400 if external_message_id else 180
-            dedup_key = f"amocrm:chat:webhook:{int(tenant_id)}:{dedup_scope}:{dedup_message_id}"
-            accepted = await _redis_queue.set(dedup_key, "1", ex=dedup_ttl, nx=True)
-            if not accepted:
-                return JSONResponse({"ok": True, "dedup": True})
-        except Exception:
-            logger.debug(
-                "amocrm_chat_webhook_dedup_check_failed tenant=%s",
-                tenant_id,
-                exc_info=True,
-            )
-    if not text and not attachment_list:
-        try:
-            raw_message = payload.get("message") if isinstance(payload, Mapping) else None
-            logger.warning(
-                "amocrm_chat_webhook_empty_text tenant=%s message_type=%s message_preview=%s",
-                tenant_id,
-                type(raw_message).__name__,
-                str(raw_message)[:500],
-            )
-        except Exception:
-            pass
-        return JSONResponse({"ok": True, "skipped": "empty_text"})
-    link = await crm_chat_links.find_by_external_chat(
-        amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
-        external_chat_id=str(message.get("external_chat_id") or ""),
-        external_conversation_id=str(message.get("external_conversation_id") or ""),
-    )
-    if not link:
-        return JSONResponse({"ok": False, "detail": "chat_link_not_found"}, status_code=404)
-    if str(link.get("last_outbound_message_id") or "").strip() == dedup_message_id:
-        return JSONResponse({"ok": True, "dedup": True})
-    lead_id = int(link.get("lead_id") or 0)
-    meta = await get_lead_dialog_metadata(int(lead_id))
-
-    async def _resolve_preferred_outbound_lead(
-        tenant_id: int,
-        default_lead_id: int,
-        link_row: Mapping[str, Any],
-    ) -> int:
-        provider_lead_id = None
-        try:
-            if link_row.get("external_lead_id") is not None:
-                provider_lead_id = int(link_row.get("external_lead_id"))
-        except Exception:
-            provider_lead_id = None
-        if provider_lead_id is None:
-            crm_link = await crm_links.get_link(
-                int(tenant_id),
-                int(default_lead_id),
-                amocrm_service.AMOCRM_PROVIDER,
-            )
-            try:
-                if isinstance(crm_link, Mapping) and crm_link.get("provider_lead_id") is not None:
-                    provider_lead_id = int(crm_link.get("provider_lead_id"))
-            except Exception:
-                provider_lead_id = None
-        if provider_lead_id is None:
-            return int(default_lead_id)
-        fetchrow = getattr(db_module, "_fetchrow", None)
-        if not fetchrow:
-            return int(default_lead_id)
-        row = await fetchrow(
-            """
-            SELECT l.id
-            FROM crm_links cl
-            JOIN leads l ON l.id = cl.lead_id
-            WHERE cl.tenant_id = $1
-              AND cl.provider = $2
-              AND cl.provider_lead_id = $3
-              AND l.tenant_id = $1
-              AND l.channel = 'telegram'
-              AND COALESCE(NULLIF(l.peer, ''), '') <> ''
-            ORDER BY cl.updated_at DESC, l.updated_at DESC
-            LIMIT 1
-            """,
-            int(tenant_id),
-            amocrm_service.AMOCRM_PROVIDER,
-            int(provider_lead_id),
-        )
-        try:
-            resolved = int((row or {}).get("id") or 0)
-        except Exception:
-            resolved = 0
-        return int(resolved) if resolved > 0 else int(default_lead_id)
-
-    outbound_lead_id = await _resolve_preferred_outbound_lead(int(tenant_id), int(lead_id), link)
-    outbound_meta = meta
-    if outbound_lead_id != lead_id:
-        candidate_meta = await get_lead_dialog_metadata(int(outbound_lead_id))
-        candidate_peer = str(candidate_meta.get("peer") or "").strip() if isinstance(candidate_meta, Mapping) else ""
-        if candidate_peer:
-            outbound_meta = candidate_meta
-        else:
-            outbound_lead_id = int(lead_id)
-    dialog_channel = (
-        str(outbound_meta.get("channel") or "").strip().lower()
-        if isinstance(outbound_meta, Mapping)
-        else ""
-    )
-    peer_value = (
-        str(outbound_meta.get("peer") or "").strip()
-        if isinstance(outbound_meta, Mapping)
-        else ""
-    )
-    if dialog_channel == "avito" and not peer_value:
-        try:
-            peer_fallback = await get_lead_peer(int(outbound_lead_id), channel="avito")
-        except Exception:
-            peer_fallback = ""
-        peer_value = str(peer_fallback or "").strip()
-    logger.info(
-        "amocrm_chat_webhook_route tenant=%s link_lead_id=%s outbound_lead_id=%s channel=%s peer_present=%s",
-        tenant_id,
-        lead_id,
-        outbound_lead_id,
-        dialog_channel or "-",
-        int(bool(peer_value)),
-    )
-    # Pre-mark manager echo keys before transport send to avoid webhook race
-    # (Avito manager-outgoing echo can arrive before post-send key write).
-    try:
-        echo_fingerprints: set[str] = set()
-        echo_fingerprints.add(content_fingerprint(text, attachment_list))
-        if attachment_list and not text:
-            echo_fingerprints.add(content_fingerprint("__image__", attachment_list))
-            placeholder_text = text_or_placeholder("", attachment_list)
-            if placeholder_text:
-                echo_fingerprints.add(content_fingerprint(placeholder_text, attachment_list))
-        for target_lead in {int(lead_id), int(outbound_lead_id)}:
-            if target_lead <= 0:
-                continue
-            for fp in echo_fingerprints:
-                pre_key = "amocrm:manager:echo:%s:%s:%s" % (
-                    int(tenant_id),
-                    int(target_lead),
-                    fp,
-                )
-                await settings.r.set(pre_key, "1", ex=180)
-                if dialog_channel == "avito" and peer_value:
-                    chat_pre_key = "amocrm:manager:echo:chat:%s:%s:%s" % (
-                        int(tenant_id),
-                        str(peer_value),
-                        fp,
-                    )
-                    await settings.r.set(chat_pre_key, "1", ex=180)
-    except Exception:
-        logger.debug(
-            "amocrm_chat_echo_pre_flag_set_failed tenant=%s lead_id=%s outbound_lead_id=%s",
-            tenant_id,
-            lead_id,
-            outbound_lead_id,
-            exc_info=True,
-        )
-    if dialog_channel == "avito" and peer_value:
-        try:
-            variants: list[str] = []
-            for candidate in (
-                text,
-                "__image__" if attachment_list else "",
-                text_or_placeholder(text, attachment_list),
-                "Голосовое сообщение",
-                "Вложение",
-            ):
-                normalized = normalize_echo_text(candidate)
-                if normalized and normalized not in variants:
-                    variants.append(normalized)
-            primary = variants[0] if variants else normalize_echo_text(text)
-            if primary:
-                payload = {"text": primary, "extra": variants, "ts": int(time.time())}
-                await settings.r.set(
-                    avito_bot_echo_key(int(tenant_id), str(peer_value)),
-                    json.dumps(payload, ensure_ascii=False),
-                    ex=AVITO_BOT_ECHO_TTL_SECONDS,
-                )
-        except Exception:
-            logger.debug(
-                "amocrm_chat_avito_echo_pre_cache_failed tenant=%s lead_id=%s outbound_lead_id=%s",
-                tenant_id,
-                lead_id,
-                outbound_lead_id,
-                exc_info=True,
-            )
-    if dialog_channel == "avito":
-        from apps.worker.main import send_avito  # local import to avoid circular startup edge
-
-        account_id = None
-        if isinstance(outbound_meta, Mapping):
-            try:
-                account_id = (
-                    int(outbound_meta.get("source_real_id"))
-                    if outbound_meta.get("source_real_id") is not None
-                    else None
-                )
-            except Exception:
-                account_id = None
-        status_code, body = await send_avito(
-            int(tenant_id),
-            int(outbound_lead_id),
-            text,
-            chat_id=peer_value or None,
-            account_id=account_id,
-            attachments=attachment_list or None,
-        )
-    else:
-        headers: dict[str, str] = {}
-        worker_token = (os.getenv("TG_WORKER_TOKEN") or os.getenv("WEBHOOK_SECRET") or "").strip()
-        admin_token = (settings.ADMIN_TOKEN or "").strip()
-        if worker_token:
-            headers["X-Auth-Token"] = worker_token
-        if admin_token:
-            headers["X-Admin-Token"] = admin_token
-        status_code, body = await telegram_transport.send(
-            tenant=int(tenant_id),
-            text=text,
-            peer=peer_value or None,
-            attachments=attachment_list or None,
-            lead_id=outbound_lead_id if outbound_lead_id > 0 else None,
-            headers=headers or None,
-            meta={"origin": "amocrm:manager"},
-        )
-    if status_code < 200 or status_code >= 300:
-        logger.warning(
-            "amocrm_chat_webhook_send_failed tenant=%s lead_id=%s status=%s body=%s",
-            tenant_id,
-            lead_id,
-            status_code,
-            body[:300],
-        )
-        return JSONResponse(
-            {"ok": False, "detail": "telegram_send_failed", "status_code": status_code, "body": body[:300]},
-            status_code=502,
-        )
-    telegram_user_id = (
-        outbound_meta.get("telegram_user_id") if isinstance(outbound_meta, Mapping) else None
-    )
-    telegram_username = (
-        outbound_meta.get("telegram_username") if isinstance(outbound_meta, Mapping) else None
-    )
-    stored_text = text_or_placeholder(text, attachment_list)
-    await insert_message_out(
-        int(outbound_lead_id),
-        stored_text,
-        provider_msg_id=dedup_message_id,
-        status="sent",
-        tenant_id=int(tenant_id),
-        channel=dialog_channel or "telegram",
-        telegram_user_id=int(telegram_user_id) if telegram_user_id is not None else None,
-        telegram_username=str(telegram_username or "") or None,
-        is_bot=False,
-        attachments=attachment_list or None,
-        source="manager",
-    )
-    try:
-        await amocrm_service.amocrm_on_outbound_message(
-            int(tenant_id),
-            int(outbound_lead_id),
-            text=stored_text or "",
-            channel=dialog_channel or "telegram",
-            attachments=attachment_list or None,
-            sync_chat=False,
-            source_role="manager",
-        )
-    except Exception:
-        logger.exception(
-            "amocrm_chat_webhook_stage_eval_failed tenant=%s lead_id=%s channel=%s",
-            tenant_id,
-            outbound_lead_id,
-            dialog_channel or "telegram",
-        )
-    # Manager message from amo inbox must silence bot auto-replies for all
-    # linked leads of the same amo deal (Avito + Telegram bridge).
-    silence_targets: set[int] = {int(lead_id), int(outbound_lead_id)}
-    provider_lead_for_silence: int | None = None
-    try:
-        if isinstance(link, Mapping) and link.get("external_lead_id") is not None:
-            provider_lead_for_silence = int(link.get("external_lead_id"))
-    except Exception:
-        provider_lead_for_silence = None
-    if provider_lead_for_silence is None:
-        try:
-            outbound_crm_link = await crm_links.get_link(
-                int(tenant_id),
-                int(outbound_lead_id),
-                amocrm_service.AMOCRM_PROVIDER,
-            )
-            if isinstance(outbound_crm_link, Mapping) and outbound_crm_link.get("provider_lead_id") is not None:
-                provider_lead_for_silence = int(outbound_crm_link.get("provider_lead_id"))
-        except Exception:
-            provider_lead_for_silence = None
-    if provider_lead_for_silence is not None:
-        fetch = getattr(db_module, "_fetch", None)
-        if fetch:
-            try:
-                rows = await fetch(
-                    """
-                    SELECT lead_id
-                    FROM crm_links
-                    WHERE tenant_id = $1
-                      AND provider = $2
-                      AND provider_lead_id = $3
-                    """,
-                    int(tenant_id),
-                    amocrm_service.AMOCRM_PROVIDER,
-                    int(provider_lead_for_silence),
-                )
-                for row in rows or []:
-                    try:
-                        candidate = int((row or {}).get("lead_id") or 0)
-                    except Exception:
-                        candidate = 0
-                    if candidate > 0:
-                        silence_targets.add(candidate)
-            except Exception:
-                logger.debug(
-                    "amocrm_chat_handoff_targets_resolve_failed tenant=%s provider_lead_id=%s",
-                    tenant_id,
-                    provider_lead_for_silence,
-                    exc_info=True,
-                )
-    for silence_lead_id in silence_targets:
-        if silence_lead_id <= 0:
-            continue
-        try:
-            await settings.r.set(
-                handoff_silence_key(int(tenant_id), int(silence_lead_id)),
-                "1",
-                ex=HANDOFF_SILENCE_TTL_SECONDS,
-            )
-            meta_payload = {
-                "reason": "manager_outgoing",
-                "source": "amocrm_inbox",
-                "ts": int(time.time()),
-                "channel": dialog_channel or "telegram",
-            }
-            if peer_value:
-                meta_payload["peer"] = peer_value
-            await settings.r.set(
-                handoff_silence_meta_key(int(tenant_id), int(silence_lead_id)),
-                json.dumps(meta_payload, ensure_ascii=False),
-                ex=HANDOFF_SILENCE_TTL_SECONDS,
-            )
-        except redis_ex.RedisError:
-            logger.debug(
-                "amocrm_chat_handoff_flag_set_failed tenant=%s lead_id=%s",
-                tenant_id,
-                silence_lead_id,
-                exc_info=True,
-            )
-    try:
-        echo_key = "amocrm:manager:echo:%s:%s:%s" % (
-            int(tenant_id),
-            int(outbound_lead_id),
-            content_fingerprint(text, attachment_list),
-        )
-        await settings.r.set(echo_key, "1", ex=180)
-    except Exception:
-        logger.debug(
-            "amocrm_chat_echo_flag_set_failed tenant=%s lead_id=%s",
-            tenant_id,
-            outbound_lead_id,
-            exc_info=True,
-        )
-    await crm_chat_links.touch_message_ids(
-        int(tenant_id),
-        int(lead_id),
-        amocrm_chat_service.AMOCRM_CHAT_PROVIDER,
-        outbound_message_id=dedup_message_id,
-    )
-    return JSONResponse({"ok": True})
 
 
 @router.post("/pub/integrations/amocrm/chat/webhook")
@@ -5163,31 +2131,13 @@ async def amocrm_chat_avatar_proxy(
     peer_id: str,
     token: str,
 ):
-    if tenant_id <= 0:
-        return JSONResponse({"ok": False, "detail": "bad_tenant"}, status_code=400)
-    cfg = common.read_tenant_config(int(tenant_id))
-    expected = amocrm_chat_service.build_avatar_path_token(cfg, int(tenant_id), peer_id)
-    token_value = str(token or "").strip()
-    if not token_value or not hmac.compare_digest(token_value, expected):
-        return JSONResponse({"ok": False, "detail": "invalid_token"}, status_code=403)
-    try:
-        peer_val = int(str(peer_id))
-    except Exception:
-        return JSONResponse({"ok": False, "detail": "bad_peer"}, status_code=400)
-    try:
-        status_code, response = await _tg_call(
-            "GET",
-            f"/avatar/{int(tenant_id)}/{int(peer_val)}",
-            timeout=15.0,
-        )
-    except TgWorkerCallError as exc:
-        return JSONResponse({"ok": False, "detail": exc.detail}, status_code=502)
-    body = bytes(response.content or b"")
-    headers = _no_store_headers({"X-Telegram-Upstream-Status": str(status_code)})
-    content_type = response.headers.get("content-type")
-    if content_type:
-        headers["Content-Type"] = content_type
-    return Response(content=body, status_code=status_code, headers=headers)
+    return await amocrm_avatar_runtime.chat_avatar_proxy(
+        request,
+        tenant_id,
+        peer_id,
+        token,
+        deps=_amocrm_avatar_deps(),
+    )
 
 
 @router.get("/pub/integrations/amocrm/chat/lead-avatar/{tenant_id}/{lead_id}/{token}")
@@ -5197,17 +2147,13 @@ async def amocrm_chat_lead_avatar_proxy(
     lead_id: int,
     token: str,
 ):
-    if tenant_id <= 0 or lead_id <= 0:
-        return JSONResponse({"ok": False, "detail": "bad_params"}, status_code=400)
-    cfg = common.read_tenant_config(int(tenant_id))
-    expected = amocrm_chat_service.build_lead_avatar_path_token(cfg, int(tenant_id), int(lead_id))
-    token_value = str(token or "").strip()
-    if not token_value or not hmac.compare_digest(token_value, expected):
-        return JSONResponse({"ok": False, "detail": "invalid_token"}, status_code=403)
-    tenant_key = str(common.get_tenant_pubkey(int(tenant_id)) or "").strip()
-    if not tenant_key:
-        return JSONResponse({"ok": False, "detail": "tenant_key_missing"}, status_code=404)
-    return await chat_avatar(request, str(int(lead_id)), tenant=int(tenant_id), k=tenant_key)
+    return await amocrm_avatar_runtime.lead_avatar_proxy(
+        request,
+        tenant_id,
+        lead_id,
+        token,
+        deps=_amocrm_avatar_deps(),
+    )
 
 
 @router.get("/pub/integrations/amocrm/pipeline")
@@ -5218,109 +2164,13 @@ async def amocrm_pipeline(
     apply: int | None = None,
     pipeline_id: int | None = None,
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    cfg = common.read_tenant_config(tenant_id)
-    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
-    if not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
-        return JSONResponse({"ok": False, "detail": "amocrm_not_enabled"}, status_code=400)
-    token_entry = await amocrm_tokens.get(int(tenant_id))
-    if not token_entry or not token_entry.access_token:
-        return JSONResponse({"ok": False, "detail": "amocrm_token_missing"}, status_code=400)
-    base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id), token_entry)
-    if not base_url:
-        return JSONResponse({"ok": False, "detail": "base_url_missing"}, status_code=400)
-    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
-    client = amocrm_integration.AmoCRMClient(
-        tenant_id=int(tenant_id),
-        base_url=base_url,
-        client_id=str(oauth_cfg.get("client_id") or ""),
-        client_secret=str(oauth_cfg.get("client_secret") or ""),
-        redirect_url=str(oauth_cfg.get("redirect_url") or ""),
-    )
-    payload = await client.get_pipelines()
-    pipelines = amocrm_service._extract_embedded_list(payload, "pipelines")
-    if not pipelines:
-        return JSONResponse({"ok": False, "detail": "amocrm_pipeline_empty"}, status_code=400)
-    pipeline_options: list[dict[str, Any]] = []
-    for item in pipelines:
-        if not isinstance(item, Mapping):
-            continue
-        try:
-            item_id = int(item.get("id") or 0)
-        except Exception:
-            item_id = 0
-        if item_id <= 0:
-            continue
-        item_name = str(item.get("name") or "").strip() or f"Воронка {item_id}"
-        pipeline_options.append({"id": item_id, "name": item_name})
-    if not pipeline_options:
-        return JSONResponse({"ok": False, "detail": "amocrm_pipeline_empty"}, status_code=400)
-
-    resolved_pipeline_id = 0
-    try:
-        resolved_pipeline_id = int(pipeline_id or amocrm_cfg.get("pipeline_id") or 0)
-    except Exception:
-        resolved_pipeline_id = 0
-    if resolved_pipeline_id <= 0:
-        resolved_pipeline_id = int(pipeline_options[0]["id"])
-
-    statuses: list[Mapping[str, Any]] = []
-    if resolved_pipeline_id > 0:
-        try:
-            # Always fetch statuses with descriptions to preserve stage hints from amoCRM.
-            pipeline_payload = await client.get_pipeline_stages(
-                resolved_pipeline_id,
-                with_descriptions=True,
-            )
-            statuses = amocrm_service._extract_embedded_list(pipeline_payload, "statuses")
-        except Exception:
-            statuses = []
-    # Fallback to already fetched pipelines list if statuses endpoint is unavailable.
-    if not statuses:
-        for pipeline in pipelines:
-            if not isinstance(pipeline, Mapping):
-                continue
-            try:
-                item_id = int(pipeline.get("id") or 0)
-            except Exception:
-                item_id = 0
-            if item_id != resolved_pipeline_id:
-                continue
-            statuses = amocrm_service._extract_embedded_list(pipeline, "statuses")
-            break
-    if not statuses:
-        return JSONResponse({"ok": False, "detail": "amocrm_statuses_empty"}, status_code=400)
-    stages = amocrm_service.build_stages_from_statuses(statuses)
-    stages = amocrm_service._merge_stages_for_pipeline(stages, amocrm_cfg, resolved_pipeline_id)
-    if not stages:
-        return JSONResponse({"ok": False, "detail": "amocrm_stage_build_failed"}, status_code=400)
-    if apply:
-        updated_cfg = dict(cfg) if isinstance(cfg, Mapping) else {}
-        integrations = updated_cfg.get("integrations")
-        if not isinstance(integrations, dict):
-            integrations = {}
-        amocrm_cfg_copy = dict(amocrm_cfg)
-        amocrm_cfg_copy["pipeline_id"] = resolved_pipeline_id
-        amocrm_cfg_copy["stages"] = stages
-        stages_by_pipeline = amocrm_cfg_copy.get("stages_by_pipeline")
-        if not isinstance(stages_by_pipeline, dict):
-            stages_by_pipeline = {}
-        stages_by_pipeline[str(int(resolved_pipeline_id))] = {
-            "stages": stages,
-            "synced_at": int(time.time()),
-        }
-        amocrm_cfg_copy["stages_by_pipeline"] = stages_by_pipeline
-        amocrm_cfg_copy["pipelines_cache"] = pipeline_options
-        amocrm_cfg_copy["pipelines_cached_at"] = int(time.time())
-        integrations["amocrm"] = amocrm_cfg_copy
-        updated_cfg["integrations"] = integrations
-        common.write_tenant_config(tenant_id, updated_cfg)
-    return JSONResponse(
-        {"ok": True, "pipeline_id": resolved_pipeline_id, "stages": stages, "pipelines": pipeline_options},
-        headers=_no_store_headers(),
+    return await amocrm_public_runtime.pipeline(
+        request,
+        tenant=tenant,
+        key=k,
+        apply=apply,
+        pipeline_id=pipeline_id,
+        deps=_amocrm_public_runtime_deps(),
     )
 
 
@@ -5330,30 +2180,12 @@ async def amocrm_test(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    cfg = common.read_tenant_config(tenant_id)
-    amocrm_cfg = amocrm_service.get_amocrm_cfg(cfg)
-    if not amocrm_cfg or not bool(amocrm_cfg.get("enabled")):
-        return JSONResponse({"ok": False, "detail": "amocrm_not_enabled"}, status_code=400)
-    base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id))
-    if not base_url:
-        return JSONResponse({"ok": False, "detail": "base_url_missing"}, status_code=400)
-    oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
-    client = amocrm_integration.AmoCRMClient(
-        tenant_id=int(tenant_id),
-        base_url=base_url,
-        client_id=str(oauth_cfg.get("client_id") or ""),
-        client_secret=str(oauth_cfg.get("client_secret") or ""),
-        redirect_url=str(oauth_cfg.get("redirect_url") or ""),
+    return await amocrm_public_runtime.test_connection(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_amocrm_public_runtime_deps(),
     )
-    try:
-        await client.get_pipelines()
-    except Exception as exc:
-        return JSONResponse({"ok": False, "detail": str(exc) or "amocrm_unreachable"}, status_code=400)
-    return JSONResponse({"ok": True})
 
 
 @router.post("/pub/integrations/amocrm/disconnect")
@@ -5363,164 +2195,32 @@ async def amocrm_disconnect(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    tenant_id = None
-    if tenant is not None or k is not None:
-        auth = await _authorize_public_settings_request(request, tenant, k)
-        if isinstance(auth, Response):
-            return auth
-        tenant_id, _ = auth
-    else:
-        payload = await _read_amocrm_webhook_payload(request)
-        account_id, subdomain = _extract_amocrm_uninstall_info(payload)
-        tenant_id = amocrm_service.find_tenant_by_account(account_id, subdomain)
-        if tenant_id is None:
-            return JSONResponse({"ok": False, "detail": "tenant_not_found"}, status_code=404)
-    cfg = common.read_tenant_config(tenant_id)
-    if isinstance(cfg, dict):
-        integrations = cfg.get("integrations")
-        if not isinstance(integrations, dict):
-            integrations = {}
-        amocrm_cfg = integrations.get("amocrm")
-        if isinstance(amocrm_cfg, dict):
-            amocrm_cfg["enabled"] = False
-            manual_cfg = amocrm_cfg.get("manual")
-            if isinstance(manual_cfg, dict):
-                manual_cfg.pop("access_token", None)
-            amocrm_cfg.pop("tokens", None)
-            integrations["amocrm"] = amocrm_cfg
-            cfg["integrations"] = integrations
-            common.write_tenant_config(tenant_id, cfg)
-    try:
-        await amocrm_tokens.delete(int(tenant_id))
-    except Exception:
-        logger.exception("amocrm_disconnect_failed tenant=%s", tenant_id)
-        return JSONResponse({"ok": False, "detail": "amocrm_disconnect_failed"}, status_code=500)
-    return JSONResponse({"ok": True})
+    return await amocrm_public_runtime.disconnect(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_amocrm_public_runtime_deps(),
+    )
 
 
 @router.get("/pub/settings/get")
-async def settings_get(
-    request: Request, tenant: int | str | None = None, k: str | None = None
-):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-
-    tenant_id, _ = auth
-    common.ensure_tenant_files(tenant_id)
-    cfg = common.read_tenant_config(tenant_id)
-    persona = common.read_persona(tenant_id)
-    personas = {
-        "telegram": common.read_persona(tenant_id, "telegram"),
-        "avito": common.read_persona(tenant_id, "avito"),
-    }
-    cfg_payload = cfg
-    if isinstance(cfg, dict):
-        cfg_payload = dict(cfg)
-        integrations = cfg_payload.get("integrations")
-        if isinstance(integrations, dict):
-            integrations_copy = dict(integrations)
-            if "amocrm" in integrations_copy:
-                masked = amocrm_service.mask_amocrm_cfg(
-                    integrations_copy.get("amocrm"),
-                    tenant_id=int(tenant_id),
-                )
-                integrations_copy["amocrm"] = masked or {}
-            cfg_payload["integrations"] = integrations_copy
-    payload = {"ok": True, "cfg": cfg_payload, "persona": persona, "personas": personas}
-    return JSONResponse(payload, headers=_no_store_headers())
+async def settings_get(request: Request, tenant: int | str | None = None, k: str | None = None):
+    return await settings_public_runtime.settings_get(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_public_settings_runtime_deps(),
+    )
 
 
 @router.post("/pub/settings/save")
-async def settings_save(
-    request: Request, tenant: int | str | None = None, k: str | None = None
-):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-
-    tenant_id, _ = auth
-    common.ensure_tenant_files(tenant_id)
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    existing_cfg = common.read_tenant_config(tenant_id)
-    if isinstance(payload.get("cfg"), dict):
-        cfg = payload["cfg"]
-    else:
-        cfg = existing_cfg
-        for section in ["passport", "behavior", "cta", "limits", "integrations", "learning"]:
-            if isinstance(payload.get(section), dict):
-                cfg.setdefault(section, {}).update(payload[section])
-        if isinstance(payload.get("catalogs"), list):
-            cfg["catalogs"] = payload["catalogs"]
-    if isinstance(cfg, dict):
-        integrations = cfg.get("integrations")
-        if isinstance(integrations, dict) and "amocrm" in integrations:
-            amocrm_cfg = integrations.get("amocrm")
-            if isinstance(amocrm_cfg, dict):
-                existing_amocrm = amocrm_service.get_amocrm_cfg(existing_cfg) or {}
-                oauth_cfg = amocrm_cfg.get("oauth")
-                if isinstance(oauth_cfg, dict):
-                    secret = str(oauth_cfg.get("client_secret") or "").strip()
-                    if not secret or secret == "***":
-                        existing_secret = ""
-                        if isinstance(existing_amocrm, dict):
-                            existing_oauth = existing_amocrm.get("oauth")
-                            if isinstance(existing_oauth, Mapping):
-                                existing_secret = str(existing_oauth.get("client_secret") or "").strip()
-                        if existing_secret:
-                            oauth_cfg["client_secret"] = existing_secret
-                manual_cfg = amocrm_cfg.get("manual")
-                if isinstance(manual_cfg, dict):
-                    manual_token = str(manual_cfg.get("access_token") or "").strip()
-                    if manual_token and manual_token != "***":
-                        try:
-                            await amocrm_tokens.ensure_schema()
-                            await amocrm_tokens.upsert(
-                                int(tenant_id),
-                                access_token=manual_token,
-                                refresh_token=None,
-                                expires_at=None,
-                                obtained_at=datetime.now(tz=timezone.utc),
-                                raw_payload={"mode": "manual"},
-                            )
-                        except Exception:
-                            logger.exception(
-                                "amocrm_manual_token_store_failed tenant=%s",
-                                tenant_id,
-                            )
-                    manual_cfg.pop("access_token", None)
-                amocrm_cfg.pop("tokens", None)
-                pipeline_id_val = amocrm_service._coerce_pipeline_id(amocrm_cfg.get("pipeline_id"))
-                merged_stages = amocrm_service._merge_stages_for_pipeline(
-                    amocrm_cfg.get("stages"),
-                    amocrm_cfg,
-                    pipeline_id_val,
-                )
-                if merged_stages:
-                    amocrm_cfg["stages"] = merged_stages
-                    stages_by_pipeline = amocrm_cfg.get("stages_by_pipeline")
-                    if isinstance(stages_by_pipeline, dict) and pipeline_id_val > 0:
-                        entry = stages_by_pipeline.get(str(pipeline_id_val))
-                        if isinstance(entry, dict):
-                            entry = dict(entry)
-                            entry["stages"] = merged_stages
-                            stages_by_pipeline[str(pipeline_id_val)] = entry
-                            amocrm_cfg["stages_by_pipeline"] = stages_by_pipeline
-    common.write_tenant_config(tenant_id, cfg)
-    if isinstance(payload.get("persona"), str):
-        common.write_persona(tenant_id, payload.get("persona") or "")
-    personas_payload = payload.get("personas")
-    if isinstance(personas_payload, Mapping):
-        for channel_key, text in personas_payload.items():
-            if channel_key not in {"telegram", "avito"}:
-                continue
-            if not isinstance(text, str):
-                continue
-            common.write_persona(tenant_id, text, channel=channel_key)
-    return {"ok": True}
+async def settings_save(request: Request, tenant: int | str | None = None, k: str | None = None):
+    return await settings_public_runtime.settings_save(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_public_settings_runtime_deps(),
+    )
 
 
 def _photo_root(tenant_id: int) -> pathlib.Path:
@@ -5628,395 +2328,80 @@ async def public_catalog_csv_save(
 # Move public catalog upload off the client namespace to avoid route collisions
 # with the client router. The tenant is accepted as a query parameter.
 
+
+def _catalog_public_deps() -> catalog_public_runtime.CatalogPublicDeps:
+    from . import client as client_module
+
+    return catalog_public_runtime.CatalogPublicDeps(
+        logger=logger,
+        resolve_key_fn=client_module._resolve_key,
+        auth_fn=client_module._auth,
+        common_module=common,
+        allowed_extensions=ALLOWED_EXTENSIONS,
+        max_upload_size_bytes=MAX_UPLOAD_SIZE_BYTES,
+        make_safe_filename_fn=_make_safe_filename,
+        relative_to_fn=_relative_to,
+        read_csv_bytes_fn=_read_csv_bytes,
+        read_excel_bytes_fn=_read_excel_bytes,
+        process_pdf_fn=_process_pdf,
+        resolve_job_metrics_fn=_resolve_job_metrics,
+        catalog_index_error=CatalogIndexError,
+        write_catalog_csv_fn=write_catalog_csv,
+        stringify_fn=_stringify,
+        amocrm_service_module=amocrm_service,
+        write_tenant_config_fn=common.write_tenant_config,
+        read_tenant_config_fn=common.read_tenant_config,
+        quote_plus_fn=quote_plus,
+    )
+
+
+def _public_photos_deps() -> public_photos_runtime.PublicPhotosDeps:
+    return public_photos_runtime.PublicPhotosDeps(
+        authorize_fn=_authorize_public_settings_request,
+        read_manifest_fn=_read_photo_manifest,
+        write_manifest_fn=_write_photo_manifest,
+        photo_url_fn=_photo_public_url,
+        validate_upload_fn=_validate_photo_upload,
+        photo_root_fn=_photo_root,
+        tenant_dir_fn=core_module.tenant_dir,
+        max_bytes=PHOTO_MAX_BYTES,
+        logger=logger,
+        sync_asset_fn=client_assets_runtime.sync_public_photo_asset,
+        compile_asset_fn=client_assets_runtime.compile_public_photo_asset_rule,
+    )
+
+
+def _catalog_view_deps() -> catalog_public_runtime.CatalogViewDeps:
+    return catalog_public_runtime.CatalogViewDeps(
+        core_module=core_module,
+        render_template_fn=render_template,
+        template_name=CATALOG_VIEW_TEMPLATE,
+        time_module=time,
+    )
+
+
 @router.post("/pub/catalog/upload")
 async def catalog_upload(
     request: Request,
     background_tasks: BackgroundTasks,
     tenant: str | None = Query(None),
 ):
-    from . import client as client_module
-
-    def invalid_payload(reason: str) -> JSONResponse:
-        body = {"ok": False, "error": "invalid_payload", "reason": reason}
-        if reason == "invalid_tenant":
-            body["detail"] = reason
-        return JSONResponse(body, status_code=422)
-
-    tenant_candidate = (tenant or "").strip() if isinstance(tenant, str) else ""
-    tenant_source = "query"
-    form_data = None
-    if not tenant_candidate:
-        try:
-            form_data = await request.form()
-        except Exception as exc:  # pragma: no cover - Starlette form parsing edge cases
-            logger.warning("catalog_upload: failed to read form data", exc_info=exc)
-            form_data = None
-        if form_data is not None:
-            form_candidate_raw = form_data.get("tenant")
-            if isinstance(form_candidate_raw, UploadFile):
-                form_candidate = (form_candidate_raw.filename or "").strip()
-            elif isinstance(form_candidate_raw, bytes):
-                form_candidate = form_candidate_raw.decode(errors="ignore").strip()
-            elif isinstance(form_candidate_raw, str):
-                form_candidate = form_candidate_raw.strip()
-            elif form_candidate_raw is not None:
-                form_candidate = str(form_candidate_raw).strip()
-            else:
-                form_candidate = ""
-            if form_candidate:
-                tenant_candidate = form_candidate
-                tenant_source = "form"
-        if not tenant_candidate:
-            env_candidate = (os.getenv("TENANT", "1") or "").strip()
-            if env_candidate:
-                tenant_candidate = env_candidate
-                tenant_source = "env"
-            else:
-                return invalid_payload("invalid_tenant")
-    try:
-        tenant_id = int(tenant_candidate)
-    except (TypeError, ValueError):
-        return invalid_payload("invalid_tenant")
-    if tenant_id <= 0:
-        return invalid_payload("invalid_tenant")
-
-    if form_data is None:
-        try:
-            form_data = await request.form()
-        except Exception as exc:  # pragma: no cover - Starlette form parsing edge cases
-            logger.warning("catalog_upload: failed to read form data for file", exc_info=exc)
-            form_data = None
-
-    upload_file: UploadFile | StarletteUploadFile | None = None
-    file_field_name: str | None = None
-    def _is_upload(value: Any) -> bool:
-        return isinstance(value, (UploadFile, StarletteUploadFile))
-
-    if form_data is not None:
-        candidates: list[tuple[str, UploadFile | StarletteUploadFile]] = []
-        possible_file = form_data.get("file")
-        possible_catalog = form_data.get("catalog") if upload_file is None else None
-
-        def _collect(candidate: str, value: Any) -> None:
-            if _is_upload(value):
-                candidates.append((candidate, value))
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    if _is_upload(item):
-                        candidates.append((candidate, item))
-
-        _collect("file", possible_file)
-        _collect("catalog", possible_catalog)
-
-        if candidates:
-            file_field_name, upload_file = candidates[0]
-    if upload_file is None:
-        return invalid_payload("missing_file")
-
-    key = client_module._resolve_key(request, request.query_params.get("k"))
-    authorized = client_module._auth(tenant_id, key)
-    if not authorized:
-        header_key = (request.headers.get("X-Access-Key") or "").strip()
-        query_key = (request.query_params.get("k") or request.query_params.get("key") or "").strip()
-        if key and key == header_key:
-            authorized = True
-        elif key and query_key and key == query_key:
-            authorized = True
-    if not authorized:
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
-
-    filename = (upload_file.filename or "").strip()
-    if not filename:
-        return JSONResponse({"ok": False, "error": "empty_file"}, status_code=400)
-
-    ext = pathlib.Path(filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        return JSONResponse({"ok": False, "error": "unsupported_type"}, status_code=400)
-
-    raw = await upload_file.read()
-    if not raw:
-        return JSONResponse(
-            {"ok": False, "error": "empty_file", "message": "Файл не содержит данных"},
-            status_code=400,
-        )
-    if len(raw) > MAX_UPLOAD_SIZE_BYTES:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "file_too_large",
-                "max_size_bytes": MAX_UPLOAD_SIZE_BYTES,
-            },
-            status_code=400,
-        )
-
-    common.ensure_tenant_files(tenant_id)
-    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
-    uploads_dir = tenant_root / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-
-    safe_name = _make_safe_filename(filename, ext, fallback=f"catalog_{uuid.uuid4().hex}")
-    saved_upload_path = uploads_dir / safe_name
-    saved_upload_path.write_bytes(raw)
-    saved_upload_rel = pathlib.Path(_relative_to(saved_upload_path, tenant_root))
-    relative_path = str(saved_upload_rel)
-
-    job_id = uuid.uuid4().hex
-    job_root = tenant_root / "catalog_jobs" / job_id
-    job_root.mkdir(parents=True, exist_ok=True)
-    status_path = job_root / "status.json"
-
-    status_state: dict[str, Any] = {
-        "job_id": job_id,
-        "state": "pending",
-        "error": None,
-        "log": [],
-        "filename": filename,
-        "message": "",
-        "tenant_source": tenant_source,
-        "file_field": file_field_name,
-    }
-
-    def write_status(status: str | None = None, **fields: Any) -> None:
-        if status is not None:
-            status_state["state"] = status
-        status_state["updated_at"] = int(time.time())
-        for key, value in fields.items():
-            status_state[key] = value
-        status_path.write_text(json.dumps(status_state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def append_log(level: str, message: str, **extra: Any) -> None:
-        entry = {"ts": int(time.time()), "level": level, "message": message}
-        if extra:
-            entry.update({k: v for k, v in extra.items() if v is not None})
-        status_state.setdefault("log", []).append(entry)
-        write_status(None, log=status_state["log"])
-
-    def fail(error_key: str, *, http_status: int = 400, **details: Any):
-        append_log("error", error_key, **details)
-        write_status("failed", error=error_key, message=error_key, **details)
-        return JSONResponse({"ok": False, "error": error_key, "job_id": job_id, **details}, status_code=http_status)
-
-    write_status(None, tenant_source=tenant_source, file_field=file_field_name)
-    append_log("info", "tenant_resolved", source=tenant_source, tenant=tenant_id)
-    append_log("info", "upload_field_detected", field=file_field_name)
-
-    mime_type, _ = mimetypes.guess_type(filename)
-    write_status("received", size=len(raw), mime=mime_type, source_path=relative_path)
-    append_log("info", "file_received", size=len(raw), mime=mime_type, field=file_field_name)
-
-    # Build background job that performs heavy processing to avoid request timeouts
-    def process_job() -> None:
-        try:
-            write_status("processing")
-            append_log("info", "job_started", source=tenant_source, field=file_field_name)
-            base_name = pathlib.Path(filename).stem or f"catalog_{job_id}"
-            normalized_rows: list[dict[str, Any]]
-            meta: dict[str, Any]
-            manifest_rel: str | None = None
-
-            # Read back from disk to keep memory footprint small
-            try:
-                if ext == ".csv":
-                    file_bytes = saved_upload_path.read_bytes()
-                    normalized_rows, meta = _read_csv_bytes(file_bytes)
-                elif ext in {".xlsx", ".xls"}:
-                    file_bytes = saved_upload_path.read_bytes()
-                    normalized_rows, meta = _read_excel_bytes(file_bytes)
-                else:
-                    normalized_rows, meta, manifest_rel = _process_pdf(
-                        tenant=tenant_id,
-                        saved_path=saved_upload_path,
-                        tenant_root=tenant_root,
-                        saved_rel_path=saved_upload_rel,
-                        original_name=filename,
-                    )
-            except CatalogIndexError as exc:
-                logger.warning("PDF indexing failed", exc_info=exc)
-                fail("pdf_index_failed", detail=str(exc))
-                return
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.exception("catalog processing failed", exc_info=exc)
-                fail("processing_failed", detail=str(exc))
-                return
-
-            job_metrics = _resolve_job_metrics(meta if isinstance(meta, Mapping) else None, normalized_rows)
-            manual_review_required = bool(
-                job_metrics["items_found"] == 0
-                or float(job_metrics.get("low_price_rate", 0.0)) > 0.2
-            )
-            try:
-                parsed_count = len(normalized_rows)
-            except Exception:
-                parsed_count = 0
-            append_log("info", "rows_parsed", items=parsed_count)
-
-            try:
-                result = write_catalog_csv(tenant_id, normalized_rows, base_name, meta)
-            except Exception as exc:  # pragma: no cover - disk errors
-                logger.exception("write_catalog_csv raised", exc_info=exc)
-                fail("csv_write_failed", detail=str(exc))
-                return
-
-            if not isinstance(result, tuple) or len(result) != 2:
-                logger.error("write_catalog_csv returned unexpected result", extra={"result": result})
-                fail("csv_write_failed")
-                return
-
-            csv_rel_path, ordered_columns = result
-            pipeline_info = meta.get("pipeline") if isinstance(meta, dict) else None
-            items = int(meta.get("items", parsed_count)) if isinstance(meta, dict) else parsed_count
-            if manifest_rel:
-                meta = dict(meta)
-                meta["manifest_path"] = manifest_rel
-
-            write_status(
-                "done",
-                csv_path=csv_rel_path,
-                items=items,
-                columns=ordered_columns,
-                metadata=meta,
-                source_path=relative_path,
-                message="completed",
-                items_found=int(job_metrics["items_found"]),
-                pages_total=int(job_metrics.get("pages_total", 0)),
-                pages_skipped_no_price=int(job_metrics.get("pages_skipped_no_price", 0)),
-                table_pages=int(job_metrics.get("table_pages", 0)),
-                median_price=job_metrics.get("median_price"),
-                low_price_rate=float(job_metrics.get("low_price_rate", 0.0)),
-                price_coverage=float(job_metrics.get("price_coverage", 0.0)),
-                manual_review_required=bool(manual_review_required),
-            )
-            if manifest_rel:
-                write_status(None, manifest_path=manifest_rel)
-            append_log(
-                "info",
-                "csv_written",
-                items=items,
-                columns=len(ordered_columns),
-                pipeline=pipeline_info,
-                metrics=job_metrics,
-            )
-
-            # Persist config updates
-            cfg_raw = common.read_tenant_config(tenant_id)
-            cfg = dict(cfg_raw) if isinstance(cfg_raw, dict) else {}
-            raw_catalogs = cfg.get("catalogs")
-            catalogs = raw_catalogs if isinstance(raw_catalogs, list) else []
-            catalog_type = "pdf" if ext == ".pdf" else ("excel" if ext in {".xlsx", ".xls"} else "csv")
-            catalog_entry: dict[str, Any] = {
-                "name": "uploaded",
-                "path": relative_path,
-                "type": catalog_type,
-            }
-            detected_encoding = _stringify(meta.get("encoding")) if isinstance(meta, dict) else ""
-            if isinstance(meta, dict):
-                raw_delimiter = meta.get("delimiter")
-                if isinstance(raw_delimiter, str):
-                    detected_delimiter = raw_delimiter
-                else:
-                    detected_delimiter = _stringify(raw_delimiter)
-            else:
-                detected_delimiter = ""
-            if detected_encoding:
-                catalog_entry["encoding"] = detected_encoding
-            if detected_delimiter:
-                catalog_entry["delimiter"] = detected_delimiter
-
-            if csv_rel_path:
-                catalog_entry["csv_path"] = csv_rel_path
-
-            cfg["catalogs"] = [
-                catalog_entry,
-                *[
-                    entry
-                    for entry in catalogs
-                    if isinstance(entry, dict) and entry.get("path") != relative_path
-                ],
-            ]
-
-            integrations_raw = cfg.get("integrations")
-            if isinstance(integrations_raw, dict):
-                integrations = dict(integrations_raw)
-            else:
-                integrations = {}
-            cfg["integrations"] = integrations
-            uploaded_meta: dict[str, Any] = {
-                "path": relative_path,
-                "original": filename,
-                "uploaded_at": int(time.time()),
-                "type": catalog_type,
-                "size": len(raw),
-                "mime": mime_type or "application/octet-stream",
-                "csv_path": csv_rel_path,
-            }
-            if pipeline_info:
-                uploaded_meta["pipeline"] = pipeline_info
-            extraction_meta = meta.get("extraction") if isinstance(meta, dict) else None
-            if isinstance(extraction_meta, dict):
-                uploaded_meta["extraction"] = extraction_meta
-            if detected_encoding:
-                uploaded_meta["encoding"] = detected_encoding
-            if detected_delimiter:
-                uploaded_meta["delimiter"] = detected_delimiter
-            uploaded_meta = {k: v for k, v in uploaded_meta.items() if v is not None}
-            integrations["uploaded_catalog"] = uploaded_meta
-
-            common.write_tenant_config(tenant_id, cfg)
-            append_log("info", "config_updated", catalog_type=catalog_type)
-        except Exception as exc:  # final safety net
-            logger.exception("catalog job crashed", exc_info=exc)
-            fail("job_crashed", detail=str(exc))
-
-    # Enqueue the job and return immediately to avoid Cloudflare 524 timeouts
-    if background_tasks is not None:
-        background_tasks.add_task(process_job)
-    else:
-        # Fallback: run inline (tests) but still return fast behavior below
-        try:
-            process_job()
-        except Exception:
-            pass
-
-    # HTML form fallback: redirect back to settings quickly
-    accept_header = (request.headers.get("accept") or "").lower()
-    sec_fetch_mode = (request.headers.get("sec-fetch-mode") or "").lower()
-    sec_fetch_dest = (request.headers.get("sec-fetch-dest") or "").lower()
-    wants_html = (
-        "text/html" in accept_header
-        or "application/xhtml+xml" in accept_header
-        or sec_fetch_mode == "navigate"
-        or sec_fetch_dest == "document"
+    return await catalog_public_runtime.catalog_upload(
+        request,
+        background_tasks,
+        tenant=tenant,
+        deps=_catalog_public_deps(),
     )
-    if wants_html and (request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"):
-        wants_html = False
-    if wants_html:
-        redirect_url = request.url_for("client_settings", tenant=str(tenant_id))
-        if key:
-            redirect_url = f"{redirect_url}?k={quote_plus(key)}"
-        return RedirectResponse(url=redirect_url, status_code=303)
-
-    return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "filename": filename})
 
 
 @router.get("/pub/files/photos/list")
-async def photos_list(
-    request: Request, tenant: int | str | None = None, k: str | None = None
-):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-
-    entries = _read_photo_manifest(tenant_id)
-    items: list[dict[str, Any]] = []
-    for entry in sorted(entries, key=lambda item: item.get("uploaded_at", 0), reverse=True):
-        photo_id = str(entry.get("id") or "").strip()
-        if not photo_id:
-            continue
-        payload = dict(entry)
-        payload["url"] = _photo_public_url(request, tenant_id, key, photo_id)
-        items.append(payload)
-    return {"ok": True, "photos": items}
+async def photos_list(request: Request, tenant: int | str | None = None, k: str | None = None):
+    return await public_photos_runtime.photos_list(
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_public_photos_deps(),
+    )
 
 
 @router.post("/pub/files/photos/upload")
@@ -6026,52 +2411,13 @@ async def photos_upload(
     k: str | None = None,
     file: UploadFile = File(...),
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-
-    filename = (file.filename or "").strip()
-    ok, reason = _validate_photo_upload(filename, file.content_type)
-    if not ok:
-        return JSONResponse({"ok": False, "error": reason}, status_code=400)
-
-    raw = await file.read()
-    if not raw:
-        return JSONResponse({"ok": False, "error": "empty_file"}, status_code=400)
-    if len(raw) > PHOTO_MAX_BYTES:
-        return JSONResponse(
-            {"ok": False, "error": "file_too_large", "max_size_bytes": PHOTO_MAX_BYTES},
-            status_code=400,
-        )
-
-    ext = pathlib.Path(filename).suffix.lower()
-    photo_id = uuid.uuid4().hex
-    safe_name = f"photo_{photo_id}{ext}"
-    root = _photo_root(tenant_id)
-    target = root / safe_name
-    target.write_bytes(raw)
-
-    rel_path = str(target.relative_to(core_module.tenant_dir(tenant_id)))
-    mime = (file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream")
-
-    entry = {
-        "id": photo_id,
-        "filename": safe_name,
-        "original": filename,
-        "mime": mime,
-        "size": len(raw),
-        "uploaded_at": int(time.time()),
-        "path": rel_path,
-    }
-
-    entries = _read_photo_manifest(tenant_id)
-    entries.insert(0, entry)
-    _write_photo_manifest(tenant_id, entries)
-
-    entry_with_url = dict(entry)
-    entry_with_url["url"] = _photo_public_url(request, tenant_id, key, photo_id)
-    return {"ok": True, "photo": entry_with_url}
+    return await public_photos_runtime.photos_upload(
+        request,
+        tenant=tenant,
+        key=k,
+        file=file,
+        deps=_public_photos_deps(),
+    )
 
 
 @router.delete("/pub/files/photos/{photo_id}")
@@ -6081,39 +2427,13 @@ async def photos_delete(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-
-    entries = _read_photo_manifest(tenant_id)
-    remaining: list[dict[str, Any]] = []
-    removed_entry: dict[str, Any] | None = None
-    for entry in entries:
-        entry_id = str(entry.get("id") or "")
-        if entry_id == photo_id and removed_entry is None:
-            removed_entry = entry
-            continue
-        remaining.append(entry)
-    if removed_entry is None:
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-
-    rel_path = str(removed_entry.get("path") or "")
-    if rel_path:
-        target = core_module.tenant_dir(tenant_id) / rel_path
-        try:
-            target = target.resolve()
-            tenant_root = core_module.tenant_dir(tenant_id).resolve()
-        except Exception:
-            target = None
-        if target is not None and str(target).startswith(str(tenant_root)) and target.exists():
-            try:
-                target.unlink()
-            except Exception:
-                logger.warning("photo_delete_failed tenant=%s path=%s", tenant_id, rel_path)
-
-    _write_photo_manifest(tenant_id, remaining)
-    return {"ok": True}
+    return await public_photos_runtime.photos_delete(
+        photo_id,
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_public_photos_deps(),
+    )
 
 
 @router.get("/pub/files/photos/{photo_id}")
@@ -6123,26 +2443,13 @@ async def photos_file(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-
-    entries = _read_photo_manifest(tenant_id)
-    entry = next((item for item in entries if str(item.get("id") or "") == photo_id), None)
-    if not entry:
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-
-    rel_path = str(entry.get("path") or "")
-    if not rel_path:
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-    target = core_module.tenant_dir(tenant_id) / rel_path
-    if not target.exists() or not target.is_file():
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-
-    mime = entry.get("mime") or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-    filename = entry.get("original") or target.name
-    return FileResponse(target, media_type=mime, filename=filename)
+    return await public_photos_runtime.photos_file(
+        photo_id,
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_public_photos_deps(),
+    )
 
 
 @router.post("/pub/files/photos/{photo_id}/meta")
@@ -6152,215 +2459,53 @@ async def photos_update_meta(
     tenant: int | str | None = None,
     k: str | None = None,
 ):
-    auth = await _authorize_public_settings_request(request, tenant, k)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-
-    entries = _read_photo_manifest(tenant_id)
-    entry = next((item for item in entries if str(item.get("id") or "") == photo_id), None)
-    if not entry:
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-
-    title = payload.get("title")
-    if isinstance(title, str):
-        entry["title"] = title.strip()
-    usage = payload.get("usage")
-    if isinstance(usage, str):
-        entry["usage"] = usage.strip()
-
-    tags_raw = payload.get("tags")
-    tags: list[str] = []
-    if isinstance(tags_raw, (list, tuple, set)):
-        tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()]
-    elif isinstance(tags_raw, str):
-        tags = [chunk.strip() for chunk in tags_raw.split(",") if chunk.strip()]
-    if tags:
-        entry["tags"] = tags
-    elif tags_raw is not None:
-        entry["tags"] = []
-
-    channels_raw = payload.get("channels")
-    channels: list[str] = []
-    if isinstance(channels_raw, (list, tuple, set)):
-        channels = [str(ch).strip().lower() for ch in channels_raw if str(ch).strip()]
-    elif isinstance(channels_raw, str):
-        channels = [chunk.strip().lower() for chunk in channels_raw.split(",") if chunk.strip()]
-    if channels:
-        entry["channels"] = channels
-    elif channels_raw is not None:
-        entry["channels"] = []
-
-    if payload.get("auto") is not None:
-        entry["auto"] = bool(payload.get("auto"))
-
-    if payload.get("priority") is not None:
-        try:
-            entry["priority"] = int(payload.get("priority") or 0)
-        except Exception:
-            entry["priority"] = 0
-
-    _write_photo_manifest(tenant_id, entries)
-    entry_with_url = dict(entry)
-    entry_with_url["url"] = _photo_public_url(request, tenant_id, key, photo_id)
-    return {"ok": True, "photo": entry_with_url}
+    return await public_photos_runtime.photos_update_meta(
+        photo_id,
+        request,
+        tenant=tenant,
+        key=k,
+        deps=_public_photos_deps(),
+    )
 
 
 @router.get("/pub/catalog/view/{tenant}", response_class=HTMLResponse)
 def catalog_view_public(tenant: int, request: Request):
-    try:
-        tenant_id = int(tenant)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=404, detail="not_found") from None
-    if tenant_id <= 0:
-        raise HTTPException(status_code=404, detail="not_found")
-
-    try:
-        meta = core_module.resolve_catalog_pdf_meta(tenant_id)
-    except Exception:
-        meta = None
-
-    catalog_url: str | None = None
-    catalog_size_mb: float | None = None
-    catalog_updated_at: int | None = None
-    has_catalog = bool(meta)
-
-    if meta:
-        try:
-            stat = pathlib.Path(meta["absolute_path"]).stat()
-        except OSError:
-            stat = None
-        if stat:
-            catalog_size_mb = round(stat.st_size / (1024 * 1024), 2)
-            catalog_updated_at = int(stat.st_mtime)
-        try:
-            catalog_url = str(request.url_for("public_catalog_file", tenant=str(tenant_id)))
-            if catalog_updated_at:
-                separator = "&" if "?" in catalog_url else "?"
-                catalog_url = f"{catalog_url}{separator}v={catalog_updated_at}"
-        except Exception:
-            catalog_url = None
-
-    brand = ""
-    agent_name = ""
-    city = ""
-    try:
-        cfg = core_module.load_tenant(tenant_id)
-    except Exception:
-        cfg = {}
-    if isinstance(cfg, dict):
-        passport = cfg.get("passport") if isinstance(cfg.get("passport"), dict) else {}
-        if isinstance(passport, dict):
-            brand = str(passport.get("brand") or "").strip()
-            agent_name = str(passport.get("agent_name") or "").strip()
-            city = str(passport.get("city") or "").strip()
-
-    context = {
-        "request": request,
-        "tenant_id": tenant_id,
-        "brand": brand or "Каталог",
-        "agent_name": agent_name,
-        "city": city,
-        "has_catalog": has_catalog,
-        "catalog_url": catalog_url,
-        "catalog_size_mb": catalog_size_mb,
-        "catalog_updated_at": catalog_updated_at,
-    }
-    return render_template(CATALOG_VIEW_TEMPLATE, context)
+    return catalog_public_runtime.catalog_view_public(
+        tenant=tenant,
+        request=request,
+        deps=_catalog_view_deps(),
+    )
 
 
 @router.get("/pub/catalog/file/{tenant}")
 def public_catalog_file(tenant: int):
-    try:
-        tenant_id = int(tenant)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=404, detail="not_found") from None
-    if tenant_id <= 0:
-        raise HTTPException(status_code=404, detail="not_found")
-
-    try:
-        meta = core_module.resolve_catalog_pdf_meta(tenant_id)
-    except Exception:
-        meta = None
-    if not meta:
-        raise HTTPException(status_code=404, detail="not_found")
-
-    pdf_path = pathlib.Path(meta["absolute_path"])
-    if not pdf_path.exists() or not pdf_path.is_file():
-        raise HTTPException(status_code=404, detail="not_found")
-
-    filename = str(meta.get("filename") or pdf_path.name)
-
-    response = FileResponse(
-        pdf_path,
-        media_type="application/pdf",
-        filename=filename,
+    return catalog_public_runtime.public_catalog_file(
+        tenant=tenant,
+        deps=_catalog_view_deps(),
     )
-    response.headers.setdefault("Cache-Control", "public, max-age=300")
-    response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
-    updated_at = meta.get("updated_at")
-    if isinstance(updated_at, int):
-        response.headers["Last-Modified"] = time.strftime(
-            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(updated_at)
-        )
-    return response
-
 
 
 # Public job status endpoint aligned with the new public upload path
 
 
-def _load_catalog_status_payload(tenant_id: int, job_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
-    status_path = tenant_root / "catalog_jobs" / job_id / "status.json"
-    if not status_path.exists():
-        return None, "not_found"
-    try:
-        raw = status_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None, "not_found"
-    except Exception as exc:
-        logger.warning("catalog status read failed", exc_info=exc)
-        return None, "status_read_failed"
-    try:
-        data = json.loads(raw)
-    except Exception as exc:
-        logger.warning("catalog status json decode failed", exc_info=exc)
-        return None, "status_read_failed"
-    return data, None
+def _load_catalog_status_payload(
+    tenant_id: int, job_id: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    return catalog_public_runtime.load_catalog_status_payload(
+        tenant_id,
+        job_id,
+        deps=_catalog_public_deps(),
+    )
 
 
 @router.get("/pub/catalog/upload/status/{job_id}")
 def catalog_upload_status(tenant: int, job_id: str, request: Request):
-    from . import client as client_module
-
-    tenant_id = int(tenant)
-    key = client_module._resolve_key(request, request.query_params.get("k"))
-    authorized = client_module._auth(tenant_id, key)
-    if not authorized:
-        header_key = (request.headers.get("X-Access-Key") or "").strip()
-        query_key = (request.query_params.get("k") or request.query_params.get("key") or "").strip()
-        if key and key == header_key:
-            authorized = True
-        elif key and query_key and key == query_key:
-            authorized = True
-    if not authorized:
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
-
-    payload, error = _load_catalog_status_payload(tenant_id, job_id)
-    if error == "not_found":
-        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-    if error:
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    data = payload or {}
-    return JSONResponse({"ok": True, **data})
+    return catalog_public_runtime.catalog_upload_status(
+        tenant=tenant,
+        job_id=job_id,
+        request=request,
+        deps=_catalog_public_deps(),
+    )
 
 
 @router.get("/pub/catalog/status/{job_id}")
@@ -6370,55 +2515,17 @@ def public_catalog_status(
     tenant: int = Query(...),
     k: str | None = Query(None),
 ):
-    from . import client as client_module
-
-    try:
-        tenant_id = int(tenant)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="invalid_tenant") from None
-    if tenant_id <= 0:
-        raise HTTPException(status_code=400, detail="invalid_tenant")
-
-    key = client_module._resolve_key(request, k)
-    authorized = client_module._auth(tenant_id, key)
-    if not authorized:
-        header_key = (request.headers.get("X-Access-Key") or "").strip()
-        query_key = (request.query_params.get("k") or request.query_params.get("key") or "").strip()
-        if key and key == header_key:
-            authorized = True
-        elif key and query_key and key == query_key:
-            authorized = True
-    if not authorized:
-        raise HTTPException(status_code=401, detail="invalid_key")
-
-    payload, error = _load_catalog_status_payload(tenant_id, job_id)
-    if error == "not_found":
-        raise HTTPException(status_code=404, detail="not_found")
-    if error:
-        raise HTTPException(status_code=500, detail=error)
-
-    return JSONResponse(payload or {})
+    return catalog_public_runtime.public_catalog_status(
+        request=request,
+        job_id=job_id,
+        tenant=tenant,
+        key=k,
+        deps=_catalog_public_deps(),
+    )
 
 
 def _sanitize_catalog_status_public(payload: Any) -> Any:
-    allowed_path_keys = {"source_path", "csv_path"}
-
-    if isinstance(payload, dict):
-        sanitized: dict[Any, Any] = {}
-        for key, value in payload.items():
-            key_str = str(key)
-            normalized = key_str.lower()
-            if "path" in normalized and normalized not in allowed_path_keys:
-                continue
-            if normalized == "log" and isinstance(value, list):
-                trimmed = value[-50:]
-                sanitized[key] = [_sanitize_catalog_status_public(item) for item in trimmed]
-                continue
-            sanitized[key] = _sanitize_catalog_status_public(value)
-        return sanitized
-    if isinstance(payload, list):
-        return [_sanitize_catalog_status_public(item) for item in payload]
-    return payload
+    return catalog_public_runtime.sanitize_catalog_status_public(payload)
 
 
 @router.get("/pub/catalog/status")
@@ -6428,63 +2535,15 @@ def catalog_status_public(
     job: str = Query(...),
     k: str | None = Query(None),
 ):
-    from . import client as client_module
-
-    tenant_raw = (tenant or "").strip()
-    if not tenant_raw:
-        return JSONResponse({"ok": False, "error": "invalid_tenant"}, status_code=422)
-    try:
-        tenant_id = int(tenant_raw)
-    except (TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "invalid_tenant"}, status_code=422)
-    if tenant_id <= 0:
-        return JSONResponse({"ok": False, "error": "invalid_tenant"}, status_code=422)
-
-    job_raw = (job or "").strip()
-    if not job_raw:
-        return JSONResponse({"ok": False, "error": "invalid_job"}, status_code=422)
-    safe_job = pathlib.Path(job_raw).name
-    if safe_job != job_raw:
-        return JSONResponse({"ok": False, "error": "invalid_job"}, status_code=422)
-
-    key_candidate = k if k is not None else request.query_params.get("k")
-    key = client_module._resolve_key(request, key_candidate)
-    authorized = client_module._auth(tenant_id, key)
-    if not authorized:
-        header_key = (request.headers.get("X-Access-Key") or "").strip()
-        query_key = (request.query_params.get("k") or request.query_params.get("key") or "").strip()
-        if key and key == header_key:
-            authorized = True
-        elif key and query_key and key == query_key:
-            authorized = True
-    if not authorized:
-        return JSONResponse({"detail": "invalid_key"}, status_code=401)
-
-    tenant_root = pathlib.Path(common.tenant_dir(tenant_id))
-    status_path = tenant_root / "catalog_jobs" / safe_job / "status.json"
-    if not status_path.exists():
-        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-    try:
-        raw_data = status_path.read_text(encoding="utf-8")
-        data = json.loads(raw_data)
-        if not isinstance(data, dict):
-            data = {"state": data}
-    except Exception as exc:
-        logger.warning("catalog status read failed", exc_info=exc)
-        return JSONResponse({"ok": False, "error": "status_read_failed"}, status_code=500)
-
-    sanitized = _sanitize_catalog_status_public(data)
-    sanitized["ok"] = True
-    sanitized.setdefault("job_id", safe_job)
-    sanitized.setdefault("state", str(data.get("state", "") or ""))
-    if "error" not in sanitized:
-        sanitized["error"] = data.get("error")
-    if "message" not in sanitized:
-        sanitized["message"] = data.get("message")
-    if "updated_at" not in sanitized:
-        sanitized["updated_at"] = data.get("updated_at")
-    return JSONResponse(sanitized)
+    return catalog_public_runtime.catalog_status_public(
+        request=request,
+        tenant=tenant,
+        job=job,
+        key=k,
+        deps=_catalog_public_deps(),
+    )
 
 
 router.include_router(oauth_router)
 router.include_router(max_router)
+router.include_router(max_personal_router)

@@ -1,0 +1,477 @@
+{
+  "cases": [
+    {
+      "name": "tenant101_shortlist_reference_followups",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "космонавтов 76",
+        "грузит ещё",
+        "это которые как жестянные банки?",
+        "ну тонкие да?",
+        "а потолще есть?",
+        "давайте",
+        "так вы тоже самое мне предлагаете"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "6": {
+            "must_include_any": [
+              "толщина",
+              "металл",
+              "наполнение"
+            ]
+          },
+          "7": {
+            "must_include_any": [
+              "41",
+              "тонк",
+              "толщина"
+            ]
+          },
+          "8": {
+            "forbidden_substrings": [
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "толщ",
+              "вариант",
+              "могу предложить",
+              "есть модели"
+            ]
+          },
+          "9": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам",
+              "ГЕРМЕС ГОСТ МЕТ/МЕТ",
+              "ГЕРМЕС ГОСТ МЕТ/МДФ"
+            ],
+            "must_include_any": [
+              "₽",
+              "вариант",
+              "модель",
+              "покаж"
+            ]
+          },
+          "10": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "характерист",
+              "важнее",
+              "другой",
+              "вариант"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_why_address_then_continue",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "зачем вам мой адрес?",
+        "пугачева 7",
+        "гарда зеркало"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "4": {
+            "must_include_any": [
+              "адрес нужен",
+              "нужен адрес",
+              "чтобы не ошибиться"
+            ],
+            "forbidden_substrings": [
+              "квартира или частный дом"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_catalog_problem_then_question",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "пугачева 7",
+        "не открывается",
+        "это которые как жестянные банки?"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "5": {
+            "must_include_any": [
+              "могу сразу предложить",
+              "подходящие модели"
+            ]
+          },
+          "6": {
+            "must_include_any": [
+              "толщина",
+              "металл",
+              "наполнение"
+            ],
+            "forbidden_substrings": [
+              "подскажите город",
+              "какая модель из каталога интересует"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_short_affirmation_variants",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "космонавтов 76",
+        "грузится ещё",
+        "а потолще есть?",
+        "ага"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "6": {
+            "must_include_any": [
+              "толщ",
+              "вариант",
+              "могу предложить",
+              "есть модели"
+            ]
+          },
+          "7": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "₽",
+              "вариант",
+              "покаж",
+              "модель"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_shortlist_to_other_options_request",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "авроры 5/3",
+        "грузится ещё",
+        "эти тонкие",
+        "покажите другие"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "6": {
+            "must_include_any": [
+              "тонщ",
+              "толщина",
+              "базов"
+            ]
+          },
+          "7": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "₽",
+              "вариант",
+              "друг",
+              "покаж"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_selected_model_factual_followups",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "квартира",
+        "пугачева 7",
+        "гарда зеркало",
+        "а замки какие",
+        "она белая внутри?",
+        "а что потолще есть?"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "6": {
+            "must_include_any": [
+              "замк",
+              "цилиндр",
+              "сувальд"
+            ]
+          },
+          "7": {
+            "must_include_any": [
+              "бел",
+              "ясень",
+              "внутр"
+            ]
+          },
+          "8": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует"
+            ],
+            "must_include_any": [
+              "₽",
+              "толщ",
+              "вариант",
+              "модель"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_repair_and_catalog_recovery",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "пугачева 7",
+        "не открывается",
+        "чего?",
+        "покажите"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "5": {
+            "must_include_any": [
+              "подходящие модели",
+              "могу сразу предложить"
+            ]
+          },
+          "6": {
+            "forbidden_substrings": [
+              "подскажите город",
+              "какая модель/тип из каталога интересует"
+            ],
+            "must_include_any": [
+              "модел",
+              "вариант",
+              "каталог",
+              "цен",
+              "характерист"
+            ]
+          },
+          "7": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует"
+            ],
+            "must_include_any": [
+              "₽",
+              "модел",
+              "вариант",
+              "покаж"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_address_color_collision_and_price_objection",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "дубцова 76",
+        "не открывается",
+        "а почему так дорого?"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "6": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "цена",
+              "диапазон",
+              "дешевле",
+              "альтернатив"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_typos_and_shortlist_non_repeat",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфка",
+        "для квартироы",
+        "пугачева 213",
+        "не открывается",
+        "они тонкие да?",
+        "давайте",
+        "так вы тоже самое мне предлагаете",
+        "покажи другой вариант"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "6": {
+            "must_include_any": [
+              "тонщ",
+              "толщина",
+              "базов"
+            ]
+          },
+          "7": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам",
+              "ГЕРМЕС ГОСТ МЕТ/МЕТ",
+              "ГЕРМЕС ГОСТ МЕТ/МДФ"
+            ],
+            "must_include_any": [
+              "вариант",
+              "покаж",
+              "₽"
+            ]
+          },
+          "8": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует"
+            ],
+            "must_include_any": [
+              "друг",
+              "вариант",
+              "важнее"
+            ]
+          },
+          "9": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "вариант",
+              "₽",
+              "покаж"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "tenant101_shortlist_then_price_objection",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "космонавтов 12",
+        "не открывается",
+        "они тонкие да?",
+        "давайте",
+        "почему так дорого?",
+        "можно дешевле?"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "8": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует"
+            ],
+            "must_include_any": [
+              "цена",
+              "диапазон",
+              "дешевле",
+              "альтернатив"
+            ]
+          },
+          "9": {
+            "forbidden_substrings": [
+              "какая модель/тип из каталога интересует",
+              "чтобы точно ответить по характеристикам"
+            ],
+            "must_include_any": [
+              "дешевле",
+              "вариант",
+              "₽",
+              "альтернатив"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

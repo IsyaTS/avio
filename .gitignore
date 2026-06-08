@@ -1,63 +1,55 @@
-# Secrets and local env
+# secrets
 .env
 .env.*
 *.env
-!.env.example
-.env_recovery/
 ops/secrets/**
 secrets/**
 *.key
 *.pem
 
-# Python caches and virtualenvs
+# local state
 __pycache__/
 *.pyc
-*.pyo
 .venv/
 .venv*/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Runtime state and local volumes
-data/
-tg-sessions/
-wa_sessions/
-apps/waweb/sessions/
-apps/waweb/.wwebjs_cache/
-data/wa_state/
-tmp_extract/
-*.rdb
-*.aof
-
-# Build artifacts and coverage
-dist/
-build/
-.coverage
-htmlcov/
 *.sqlite*
 *.db
 
-# Logs and sockets
+# docker artifacts
 *.log
 *.pid
 *.sock
 
-# JS deps
+# build/outputs
+dist/
+build/
+.coverage
+htmlcov/
+# runtime volumes
+# redis, tenants, экспорты, временные
+data/
+tg-sessions/
+wa_sessions/
+apps/waweb/sessions/
+tmp_extract/
+*.rdb
+*.aof
+.pytest_cache/
+.mypy_cache/
 node_modules/
-
-# IDE / OS files
-.idea/
-.vscode/
-.DS_Store
-Thumbs.db
-
-# Repo hygiene
-.backups/
-tmp/
-tmp_examples_*.json
-*.bak
-*.old
-*.orig
-*.rej
+# уже есть:
+# __pycache__/, *.pyc, .venv/
+# runtime extra
+data/wa_state/
+apps/waweb/.wwebjs_cache/
 .aider*
+
+# local diagnostics / generated worktrees kept out of release scope
+.codex
+.env_recovery/
+screens/
+kabinet/
+avio-connect-flow/
+dialogs/
+infra/caddy/Caddyfile.backup.*
+infra/caddy/Caddyfile.bak.*

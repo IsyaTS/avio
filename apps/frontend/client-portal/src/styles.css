@@ -75,4 +75,39 @@
   .sidebar-link-active {
     @apply bg-brand-50 text-brand-700 shadow-subtle;
   }
+
+  .avito-delete-overlay {
+    animation: avitoDeleteOverlayIn 160ms ease-out;
+  }
+
+  .avito-delete-modal {
+    animation: avitoDeleteModalIn 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+@keyframes avitoDeleteOverlayIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes avitoDeleteModalIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .avito-delete-overlay,
+  .avito-delete-modal {
+    animation: none;
+  }
 }

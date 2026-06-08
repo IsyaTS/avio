@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "name": "ci_greeting_progression",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "здравствуйте",
+        "уфа",
+        "для квартиры",
+        "космонавтов 76"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "2": {
+            "forbidden_substrings": [
+              "что для вас важнее по запросу"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "ci_direct_question_no_service_fallback",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "а с зеркалом есть?",
+        "и бюджетнее варианты?"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "1": {
+            "forbidden_substrings": [
+              "уточню и сразу вернусь с точным ответом"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "ci_complaint_recovery",
+      "tenant": 101,
+      "channel": "telegram",
+      "messages": [
+        "ты повторяешься",
+        "ответь конкретно"
+      ],
+      "rules": {
+        "forbid_repeated_questions": true,
+        "forbid_repeated_reply_loop": true,
+        "max_questions_per_reply": 1,
+        "max_sentences_per_reply": 4,
+        "turn_rules": {
+          "2": {
+            "forbidden_substrings": [
+              "что для вас важнее по запросу"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

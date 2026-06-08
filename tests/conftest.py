@@ -7,6 +7,7 @@ import sys
 import asyncio
 import inspect
 from pathlib import Path
+import pytest
 try:  # Ensure trio exposes MultiError for anyio's legacy expectations
     import trio  # type: ignore
 
@@ -46,6 +47,11 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("PUBLIC_KEY", "test-public-key")
 os.environ.setdefault("TESTING", "1")
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 def pytest_configure(config):

@@ -357,6 +357,11 @@ async def get_balance(access_token: str, user_id: int | None) -> Mapping[str, An
     return await avito_request("GET", target, access_token)
 
 
+async def get_item_info(access_token: str, account_id: int, item_id: int) -> Mapping[str, Any] | list[Any]:
+    target = f"/core/v1/accounts/{int(account_id)}/items/{int(item_id)}/"
+    return await avito_request("GET", target, access_token)
+
+
 async def get_operations(
     access_token: str,
     date_from: str,
@@ -375,8 +380,11 @@ async def messenger_list_chats(
     *,
     limit: int = 50,
     offset: int = 0,
+    item_ids: Sequence[int] | Sequence[str] | None = None,
 ) -> Mapping[str, Any] | list[Any]:
     params = {"limit": limit, "offset": offset}
+    if item_ids:
+        params["item_ids"] = ",".join(str(item_id) for item_id in item_ids)
     targets = []
     if user_id:
         targets.append(f"/messenger/v2/accounts/{user_id}/chats")
@@ -414,7 +422,6 @@ async def messenger_get_messages(
     params = {"limit": limit, "offset": offset}
     targets: list[str] = []
     if user_id:
-        targets.append(f"/messenger/v1/accounts/{user_id}/chats/{chat_id}/messages")
         targets.append(f"/messenger/v3/accounts/{user_id}/chats/{chat_id}/messages/")
         targets.append(f"/messenger/v3/accounts/{user_id}/chats/{chat_id}/messages")
     else:
@@ -578,6 +585,7 @@ __all__ = [
     "get_items_stats_v1",
     "get_calls_stats",
     "get_balance",
+    "get_item_info",
     "get_operations",
     "messenger_list_chats",
     "messenger_get_messages",

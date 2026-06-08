@@ -6,9 +6,9 @@ import secrets
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-import importlib
 
 from .. import sales_core as core
+
 common_module = core
 
 from ..metrics import DB_ERRORS_COUNTER, INTERNAL_TENANT_COUNTER

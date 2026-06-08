@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import pathlib
@@ -16,6 +15,7 @@ except Exception:  # pragma: no cover - fallback for worker-only usage
 
 from libs.core import sales_core as core
 from libs.core.common import OUTBOX_QUEUE_KEY, smart_reply_enabled
+from libs.core.services.queue_contract import push_json_left
 
 try:  # pragma: no cover - optional when running outside web context
     from libs.core.web import common as web_common  # type: ignore[attr-defined]
@@ -35,6 +35,20 @@ _CATALOG_KEYWORDS = (
     "price",
     "pdf",
 )
+_CATALOG_REQUEST_VERB_RE = re.compile(
+    r"(?iu)\b(скин|отправ|пришл|покаж|дайте|дай|можно|нужен|нужно|хочу|где)\w*\b"
+)
+_CATALOG_REQUEST_NEAR_RE = re.compile(
+    r"(?iu)\b(?:"
+    r"(?:скин|отправ|пришл|покаж|дайте|дай|можно|нужен|нужно|хочу|где)\w*"
+    r"(?:\s+\w+){0,3}\s+(?:каталог|прайс(?:-лист)?|pdf|catalog|price)|"
+    r"(?:каталог|прайс(?:-лист)?|pdf|catalog|price)"
+    r"(?:\s+\w+){0,3}\s+(?:скин|отправ|пришл|покаж|дайте|дай|можно|нужен|нужно|хочу|где)\w*"
+    r")\b"
+)
+_CATALOG_REFERENCE_ONLY_RE = re.compile(
+    r"(?iu)\b(?:из|по)\s+(?:ваш\w+\s+)?(?:pdf\s+)?(?:каталог\w*|прайс\w*)\b"
+)
 
 try:
     _catalog_inline_limit_mb = float(os.getenv("WA_CATALOG_INLINE_LIMIT_MB", "5") or "0")
@@ -47,6 +61,36 @@ CATALOG_INLINE_LIMIT_BYTES = (
 )
 
 _catalog_sent_cache: dict[Tuple[int, str], float] = {}
+
+
+def _first_message_catalog_enabled(
+    behavior: Mapping[str, object] | None,
+    provider: str,
+) -> bool:
+    if not isinstance(behavior, Mapping):
+        return True
+    channel = str(provider or "").strip().lower()
+    channel_key = ""
+    if channel in {"max", "max_personal"}:
+        channel_key = "send_catalog_on_first_message_max"
+    elif channel == "telegram":
+        channel_key = "send_catalog_on_first_message"
+
+    if channel_key:
+        raw_channel = behavior.get(channel_key)
+        if raw_channel is not None:
+            try:
+                return bool(raw_channel)
+            except Exception:
+                return True
+
+    raw_global = behavior.get("send_catalog_on_first_message")
+    if raw_global is not None:
+        try:
+            return bool(raw_global)
+        except Exception:
+            return True
+    return True
 
 
 def _catalog_cache_redis_key(cache_key: tuple[int, str]) -> str:
@@ -116,8 +160,33 @@ class CatalogFlowResult:
 def _user_requested_catalog(text: str) -> bool:
     if not text:
         return False
-    lowered = text.lower()
-    return any(token in lowered for token in _CATALOG_KEYWORDS)
+    lowered = re.sub(r"\s+", " ", str(text).lower()).strip()
+    if not lowered:
+        return False
+
+    has_keyword = any(token in lowered for token in _CATALOG_KEYWORDS)
+    if not has_keyword:
+        return False
+
+    # Short direct phrases like "каталог", "pdf", "прайс" are explicit requests.
+    word_count = len([w for w in re.split(r"\s+", lowered) if w])
+    if word_count <= 3:
+        return True
+
+    # Interrogative form with catalog keywords is also a request.
+    if "?" in lowered:
+        return True
+
+    # Distinguish explicit request from mere reference ("из каталога", "по каталогу").
+    has_request_verb = bool(_CATALOG_REQUEST_VERB_RE.search(lowered))
+    has_request_near_keyword = bool(_CATALOG_REQUEST_NEAR_RE.search(lowered))
+    reference_only = bool(_CATALOG_REFERENCE_ONLY_RE.search(lowered))
+
+    if has_request_near_keyword:
+        return True
+    if has_request_verb and not reference_only:
+        return True
+    return False
 
 
 def _resolve_catalog_attachment(
@@ -147,7 +216,11 @@ def _resolve_catalog_attachment(
         except Exception:
             base = ""
     else:
-        base = str(getattr(settings, "APP_INTERNAL_URL", "") or getattr(settings, "APP_PUBLIC_URL", "") or "")
+        base = str(
+            getattr(settings, "APP_INTERNAL_URL", "")
+            or getattr(settings, "APP_PUBLIC_URL", "")
+            or ""
+        )
         if not base:
             base = "http://app:8000"
         base = f"{base.rstrip('/')}/internal/tenant/{tenant}/catalog-file"
@@ -172,8 +245,6 @@ def _resolve_catalog_attachment(
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}token={quote(token)}"
 
-    caption = f"Каталог в PDF: {filename}"
-
     attachment = {
         "type": "document",
         "url": url,
@@ -184,9 +255,7 @@ def _resolve_catalog_attachment(
         "mimetype": mime,
         "sendMediaAsDocument": True,
     }
-    if caption:
-        attachment["caption"] = caption
-    return attachment, caption
+    return attachment, ""
 
 
 def _build_public_catalog_url(
@@ -200,9 +269,7 @@ def _build_public_catalog_url(
         integrations = cfg.get("integrations")
         if isinstance(integrations, Mapping):
             viewer_link = str(
-                integrations.get("catalog_url")
-                or integrations.get("pdf_catalog_url")
-                or ""
+                integrations.get("catalog_url") or integrations.get("pdf_catalog_url") or ""
             ).strip()
         if not viewer_link:
             passport = cfg.get("passport")
@@ -263,7 +330,6 @@ async def handle_catalog_flow(
     redis_conn = redis_conn or _redis_queue
 
     text_value = (text or "").strip()
-    now_ts = time.time()
 
     key = cache_key
     if key is None:
@@ -300,7 +366,6 @@ async def handle_catalog_flow(
     result.tenant_cfg = cfg if isinstance(cfg, dict) else None
     result.behavior = behavior
 
-    attachment_path: pathlib.Path | None = None
     attachment_size = 0
     attachment_mtime = 0
     if isinstance(attachment, Mapping):
@@ -309,26 +374,16 @@ async def handle_catalog_flow(
             try:
                 candidate = pathlib.Path(path_value)
                 stat = candidate.stat()
-                attachment_path = candidate
                 attachment_size = stat.st_size
                 attachment_mtime = int(stat.st_mtime)
             except Exception:
-                attachment_path = None
                 attachment_size = 0
                 attachment_mtime = 0
 
     file_url = _build_public_catalog_url(tenant, attachment_mtime, request, cfg)
-    prefer_link = resolved_provider == "whatsapp"
-    use_file_link = False
-    if file_url and (
-        prefer_link
-        or (
-            attachment_size
-            and CATALOG_INLINE_LIMIT_BYTES
-            and attachment_size > CATALOG_INLINE_LIMIT_BYTES
-        )
-    ):
-        use_file_link = True
+    # Always prefer sending catalog as a real file when attachment exists.
+    # Public link fallback is used only when file attachment cannot be resolved.
+    use_file_link = not bool(attachment) and bool(file_url)
 
     lowered_text = text_value.lower()
     forced_catalog = bool(text_value and _user_requested_catalog(text_value))
@@ -347,7 +402,10 @@ async def handle_catalog_flow(
 
     has_attachment = bool(attachment)
     has_file_link = bool(file_url)
-    should_send_catalog = (has_attachment or has_file_link) and (forced_catalog or not catalog_already_sent)
+    first_message_catalog_enabled = _first_message_catalog_enabled(behavior, resolved_provider)
+    should_send_catalog = (has_attachment or has_file_link) and (
+        forced_catalog or (first_message_catalog_enabled and not catalog_already_sent)
+    )
     logger.warning(
         "catalog_flow tenant=%s text=%r has_attachment=%s has_link=%s forced=%s already_sent=%s cache_key=%s",
         tenant,
@@ -387,7 +445,14 @@ async def handle_catalog_flow(
                 attachment_size,
                 file_url,
             )
-        catalog_text = (catalog_text_override or caption_value or "Каталог во вложении (PDF).").strip()
+        # For real file delivery we intentionally avoid auto text/caption,
+        # so the user receives only the PDF file plus normal LLM reply flow.
+        if attachment_payload:
+            catalog_text = (catalog_text_override or "").strip()
+        else:
+            catalog_text = (
+                catalog_text_override or caption_value or "Каталог во вложении (PDF)."
+            ).strip()
         catalog_out: Dict[str, Any] = {
             "lead_id": lead_id,
             "text": catalog_text,
@@ -413,12 +478,13 @@ async def handle_catalog_flow(
                 catalog_out["to_jid"] = whatsapp_jid
 
         if should_send_catalog:
-            await redis_conn.lpush(OUTBOX_QUEUE_KEY, json.dumps(catalog_out, ensure_ascii=False))
+            await push_json_left(redis_conn, OUTBOX_QUEUE_KEY, catalog_out)
             await _mark_catalog_sent(key, redis_conn)
-            try:
-                core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
-            except Exception:
-                pass
+            if catalog_text:
+                try:
+                    core.record_bot_reply(refer_id, tenant, provider, catalog_text, tenant_cfg=cfg)
+                except Exception:
+                    pass
             catalog_sent_now = True
 
     result.catalog_sent = catalog_sent_now
@@ -430,6 +496,7 @@ async def handle_catalog_flow(
         return result
 
     if price_question and not catalog_sent_now:
+
         def _tokenize(value: str) -> tuple[set[str], set[str]]:
             tokens = re.findall(r"[a-zA-Zа-яА-Я0-9]+", value.lower())
             letters = {tok for tok in tokens if len(tok) >= 3 and not tok.isdigit()}
@@ -488,7 +555,9 @@ async def handle_catalog_flow(
 
         if smart_reply_enabled(tenant) and not avito_price_blocked:
             try:
-                catalog_matches = core.search_catalog({}, limit=5, tenant=tenant, query=text_value or "")
+                catalog_matches = core.search_catalog(
+                    {}, limit=5, tenant=tenant, query=text_value or ""
+                )
             except Exception:
                 catalog_matches = []
             if catalog_matches:
@@ -528,9 +597,11 @@ async def handle_catalog_flow(
                             price_out["to"] = whatsapp_phone
                             if whatsapp_jid:
                                 price_out["to_jid"] = whatsapp_jid
-                        await redis_conn.lpush(OUTBOX_QUEUE_KEY, json.dumps(price_out, ensure_ascii=False))
+                        await push_json_left(redis_conn, OUTBOX_QUEUE_KEY, price_out)
                         try:
-                            core.record_bot_reply(refer_id, tenant, provider, reply_text, tenant_cfg=cfg)
+                            core.record_bot_reply(
+                                refer_id, tenant, provider, reply_text, tenant_cfg=cfg
+                            )
                         except Exception:
                             pass
                         result.price_reply_sent = True
@@ -540,8 +611,6 @@ async def handle_catalog_flow(
                         return result
 
     behavior = behavior or {}
-    always_full = bool(behavior.get("always_full_catalog")) if behavior else False
-    send_pages_pref = bool(behavior.get("send_catalog_as_pages")) if behavior else False
     should_send_catalog_pages = False  # отключено для всех каналов
 
     if should_send_catalog_pages:
@@ -569,7 +638,7 @@ async def handle_catalog_flow(
                 }
                 if whatsapp_jid:
                     page_out["to_jid"] = whatsapp_jid
-                await redis_conn.lpush(OUTBOX_QUEUE_KEY, json.dumps(page_out, ensure_ascii=False))
+                await push_json_left(redis_conn, OUTBOX_QUEUE_KEY, page_out)
             await _mark_catalog_sent(key, redis_conn)
 
     return result

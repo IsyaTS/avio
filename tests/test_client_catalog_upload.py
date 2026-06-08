@@ -118,6 +118,7 @@ def _wait_for_job_status(tenant_id: int, job_id: str, *, timeout: float = 3.0):
         return status_path, last_payload
     raise AssertionError(f"status.json not created for job {job_id}")
 
+
 def test_catalog_upload_accepts_header_only(api_client):
     response = api_client.post(
         "/client/1/catalog/upload",

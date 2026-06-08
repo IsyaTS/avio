@@ -44,7 +44,6 @@ def dialogs_to_examples(dialog: Dict) -> Dict:
     """
     messages = dialog.get("messages") or []
     out: List[Dict] = []
-    last_role = None
     for m in messages:
         role = (m.get("role") or "").strip().lower() or "user"
         content = (m.get("content") or m.get("text") or "").strip()
@@ -57,7 +56,6 @@ def dialogs_to_examples(dialog: Dict) -> Dict:
             out[-1]["content"] = (out[-1]["content"] + "\n" + content).strip()
         else:
             out.append({"role": role, "content": content})
-        last_role = role
     return {"messages": out, "meta": dialog.get("meta") or {}}
 
 
@@ -146,7 +144,9 @@ def _format_timestamp(raw_ts: object, tzinfo: timezone) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def build_text_archive(dialogs: List[Dict], tz: timezone = timezone.utc) -> Tuple[io.BytesIO, List[str]]:
+def build_text_archive(
+    dialogs: List[Dict], tz: timezone = timezone.utc
+) -> Tuple[io.BytesIO, List[str]]:
     """Create an in-memory ZIP with one text file per dialog."""
 
     buffer = io.BytesIO()

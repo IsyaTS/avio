@@ -1,6 +1,14 @@
-import os, hashlib, json, time, logging, pathlib, threading, re, asyncio
+import os
+import hashlib
+import json
+import time
+import logging
+import pathlib
+import threading
+import re
+import asyncio
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple, AsyncIterator
+from typing import Optional, List, Dict, Any, AsyncIterator, Sequence
 from collections.abc import Mapping
 
 try:
@@ -9,14 +17,41 @@ except Exception:  # pragma: no cover - optional dependency
     asyncpg = None  # type: ignore[assignment]
 
 # DSN: допускаем вид postgresql+asyncpg:// и нормализуем
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio"
+)
 DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 IS_TESTING = os.getenv("TESTING") == "1"
 
 
+def _env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 1000) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except Exception:
+        value = int(default)
+    value = max(min_value, value)
+    value = min(max_value, value)
+    return value
+
+
+DB_POOL_MIN_SIZE = _env_int("DB_POOL_MIN_SIZE", 5, min_value=1, max_value=100)
+DB_POOL_MAX_SIZE = _env_int("DB_POOL_MAX_SIZE", 20, min_value=1, max_value=200)
+if DB_POOL_MAX_SIZE < DB_POOL_MIN_SIZE:
+    DB_POOL_MAX_SIZE = DB_POOL_MIN_SIZE
+try:
+    DB_POOL_ACQUIRE_TIMEOUT_SECONDS = float(
+        os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "8.0") or "8.0"
+    )
+except Exception:
+    DB_POOL_ACQUIRE_TIMEOUT_SECONDS = 8.0
+if DB_POOL_ACQUIRE_TIMEOUT_SECONDS < 1.0:
+    DB_POOL_ACQUIRE_TIMEOUT_SECONDS = 1.0
+
+
 def _is_testing_env() -> bool:
     return os.getenv("TESTING") == "1"
+
 
 _pool: Any = None
 _log = logging.getLogger("db")
@@ -35,6 +70,16 @@ else:
 
 _OFFLINE_LOCK = threading.Lock()
 _OFFLINE_MAX_RECORDS = int(os.getenv("OFFLINE_DIALOGS_MAX_RECORDS", "5000"))
+
+
+def _normalize_e164_digits(value: str | int) -> str:
+    raw = str(value or "").strip()
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("8") and len(digits) == 11:
+        digits = f"7{digits[1:]}"
+    if len(digits) < 10 or len(digits) > 15:
+        raise ValueError("invalid_phone")
+    return digits
 
 
 class DatabaseUnavailableError(RuntimeError):
@@ -124,14 +169,15 @@ async def _ensure_pool() -> Any:
     try:
         _pool = await asyncpg.create_pool(
             DATABASE_URL,
-            min_size=5,
-            max_size=20,
-            timeout=3.0,
+            min_size=DB_POOL_MIN_SIZE,
+            max_size=DB_POOL_MAX_SIZE,
+            timeout=DB_POOL_ACQUIRE_TIMEOUT_SECONDS,
         )
         return _pool
     except Exception:
         _pool = None
         return None
+
 
 # Утилиты-обёртки: не валятся, если БД недоступна
 async def _exec(sql: str, *args) -> int:
@@ -143,6 +189,7 @@ async def _exec(sql: str, *args) -> int:
     async with pool.acquire() as con:
         return await con.execute(sql, *args)  # type: ignore[return-value]
 
+
 async def _fetchrow(sql: str, *args):
     pool = await _ensure_pool()
     if not pool:
@@ -151,6 +198,7 @@ async def _fetchrow(sql: str, *args):
         _log.debug("sql_fetchrow query=%s params=%s", sql, args)
     async with pool.acquire() as con:
         return await con.fetchrow(sql, *args)
+
 
 async def _fetch(sql: str, *args):
     pool = await _ensure_pool()
@@ -207,7 +255,10 @@ async def ensure_provider_tokens_schema() -> None:
             try:
                 await con.execute(statement)
             except Exception:
-                _log.exception("provider_tokens_migration_failed statement=%s", statement.strip().split("\n", 1)[0])
+                _log.exception(
+                    "provider_tokens_migration_failed statement=%s",
+                    statement.strip().split("\n", 1)[0],
+                )
                 raise
 
 
@@ -409,7 +460,9 @@ def _offline_append_message(
         pass
 
 
-def _offline_fetch_threads(since_ts: Optional[float], limit: int, tenant_id: Optional[int]) -> List[Dict[str, Any]]:
+def _offline_fetch_threads(
+    since_ts: Optional[float], limit: int, tenant_id: Optional[int]
+) -> List[Dict[str, Any]]:
     if not _is_testing_env() or _OFFLINE_THREADS_FILE is None:
         return []
     try:
@@ -551,14 +604,18 @@ def _offline_threads_to_dialogs(
         )
     return exported
 
+
 # Явная инициализация по желанию
 async def init_db():
     await _ensure_pool()
 
+
 def sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
+
 # -------- Leads / sources --------
+
 
 async def find_lead_by_peer(
     tenant_id: Optional[int],
@@ -676,7 +733,23 @@ async def upsert_lead(
         )
     peer_first = channel_val == "avito"
 
-    if existing is None and peer_first and peer_text:
+    if existing is None and peer_first and peer_text and source_val is not None:
+        existing = await _fetchrow(
+            """
+            SELECT id, tenant_id
+            FROM leads
+            WHERE tenant_id = $1
+              AND channel = $2
+              AND peer = $3
+              AND source_real_id = $4
+            LIMIT 1;
+            """,
+            tenant_val,
+            channel_val,
+            peer_text,
+            source_val,
+        )
+    if existing is None and peer_first and peer_text and source_val is None:
         existing = await find_lead_by_peer(tenant_val, channel_val, peer_text)
     if existing is None and lead_val is not None:
         existing = await _fetchrow(
@@ -702,7 +775,7 @@ async def upsert_lead(
             source_val,
             tenant_val,
         )
-    if existing is None and peer_text:
+    if existing is None and peer_text and not (peer_first and source_val is not None):
         existing = await find_lead_by_peer(tenant_val, channel_val, peer_text)
 
     if existing is not None:
@@ -805,14 +878,19 @@ async def upsert_lead(
             pass
     return lead_val
 
+
 async def upsert_source_cache(lead_id: int, real_id: int):
-    await _exec("""
+    await _exec(
+        """
         INSERT INTO source_cache(lead_id, real_id)
         VALUES($1, $2)
         ON CONFLICT (lead_id)
         DO UPDATE SET real_id = EXCLUDED.real_id,
                       updated_at = now();
-    """, lead_id, real_id)
+    """,
+        lead_id,
+        real_id,
+    )
 
 
 async def lead_exists(lead_id: int, tenant_id: Optional[int] = None) -> bool:
@@ -833,9 +911,12 @@ async def lead_exists(lead_id: int, tenant_id: Optional[int] = None) -> bool:
     )
     return bool(row)
 
+
 # -------- Contacts / linking --------
 
+
 async def resolve_or_create_contact(
+    tenant_id: Optional[int] = None,
     phone: Optional[str] = None,
     whatsapp_phone: Optional[str] = None,
     avito_user_id: Optional[int] = None,
@@ -851,33 +932,101 @@ async def resolve_or_create_contact(
     max_username_norm = (max_username or "").strip() or None
     avito_login_norm = (avito_login or "").strip() or None
     phone_norm = None
+    tenant_val = 0
+    if tenant_id is not None:
+        try:
+            tenant_val = int(tenant_id)
+        except Exception:
+            tenant_val = 0
+    use_tenant_scope = tenant_val > 0
     if phone:
         try:
-            phone_norm = normalize_e164_digits(phone)
+            phone_norm = _normalize_e164_digits(phone)
         except Exception:
             phone_norm = None
     if whatsapp_phone:
-        row = await _fetchrow("SELECT id FROM contacts WHERE whatsapp_phone=$1", whatsapp_phone)
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND whatsapp_phone=$2",
+                tenant_val,
+                whatsapp_phone,
+            )
+        else:
+            row = await _fetchrow("SELECT id FROM contacts WHERE whatsapp_phone=$1", whatsapp_phone)
         if row:
             contact_id = row["id"]
     if contact_id is None and phone_norm:
-        row = await _fetchrow("SELECT id FROM contacts WHERE phone=$1", phone_norm)
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND phone=$2",
+                tenant_val,
+                phone_norm,
+            )
+        else:
+            row = await _fetchrow("SELECT id FROM contacts WHERE phone=$1", phone_norm)
         if row:
             contact_id = row["id"]
     if contact_id is None and avito_user_id:
-        row = await _fetchrow("SELECT id FROM contacts WHERE avito_user_id=$1", avito_user_id)
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND avito_user_id=$2",
+                tenant_val,
+                avito_user_id,
+            )
+        else:
+            row = await _fetchrow("SELECT id FROM contacts WHERE avito_user_id=$1", avito_user_id)
         if row:
             contact_id = row["id"]
     if contact_id is None and avito_login_norm:
-        row = await _fetchrow("SELECT id FROM contacts WHERE avito_login=$1 LIMIT 1", avito_login_norm)
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND avito_login=$2 LIMIT 1",
+                tenant_val,
+                avito_login_norm,
+            )
+        else:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE avito_login=$1 LIMIT 1", avito_login_norm
+            )
         if row:
             contact_id = row["id"]
     if contact_id is None and telegram_user_id:
-        row = await _fetchrow("SELECT id FROM contacts WHERE telegram_user_id=$1::bigint", telegram_user_id)
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND telegram_user_id=$2::bigint",
+                tenant_val,
+                telegram_user_id,
+            )
+        else:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE telegram_user_id=$1::bigint", telegram_user_id
+            )
         if row:
             contact_id = row["id"]
     if contact_id is None and max_user_id:
-        row = await _fetchrow("SELECT id FROM contacts WHERE max_user_id=$1::bigint", max_user_id)
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND max_user_id=$2::bigint",
+                tenant_val,
+                max_user_id,
+            )
+        else:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE max_user_id=$1::bigint", max_user_id
+            )
+        if row:
+            contact_id = row["id"]
+    if contact_id is None and max_username_norm:
+        if use_tenant_scope:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE tenant_id=$1::int AND max_username=$2 LIMIT 1",
+                tenant_val,
+                max_username_norm,
+            )
+        else:
+            row = await _fetchrow(
+                "SELECT id FROM contacts WHERE max_username=$1 LIMIT 1", max_username_norm
+            )
         if row:
             contact_id = row["id"]
 
@@ -957,6 +1106,7 @@ async def resolve_or_create_contact(
     row = await _fetchrow(
         """
         INSERT INTO contacts(
+            tenant_id,
             phone,
             whatsapp_phone,
             avito_user_id,
@@ -966,9 +1116,10 @@ async def resolve_or_create_contact(
             max_user_id,
             max_username
         )
-        VALUES($1,$2,$3,$4,$5::bigint,$6,$7::bigint,$8)
+        VALUES($1::int,$2,$3,$4,$5,$6::bigint,$7,$8::bigint,$9)
         RETURNING id
     """,
+        tenant_val,
         phone_norm or whatsapp_phone,
         whatsapp_phone or phone_norm,
         avito_user_id,
@@ -980,6 +1131,7 @@ async def resolve_or_create_contact(
     )
     # если БД недоступна — вернём фиктивный id, чтобы не падал вызов
     return int(row["id"]) if row and "id" in row else 0
+
 
 async def link_lead_contact(
     lead_id: int,
@@ -1006,6 +1158,7 @@ async def link_lead_contact(
         peer_val,
     )
 
+
 async def get_contact_id_by_lead(lead_id: int) -> Optional[int]:
     row = await _fetchrow("SELECT contact_id FROM lead_contacts WHERE lead_id=$1::bigint", lead_id)
     return row["contact_id"] if row else None
@@ -1027,7 +1180,7 @@ async def get_contact_phone_by_lead(lead_id: int) -> Optional[str]:
     return None
 
 
-async def get_contact_id_by_phone(phone: str | None) -> Optional[int]:
+async def get_contact_id_by_phone(phone: str | None, tenant_id: int | None = None) -> Optional[int]:
     """Return contact id that owns the phone (either phone or whatsapp_phone)."""
     if not phone:
         return None
@@ -1040,13 +1193,22 @@ async def get_contact_id_by_phone(phone: str | None) -> Optional[int]:
         digits = re.sub(r"\D", "", str(phone))
     if not digits:
         return None
-    row = await _fetchrow(
-        "SELECT id FROM contacts WHERE whatsapp_phone=$1 OR phone=$1 LIMIT 1",
-        digits,
-    )
+    if tenant_id is not None:
+        row = await _fetchrow(
+            "SELECT id FROM contacts WHERE tenant_id=$1::int AND (whatsapp_phone=$2 OR phone=$2) LIMIT 1",
+            int(tenant_id),
+            digits,
+        )
+    else:
+        row = await _fetchrow(
+            "SELECT id FROM contacts WHERE whatsapp_phone=$1 OR phone=$1 LIMIT 1",
+            digits,
+        )
     return int(row["id"]) if row and "id" in row and row["id"] is not None else None
 
+
 # -------- Outbox --------
+
 
 async def ensure_outbox_queued(
     lead_id: int,
@@ -1078,34 +1240,51 @@ async def ensure_outbox_queued(
     )
     return dedup
 
+
 async def bump_attempt(lead_id: int, d: str, error: Optional[str] = None):
-    await _exec("""
+    await _exec(
+        """
         UPDATE outbox
         SET attempts = attempts + 1,
             last_error = left($3, 2000),
             status = 'retry',
             updated_at = now()
         WHERE lead_id = $1::bigint AND dedup_hash = $2;
-    """, lead_id, d, error or "")
+    """,
+        lead_id,
+        d,
+        error or "",
+    )
+
 
 async def mark_sent(lead_id: int, d: str):
-    await _exec("""
+    await _exec(
+        """
         UPDATE outbox
         SET status = 'sent',
             sent_at = now(),
             updated_at = now(),
             last_error = NULL
         WHERE lead_id = $1::bigint AND dedup_hash = $2;
-    """, lead_id, d)
+    """,
+        lead_id,
+        d,
+    )
+
 
 async def mark_failed(lead_id: int, d: str, error: str):
-    await _exec("""
+    await _exec(
+        """
         UPDATE outbox
         SET status = 'failed',
             last_error = left($3, 2000),
             updated_at = now()
         WHERE lead_id = $1::bigint AND dedup_hash = $2;
-    """, lead_id, d, error)
+    """,
+        lead_id,
+        d,
+        error,
+    )
 
 
 async def take_outbox_batch(limit: int = 10) -> list[Dict[str, Any]]:
@@ -1146,7 +1325,9 @@ async def take_outbox_batch(limit: int = 10) -> list[Dict[str, Any]]:
             )
     return [dict(row) for row in rows]
 
+
 # -------- Messages --------
+
 
 async def insert_message_in(
     lead_id: int,
@@ -1296,442 +1477,6 @@ async def insert_message_out(
     return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
 
 
-async def get_lead_dialog_metadata(lead_id: int) -> Optional[Mapping[str, Any]]:
-    try:
-        lead_ref = int(lead_id)
-    except Exception:
-        return None
-    if lead_ref <= 0:
-        return None
-    row = await _fetchrow(
-        """
-        SELECT l.id,
-               l.tenant_id,
-               l.channel,
-               l.peer,
-               l.contact,
-               l.title,
-               l.telegram_user_id,
-               l.telegram_username
-        FROM leads l
-        WHERE l.id = $1::bigint
-        LIMIT 1;
-    """,
-        lead_ref,
-    )
-    return row if row else None
-
-
-async def fetch_dialogs_for_tenant(tenant_id: int, limit: int = 200) -> List[Dict[str, Any]]:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return []
-    if tenant_val <= 0:
-        return []
-    try:
-        limit_val = int(limit)
-    except Exception:
-        limit_val = 200
-    if limit_val <= 0:
-        limit_val = 50
-    limit_val = min(limit_val, 500)
-    rows = await _fetch(
-        """
-        SELECT l.id,
-               l.channel,
-               l.peer,
-               l.contact,
-               l.title,
-               l.telegram_username,
-               c.avito_login,
-               m.text AS last_message,
-               m.created_at AS last_ts
-        FROM leads l
-        LEFT JOIN contacts c
-            ON c.id = (
-                SELECT lc.contact_id
-                FROM lead_contacts lc
-                WHERE lc.lead_id = l.id
-                LIMIT 1
-            )
-        LEFT JOIN LATERAL (
-            SELECT m2.text, m2.created_at
-            FROM messages m2
-            WHERE m2.lead_id = l.id
-            ORDER BY m2.created_at DESC
-            LIMIT 1
-        ) m ON true
-        WHERE l.tenant_id = $1
-        ORDER BY m.created_at DESC NULLS LAST, l.updated_at DESC NULLS LAST
-        LIMIT $2;
-    """,
-        tenant_val,
-        limit_val,
-    )
-    return [dict(row) for row in rows]
-
-
-async def list_messages_for_lead(
-    tenant_id: int,
-    lead_id: int,
-    limit: int = 50,
-    before: Optional[datetime] = None,
-) -> List[Dict[str, Any]]:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return []
-    try:
-        lead_val = int(lead_id)
-    except Exception:
-        return []
-    if tenant_val <= 0 or lead_val <= 0:
-        return []
-    try:
-        limit_val = int(limit)
-    except Exception:
-        limit_val = 50
-    if limit_val <= 0:
-        limit_val = 20
-    limit_val = min(limit_val, 200)
-    if before is None:
-        rows = await _fetch(
-            """
-            SELECT id, direction, text, status, is_bot, created_at
-            FROM messages
-            WHERE tenant_id = $1
-              AND lead_id = $2::bigint
-            ORDER BY created_at DESC
-            LIMIT $3;
-        """,
-            tenant_val,
-            lead_val,
-            limit_val,
-        )
-    else:
-        rows = await _fetch(
-            """
-            SELECT id, direction, text, status, is_bot, created_at
-            FROM messages
-            WHERE tenant_id = $1
-              AND lead_id = $2::bigint
-              AND created_at < $3
-            ORDER BY created_at DESC
-            LIMIT $4;
-        """,
-            tenant_val,
-            lead_val,
-            before,
-            limit_val,
-        )
-    return [dict(row) for row in rows]
-
-
-async def create_message_feedback(
-    tenant_id: int,
-    message_id: int,
-    rating: str,
-    comment: Optional[str],
-    *,
-    lead_id: Optional[int] = None,
-    expected_answer: Optional[str] = None,
-) -> int:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return 0
-    try:
-        message_val = int(message_id)
-    except Exception:
-        return 0
-    if tenant_val <= 0 or message_val <= 0:
-        return 0
-    lead_val = None
-    if lead_id is not None:
-        try:
-            lead_val = int(lead_id)
-        except Exception:
-            lead_val = None
-    try:
-        row = await _fetchrow(
-            """
-            INSERT INTO feedback(message_id, tenant_id, rating, comment, lead_id, expected_answer)
-            VALUES($1::bigint, $2, $3, $4, $5::bigint, $6)
-            RETURNING id;
-        """,
-            message_val,
-            tenant_val,
-            rating,
-            comment,
-            lead_val,
-            expected_answer,
-        )
-    except Exception:
-        return 0
-    return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
-
-
-async def get_message_metadata(message_id: int) -> Optional[Mapping[str, Any]]:
-    try:
-        message_val = int(message_id)
-    except Exception:
-        return None
-    if message_val <= 0:
-        return None
-    row = await _fetchrow(
-        """
-        SELECT id, tenant_id, lead_id, direction, is_bot, text, created_at
-        FROM messages
-        WHERE id = $1::bigint
-        LIMIT 1;
-    """,
-        message_val,
-    )
-    return row if row else None
-
-
-async def get_previous_incoming_message(
-    tenant_id: int,
-    lead_id: int,
-    *,
-    before: Optional[datetime] = None,
-) -> Optional[Mapping[str, Any]]:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return None
-    try:
-        lead_val = int(lead_id)
-    except Exception:
-        return None
-    if tenant_val <= 0 or lead_val <= 0:
-        return None
-    if before is None:
-        row = await _fetchrow(
-            """
-            SELECT id, text, created_at
-            FROM messages
-            WHERE tenant_id = $1
-              AND lead_id = $2::bigint
-              AND direction = 0
-            ORDER BY created_at DESC
-            LIMIT 1;
-        """,
-            tenant_val,
-            lead_val,
-        )
-    else:
-        row = await _fetchrow(
-            """
-            SELECT id, text, created_at
-            FROM messages
-            WHERE tenant_id = $1
-              AND lead_id = $2::bigint
-              AND direction = 0
-              AND created_at < $3
-            ORDER BY created_at DESC
-            LIMIT 1;
-        """,
-            tenant_val,
-            lead_val,
-            before,
-        )
-    return row if row else None
-
-
-async def record_training_example(
-    tenant_id: int,
-    *,
-    lead_id: Optional[int],
-    message_id: Optional[int],
-    source: str,
-    source_feedback_id: Optional[int],
-    q_text: str,
-    a_text: str,
-    is_bad: bool = False,
-    embedding_status: str = "pending",
-) -> int:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return 0
-    if tenant_val <= 0:
-        return 0
-    lead_val = None
-    if lead_id is not None:
-        try:
-            lead_val = int(lead_id)
-        except Exception:
-            lead_val = None
-    message_val = None
-    if message_id is not None:
-        try:
-            message_val = int(message_id)
-        except Exception:
-            message_val = None
-    feedback_val = None
-    if source_feedback_id is not None:
-        try:
-            feedback_val = int(source_feedback_id)
-        except Exception:
-            feedback_val = None
-    row = await _fetchrow(
-        """
-        INSERT INTO training_examples(
-            tenant_id,
-            lead_id,
-            message_id,
-            source,
-            source_feedback_id,
-            q_text,
-            a_text,
-            is_bad,
-            embedding_status
-        )
-        VALUES($1, $2::bigint, $3::bigint, $4, $5::bigint, $6, $7, $8, $9)
-        RETURNING id;
-    """,
-        tenant_val,
-        lead_val,
-        message_val,
-        source,
-        feedback_val,
-        q_text,
-        a_text,
-        is_bad,
-        embedding_status,
-    )
-    return int(row["id"]) if row and "id" in row and row["id"] is not None else 0
-
-
-async def mark_bad_bot_message(
-    tenant_id: int,
-    message_id: int,
-    *,
-    feedback_id: Optional[int] = None,
-    reason: Optional[str] = None,
-) -> None:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return None
-    try:
-        message_val = int(message_id)
-    except Exception:
-        return None
-    if tenant_val <= 0 or message_val <= 0:
-        return None
-    feedback_val = None
-    if feedback_id is not None:
-        try:
-            feedback_val = int(feedback_id)
-        except Exception:
-            feedback_val = None
-    await _exec(
-        """
-        INSERT INTO bad_bot_messages(tenant_id, message_id, feedback_id, reason)
-        VALUES($1, $2::bigint, $3::bigint, $4)
-        ON CONFLICT (message_id) DO UPDATE
-        SET feedback_id = EXCLUDED.feedback_id,
-            reason = EXCLUDED.reason;
-    """,
-        tenant_val,
-        message_val,
-        feedback_val,
-        reason,
-    )
-
-
-async def get_feedback_counts(tenant_id: int) -> dict[str, int]:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return {"like": 0, "dislike": 0}
-    if tenant_val <= 0:
-        return {"like": 0, "dislike": 0}
-    try:
-        rows = await _fetch(
-            """
-            SELECT rating, COUNT(*)::int AS total
-            FROM feedback
-            WHERE tenant_id = $1
-            GROUP BY rating;
-        """,
-            tenant_val,
-        )
-    except Exception:
-        return {"like": 0, "dislike": 0}
-    out = {"like": 0, "dislike": 0}
-    for row in rows:
-        rating = str(row.get("rating") or "").strip().lower()
-        total = int(row.get("total") or 0)
-        if rating in out:
-            out[rating] = total
-    return out
-
-
-async def feedback_exists(tenant_id: int, message_id: int) -> bool:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return False
-    try:
-        message_val = int(message_id)
-    except Exception:
-        return False
-    if tenant_val <= 0 or message_val <= 0:
-        return False
-    try:
-        row = await _fetchrow(
-            """
-            SELECT 1
-            FROM feedback
-            WHERE tenant_id = $1
-              AND message_id = $2::bigint
-            LIMIT 1;
-        """,
-            tenant_val,
-            message_val,
-        )
-    except Exception:
-        return False
-    return bool(row)
-
-
-async def list_feedback_message_ids(tenant_id: int, message_ids: list[int]) -> set[int]:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return set()
-    if tenant_val <= 0 or not message_ids:
-        return set()
-    ids: list[int] = []
-    for candidate in message_ids:
-        try:
-            cid = int(candidate)
-        except Exception:
-            continue
-        if cid > 0:
-            ids.append(cid)
-    if not ids:
-        return set()
-    try:
-        rows = await _fetch(
-            """
-            SELECT message_id
-            FROM feedback
-            WHERE tenant_id = $1
-              AND message_id = ANY($2::bigint[]);
-        """,
-            tenant_val,
-            ids,
-        )
-    except Exception:
-        return set()
-    return {int(row.get("message_id")) for row in rows if row.get("message_id")}
-
-
 async def update_message_status(
     message_id: int,
     status: str,
@@ -1775,7 +1520,9 @@ async def get_lead_dialog_metadata(lead_id: int) -> Optional[Mapping[str, Any]]:
                c.whatsapp_phone,
                c.avito_login,
                c.avito_user_id,
-               c.telegram_username AS contact_telegram_username
+               c.telegram_username AS contact_telegram_username,
+               c.max_user_id,
+               c.max_username
         FROM leads
         LEFT JOIN lead_contacts lc ON lc.lead_id = leads.id
         LEFT JOIN contacts c ON c.id = lc.contact_id
@@ -1819,8 +1566,11 @@ async def fetch_dialogs_for_tenant(
                l.title,
                l.contact,
                l.peer,
+               l.source_real_id,
                c.avito_login,
                c.telegram_username,
+               c.max_user_id,
+               c.max_username,
                last_msg.text AS last_message,
                last_msg.created_at AS last_ts
         FROM leads l
@@ -2220,7 +1970,9 @@ async def get_previous_incoming_message(
         return None
 
     selected_reversed = list(reversed(selected))
-    combined_text = " ".join(item.get("text", "").strip() for item in selected_reversed if item.get("text"))
+    combined_text = " ".join(
+        item.get("text", "").strip() for item in selected_reversed if item.get("text")
+    )
     latest = selected[0]
     return {
         "id": latest.get("id"),
@@ -2397,57 +2149,6 @@ async def get_training_examples_for_retrieval(
     return results
 
 
-async def list_training_suggestions(tenant_id: int, *, limit: int = 20) -> list[dict[str, Any]]:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return []
-    if tenant_val <= 0:
-        return []
-    lim = limit if isinstance(limit, int) and limit > 0 else 20
-    rows = await _fetch(
-        """
-        SELECT id, q_text, a_text, source, updated_at, created_at
-        FROM training_examples
-        WHERE tenant_id = $1
-          AND is_active = FALSE
-          AND is_bad = FALSE
-          AND source LIKE 'auto_suggest%'
-        ORDER BY updated_at DESC, id DESC
-        LIMIT $2;
-        """,
-        tenant_val,
-        lim,
-    )
-    results: list[dict[str, Any]] = []
-    for row in rows or []:
-        try:
-            results.append(dict(row))
-        except Exception:
-            if isinstance(row, Mapping):
-                results.append(dict(row.items()))
-    return results
-
-
-async def delete_training_suggestions(tenant_id: int) -> None:
-    try:
-        tenant_val = int(tenant_id)
-    except Exception:
-        return
-    if tenant_val <= 0:
-        return
-    await _exec(
-        """
-        DELETE FROM training_examples
-        WHERE tenant_id = $1
-          AND is_active = FALSE
-          AND is_bad = FALSE
-          AND source LIKE 'auto_suggest%';
-        """,
-        tenant_val,
-    )
-
-
 async def activate_training_examples(example_ids: list[int]) -> None:
     if not example_ids:
         return
@@ -2466,11 +2167,7 @@ async def activate_training_examples(example_ids: list[int]) -> None:
         UPDATE training_examples
         SET is_active = TRUE,
             embedding_status = 'pending',
-            updated_at = now(),
-            source = CASE
-                WHEN source LIKE 'auto_suggest%' THEN 'auto_suggest_approved'
-                ELSE source
-            END
+            updated_at = now()
         WHERE id = ANY($1::bigint[]);
         """,
         ids,
@@ -2724,6 +2421,7 @@ async def list_recent_disliked_feedback(tenant_id: int, limit: int = 50) -> list
                 out.append(dict(row.items()))
     return out
 
+
 async def find_lead_by_telegram(
     tenant_id: int,
     telegram_user_id: int,
@@ -2831,17 +2529,23 @@ async def get_lead_peer(lead_id: int, channel: Optional[str] = None) -> Optional
     value_str = str(value).strip()
     return value_str or None
 
+
 async def get_recent_dialog_by_contact(contact_id: int, limit: int = 40) -> List[Dict[str, Any]]:
-    rows = await _fetch("""
+    rows = await _fetch(
+        """
         SELECT m.direction, m.text, m.created_at
         FROM messages m
         JOIN lead_contacts lc ON lc.lead_id = m.lead_id
         WHERE lc.contact_id = $1
         ORDER BY m.id DESC
         LIMIT $2
-    """, contact_id, limit)
+    """,
+        contact_id,
+        limit,
+    )
     data = list(reversed([dict(r) for r in rows]))
     return data
+
 
 async def stream_whatsapp_dialogs(
     tenant_val: int,
@@ -2852,7 +2556,9 @@ async def stream_whatsapp_dialogs(
     per_message_limit: Optional[int] = None,
     batch_size_dialogs: int = 200,
     message_batch_size: int = 1000,
-) -> tuple[AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]], Dict[str, Any]]:
+) -> tuple[
+    AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]], Dict[str, Any]
+]:
     """Yield WhatsApp dialogs with batched message loaders and export metadata."""
 
     if channel not in {"whatsapp", "wa"}:
@@ -3005,7 +2711,9 @@ async def stream_whatsapp_dialogs(
             if False:  # pragma: no cover - type guard
                 yield []
 
-        async def _empty_generator() -> AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]]:
+        async def _empty_generator() -> (
+            AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]]
+        ):
             if False:  # pragma: no cover - type guard
                 yield {}, _empty_message_batches()
 
@@ -3110,7 +2818,9 @@ async def stream_whatsapp_dialogs(
         if per_limit_int is not None and per_limit_int > 0:
             limit_for_lead = min(count, per_limit_int)
         total_exported += limit_for_lead
-        selected_dialogs.append({**summary, "message_limit": limit_for_lead, "message_total": count})
+        selected_dialogs.append(
+            {**summary, "message_limit": limit_for_lead, "message_total": count}
+        )
 
     distinct_chat_ids = [dialog["chat_id"] for dialog in selected_dialogs]
     meta.update(
@@ -3222,7 +2932,9 @@ async def stream_whatsapp_dialogs(
                     last_created_at = created_at
                 message_id_raw = row.get("message_id")
                 try:
-                    last_message_id = int(message_id_raw) if message_id_raw is not None else last_message_id
+                    last_message_id = (
+                        int(message_id_raw) if message_id_raw is not None else last_message_id
+                    )
                 except (TypeError, ValueError):
                     last_message_id = last_message_id
 
@@ -3235,7 +2947,9 @@ async def stream_whatsapp_dialogs(
             if len(rows) < limit_current and skip_remaining <= 0:
                 break
 
-    async def _dialog_generator() -> AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]]:
+    async def _dialog_generator() -> (
+        AsyncIterator[tuple[Dict[str, Any], AsyncIterator[List[Dict[str, Any]]]]]
+    ):
         for dialog in selected_dialogs:
             max_messages = dialog.get("message_limit")
             skip_messages = max(dialog.get("message_total", 0) - (max_messages or 0), 0)
@@ -3437,7 +3151,9 @@ async def fetch_whatsapp_dialogs(
 
     return dialogs, meta
 
+
 # -------- Training export: thread fetch (no joins) --------
+
 
 async def fetch_threads(
     tenant: int,
@@ -3497,13 +3213,15 @@ async def fetch_threads(
         if msg_tenant not in (0, tenant_int) and lead_tenant not in (0, tenant_int):
             continue
         msgs = grouped.setdefault(lid, [])
-        msgs.append({
-            "lead_id": lid,
-            "direction": int(r["direction"]) if r.get("direction") is not None else 0,
-            "text": r.get("text") or "",
-            "ts": float(r.get("ts") or 0.0),
-            "contact_id": r.get("contact_id"),
-        })
+        msgs.append(
+            {
+                "lead_id": lid,
+                "direction": int(r["direction"]) if r.get("direction") is not None else 0,
+                "text": r.get("text") or "",
+                "ts": float(r.get("ts") or 0.0),
+                "contact_id": r.get("contact_id"),
+            }
+        )
     out: List[Dict[str, Any]] = []
     for lid, msgs in grouped.items():
         # reverse to chronological
@@ -3516,42 +3234,65 @@ async def fetch_threads(
         sanitized = []
         for m in msgs_sorted:
             sanitized.append({k: v for k, v in m.items() if k != "contact_id"})
-        out.append({
-            "lead_id": lid,
-            "contact_id": contact_id,
-            "messages": sanitized,
-        })
+        out.append(
+            {
+                "lead_id": lid,
+                "contact_id": contact_id,
+                "messages": sanitized,
+            }
+        )
     return out
+
 
 # -------- Webhook log --------
 
-async def insert_webhook_event(provider: str, event_type: str, lead_id: Optional[int], payload: dict):
+
+async def insert_webhook_event(
+    provider: str, event_type: str, lead_id: Optional[int], payload: dict
+):
     # Пытаемся писать в БД. Если пула нет — пишем в файл, чтобы вебхук не падал.
     pool = await _ensure_pool()
     if not pool:
         try:
             os.makedirs("/app/data", exist_ok=True)
             with open("/app/data/webhooks.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "provider": provider,
-                    "event_type": event_type,
-                    "lead_id": lead_id,
-                    "payload": payload,
-                }, ensure_ascii=False) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "provider": provider,
+                            "event_type": event_type,
+                            "lead_id": lead_id,
+                            "payload": payload,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
         except Exception:
             pass
         return
 
     async with pool.acquire() as con:
-        await con.execute("""
+        await con.execute(
+            """
             INSERT INTO webhook_events(provider, event_type, lead_id, payload)
             VALUES($1, $2, $3, $4::jsonb);
-        """, provider, event_type, lead_id, json.dumps(payload, ensure_ascii=False))
+        """,
+            provider,
+            event_type,
+            lead_id,
+            json.dumps(payload, ensure_ascii=False),
+        )
+
+
 async def update_contact_phone(contact_id: int, phone: str | None) -> None:
     """Update contact phone if provided."""
     if not contact_id or not phone:
         return
-    from libs.core.transport import normalize_e164_digits  # local import to avoid circular dependency
+    from libs.core.transport import (
+        normalize_e164_digits,
+    )  # local import to avoid circular dependency
+
     raw_value = phone.decode() if isinstance(phone, (bytes, bytearray)) else str(phone)
     digits = None
     try:
@@ -3582,7 +3323,9 @@ async def update_contact_phone(contact_id: int, phone: str | None) -> None:
     )
 
 
-async def update_contact_telegram(contact_id: int, telegram_user_id: int | None, telegram_username: str | None) -> None:
+async def update_contact_telegram(
+    contact_id: int, telegram_user_id: int | None, telegram_username: str | None
+) -> None:
     """Update contact with Telegram identifiers if missing."""
     if not contact_id:
         return
@@ -3619,7 +3362,9 @@ async def update_contact_avito_login(contact_id: int, avito_login: str | None) -
     )
 
 
-async def update_contact_max(contact_id: int, max_user_id: int | None, max_username: str | None) -> None:
+async def update_contact_max(
+    contact_id: int, max_user_id: int | None, max_username: str | None
+) -> None:
     """Update contact with MAX identifiers if missing."""
     if not contact_id:
         return
@@ -3635,3 +3380,702 @@ async def update_contact_max(contact_id: int, max_user_id: int | None, max_usern
         max_user_id,
         max_username,
     )
+
+
+def _jsonb(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _jsonb_object(value: Any) -> str:
+    if isinstance(value, Mapping):
+        payload: Any = dict(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            payload = {}
+        else:
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = {}
+            payload = dict(parsed) if isinstance(parsed, Mapping) else {}
+    else:
+        payload = {}
+    return _jsonb(payload)
+
+
+async def get_recent_lead_messages(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    try:
+        tenant_val = int(tenant_id)
+        lead_val = int(lead_id)
+    except Exception:
+        return []
+    if tenant_val <= 0 or lead_val <= 0:
+        return []
+    limit_val = limit if isinstance(limit, int) and limit > 0 else 40
+    if _offline_enabled():
+        return []
+    rows = await _fetch(
+        """
+        SELECT id, lead_id, direction, is_bot, source, text, status, created_at
+        FROM messages
+        WHERE tenant_id = $1
+          AND lead_id = $2
+          AND text IS NOT NULL
+          AND btrim(text) <> ''
+        ORDER BY created_at ASC, id ASC
+        LIMIT $3
+        """,
+        tenant_val,
+        lead_val,
+        limit_val,
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            out.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                out.append(dict(row.items()))
+    return out
+
+
+async def create_dialogue_state_snapshot(snapshot: Mapping[str, Any]) -> int:
+    if not isinstance(snapshot, Mapping):
+        return 0
+    if _offline_enabled():
+        return 0
+    try:
+        tenant_id = int(snapshot.get("tenant_id") or 0)
+        lead_id = int(snapshot.get("lead_id") or 0)
+        contact_id = int(snapshot.get("contact_id") or 0)
+    except Exception:
+        return 0
+    row = await _fetchrow(
+        """
+        INSERT INTO dialogue_state_snapshots(
+            tenant_id, lead_id, contact_id, channel, feature_version, fingerprint, snapshot_json
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        RETURNING id
+        """,
+        tenant_id,
+        lead_id,
+        contact_id,
+        str(snapshot.get("channel") or ""),
+        str(snapshot.get("feature_version") or "learning_v2:1"),
+        str(snapshot.get("fingerprint") or ""),
+        _jsonb(dict(snapshot)),
+    )
+    try:
+        return int(row["id"]) if row else 0
+    except Exception:
+        return 0
+
+
+async def create_intervention_episode(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    source_event: str,
+    trigger_user_text: str,
+    pre_bot_snapshot_id: int | None,
+    pre_manager_snapshot_id: int | None,
+    bot_message_id: int | None,
+    manager_message_id: int | None,
+    bot_reply_text: str,
+    manager_reply_text: str,
+    bot_action: Mapping[str, Any],
+    manager_action: Mapping[str, Any],
+    stitched_dialogue: Sequence[Mapping[str, Any]],
+    policy_key: str,
+) -> int:
+    if _offline_enabled():
+        return 0
+    row = await _fetchrow(
+        """
+        INSERT INTO intervention_episodes(
+            tenant_id, lead_id, channel, source_event, trigger_user_text,
+            pre_bot_snapshot_id, pre_manager_snapshot_id, bot_message_id, manager_message_id,
+            bot_reply_text, manager_reply_text, bot_action, manager_action, stitched_dialogue,
+            policy_key
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15)
+        RETURNING id
+        """,
+        int(tenant_id),
+        int(lead_id),
+        str(channel or ""),
+        str(source_event or "manager_outgoing"),
+        str(trigger_user_text or ""),
+        int(pre_bot_snapshot_id) if pre_bot_snapshot_id else None,
+        int(pre_manager_snapshot_id) if pre_manager_snapshot_id else None,
+        int(bot_message_id) if bot_message_id else None,
+        int(manager_message_id) if manager_message_id else None,
+        str(bot_reply_text or ""),
+        str(manager_reply_text or ""),
+        _jsonb(dict(bot_action or {})),
+        _jsonb(dict(manager_action or {})),
+        _jsonb(list(stitched_dialogue or [])),
+        str(policy_key or "") or None,
+    )
+    try:
+        return int(row["id"]) if row else 0
+    except Exception:
+        return 0
+
+
+async def insert_episode_labels(episode_id: int, *, labels: Sequence[Mapping[str, Any]]) -> None:
+    if _offline_enabled() or not labels:
+        return
+    try:
+        episode_ref = int(episode_id)
+    except Exception:
+        return
+    if episode_ref <= 0:
+        return
+    episode_row = await _fetchrow(
+        "SELECT tenant_id FROM intervention_episodes WHERE id = $1 LIMIT 1",
+        episode_ref,
+    )
+    if not episode_row:
+        return
+    tenant_id = int(episode_row.get("tenant_id") if hasattr(episode_row, "get") else episode_row[0])
+    for item in labels:
+        await _exec(
+            """
+            INSERT INTO episode_labels(episode_id, tenant_id, label_type, label_key, label_value, confidence)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+            """,
+            episode_ref,
+            tenant_id,
+            str(item.get("label_type") or "generic"),
+            str(item.get("label_key") or "label"),
+            _jsonb(item.get("label_value") or {}),
+            float(item.get("confidence") or 0.0),
+        )
+
+
+async def list_open_intervention_episodes(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    limit: int = 20,
+    older_than_minutes: int = 180,
+) -> list[dict[str, Any]]:
+    if _offline_enabled():
+        return []
+    lookback_minutes = max(max(older_than_minutes, 5) * 4, 24 * 60)
+    rows = await _fetch(
+        """
+        SELECT id, tenant_id, lead_id, manager_message_id, trigger_user_text, manager_reply_text, created_at
+        FROM intervention_episodes
+        WHERE tenant_id = $1
+          AND lead_id = $2
+          AND status IN ('captured', 'pending')
+          AND created_at >= now() - ($3::int || ' minutes')::interval
+        ORDER BY created_at ASC, id ASC
+        LIMIT $4
+        """,
+        int(tenant_id),
+        int(lead_id),
+        lookback_minutes,
+        max(1, int(limit)),
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            out.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                out.append(dict(row.items()))
+    return out
+
+
+async def finalize_intervention_episode(
+    episode_id: int,
+    outcome_payload: Mapping[str, Any],
+    *,
+    reward: float,
+    status: str = "finalized",
+) -> None:
+    if _offline_enabled():
+        return
+    try:
+        episode_ref = int(episode_id)
+    except Exception:
+        return
+    if episode_ref <= 0:
+        return
+    await _exec(
+        """
+        UPDATE intervention_episodes
+        SET outcome_payload = $2::jsonb,
+            reward = $3,
+            status = $4,
+            updated_at = now()
+        WHERE id = $1
+        """,
+        episode_ref,
+        _jsonb(dict(outcome_payload or {})),
+        float(reward),
+        str(status or "finalized"),
+    )
+
+
+async def upsert_policy_candidate_from_episode(
+    episode_id: int,
+    *,
+    reward: float,
+    signals: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if _offline_enabled():
+        return None
+    try:
+        episode_ref = int(episode_id)
+    except Exception:
+        return None
+    row = await _fetchrow(
+        """
+        SELECT id, tenant_id, lead_id, policy_key, pre_manager_snapshot_id, bot_action, manager_action
+        FROM intervention_episodes
+        WHERE id = $1
+        LIMIT 1
+        """,
+        episode_ref,
+    )
+    if not row:
+        return None
+    tenant_id = int(row.get("tenant_id") if hasattr(row, "get") else row[1])
+    lead_id = int(row.get("lead_id") if hasattr(row, "get") else row[2])
+    policy_key = str(row.get("policy_key") if hasattr(row, "get") else row[3] or "").strip()
+    if not policy_key:
+        return None
+    snapshot_id = int(row.get("pre_manager_snapshot_id") if hasattr(row, "get") else row[4] or 0)
+    snapshot = await _fetchrow(
+        "SELECT snapshot_json FROM dialogue_state_snapshots WHERE id = $1 LIMIT 1",
+        snapshot_id,
+    )
+    if not snapshot:
+        return None
+    snapshot_json = snapshot.get("snapshot_json") if hasattr(snapshot, "get") else snapshot[0]
+    if isinstance(snapshot_json, str):
+        try:
+            snapshot_payload = json.loads(snapshot_json)
+        except Exception:
+            snapshot_payload = {}
+    else:
+        snapshot_payload = dict(snapshot_json or {}) if isinstance(snapshot_json, Mapping) else {}
+    manager_action_map = row.get("manager_action") if hasattr(row, "get") else row[6]
+    bot_action_map = row.get("bot_action") if hasattr(row, "get") else row[5]
+    manager_action = dict(manager_action_map or {}) if isinstance(manager_action_map, Mapping) else {}
+    bot_action = dict(bot_action_map or {}) if isinstance(bot_action_map, Mapping) else {}
+    recommended_action = str(manager_action.get("action") or "answer_direct")
+    avoid_action = str(bot_action.get("action") or "").strip() or None
+    fingerprint_payload = snapshot_payload.get("fingerprint_payload") if isinstance(snapshot_payload, Mapping) else {}
+    if not isinstance(fingerprint_payload, Mapping):
+        fingerprint_payload = {}
+    style_hints = manager_action.get("style_hints") if isinstance(manager_action, Mapping) else {}
+    if not isinstance(style_hints, Mapping):
+        style_hints = {}
+    existing = await _fetchrow(
+        "SELECT id, evidence_count, distinct_leads_count, reward_delta, negative_evidence FROM policy_candidates WHERE tenant_id = $1 AND policy_key = $2 LIMIT 1",
+        tenant_id,
+        policy_key,
+    )
+    candidate_id = 0
+    if not existing:
+        created = await _fetchrow(
+            """
+            INSERT INTO policy_candidates(
+                tenant_id, policy_key, fingerprint_payload, recommended_action, avoid_action,
+                discouraged_actions, style_hints, evidence_count, distinct_leads_count,
+                reward_delta, confidence, freshness, negative_evidence, active, last_episode_id
+            )
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6::jsonb, $7::jsonb, 0, 0, 0, 0, 0, 0, FALSE, $8)
+            RETURNING id
+            """,
+            tenant_id,
+            policy_key,
+            _jsonb(dict(fingerprint_payload)),
+            recommended_action,
+            avoid_action,
+            _jsonb([avoid_action] if avoid_action else []),
+            _jsonb(dict(style_hints)),
+            episode_ref,
+        )
+        if not created:
+            return None
+        candidate_id = int(created["id"])
+    else:
+        candidate_id = int(existing["id"])
+
+    await _exec(
+        """
+        INSERT INTO policy_candidate_evidence(candidate_id, episode_id, tenant_id, lead_id, reward, positive)
+        VALUES($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (candidate_id, episode_id) DO NOTHING
+        """,
+        candidate_id,
+        episode_ref,
+        tenant_id,
+        lead_id,
+        float(reward),
+        bool(reward > 0),
+    )
+    stats = await _fetchrow(
+        """
+        SELECT
+            COUNT(*)::int AS evidence_count,
+            COUNT(DISTINCT lead_id)::int AS distinct_leads_count,
+            COALESCE(AVG(reward), 0)::double precision AS reward_delta,
+            COUNT(*) FILTER (WHERE reward <= 0)::int AS negative_evidence
+        FROM policy_candidate_evidence
+        WHERE candidate_id = $1
+        """,
+        candidate_id,
+    )
+    evidence_count = int(stats.get("evidence_count") if hasattr(stats, "get") else stats[0] or 0)
+    distinct_leads_count = int(stats.get("distinct_leads_count") if hasattr(stats, "get") else stats[1] or 0)
+    reward_delta = float(stats.get("reward_delta") if hasattr(stats, "get") else stats[2] or 0.0)
+    negative_evidence = int(stats.get("negative_evidence") if hasattr(stats, "get") else stats[3] or 0)
+    confidence = max(0.0, min(1.0, 0.45 + min(evidence_count, 8) * 0.06 + max(reward_delta, 0.0) * 0.25 - min(negative_evidence, 5) * 0.08))
+    freshness = max(0.0, min(1.0, 0.4 + min(evidence_count, 10) * 0.04))
+    await _exec(
+        """
+        UPDATE policy_candidates
+        SET fingerprint_payload = $2::jsonb,
+            recommended_action = $3,
+            avoid_action = $4,
+            discouraged_actions = $5::jsonb,
+            style_hints = $6::jsonb,
+            evidence_count = $7,
+            distinct_leads_count = $8,
+            reward_delta = $9,
+            confidence = $10,
+            freshness = $11,
+            negative_evidence = $12,
+            last_episode_id = $13,
+            updated_at = now()
+        WHERE id = $1
+        """,
+        candidate_id,
+        _jsonb(dict(fingerprint_payload)),
+        recommended_action,
+        avoid_action,
+        _jsonb([avoid_action] if avoid_action else []),
+        _jsonb(dict(style_hints)),
+        evidence_count,
+        distinct_leads_count,
+        reward_delta,
+        confidence,
+        freshness,
+        negative_evidence,
+        episode_ref,
+    )
+    out = await _fetchrow("SELECT * FROM policy_candidates WHERE id = $1 LIMIT 1", candidate_id)
+    return dict(out) if out else None
+
+
+async def promote_or_demote_policy_candidate(
+    candidate_id: int,
+    *,
+    min_evidence: int,
+    min_distinct_leads: int,
+    min_reward_delta: float,
+    max_negative_evidence: int,
+) -> None:
+    if _offline_enabled():
+        return
+    try:
+        candidate_ref = int(candidate_id)
+    except Exception:
+        return
+    row = await _fetchrow("SELECT * FROM policy_candidates WHERE id = $1 LIMIT 1", candidate_ref)
+    if not row:
+        return
+    candidate = dict(row)
+    tenant_id = int(candidate.get("tenant_id") or 0)
+    rule_key = str(candidate.get("policy_key") or "").strip()
+    should_activate = (
+        int(candidate.get("evidence_count") or 0) >= int(min_evidence)
+        and int(candidate.get("distinct_leads_count") or 0) >= int(min_distinct_leads)
+        and float(candidate.get("reward_delta") or 0.0) >= float(min_reward_delta)
+        and int(candidate.get("negative_evidence") or 0) <= int(max_negative_evidence)
+    )
+    await _exec(
+        "UPDATE policy_candidates SET active = $2, updated_at = now() WHERE id = $1",
+        candidate_ref,
+        bool(should_activate),
+    )
+    existing = await _fetchrow(
+        "SELECT id FROM tenant_policy_rules WHERE tenant_id = $1 AND rule_key = $2 LIMIT 1",
+        tenant_id,
+        rule_key,
+    )
+    status = "active" if should_activate else "disabled"
+    if existing:
+        await _exec(
+            """
+            UPDATE tenant_policy_rules
+            SET candidate_id = $2,
+                fingerprint_payload = $3::jsonb,
+                recommended_action = $4,
+                avoid_action = $5,
+                style_hints = $6::jsonb,
+                confidence = $7,
+                evidence_count = $8,
+                status = $9,
+                active = $10,
+                updated_at = now(),
+                promoted_at = CASE WHEN $10 THEN now() ELSE promoted_at END,
+                demoted_at = CASE WHEN NOT $10 THEN now() ELSE demoted_at END
+            WHERE id = $1
+            """,
+            int(existing.get("id") or 0),
+            candidate_ref,
+            _jsonb_object(candidate.get("fingerprint_payload")),
+            str(candidate.get("recommended_action") or ""),
+            str(candidate.get("avoid_action") or "") or None,
+            _jsonb_object(candidate.get("style_hints")),
+            float(candidate.get("confidence") or 0.0),
+            int(candidate.get("evidence_count") or 0),
+            status,
+            bool(should_activate),
+        )
+    else:
+        await _exec(
+            """
+            INSERT INTO tenant_policy_rules(
+                tenant_id, candidate_id, rule_key, fingerprint_payload,
+                recommended_action, avoid_action, style_hints, confidence,
+                evidence_count, status, active, shadow_only, promoted_at, demoted_at
+            )
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10, $11, TRUE,
+                    CASE WHEN $11 THEN now() ELSE NULL END,
+                    CASE WHEN NOT $11 THEN now() ELSE NULL END)
+            ON CONFLICT (tenant_id, rule_key) DO NOTHING
+            """,
+            tenant_id,
+            candidate_ref,
+            rule_key,
+            _jsonb_object(candidate.get("fingerprint_payload")),
+            str(candidate.get("recommended_action") or ""),
+            str(candidate.get("avoid_action") or "") or None,
+            _jsonb_object(candidate.get("style_hints")),
+            float(candidate.get("confidence") or 0.0),
+            int(candidate.get("evidence_count") or 0),
+            status,
+            bool(should_activate),
+        )
+
+
+async def list_tenant_policy_rules(
+    tenant_id: int,
+    *,
+    active_only: bool = True,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    if _offline_enabled():
+        return []
+    sql = [
+        "SELECT id, tenant_id, candidate_id, rule_key, fingerprint_payload, recommended_action, avoid_action, style_hints, confidence, evidence_count, status, active, shadow_only, updated_at",
+        "FROM tenant_policy_rules",
+        "WHERE tenant_id = $1",
+    ]
+    params: list[Any] = [int(tenant_id)]
+    if active_only:
+        sql.append("AND active = TRUE")
+        sql.append("AND status <> 'disabled'")
+    params.append(max(1, int(limit)))
+    sql.append(f"ORDER BY confidence DESC, evidence_count DESC, updated_at DESC LIMIT ${len(params)}")
+    rows = await _fetch(" ".join(sql), *params)
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            out.append(dict(row))
+        except Exception:
+            if isinstance(row, Mapping):
+                out.append(dict(row.items()))
+    return out
+
+
+async def create_policy_decision(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    channel: str,
+    snapshot: Mapping[str, Any],
+    status: str,
+    mode: str,
+    reason: str,
+    similarity: float,
+    confidence: float,
+    recommended_action: str,
+    avoid_action: str,
+    style_hints: Mapping[str, Any],
+    rule_id: int | None,
+) -> int:
+    if _offline_enabled():
+        return 0
+    snapshot_id = await create_dialogue_state_snapshot(snapshot)
+    row = await _fetchrow(
+        """
+        INSERT INTO policy_decisions(
+            tenant_id, lead_id, channel, snapshot_id, rule_id, mode, status, reason,
+            similarity, confidence, recommended_action, avoid_action, style_hints
+        )
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+        RETURNING id
+        """,
+        int(tenant_id),
+        int(lead_id),
+        str(channel or ""),
+        int(snapshot_id) if snapshot_id else None,
+        int(rule_id) if rule_id else None,
+        str(mode or "shadow"),
+        str(status or "skipped"),
+        str(reason or ""),
+        float(similarity),
+        float(confidence),
+        str(recommended_action or ""),
+        str(avoid_action or "") or None,
+        _jsonb(dict(style_hints or {})),
+    )
+    try:
+        return int(row["id"]) if row else 0
+    except Exception:
+        return 0
+
+
+async def mark_policy_decision_applied(decision_id: int, *, applied: bool) -> None:
+    if _offline_enabled():
+        return
+    try:
+        decision_ref = int(decision_id)
+    except Exception:
+        return
+    await _exec(
+        "UPDATE policy_decisions SET applied = $2 WHERE id = $1",
+        decision_ref,
+        bool(applied),
+    )
+
+
+async def get_recent_policy_decision_for_lead(
+    tenant_id: int,
+    lead_id: int,
+    *,
+    within_minutes: int = 180,
+) -> dict[str, Any] | None:
+    if _offline_enabled():
+        return None
+    row = await _fetchrow(
+        """
+        SELECT id, recommended_action, status, mode, created_at
+        FROM policy_decisions
+        WHERE tenant_id = $1
+          AND lead_id = $2
+          AND created_at >= now() - ($3::int || ' minutes')::interval
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        int(tenant_id),
+        int(lead_id),
+        max(5, int(within_minutes)),
+    )
+    if not row:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        if isinstance(row, Mapping):
+            return dict(row.items())
+    return None
+
+
+async def create_policy_outcome(
+    *,
+    tenant_id: int,
+    lead_id: int,
+    episode_id: int,
+    decision_id: int,
+    reward: float,
+    outcome_payload: Mapping[str, Any],
+    manager_agreement: bool | None,
+    manager_action: str | None,
+) -> int:
+    if _offline_enabled():
+        return 0
+    row = await _fetchrow(
+        """
+        INSERT INTO policy_outcomes(
+            tenant_id, lead_id, episode_id, decision_id, reward,
+            manager_agreement, manager_action, outcome_payload
+        )
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+        RETURNING id
+        """,
+        int(tenant_id),
+        int(lead_id),
+        int(episode_id),
+        int(decision_id) if decision_id else None,
+        float(reward),
+        manager_agreement,
+        str(manager_action or "") or None,
+        _jsonb(dict(outcome_payload or {})),
+    )
+    try:
+        return int(row["id"]) if row else 0
+    except Exception:
+        return 0
+
+
+async def get_learning_policy_stats(tenant_id: int, *, days: int = 30) -> dict[str, Any]:
+    if _offline_enabled():
+        return {}
+    row = await _fetchrow(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE source_event = 'manager_outgoing')::int AS manager_takeovers,
+            COUNT(*) FILTER (WHERE (outcome_payload->>'repeated_question_stopped') = 'false')::int AS repeated_question_failures,
+            COUNT(*) FILTER (WHERE (outcome_payload->>'no_fallback_spiral') = 'false')::int AS fallback_failures,
+            COALESCE(AVG(reward), 0)::double precision AS outcome_lift_estimate
+        FROM intervention_episodes
+        WHERE tenant_id = $1
+          AND created_at >= now() - ($2::int || ' days')::interval
+        """,
+        int(tenant_id),
+        max(1, int(days)),
+    )
+    decisions = await _fetchrow(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE mode = 'shadow')::int AS policy_shadow_decisions,
+            COUNT(*) FILTER (WHERE applied = TRUE)::int AS policy_apply_decisions,
+            COUNT(*) FILTER (WHERE status = 'skipped')::int AS policy_regret_events,
+            COUNT(*) FILTER (WHERE active = TRUE)::int AS active_rule_count
+        FROM policy_decisions d
+        LEFT JOIN tenant_policy_rules r ON r.id = d.rule_id
+        WHERE d.tenant_id = $1
+          AND d.created_at >= now() - ($2::int || ' days')::interval
+        """,
+        int(tenant_id),
+        max(1, int(days)),
+    )
+    out: dict[str, Any] = {}
+    for source in (row, decisions):
+        if not source:
+            continue
+        try:
+            out.update(dict(source))
+        except Exception:
+            if isinstance(source, Mapping):
+                out.update(dict(source.items()))
+    return out

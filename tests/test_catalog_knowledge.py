@@ -66,6 +66,32 @@ def test_search_catalog_ranks_by_keywords(catalog_core):
     assert results[0].get("title") == "Milano 10"
 
 
+def test_search_catalog_prefers_highest_price_for_explicit_expensive_request(catalog_core):
+    tenant_id = catalog_core
+    needs = core.infer_user_needs("покажите самую дорогую модель")
+    results = core.search_catalog(
+        needs,
+        limit=1,
+        tenant=tenant_id,
+        query="покажите самую дорогую модель",
+    )
+    assert results, "expected priced result for expensive request"
+    assert results[0].get("title") == "Sirius Pro"
+
+
+def test_search_catalog_prefers_lowest_price_for_explicit_cheap_request(catalog_core):
+    tenant_id = catalog_core
+    needs = core.infer_user_needs("покажите самую дешевую модель")
+    results = core.search_catalog(
+        needs,
+        limit=1,
+        tenant=tenant_id,
+        query="покажите самую дешевую модель",
+    )
+    assert results, "expected priced result for cheap request"
+    assert results[0].get("title") == "Nord 70"
+
+
 @pytest.mark.anyio
 async def test_build_llm_messages_embed_catalog_context(catalog_core):
     tenant_id = catalog_core

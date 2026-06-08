@@ -57,12 +57,12 @@ def _write_pdf(path: Path, lines: list[str]) -> None:
 
     xref_pos = len(output)
     output.extend(b"xref\n")
-    output.extend(f"0 {len(objects)+1}\n".encode("ascii"))
+    output.extend(f"0 {len(objects) + 1}\n".encode("ascii"))
     output.extend(b"0000000000 65535 f \n")
     for offset in offsets:
         output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
     output.extend(b"trailer\n")
-    output.extend(f"<< /Size {len(objects)+1} /Root 1 0 R >>\n".encode("ascii"))
+    output.extend(f"<< /Size {len(objects) + 1} /Root 1 0 R >>\n".encode("ascii"))
     output.extend(b"startxref\n")
     output.extend(f"{xref_pos}\n".encode("ascii"))
     output.extend(b"%%EOF")

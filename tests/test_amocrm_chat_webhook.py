@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from libs.core.services import amocrm_chat
+
+
+pytestmark = pytest.mark.unit
 
 
 def test_extract_webhook_message_parses_picture_payload() -> None:

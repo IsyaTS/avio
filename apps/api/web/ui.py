@@ -47,6 +47,12 @@ def render_template(
     data.setdefault("ASSET_VERSION", data["client_settings_version"])
     data.setdefault("favicon_version", favicon_version())
     data.setdefault("landing_version", landing_version())
-    response = templates.TemplateResponse(template_name, data, status_code=status_code)
+    # FastAPI/Starlette TemplateResponse API expects request first.
+    response = templates.TemplateResponse(
+        request=data["request"],
+        name=template_name,
+        context=data,
+        status_code=status_code,
+    )
     response.headers["X-Asset-Version"] = data["client_settings_version"]
     return response

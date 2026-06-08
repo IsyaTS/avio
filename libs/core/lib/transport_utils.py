@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
+from libs.core.lib.numbers import coerce_int as _coerce_int_shared
 from libs.core.message_envelope import sanitize_display_name
 from libs.core.schemas import Attachment, MessageIn, TransportMessage
 
 LOGGER = logging.getLogger("app.transport")
-_CHANNELS = {"telegram", "whatsapp", "max"}
+_CHANNELS = {"telegram", "whatsapp", "max", "max_personal"}
 
 
 def _model_dump(model: Any) -> dict[str, Any]:
@@ -45,14 +46,18 @@ def normalize_channel(value: str | None) -> str:
     return channel
 
 
-def ensure_transport_message(payload: Mapping[str, Any], *, default_channel: str | None = None) -> TransportMessage:
+def ensure_transport_message(
+    payload: Mapping[str, Any], *, default_channel: str | None = None
+) -> TransportMessage:
     data = dict(payload)
     if "channel" not in data and default_channel:
         data["channel"] = default_channel
     return TransportMessage(**data)
 
 
-def ensure_message_in(payload: Mapping[str, Any], *, default_channel: str | None = None) -> MessageIn:
+def ensure_message_in(
+    payload: Mapping[str, Any], *, default_channel: str | None = None
+) -> MessageIn:
     data = dict(payload)
     if "channel" not in data and default_channel:
         data["channel"] = default_channel
@@ -94,14 +99,6 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
     if channel != "telegram":
         return {key: value for key, value in data.items() if value is not None}
 
-    def _coerce_int(value: Any) -> int | None:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
     tenant_raw = data.get("tenant")
     try:
         tenant = int(tenant_raw) if tenant_raw is not None else None
@@ -122,17 +119,19 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
 
     telegram_user_id = message.telegram_user_id
     if telegram_user_id is None:
-        telegram_user_id = _coerce_int(data.get("telegram_user_id"))
+        telegram_user_id = _coerce_int_shared(data.get("telegram_user_id"))
 
     username_value = message.username if message.username is not None else data.get("username")
     if isinstance(username_value, str):
         username_value = username_value.strip() or None
-    display_name_value = message.display_name if message.display_name is not None else data.get("display_name")
+    display_name_value = (
+        message.display_name if message.display_name is not None else data.get("display_name")
+    )
     display_name_value = sanitize_display_name(display_name_value)
 
     peer_id_value = message.peer_id
     if peer_id_value is None:
-        peer_id_value = _coerce_int(data.get("peer_id"))
+        peer_id_value = _coerce_int_shared(data.get("peer_id"))
 
     peer_value: str | None
     if peer_id_value is not None:
@@ -146,16 +145,20 @@ def message_in_asdict(message: MessageIn) -> dict[str, Any]:
         else:
             peer_value = str(peer_raw)
 
-    message_id_value = message.message_id if message.message_id is not None else data.get("message_id")
+    message_id_value = (
+        message.message_id if message.message_id is not None else data.get("message_id")
+    )
     if isinstance(message_id_value, str):
         message_id_value = message_id_value.strip() or None
     elif message_id_value is not None and not isinstance(message_id_value, int):
-        coerced = _coerce_int(message_id_value)
+        coerced = _coerce_int_shared(message_id_value)
         message_id_value = coerced if coerced is not None else str(message_id_value)
 
     attachments_value = data.get("attachments")
     if not isinstance(attachments_value, list):
-        attachments_value = list(message.attachments) if isinstance(message.attachments, list) else []
+        attachments_value = (
+            list(message.attachments) if isinstance(message.attachments, list) else []
+        )
 
     nested: dict[str, Any] = {
         "id": message_id_value,

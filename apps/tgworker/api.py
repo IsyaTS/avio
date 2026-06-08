@@ -9,9 +9,10 @@ import re
 import random
 import uuid
 import io
-import imghdr
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Optional
+from urllib.parse import quote
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -23,6 +24,7 @@ from telethon.errors.rpcerrorlist import (
     ChannelPrivateError,
     FloodWaitError,
 )
+
 try:  # pragma: no cover - pydantic v1/v2 compatibility
     from pydantic import ConfigDict
 except ImportError:  # pragma: no cover - pydantic v1
@@ -70,7 +72,9 @@ from .metrics import (
 logger = logging.getLogger("tgworker.api")
 ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 _TELEGRAM_WEBHOOK_PATH = "/webhook/telegram"
-_RESOLVE_ENTITY_AFTER_SEND = (os.getenv("TGWORKER_RESOLVE_ENTITY_AFTER_SEND") or "0").strip().lower() in {
+_RESOLVE_ENTITY_AFTER_SEND = (
+    os.getenv("TGWORKER_RESOLVE_ENTITY_AFTER_SEND") or "0"
+).strip().lower() in {
     "1",
     "true",
     "yes",
@@ -170,7 +174,7 @@ class TelegramSendRequest(_TenantModel):
             if cleaned != "telegram":
                 raise ValueError("channel_must_be_telegram")
             return "telegram"
-        
+
         @field_validator("to", mode="before")
         @classmethod
         def _empty_to_to_none(cls, value: Any) -> Any:
@@ -179,7 +183,7 @@ class TelegramSendRequest(_TenantModel):
             if isinstance(value, str) and not value.strip():
                 return None
             return value
-        
+
         @model_validator(mode="after")
         def _validate_target(self) -> "TelegramSendRequest":
             if self.to is None and (self.phone is None or not str(self.phone).strip()):
@@ -194,7 +198,7 @@ class TelegramSendRequest(_TenantModel):
             if cleaned != "telegram":
                 raise ValueError("channel_must_be_telegram")
             return "telegram"
-        
+
         @validator("to", pre=True)
         def _empty_to_to_none(cls, value: Any) -> Any:
             if value is None:
@@ -202,7 +206,7 @@ class TelegramSendRequest(_TenantModel):
             if isinstance(value, str) and not value.strip():
                 return None
             return value
-        
+
         @root_validator
         def _validate_target(cls, values: dict[str, Any]) -> dict[str, Any]:
             to_value = values.get("to")
@@ -308,7 +312,17 @@ def create_app() -> FastAPI:
         qr_poll_interval=cfg.qr_poll_interval,
     )
 
-    app = FastAPI(title="tgworker")
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):  # pragma: no cover - wiring
+        await manager.start()
+        if cfg.api_id <= 0 or not cfg.api_hash:
+            logger.warning("telegram api credentials are not configured")
+        try:
+            yield
+        finally:
+            await manager.shutdown()
+
+    app = FastAPI(title="tgworker", lifespan=_lifespan)
     app.state.session_manager = manager
     pending_registry: dict[int, PendingEntry] = {}
     tenant_locks: dict[int, asyncio.Lock] = {}
@@ -397,7 +411,11 @@ def create_app() -> FastAPI:
     def _entity_display_name(entity: Any) -> str | None:
         first_name = getattr(entity, "first_name", None)
         last_name = getattr(entity, "last_name", None)
-        parts = [part.strip() for part in (first_name, last_name) if isinstance(part, str) and part.strip()]
+        parts = [
+            part.strip()
+            for part in (first_name, last_name)
+            if isinstance(part, str) and part.strip()
+        ]
         if parts:
             combined = " ".join(parts)
             if combined.strip().lower() not in {"contact", "контакт"}:
@@ -414,14 +432,21 @@ def create_app() -> FastAPI:
         return None
 
     def _image_media_type(data: bytes) -> str:
-        kind = imghdr.what(None, h=data)
-        if kind == "png":
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
             return "image/png"
-        if kind == "gif":
+        if data.startswith((b"GIF87a", b"GIF89a")):
             return "image/gif"
-        if kind == "webp":
+        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             return "image/webp"
         return "image/jpeg"
+
+    def _safe_content_disposition(filename: str) -> str:
+        cleaned = str(filename or "").strip()
+        if not cleaned:
+            return "attachment"
+        ascii_fallback = "".join(ch if ord(ch) < 128 else "_" for ch in cleaned) or "file"
+        encoded = quote(cleaned, safe="")
+        return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
     @app.get("/media/{tenant}/{peer_id}/{message_id}")
     async def download_media(
@@ -436,7 +461,9 @@ def create_app() -> FastAPI:
         manager = app.state.session_manager
         client = await manager.get_client(int(tenant))
         if client is None:
-            return JSONResponse({"error": "not_authorized"}, status_code=409, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "not_authorized"}, status_code=409, headers=dict(NO_STORE_HEADERS)
+            )
         peer_entity = None
         try:
             peer_entity = await client.get_entity(int(peer_id))
@@ -445,21 +472,33 @@ def create_app() -> FastAPI:
         try:
             message = await client.get_messages(peer_entity, ids=[int(message_id)])
         except Exception:
-            logger.exception("media_fetch_failed tenant=%s peer=%s message=%s", tenant, peer_id, message_id)
-            return JSONResponse({"error": "media_fetch_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS))
+            logger.exception(
+                "media_fetch_failed tenant=%s peer=%s message=%s", tenant, peer_id, message_id
+            )
+            return JSONResponse(
+                {"error": "media_fetch_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS)
+            )
         if isinstance(message, list):
             message = next((item for item in message if item is not None), None)
         if not message:
-            return JSONResponse({"error": "media_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "media_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS)
+            )
         buf = io.BytesIO()
         try:
             await client.download_media(message, file=buf)
         except Exception:
-            logger.exception("media_download_failed tenant=%s peer=%s message=%s", tenant, peer_id, message_id)
-            return JSONResponse({"error": "media_download_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS))
+            logger.exception(
+                "media_download_failed tenant=%s peer=%s message=%s", tenant, peer_id, message_id
+            )
+            return JSONResponse(
+                {"error": "media_download_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS)
+            )
         data = buf.getvalue()
         if not data:
-            return JSONResponse({"error": "media_empty"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "media_empty"}, status_code=404, headers=dict(NO_STORE_HEADERS)
+            )
         filename = None
         mime = None
         file_obj = getattr(message, "file", None)
@@ -468,8 +507,10 @@ def create_app() -> FastAPI:
             mime = getattr(file_obj, "mime_type", None)
         headers = dict(NO_STORE_HEADERS)
         if filename:
-            headers["Content-Disposition"] = f"attachment; filename={filename}"
-        return Response(content=data, media_type=mime or "application/octet-stream", headers=headers)
+            headers["Content-Disposition"] = _safe_content_disposition(str(filename))
+        return Response(
+            content=data, media_type=mime or "application/octet-stream", headers=headers
+        )
 
     @app.get("/avatar/{tenant}/{peer_id}")
     async def download_avatar(
@@ -483,20 +524,28 @@ def create_app() -> FastAPI:
         manager = app.state.session_manager
         client = await manager.get_client(int(tenant))
         if client is None:
-            return JSONResponse({"error": "not_authorized"}, status_code=409, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "not_authorized"}, status_code=409, headers=dict(NO_STORE_HEADERS)
+            )
         try:
             peer_entity = await client.get_entity(int(peer_id))
         except Exception:
-            return JSONResponse({"error": "peer_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "peer_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS)
+            )
         buf = io.BytesIO()
         try:
             await client.download_profile_photo(peer_entity, file=buf)
         except Exception:
             logger.exception("avatar_download_failed tenant=%s peer=%s", tenant, peer_id)
-            return JSONResponse({"error": "avatar_download_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "avatar_download_failed"}, status_code=500, headers=dict(NO_STORE_HEADERS)
+            )
         data = buf.getvalue()
         if not data:
-            return JSONResponse({"error": "avatar_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS))
+            return JSONResponse(
+                {"error": "avatar_not_found"}, status_code=404, headers=dict(NO_STORE_HEADERS)
+            )
         headers = dict(NO_STORE_HEADERS)
         headers["Content-Type"] = _image_media_type(data)
         return Response(content=data, media_type=headers["Content-Type"], headers=headers)
@@ -543,9 +592,7 @@ def create_app() -> FastAPI:
                 record["failed"] += 1
                 errors = record.setdefault("errors", [])
                 if isinstance(errors, list) and len(errors) < 20:
-                    errors.append(
-                        {"username": username, "error": str(exc) or "telegram_error"}
-                    )
+                    errors.append({"username": username, "error": str(exc) or "telegram_error"})
             except Exception as exc:
                 record["failed"] += 1
                 errors = record.setdefault("errors", [])
@@ -742,7 +789,9 @@ def create_app() -> FastAPI:
                 entry.last_error = None
             entry.png_bytes = None
 
-        _apply_state(entry, derived_state, reason=entry.last_error if derived_state == "failed" else None)
+        _apply_state(
+            entry, derived_state, reason=entry.last_error if derived_state == "failed" else None
+        )
 
         if entry.state == "waiting_qr" and entry.is_expired():
             entry.last_error = "qr_expired"
@@ -755,16 +804,6 @@ def create_app() -> FastAPI:
 
         pending_registry[tenant] = entry
         return entry
-
-    @app.on_event("startup")
-    async def _startup() -> None:  # pragma: no cover - wiring
-        await manager.start()
-        if cfg.api_id <= 0 or not cfg.api_hash:
-            logger.warning("telegram api credentials are not configured")
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:  # pragma: no cover - wiring
-        await manager.shutdown()
 
     def require_credentials() -> None:
         if cfg.api_id <= 0 or not cfg.api_hash:
@@ -790,9 +829,7 @@ def create_app() -> FastAPI:
                 if not force_login:
                     body = _entry_payload(entry, stats=_safe_stats_snapshot())
                     body.update({"error": "already_authorized"})
-                    return JSONResponse(
-                        body, status_code=409, headers=dict(NO_STORE_HEADERS)
-                    )
+                    return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
                 await manager.logout(tenant, force=force_login)
                 entry = await _refresh_pending(tenant)
 
@@ -835,9 +872,7 @@ def create_app() -> FastAPI:
             return JSONResponse(body, headers=dict(NO_STORE_HEADERS))
 
     @app.get("/qr/png")
-    async def qr_png(
-        tenant_params: TenantQuery = Depends(), qr_id: str = Query(..., min_length=1)
-    ):
+    async def qr_png(tenant_params: TenantQuery = Depends(), qr_id: str = Query(..., min_length=1)):
         tenant = tenant_params.tenant
         lock = _tenant_lock(tenant)
         async with lock:
@@ -894,9 +929,7 @@ def create_app() -> FastAPI:
                 body = {"ok": False, "error": "not_waiting_2fa", "state": entry.state}
                 return JSONResponse(body, status_code=409, headers=dict(NO_STORE_HEADERS))
 
-            result = await manager.submit_password(
-                tenant, payload.password.get_secret_value()
-            )
+            result = await manager.submit_password(tenant, payload.password.get_secret_value())
             headers = dict(NO_STORE_HEADERS)
             if result.headers:
                 headers.update(result.headers)
@@ -1192,7 +1225,9 @@ def create_app() -> FastAPI:
             )
             return JSONResponse({"error": error}, status_code=500, headers=headers)
 
-        return JSONResponse(body or {"error": "password_exception"}, status_code=500, headers=headers)
+        return JSONResponse(
+            body or {"error": "password_exception"}, status_code=500, headers=headers
+        )
 
     @app.get("/admin/tg/dialogs")
     async def admin_tg_dialogs(request: Request, tenant_params: TenantQuery = Depends()):
@@ -1281,7 +1316,12 @@ def create_app() -> FastAPI:
             )
         except (ChatAdminRequiredError, ChatWriteForbiddenError, ChannelPrivateError) as exc:
             return JSONResponse(
-                {"error": {"code": "chat_admin_required", "message": str(exc) or "chat_admin_required"}},
+                {
+                    "error": {
+                        "code": "chat_admin_required",
+                        "message": str(exc) or "chat_admin_required",
+                    }
+                },
                 status_code=403,
                 headers=dict(NO_STORE_HEADERS),
             )
@@ -1450,9 +1490,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/admin/tg/broadcast/status")
-    async def admin_tg_broadcast_status(
-        request: Request, job_id: str = Query(..., min_length=8)
-    ):
+    async def admin_tg_broadcast_status(request: Request, job_id: str = Query(..., min_length=8)):
         unauthorized = _enforce_admin_strict(request, "/admin/tg/broadcast/status")
         if unauthorized is not None:
             return unauthorized
@@ -1585,7 +1623,12 @@ def create_app() -> FastAPI:
                 digits = f"7{digits}"
             if len(digits) == 11 and digits.startswith("7"):
                 normalized_phone = f"+{digits}"
-        if peer_entity is None and username is None and telegram_user_id is None and not normalized_phone:
+        if (
+            peer_entity is None
+            and username is None
+            and telegram_user_id is None
+            and not normalized_phone
+        ):
             raise HTTPException(
                 status_code=422,
                 detail=[
@@ -1598,13 +1641,20 @@ def create_app() -> FastAPI:
             )
 
         meta_peer_value: Any = None
-        if normalized_phone and peer_entity is None and username is None and telegram_user_id is None:
+        if (
+            normalized_phone
+            and peer_entity is None
+            and username is None
+            and telegram_user_id is None
+        ):
             try:
                 resolver = getattr(manager, "resolve_peer_by_phone")
             except AttributeError:
                 return _error(400, "unsupported_version")
             try:
-                resolved_peer_id, resolved_user_id = await resolver(payload.tenant, normalized_phone)
+                resolved_peer_id, resolved_user_id = await resolver(
+                    payload.tenant, normalized_phone
+                )
             except NotAuthorizedError:
                 return _error(409, "not_authorized")
             except Exception:
@@ -1629,6 +1679,7 @@ def create_app() -> FastAPI:
                 "mime_type": att.mime,
                 "size": att.size,
                 "type": att.type,
+                "path": att.path,
             }
             for att in payload.attachments
         ]
@@ -1735,9 +1786,7 @@ def create_app() -> FastAPI:
         except RPCError as exc:
             return _rpc_error_response(exc)
         except Exception:
-            logger.exception(
-                "event=send_message_failed route=/send tenant=%s", payload.tenant
-            )
+            logger.exception("event=send_message_failed route=/send tenant=%s", payload.tenant)
             return _error(500, "send_failed")
 
         error_value = _extract_error(result)
@@ -1766,9 +1815,7 @@ def create_app() -> FastAPI:
             except RPCError as exc:
                 return _rpc_error_response(exc)
             except Exception:
-                logger.exception(
-                    "event=send_message_failed route=/send tenant=%s", payload.tenant
-                )
+                logger.exception("event=send_message_failed route=/send tenant=%s", payload.tenant)
                 return _error(500, "send_failed")
             error_value = _extract_error(result)
 
@@ -1830,7 +1877,11 @@ def create_app() -> FastAPI:
                     resolved_entity = None
             if resolved_entity is not None:
                 resolved_username = getattr(resolved_entity, "username", None)
-                normalized_username = _normalize_username(resolved_username) if isinstance(resolved_username, str) else None
+                normalized_username = (
+                    _normalize_username(resolved_username)
+                    if isinstance(resolved_username, str)
+                    else None
+                )
                 if normalized_username:
                     response_payload["username"] = normalized_username.lstrip("@")
                 display_name = _entity_display_name(resolved_entity)

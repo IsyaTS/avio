@@ -6,7 +6,6 @@ import time
 import pathlib
 from typing import Any, Dict, List, Tuple
 
-from libs.core import sales_core as core
 from libs.core.sales_core import (
     settings,
     tenant_dir,
@@ -113,6 +112,7 @@ def reset_conversation(tenant: int) -> None:
 
 # ----------------------------- Preconditions helpers -----------------------------
 
+
 def _passport_ready(cfg: Dict[str, Any]) -> bool:
     passport = cfg.get("passport") if isinstance(cfg.get("passport"), dict) else {}
     brand = (passport.get("brand") or "").strip()
@@ -197,7 +197,9 @@ def _channels_ready(cfg: Dict[str, Any], tenant: int) -> bool:
         if isinstance(candidate, str) and candidate.strip():
             return True
 
-    session_meta = integrations.get("wa_session") if isinstance(integrations.get("wa_session"), dict) else {}
+    session_meta = (
+        integrations.get("wa_session") if isinstance(integrations.get("wa_session"), dict) else {}
+    )
     if _session_ready(session_meta):
         return True
     # Some deployments keep session state under a list of tenants
@@ -237,6 +239,7 @@ def preconditions_met(checks: Dict[str, bool]) -> bool:
 
 # ----------------------------- Insights merge -----------------------------
 
+
 def _merge_dict(base: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in (delta or {}).items():
         if value is None:
@@ -261,7 +264,9 @@ def update_tenant_insights(tenant: int, status: str, insights_delta: Dict[str, A
     cfg = read_tenant_config(tenant)
     section = cfg.setdefault("onboarding", {})
     if insights_delta:
-        current = section.setdefault("insights", {}) if isinstance(section.get("insights"), dict) else {}
+        current = (
+            section.setdefault("insights", {}) if isinstance(section.get("insights"), dict) else {}
+        )
         section["insights"] = _merge_dict(current, insights_delta or {})
     section["updated_at"] = int(time.time())
     section.setdefault("started_at", int(time.time()))
@@ -270,6 +275,7 @@ def update_tenant_insights(tenant: int, status: str, insights_delta: Dict[str, A
 
 
 # ----------------------------- LLM helpers -----------------------------
+
 
 def _truncate(text: str, limit: int = 1200) -> str:
     if not text:
@@ -301,7 +307,9 @@ def _insights_excerpt(insights: Dict[str, Any]) -> str:
         return str(insights)
 
 
-def _build_system_prompt(tenant: int, cfg: Dict[str, Any], persona: str, insights: Dict[str, Any]) -> str:
+def _build_system_prompt(
+    tenant: int, cfg: Dict[str, Any], persona: str, insights: Dict[str, Any]
+) -> str:
     passport = cfg.get("passport") if isinstance(cfg.get("passport"), dict) else {}
     brand = passport.get("brand") or "(бренд не указан)"
     agent = passport.get("agent_name") or "менеджер"
@@ -317,7 +325,7 @@ def _build_system_prompt(tenant: int, cfg: Dict[str, Any], persona: str, insight
         "Контекст каталога (фрагмент):\n" + (catalog_excerpt or "(нет каталога)") + "\n\n"
         "Persona (фрагмент):\n" + (persona_excerpt or "(persona.md пока пустой)") + "\n\n"
         "Уже собранные инсайты:\n" + (insights_text or "—") + "\n\n"
-        "Формат ответа строго в JSON: {\"ask\": \"следующий вопрос человеку\", \"insights\": {...}, \"complete\": false}.\n"
+        'Формат ответа строго в JSON: {"ask": "следующий вопрос человеку", "insights": {...}, "complete": false}.\n'
         "Если ты уверен, что собрал достаточно данных для тонкой настройки, установи complete=true и дай короткое завершающее сообщение в поле ask."
     )
 
@@ -436,7 +444,9 @@ async def initial_assistant_turn(
         ask, _, complete = _fallback_question(convo)
         return ask, {}, complete
     try:
-        starter = "Начинаем онбординг. Оцени загруженный каталог и задавай первый уточняющий вопрос."
+        starter = (
+            "Начинаем онбординг. Оцени загруженный каталог и задавай первый уточняющий вопрос."
+        )
         ask, delta, complete = await _llm_step(tenant, convo, cfg, persona, starter)
         if not ask:
             raise ValueError("empty llm response")

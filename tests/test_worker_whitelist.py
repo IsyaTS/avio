@@ -6,6 +6,9 @@ from libs.core.common import OutboxWhitelist
 from apps.worker import main as worker_module
 
 
+pytestmark = pytest.mark.unit
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

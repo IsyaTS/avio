@@ -7,6 +7,8 @@ import re
 from typing import Any, Iterable, Mapping, MutableMapping
 from urllib.parse import urlparse
 
+from libs.core.lib.numbers import coerce_int as _coerce_int_shared
+
 
 MESSAGE_KIND_TEXT = "text"
 MESSAGE_KIND_IMAGE = "image"
@@ -56,6 +58,8 @@ def normalize_channel(value: Any, *, default: str = "whatsapp") -> str:
         "whatsapp": "whatsapp",
         "avito": "avito",
         "max": "max",
+        "max_personal": "max_personal",
+        "max-personal": "max_personal",
         "amocrm": "amocrm",
     }
     return aliases.get(raw, default)
@@ -94,18 +98,19 @@ def normalize_author_kind(value: Any, *, manager: bool = False, is_bot: bool = F
 
 
 def _coerce_int(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except Exception:
-        return None
-    return parsed if parsed >= 0 else None
+    return _coerce_int_shared(value, min_value=0)
 
 
 def normalize_attachment_type(raw_type: Any, mime: Any = None, name: Any = None) -> str:
     type_value = str(raw_type or "").strip().lower()
     mime_value = str(mime or "").strip().lower()
     name_value = str(name or "").strip().lower()
-    if mime_value.startswith("image/") or "photo" in type_value or "image" in type_value or "picture" in type_value:
+    if (
+        mime_value.startswith("image/")
+        or "photo" in type_value
+        or "image" in type_value
+        or "picture" in type_value
+    ):
         return MESSAGE_KIND_IMAGE
     if mime_value.startswith("video/") or "video" in type_value:
         return MESSAGE_KIND_VIDEO
@@ -144,7 +149,9 @@ def normalize_attachment(blob: Mapping[str, Any]) -> dict[str, Any] | None:
         or blob.get("mimetype")
         or ""
     ).strip()
-    attachment_type = normalize_attachment_type(blob.get("type") or blob.get("kind") or blob.get("_"), mime, name)
+    attachment_type = normalize_attachment_type(
+        blob.get("type") or blob.get("kind") or blob.get("_"), mime, name
+    )
     if not name:
         defaults = {
             MESSAGE_KIND_IMAGE: "image.jpg",
@@ -163,13 +170,20 @@ def normalize_attachment(blob: Mapping[str, Any]) -> dict[str, Any] | None:
     }
     if mime:
         normalized["mime"] = mime
-    size = _coerce_int(blob.get("size") or blob.get("file_size") or blob.get("filesize") or blob.get("length"))
+    size = _coerce_int(
+        blob.get("size") or blob.get("file_size") or blob.get("filesize") or blob.get("length")
+    )
     if size is not None:
         normalized["size"] = size
     if caption is not None:
         caption_value = str(caption).strip()
         if caption_value:
             normalized["caption"] = caption_value
+    path_value = blob.get("path")
+    if isinstance(path_value, str):
+        cleaned_path = path_value.strip()
+        if cleaned_path:
+            normalized["path"] = cleaned_path
     return normalized
 
 

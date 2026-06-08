@@ -1,0 +1,30 @@
+Tracked deletions accepted for this release candidate:
+.editorconfig
+.env.example
+apps/api/static/spa/client/assets/index-Czu-Xm0l.js
+apps/tgworker/tests/test_manager_internal_attachment.py
+pyproject.toml
+scripts/chat_simulator.py
+tests/test_worker_outbox_deferred.py
+
+Deploy-sensitive modified files requiring manual review:
+.dockerignore
+.gitignore
+.github/workflows/smoke.yml
+docker-compose.yml
+compose/ci/docker-compose.yml
+infra/caddy/Caddyfile
+ops/deploy.sh
+db/init/002_schema.sql
+db/init/003_contacts.sql
+
+Ignored local/generated candidates that must not be included blindly:
+.codex
+.env_recovery/
+infra/caddy/Caddyfile.backup.*
+infra/caddy/Caddyfile.bak.*
+screens/
+kabinet/
+avio-connect-flow/
+config/tenants/
+libs/config/tenants/

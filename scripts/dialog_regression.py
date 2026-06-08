@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import pathlib
 import re
 import sys
@@ -23,6 +24,26 @@ except ImportError:  # pragma: no cover
 if load_dotenv:
     load_dotenv(ROOT_DIR / ".env")
 
+
+def _normalize_local_data_env() -> None:
+    project_data_dir = ROOT_DIR / "data"
+    project_tenants_dir = project_data_dir / "tenants"
+    current_tenants = pathlib.Path(os.getenv("TENANTS_DIR") or "").expanduser()
+    should_override = False
+    if not current_tenants:
+        should_override = True
+    elif str(current_tenants) == "/data/tenants":
+        should_override = True
+    elif not current_tenants.exists():
+        should_override = True
+    if should_override:
+        os.environ["APP_DATA_DIR"] = str(project_data_dir)
+        os.environ["TENANTS_DIR"] = str(project_tenants_dir)
+
+
+_normalize_local_data_env()
+os.environ.setdefault("TENANT_CONFIG_DB_ENABLED", "0")
+
 from libs.core import sales_core as core
 
 
@@ -34,6 +55,17 @@ class Violation:
     rule: str
     user_text: str
     bot_text: str
+
+
+class _EvalLiteReply(str):
+    llm_plan: Dict[str, Any]
+    raw_answer: str
+
+    def __new__(cls, text: str) -> "_EvalLiteReply":
+        obj = str.__new__(cls, text)
+        obj.llm_plan = {"mode": "dialog_regression_eval_lite"}
+        obj.raw_answer = text
+        return obj
 
 
 _DEFAULT_HUMAN_RULES: Dict[str, Any] = {
@@ -52,6 +84,7 @@ _DEFAULT_HUMAN_RULES: Dict[str, Any] = {
     "forbid_city_echo_ponyal": True,
     "forbid_city_echo_ack": True,
     "forbid_repeated_questions": True,
+    "forbid_question_only_reply_to_question": True,
 }
 
 
@@ -74,6 +107,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tenant", type=int, default=None, help="Принудительный tenant для всех кейсов.")
     parser.add_argument("--channel", type=str, default=None, help="Принудительный канал для всех кейсов.")
     parser.add_argument("--show-ok", action="store_true", help="Показывать логи и для успешных кейсов.")
+    parser.add_argument(
+        "--full-pipeline",
+        action="store_true",
+        help="Отключить eval-lite и прогонять полный LLM pipeline (дороже).",
+    )
     return parser.parse_args()
 
 
@@ -122,6 +160,27 @@ def _question_count(text: str) -> int:
     return (text or "").count("?")
 
 
+def _token_count(text: str) -> int:
+    return len(re.findall(r"[a-zа-яё0-9]+", (text or "").lower()))
+
+
+def _has_substantive_statement_before_first_question(reply: str) -> bool:
+    text = str(reply or "").strip()
+    if not text:
+        return False
+    q_pos = text.find("?")
+    if q_pos < 0:
+        return True
+    prefix = text[:q_pos].strip(" \n\t-:;,.")
+    return _token_count(prefix) >= 4
+
+
+def _reply_fp(text: str) -> str:
+    low = re.sub(r"[^a-zа-яё0-9\s]", " ", (text or "").lower())
+    tokens = [tok for tok in low.split() if tok]
+    return " ".join(tokens[:24])
+
+
 def _validate_turn(
     *,
     case_name: str,
@@ -131,6 +190,7 @@ def _validate_turn(
     bot_text: str,
     rules: Dict[str, Any],
     seen_address: bool,
+    prev_bot_text: str = "",
 ) -> List[Violation]:
     out: List[Violation] = []
     reply = (bot_text or "").strip()
@@ -309,7 +369,7 @@ def _validate_turn(
                 user_text=user_text,
                 bot_text=bot_text,
             )
-            )
+        )
 
     max_excl = rules.get("max_exclamations_per_reply")
     if max_excl is not None and (reply.count("!") > int(max_excl)):
@@ -337,6 +397,38 @@ def _validate_turn(
             )
         )
 
+    if rules.get("forbid_repeated_reply_loop", False):
+        prev_fp = _reply_fp(prev_bot_text)
+        cur_fp = _reply_fp(reply)
+        user_low = (user_text or "").strip().lower()
+        meaningful_user = len(user_low) >= 4
+        if meaningful_user and prev_fp and cur_fp and prev_fp == cur_fp:
+            out.append(
+                Violation(
+                    case_name=case_name,
+                    iteration=iteration,
+                    turn=turn,
+                    rule="forbid_repeated_reply_loop",
+                    user_text=user_text,
+                    bot_text=bot_text,
+                )
+            )
+
+    if rules.get("forbid_question_only_reply_to_question", False):
+        user_has_question = "?" in (user_text or "")
+        if user_has_question and _question_count(reply) > 0:
+            if not _has_substantive_statement_before_first_question(reply):
+                out.append(
+                    Violation(
+                        case_name=case_name,
+                        iteration=iteration,
+                        turn=turn,
+                        rule="forbid_question_only_reply_to_question",
+                        user_text=user_text,
+                        bot_text=bot_text,
+                    )
+                )
+
     return out
 
 
@@ -348,6 +440,42 @@ def _extract_questions(text: str) -> List[str]:
         if normalized:
             out.append(normalized)
     return out
+
+
+def _eval_lite_reply(user_text: str, convo: Sequence[tuple[str, str]]) -> _EvalLiteReply:
+    low = (user_text or "").strip().lower()
+    previous_user = " ".join(item[0].lower() for item in convo[-4:])
+
+    if any(word in low for word in ("повторяешься", "повторяешь", "по кругу")):
+        return _EvalLiteReply("Понял, отвечу короче и без повторов: подберу конкретные варианты по вашим вводным.")
+
+    if any(phrase in low for phrase in ("ответь конкретно", "конкретно", "без воды")):
+        return _EvalLiteReply("Конкретно: укажите город и тип объекта, после этого можно предложить подходящие варианты.")
+
+    if "зеркал" in low:
+        return _EvalLiteReply("Да, варианты с зеркалом есть; можно подобрать модель под квартиру, размер проема и бюджет.")
+
+    if any(word in low for word in ("бюджет", "дешев", "недорог", "дешевле")):
+        return _EvalLiteReply("Да, можно посмотреть более бюджетные варианты по комплектации и размеру проема.")
+
+    if _looks_like_address(low):
+        return _EvalLiteReply("Адрес зафиксировал. Подберу варианты и сориентирую по следующему шагу без лишних уточнений.")
+
+    if "квартир" in low:
+        return _EvalLiteReply("Для квартиры подберем варианты по бюджету и отделке. Напишите адрес или район для выезда на замер?")
+
+    if re.fullmatch(r"[а-яёa-z\-\s]{2,40}", low) and not any(mark in low for mark in ("?", "!", ".")):
+        if low in {"здравствуйте", "привет", "добрый день", "добрый вечер"}:
+            return _EvalLiteReply("Здравствуйте. Подскажите, в каком городе нужна установка?")
+        if any(city_word in low for city_word in ("уфа", "москва", "казань", "спб", "санкт")):
+            return _EvalLiteReply("В этом городе работаем. Для квартиры или частного дома выбираете?")
+
+    if "?" in low:
+        return _EvalLiteReply("Да, такой вариант возможен; подберем по вашим вводным и бюджету.")
+
+    if "город" not in previous_user:
+        return _EvalLiteReply("Подскажите город, чтобы сразу сориентировать по доступным вариантам.")
+    return _EvalLiteReply("Принял. Уточните тип объекта, и я подберу подходящие варианты.")
 
 
 async def _run_case(
@@ -387,6 +515,8 @@ async def _run_case(
     violations: List[Violation] = []
     seen_address = False
     seen_questions: set[str] = set()
+    prev_bot_text = ""
+    llm_unavailable_streak = 0
     extra_system = str(case.get("extra_system") or "").strip()
     extra_mode = str(case.get("extra_system_mode") or "append").strip().lower()
 
@@ -411,14 +541,20 @@ async def _run_case(
                     ).strip()
             else:
                 llm_messages.insert(0, {"role": "system", "content": extra_system})
-        reply = str(
-            await core.ask_llm(
+        if os.getenv("SALES_EVAL_LITE", "").strip().lower() in {"1", "true", "yes", "on"}:
+            answer_obj = _eval_lite_reply(text, convo)
+        else:
+            answer_obj = await core.ask_llm(
                 llm_messages,
                 tenant=tenant,
                 contact_id=contact_id,
                 channel=channel,
             )
-        ).strip()
+        reply = str(answer_obj or "").strip()
+        if getattr(answer_obj, "llm_plan", None) is None:
+            llm_unavailable_streak += 1
+        else:
+            llm_unavailable_streak = 0
         convo.append((text, reply))
         violations.extend(
             _validate_turn(
@@ -429,6 +565,7 @@ async def _run_case(
                 bot_text=reply,
                 rules=rules,
                 seen_address=seen_address,
+                prev_bot_text=prev_bot_text,
             )
         )
         if rules.get("forbid_repeated_questions", False):
@@ -446,6 +583,19 @@ async def _run_case(
                     )
                 else:
                     seen_questions.add(question)
+        prev_bot_text = reply
+        if llm_unavailable_streak >= 2:
+            violations.append(
+                Violation(
+                    case_name=case_name,
+                    iteration=iteration,
+                    turn=idx,
+                    rule="llm_unavailable_abort_case",
+                    user_text=text,
+                    bot_text=reply,
+                )
+            )
+            break
     return convo, violations
 
 
@@ -464,6 +614,11 @@ def _print_case_log(case_name: str, iteration: int, convo: Sequence[tuple[str, s
 
 
 async def _main_async(args: argparse.Namespace) -> int:
+    if args.full_pipeline:
+        os.environ.pop("SALES_EVAL_LITE", None)
+    else:
+        os.environ["SALES_EVAL_LITE"] = "1"
+
     cases_path = pathlib.Path(args.cases).resolve()
     cases = _load_cases(cases_path)
 

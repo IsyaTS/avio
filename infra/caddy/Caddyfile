@@ -2,11 +2,41 @@ api.avio.website {
   reverse_proxy http://app:8000
 }
 
+financeavio.ru {
+  reverse_proxy http://172.17.0.1:18101
+}
+
+app.financeavio.ru {
+  reverse_proxy http://172.17.0.1:18101
+}
+
+aidar.financeavio.ru {
+  reverse_proxy http://172.17.0.1:3014
+}
+
+crm.financeavio.ru {
+  reverse_proxy http://172.17.0.1:18102
+}
+
 dev.avio.website {
+  @n8n_telegram_webhook path /telegram-bot/webhook/* /telegram-bot/webhook-test/*
+  handle @n8n_telegram_webhook {
+    uri strip_prefix /telegram-bot
+    reverse_proxy http://n8n:5678
+  }
+
   reverse_proxy http://app:8000
 }
 
+dveri.avio.website {
+  reverse_proxy http://172.17.0.1:18080
+}
+
 hub.avio.website {
+  reverse_proxy http://app:8000
+}
+
+avio.website {
   reverse_proxy http://app:8000
 }
 

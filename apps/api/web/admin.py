@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 import httpx
 
 from libs.constants import ADMIN_TENANT_ID
-from libs.core import sales_core as core
 from libs.core.sales_core import ADMIN_COOKIE, settings, get_tenant_pubkey, set_tenant_pubkey
 from libs.core.common import OUTBOX_QUEUE_KEY, OUTBOX_DLQ_KEY
 from libs.core.repo import provider_tokens as provider_tokens_repo
@@ -40,6 +39,22 @@ def _auth_ok(request: Request) -> bool:
         return True
     cookie = (request.cookies.get(ADMIN_COOKIE) or "").strip()
     return bool(cookie) and cookie == settings.ADMIN_TOKEN
+
+
+def _request_public_base(request: Request) -> str:
+    headers = request.headers or {}
+    host = (
+        str(headers.get("x-forwarded-host") or headers.get("host") or "").split(",", 1)[0].strip()
+    )
+    proto = (
+        str(headers.get("x-forwarded-proto") or headers.get("x-forwarded-scheme") or "")
+        .split(",", 1)[0]
+        .strip()
+    )
+    if host:
+        scheme = (proto or request.url.scheme or "https").strip(":/")
+        return f"{scheme}://{host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
 
 
 @router.get("/admin/login")
@@ -102,7 +117,7 @@ def dashboard(request: Request, tenant: int = 1):
     tenant = int(tenant)
     keys = C.list_keys(tenant)
     primary = next((item for item in keys if item.get("primary")), None)
-    public_base = C.public_base_url(request)
+    public_base = _request_public_base(request)
 
     context = {
         "request": request,
@@ -394,7 +409,9 @@ async def admin_wa_status(tenant: int, request: Request):
             "qr": bool(session.get("qr")),
             "state": state,
         }
-        return JSONResponse(resp, status_code=200, headers={"X-Debug-Stage": "admin_status_baileys"})
+        return JSONResponse(
+            resp, status_code=200, headers={"X-Debug-Stage": "admin_status_baileys"}
+        )
 
     base_url = C.wa_base_url(int(tenant))
     code, raw = C.http("GET", f"{base_url}/session/{int(tenant)}/status")
@@ -404,7 +421,15 @@ async def admin_wa_status(tenant: int, request: Request):
         data = json.loads(raw)
     except Exception:
         data = {}
-    state = (data.get("last") or data.get("state") or ("no_session" if int(code or 0) == 404 else "unknown")).strip() if isinstance(data, dict) else "unknown"
+    state = (
+        (
+            data.get("last")
+            or data.get("state")
+            or ("no_session" if int(code or 0) == 404 else "unknown")
+        ).strip()
+        if isinstance(data, dict)
+        else "unknown"
+    )
     resp = {
         "ok": bool(data.get("ok", True)) if isinstance(data, dict) else True,
         "tenant": int(tenant),
@@ -412,7 +437,11 @@ async def admin_wa_status(tenant: int, request: Request):
         "qr": bool(data.get("qr")) if isinstance(data, dict) else False,
         "state": state,
     }
-    return JSONResponse(resp, status_code=200, headers={"X-Debug-Stage": f"admin_status_{'tenant' if int(code or 0)!=404 else 'global'}"})
+    return JSONResponse(
+        resp,
+        status_code=200,
+        headers={"X-Debug-Stage": f"admin_status_{'tenant' if int(code or 0)!=404 else 'global'}"},
+    )
 
 
 @router.get("/admin/wa/qr.svg")
@@ -588,7 +617,9 @@ async def admin_tgexport_qr(request: Request, qr_id: str):
     resp = await _tgworker_request("GET", f"/session/qr/{safe_qr}.png")
     headers = {"Cache-Control": "no-store"}
     media_type = resp.headers.get("Content-Type") or "image/png"
-    return Response(resp.content, status_code=resp.status_code, headers=headers, media_type=media_type)
+    return Response(
+        resp.content, status_code=resp.status_code, headers=headers, media_type=media_type
+    )
 
 
 @router.get("/admin/_secret/tgexport/status")

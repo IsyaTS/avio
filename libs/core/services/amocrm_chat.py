@@ -27,6 +27,7 @@ from libs.core.message_envelope import (
     sanitize_display_name,
 )
 from libs.core.repo import crm_chat_links, crm_links, crm_outbox
+from libs.core.lib.numbers import coerce_int as _coerce_int_shared
 
 logger = logging.getLogger(__name__)
 
@@ -42,19 +43,22 @@ _ENV_CHAT_SECRET = "AMOCRM_CHAT_SECRET"
 _ENV_CHAT_TITLE = "AMOCRM_CHAT_TITLE"
 _ENV_CHAT_BOT_ID = "AMOCRM_CHAT_BOT_ID"
 _ENV_CHAT_BASE_URL = "AMOCRM_CHAT_BASE_URL"
+_ENV_CHAT_PROFILE_PATCH = "AMOCRM_CHAT_PROFILE_PATCH"
 
 _DEFAULT_CHAT_SOURCE_ID = "telegram"
 _DEFAULT_CHAT_TITLE = "Avio Telegram"
 _DEFAULT_CHAT_BASE_URL = "https://amojo.amocrm.ru"
 
 
+def _env_flag(name: str, default: bool = False, tenant_id: int | None = None) -> bool:
+    value = _env_value(name, tenant_id)
+    if not value:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _coerce_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(str(value).strip())
-    except Exception:
-        return None
+    return _coerce_int_shared(value)
 
 
 def _env_value(name: str, tenant_id: int | None = None) -> str:
@@ -87,17 +91,30 @@ def resolve_chat_cfg(cfg: Mapping[str, Any] | None, tenant_id: int | None = None
         enabled = enabled_raw.lower() in {"1", "true", "yes", "on"}
     else:
         enabled = bool(chat_cfg.get("enabled"))
-    scope_id = _env_value(_ENV_CHAT_SCOPE_ID, tenant_id) or str(chat_cfg.get("scope_id") or "").strip()
-    channel_id = _env_value(_ENV_CHAT_CHANNEL_ID, tenant_id) or str(chat_cfg.get("channel_id") or "").strip()
+    scope_id = (
+        _env_value(_ENV_CHAT_SCOPE_ID, tenant_id) or str(chat_cfg.get("scope_id") or "").strip()
+    )
+    channel_id = (
+        _env_value(_ENV_CHAT_CHANNEL_ID, tenant_id) or str(chat_cfg.get("channel_id") or "").strip()
+    )
     source_id = (
         _env_value(_ENV_CHAT_SOURCE_ID, tenant_id)
         or str(chat_cfg.get("source_id") or "").strip()
         or _DEFAULT_CHAT_SOURCE_ID
     )
-    push_url = _env_value(_ENV_CHAT_PUSH_URL, tenant_id) or str(chat_cfg.get("push_url") or "").strip()
-    webhook_token = _env_value(_ENV_CHAT_WEBHOOK_TOKEN, tenant_id) or str(chat_cfg.get("webhook_token") or "").strip()
+    push_url = (
+        _env_value(_ENV_CHAT_PUSH_URL, tenant_id) or str(chat_cfg.get("push_url") or "").strip()
+    )
+    webhook_token = (
+        _env_value(_ENV_CHAT_WEBHOOK_TOKEN, tenant_id)
+        or str(chat_cfg.get("webhook_token") or "").strip()
+    )
     secret = _env_value(_ENV_CHAT_SECRET, tenant_id) or str(chat_cfg.get("secret") or "").strip()
-    title = _env_value(_ENV_CHAT_TITLE, tenant_id) or str(chat_cfg.get("title") or "").strip() or _DEFAULT_CHAT_TITLE
+    title = (
+        _env_value(_ENV_CHAT_TITLE, tenant_id)
+        or str(chat_cfg.get("title") or "").strip()
+        or _DEFAULT_CHAT_TITLE
+    )
     bot_id = str(_env_value(_ENV_CHAT_BOT_ID, tenant_id) or chat_cfg.get("bot_id") or "").strip()
     amojo_base_url = (
         _env_value(_ENV_CHAT_BASE_URL, tenant_id)
@@ -148,7 +165,9 @@ def mask_chat_cfg(cfg: Mapping[str, Any] | None, tenant_id: int | None = None) -
     }
 
 
-def ensure_chat_cfg_in_tenant(cfg: Mapping[str, Any] | None, tenant_id: int | None = None) -> dict[str, Any] | None:
+def ensure_chat_cfg_in_tenant(
+    cfg: Mapping[str, Any] | None, tenant_id: int | None = None
+) -> dict[str, Any] | None:
     if not isinstance(cfg, Mapping):
         return None
     resolved = resolve_chat_cfg(cfg, tenant_id)
@@ -195,15 +214,21 @@ def build_webhook_path_token(cfg: Mapping[str, Any] | None, tenant_id: int | Non
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
 
-def build_webhook_url(base_url: str, cfg: Mapping[str, Any] | None, tenant_id: int | None = None) -> str:
+def build_webhook_url(
+    base_url: str, cfg: Mapping[str, Any] | None, tenant_id: int | None = None
+) -> str:
     token = build_webhook_path_token(cfg, tenant_id)
     return f"{str(base_url or '').rstrip('/')}/pub/integrations/amocrm/chat/webhook?token={token}"
 
 
-def build_avatar_path_token(cfg: Mapping[str, Any] | None, tenant_id: int, peer_id: str | int) -> str:
+def build_avatar_path_token(
+    cfg: Mapping[str, Any] | None, tenant_id: int, peer_id: str | int
+) -> str:
     secret = build_webhook_path_token(cfg, int(tenant_id))
     payload = f"{int(tenant_id)}:{str(peer_id).strip()}"
-    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :24
+    ]
 
 
 def build_avatar_proxy_url(
@@ -222,10 +247,14 @@ def build_avatar_proxy_url(
     )
 
 
-def build_lead_avatar_path_token(cfg: Mapping[str, Any] | None, tenant_id: int, lead_id: int) -> str:
+def build_lead_avatar_path_token(
+    cfg: Mapping[str, Any] | None, tenant_id: int, lead_id: int
+) -> str:
     secret = build_webhook_path_token(cfg, int(tenant_id))
     payload = f"lead:{int(tenant_id)}:{int(lead_id)}"
-    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :24
+    ]
 
 
 def build_lead_avatar_proxy_url(
@@ -423,7 +452,9 @@ async def _resolve_amocrm_account(
     from libs.core.repo import amocrm_tokens
     from libs.core.services import amocrm as amocrm_service
 
-    tenant_cfg = dict(cfg) if isinstance(cfg, Mapping) else core_module.read_tenant_config(int(tenant_id))
+    tenant_cfg = (
+        dict(cfg) if isinstance(cfg, Mapping) else core_module.read_tenant_config(int(tenant_id))
+    )
     amocrm_cfg = amocrm_service.get_amocrm_cfg(tenant_cfg) or {}
     token_entry = await amocrm_tokens.get(int(tenant_id))
     base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id), token_entry)
@@ -447,14 +478,18 @@ async def ensure_connected(
     cfg: Mapping[str, Any] | None = None,
     webhook_base_url: str | None = None,
 ) -> dict[str, Any]:
-    tenant_cfg = dict(cfg) if isinstance(cfg, Mapping) else core_module.read_tenant_config(int(tenant_id))
+    tenant_cfg = (
+        dict(cfg) if isinstance(cfg, Mapping) else core_module.read_tenant_config(int(tenant_id))
+    )
     resolved = resolve_chat_cfg(tenant_cfg, int(tenant_id))
     if not resolved.get("enabled"):
         return resolved
     if resolved.get("scope_id"):
         return resolved
     if not resolved.get("channel_id") or not resolved.get("secret"):
-        logger.info("amocrm_chat_connect_skipped tenant=%s reason=channel_or_secret_missing", tenant_id)
+        logger.info(
+            "amocrm_chat_connect_skipped tenant=%s reason=channel_or_secret_missing", tenant_id
+        )
         return resolved
     try:
         account_payload, current_cfg = await _resolve_amocrm_account(int(tenant_id), tenant_cfg)
@@ -464,7 +499,9 @@ async def ensure_connected(
     amojo_id = str(
         account_payload.get("amojo_id")
         or account_payload.get("account_id")
-        or (current_cfg.get("integrations", {}) if isinstance(current_cfg, Mapping) else {}).get("amocrm", {}).get("amojo_id")
+        or (current_cfg.get("integrations", {}) if isinstance(current_cfg, Mapping) else {})
+        .get("amocrm", {})
+        .get("amojo_id")
         or ""
     ).strip()
     if not amojo_id:
@@ -543,7 +580,9 @@ async def _lead_sender_profile(lead_id: int) -> tuple[str, str, dict[str, Any]]:
     data = dict(meta or {})
     tenant_id = int(data.get("tenant_id") or 0)
     channel = str(data.get("channel") or "").strip().lower()
-    username = str(data.get("telegram_username") or data.get("contact_telegram_username") or "").strip()
+    username = str(
+        data.get("telegram_username") or data.get("contact_telegram_username") or ""
+    ).strip()
     contact = sanitize_display_name(data.get("contact"))
     title = sanitize_display_name(data.get("title"))
     if title and re.fullmatch(r"(?i)tg:id\s+\d+", title):
@@ -565,10 +604,16 @@ async def _lead_sender_profile(lead_id: int) -> tuple[str, str, dict[str, Any]]:
         linked_tg_title: str = ""
         if tenant_id > 0:
             try:
-                crm_link = await crm_links.get_link(int(tenant_id), int(lead_id), AMOCRM_CHAT_PROVIDER)
+                crm_link = await crm_links.get_link(
+                    int(tenant_id), int(lead_id), AMOCRM_CHAT_PROVIDER
+                )
             except Exception:
                 crm_link = None
-            provider_lead_id = _coerce_int((crm_link or {}).get("provider_lead_id")) if isinstance(crm_link, Mapping) else None
+            provider_lead_id = (
+                _coerce_int((crm_link or {}).get("provider_lead_id"))
+                if isinstance(crm_link, Mapping)
+                else None
+            )
             if provider_lead_id is not None:
                 fetchrow = getattr(db_module, "_fetchrow", None)
                 if fetchrow:
@@ -598,7 +643,9 @@ async def _lead_sender_profile(lead_id: int) -> tuple[str, str, dict[str, Any]]:
                         row = None
                     if row:
                         row_map = dict(row)
-                        tg_user = str(row_map.get("telegram_user_id") or row_map.get("peer") or "").strip()
+                        tg_user = str(
+                            row_map.get("telegram_user_id") or row_map.get("peer") or ""
+                        ).strip()
                         if tg_user and tg_user.lstrip("-").isdigit():
                             linked_tg_user_id = tg_user
                         linked_tg_username = str(row_map.get("telegram_username") or "").strip()
@@ -722,13 +769,22 @@ def _public_attachment_url(tenant_id: int, attachment: Mapping[str, Any]) -> str
 
 def _attachment_message_type(attachment: Mapping[str, Any]) -> str:
     raw_type = str(attachment.get("type") or attachment.get("_") or "").strip().lower()
-    mime = str(
-        attachment.get("mime")
-        or attachment.get("mime_type")
-        or attachment.get("content_type")
-        or ""
-    ).strip().lower()
-    if mime.startswith("image/") or "photo" in raw_type or "image" in raw_type or "picture" in raw_type:
+    mime = (
+        str(
+            attachment.get("mime")
+            or attachment.get("mime_type")
+            or attachment.get("content_type")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    if (
+        mime.startswith("image/")
+        or "photo" in raw_type
+        or "image" in raw_type
+        or "picture" in raw_type
+    ):
         return "picture"
     if "voice" in raw_type or mime.startswith("audio/ogg") or mime.startswith("audio/opus"):
         return "voice"
@@ -773,10 +829,7 @@ def _normalize_media_attachment(
         "file": "file",
     }.get(message_type, "file")
     file_name = str(
-        attachment.get("filename")
-        or attachment.get("name")
-        or attachment.get("title")
-        or ""
+        attachment.get("filename") or attachment.get("name") or attachment.get("title") or ""
     ).strip() or _guess_file_name(media_url, mime, default_name)
     payload = {
         "message_type": message_type,
@@ -923,6 +976,8 @@ async def _refresh_remote_chat_profile(
     profile: Mapping[str, Any],
     source_id: str,
 ) -> None:
+    if not _env_flag(_ENV_CHAT_PROFILE_PATCH, default=False, tenant_id=int(tenant_id)):
+        return
     scope_id = str(resolved.get("scope_id") or "").strip()
     if not scope_id:
         return
@@ -956,32 +1011,24 @@ async def _refresh_remote_chat_profile(
     if source_id:
         payload["source"] = {"external_id": source_id}
 
-    targets: list[str] = []
     chat_id_value = str(remote_chat_id or "").strip()
-    conv_value = str(conversation_id or "").strip()
-    if chat_id_value:
-        targets.append(chat_id_value)
-    if conv_value and conv_value not in targets:
-        targets.append(conv_value)
-    if not targets:
+    if not chat_id_value:
         return
-    for target in targets:
-        try:
-            await _amojo_request(
-                int(tenant_id),
-                cfg=resolved,
-                method="PATCH",
-                path=f"/v2/origin/custom/{scope_id}/chats/{target}",
-                payload=payload,
-            )
-            return
-        except Exception:
-            logger.debug(
-                "amocrm_chat_profile_refresh_failed tenant=%s conversation_id=%s target=%s",
-                tenant_id,
-                conversation_id,
-                target,
-            )
+    try:
+        await _amojo_request(
+            int(tenant_id),
+            cfg=resolved,
+            method="PATCH",
+            path=f"/v2/origin/custom/{scope_id}/chats/{chat_id_value}",
+            payload=payload,
+        )
+    except Exception:
+        logger.debug(
+            "amocrm_chat_profile_refresh_failed tenant=%s conversation_id=%s target=%s",
+            tenant_id,
+            conversation_id,
+            chat_id_value,
+        )
 
 
 def _extract_remote_chat_id(payload: Mapping[str, Any] | None) -> str:
@@ -1014,7 +1061,9 @@ async def _bind_contact_chat(
     from libs.core.integrations import amocrm as amocrm_integration
     from libs.core.services import amocrm as amocrm_service
 
-    tenant_cfg = dict(cfg) if isinstance(cfg, Mapping) else core_module.read_tenant_config(int(tenant_id))
+    tenant_cfg = (
+        dict(cfg) if isinstance(cfg, Mapping) else core_module.read_tenant_config(int(tenant_id))
+    )
     amocrm_cfg = amocrm_service.get_amocrm_cfg(tenant_cfg) or {}
     base_url = await amocrm_service.resolve_api_base_url(amocrm_cfg, int(tenant_id))
     oauth_cfg = amocrm_service.resolve_oauth_cfg(amocrm_cfg, int(tenant_id))
@@ -1049,7 +1098,10 @@ async def _bind_contact_chat(
             int(lead_id),
             AMOCRM_CHAT_PROVIDER,
         )
-        if isinstance(existing_link, Mapping) and existing_link.get("provider_contact_id") is not None:
+        if (
+            isinstance(existing_link, Mapping)
+            and existing_link.get("provider_contact_id") is not None
+        ):
             try:
                 existing_contact_id = int(existing_link.get("provider_contact_id"))
             except Exception:
@@ -1063,7 +1115,9 @@ async def _bind_contact_chat(
             sanitize_display_name(data.get("contact"))
             or sanitize_display_name(data.get("title"))
             or sanitize_display_name(data.get("avito_login"))
-            or sanitize_display_name(data.get("telegram_username") or data.get("contact_telegram_username"))
+            or sanitize_display_name(
+                data.get("telegram_username") or data.get("contact_telegram_username")
+            )
         )
         new_contact_id = await client.upsert_contact(
             phone=phone,
@@ -1086,7 +1140,9 @@ async def _bind_contact_chat(
                 external_chat_id=str(existing.get("external_chat_id") or ""),
                 external_conversation_id=str(existing.get("external_conversation_id") or ""),
                 external_contact_id=int(new_contact_id),
-                external_lead_id=int(existing.get("external_lead_id")) if existing.get("external_lead_id") is not None else None,
+                external_lead_id=int(existing.get("external_lead_id"))
+                if existing.get("external_lead_id") is not None
+                else None,
                 chat_scope_id=str(existing.get("chat_scope_id") or ""),
                 source_id=str(existing.get("source_id") or ""),
             )
@@ -1144,15 +1200,21 @@ async def _bind_contact_chat(
                             AMOCRM_CHAT_PROVIDER,
                             int(existing_entity_id),
                         )
-                        existing = await crm_chat_links.get_link(int(tenant_id), int(lead_id), AMOCRM_CHAT_PROVIDER)
+                        existing = await crm_chat_links.get_link(
+                            int(tenant_id), int(lead_id), AMOCRM_CHAT_PROVIDER
+                        )
                         if isinstance(existing, Mapping):
-                            existing_external_lead_id = _coerce_int(existing.get("external_lead_id"))
+                            existing_external_lead_id = _coerce_int(
+                                existing.get("external_lead_id")
+                            )
                             await crm_chat_links.upsert_link(
                                 int(tenant_id),
                                 int(lead_id),
                                 AMOCRM_CHAT_PROVIDER,
                                 external_chat_id=str(existing.get("external_chat_id") or ""),
-                                external_conversation_id=str(existing.get("external_conversation_id") or ""),
+                                external_conversation_id=str(
+                                    existing.get("external_conversation_id") or ""
+                                ),
                                 external_contact_id=int(existing_entity_id),
                                 external_lead_id=existing_external_lead_id,
                                 chat_scope_id=str(existing.get("chat_scope_id") or ""),
@@ -1205,10 +1267,13 @@ async def enqueue_message(
         current_channel = str((meta or {}).get("channel") or "").strip().lower()
         if current_channel != "avito":
             return int(current_lead_id)
-        current_link = await crm_links.get_link(int(tenant_id), int(current_lead_id), AMOCRM_CHAT_PROVIDER)
+        current_link = await crm_links.get_link(
+            int(tenant_id), int(current_lead_id), AMOCRM_CHAT_PROVIDER
+        )
         provider_lead = (
             int(current_link.get("provider_lead_id"))
-            if isinstance(current_link, Mapping) and current_link.get("provider_lead_id") is not None
+            if isinstance(current_link, Mapping)
+            and current_link.get("provider_lead_id") is not None
             else None
         )
         if provider_lead is None:
@@ -1246,25 +1311,38 @@ async def enqueue_message(
     target_lead_id = await _resolve_target_lead_id(source_lead_id)
     crm_link = await crm_links.get_link(int(tenant_id), int(target_lead_id), AMOCRM_CHAT_PROVIDER)
     external_lead_id = crm_link.get("provider_lead_id") if isinstance(crm_link, Mapping) else None
-    external_contact_id = crm_link.get("provider_contact_id") if isinstance(crm_link, Mapping) else None
-    chat_cfg = resolve_chat_cfg(cfg, int(tenant_id))
-    existing = await crm_chat_links.get_link(int(tenant_id), int(target_lead_id), AMOCRM_CHAT_PROVIDER)
-    external_chat_id = (
-        str((existing or {}).get("external_chat_id") or "").strip()
-        or _stable_external_chat_id(int(tenant_id), int(target_lead_id), channel)
+    external_contact_id = (
+        crm_link.get("provider_contact_id") if isinstance(crm_link, Mapping) else None
     )
-    external_conversation_id = str((existing or {}).get("external_conversation_id") or external_chat_id)
+    chat_cfg = resolve_chat_cfg(cfg, int(tenant_id))
+    existing = await crm_chat_links.get_link(
+        int(tenant_id), int(target_lead_id), AMOCRM_CHAT_PROVIDER
+    )
+    external_chat_id = str(
+        (existing or {}).get("external_chat_id") or ""
+    ).strip() or _stable_external_chat_id(int(tenant_id), int(target_lead_id), channel)
+    external_conversation_id = str(
+        (existing or {}).get("external_conversation_id") or external_chat_id
+    )
     # For Avito->Telegram bridge, keep conversation identity bound to the source Avito lead,
     # otherwise repeated bridges may reuse an old Telegram conversation id.
     if channel == "avito" and source_lead_id != target_lead_id:
-        source_chat = await crm_chat_links.get_link(int(tenant_id), int(source_lead_id), AMOCRM_CHAT_PROVIDER)
+        source_chat = await crm_chat_links.get_link(
+            int(tenant_id), int(source_lead_id), AMOCRM_CHAT_PROVIDER
+        )
         preferred_chat_id = str((existing or {}).get("external_chat_id") or "").strip()
-        preferred_conversation_id = str((existing or {}).get("external_conversation_id") or "").strip()
+        preferred_conversation_id = str(
+            (existing or {}).get("external_conversation_id") or ""
+        ).strip()
         if not preferred_chat_id:
             preferred_chat_id = str((source_chat or {}).get("external_chat_id") or "").strip()
-            preferred_conversation_id = str((source_chat or {}).get("external_conversation_id") or "").strip()
+            preferred_conversation_id = str(
+                (source_chat or {}).get("external_conversation_id") or ""
+            ).strip()
         if not preferred_chat_id:
-            preferred_chat_id = _stable_external_chat_id(int(tenant_id), int(source_lead_id), "avito")
+            preferred_chat_id = _stable_external_chat_id(
+                int(tenant_id), int(source_lead_id), "avito"
+            )
             preferred_conversation_id = preferred_chat_id
         external_chat_id = preferred_chat_id
         external_conversation_id = preferred_conversation_id
@@ -1295,7 +1373,9 @@ async def enqueue_message(
             AMOCRM_CHAT_PROVIDER,
             external_chat_id=external_chat_id,
             external_conversation_id=external_conversation_id,
-            external_contact_id=int(external_contact_id) if external_contact_id is not None else None,
+            external_contact_id=int(external_contact_id)
+            if external_contact_id is not None
+            else None,
             external_lead_id=int(external_lead_id) if external_lead_id is not None else None,
             chat_scope_id=scope_id,
             source_id=source_id,
@@ -1368,12 +1448,16 @@ async def sync_chat_profile(
     if not isinstance(existing, Mapping):
         return
     external_chat_id = str(existing.get("external_chat_id") or "").strip()
-    conversation_id = str(existing.get("external_conversation_id") or external_chat_id or "").strip()
+    conversation_id = str(
+        existing.get("external_conversation_id") or external_chat_id or ""
+    ).strip()
     if not conversation_id:
         return
     resolved = await ensure_connected(int(tenant_id), cfg=cfg)
     chat_cfg = resolve_chat_cfg(cfg, int(tenant_id))
-    source_id = str(existing.get("source_id") or chat_cfg.get("source_id") or _DEFAULT_CHAT_SOURCE_ID).strip()
+    source_id = str(
+        existing.get("source_id") or chat_cfg.get("source_id") or _DEFAULT_CHAT_SOURCE_ID
+    ).strip()
     external_user_id, display_name, profile = await _lead_sender_profile(int(lead_id))
     external_user_id = _canonical_external_user_id(
         amo_lead_id=_coerce_int(existing.get("external_lead_id")),
@@ -1402,7 +1486,9 @@ async def sync_chat_profile(
     )
     await _bind_contact_chat(
         int(tenant_id),
-        contact_id=int(existing.get("external_contact_id")) if existing.get("external_contact_id") is not None else None,
+        contact_id=int(existing.get("external_contact_id"))
+        if existing.get("external_contact_id") is not None
+        else None,
         remote_chat_id=remote_chat_id,
         cfg=cfg,
         lead_id=int(lead_id),
@@ -1454,25 +1540,32 @@ async def push_message(
     explicit_text = str(payload.get("text") or "").strip()
     text = explicit_text if media_items else _message_payload_text(explicit_text, raw_attachments)
     if not text and not media_items:
-        logger.info("amocrm_chat_push_skipped tenant=%s reason=empty_text lead_id=%s", tenant_id, lead_id)
+        logger.info(
+            "amocrm_chat_push_skipped tenant=%s reason=empty_text lead_id=%s", tenant_id, lead_id
+        )
         return
     if direction == "out" and not resolved.get("bot_id"):
-        logger.info("amocrm_chat_push_skipped tenant=%s reason=bot_id_missing lead_id=%s", tenant_id, lead_id)
+        logger.info(
+            "amocrm_chat_push_skipped tenant=%s reason=bot_id_missing lead_id=%s",
+            tenant_id,
+            lead_id,
+        )
         return
     external_chat_id = str(payload.get("external_chat_id") or "").strip()
     conversation_id = str(payload.get("external_conversation_id") or external_chat_id or "").strip()
     if not conversation_id:
-        logger.info("amocrm_chat_push_skipped tenant=%s reason=conversation_id_missing lead_id=%s", tenant_id, lead_id)
+        logger.info(
+            "amocrm_chat_push_skipped tenant=%s reason=conversation_id_missing lead_id=%s",
+            tenant_id,
+            lead_id,
+        )
         return
     external_user_id, display_name, profile = (
-        await _lead_sender_profile(lead_id)
-        if lead_id > 0
-        else ("lead", "Lead", {"name": "Lead"})
+        await _lead_sender_profile(lead_id) if lead_id > 0 else ("lead", "Lead", {"name": "Lead"})
     )
     external_user_id = _canonical_external_user_id(
         amo_lead_id=(
-            _coerce_int(payload.get("amo_lead_id"))
-            or _coerce_int(payload.get("external_lead_id"))
+            _coerce_int(payload.get("amo_lead_id")) or _coerce_int(payload.get("external_lead_id"))
         ),
         amo_contact_id=(
             _coerce_int(payload.get("amo_contact_id"))
@@ -1487,7 +1580,8 @@ async def push_message(
         direction,
         conversation_id,
         external_user_id,
-        _coerce_int(payload.get("amo_contact_id")) or _coerce_int(payload.get("external_contact_id")),
+        _coerce_int(payload.get("amo_contact_id"))
+        or _coerce_int(payload.get("external_contact_id")),
     )
     remote_chat: dict[str, Any] = {}
     try:
@@ -1522,7 +1616,9 @@ async def push_message(
     try:
         contact_bind_ok = await _bind_contact_chat(
             int(tenant_id),
-            contact_id=int(payload.get("amo_contact_id")) if payload.get("amo_contact_id") is not None else None,
+            contact_id=int(payload.get("amo_contact_id"))
+            if payload.get("amo_contact_id") is not None
+            else None,
             remote_chat_id=remote_chat_id,
             cfg=cfg,
             lead_id=int(lead_id) if lead_id > 0 else None,
@@ -1535,7 +1631,9 @@ async def push_message(
             lead_id,
             conversation_id,
         )
-    required_contact_id = _coerce_int(payload.get("amo_contact_id")) or _coerce_int(payload.get("external_contact_id"))
+    required_contact_id = _coerce_int(payload.get("amo_contact_id")) or _coerce_int(
+        payload.get("external_contact_id")
+    )
     if required_contact_id and not contact_bind_ok:
         logger.warning(
             "amocrm_chat_push_skipped tenant=%s lead_id=%s reason=contact_bind_failed contact_id=%s conversation_id=%s",
@@ -1571,7 +1669,9 @@ async def push_message(
             path=f"/v2/origin/custom/{scope_id}",
             payload=message_payload,
         )
-        last_msgid = str((message_payload.get("payload") or {}).get("msgid") or "").strip() or last_msgid
+        last_msgid = (
+            str((message_payload.get("payload") or {}).get("msgid") or "").strip() or last_msgid
+        )
     await crm_chat_links.touch_message_ids(
         int(tenant_id),
         int(lead_id),
@@ -1695,10 +1795,7 @@ def _extract_webhook_attachments(
                 "file": "file",
             }.get(attachment_type, attachment_type)
         mime = str(
-            item.get("mime")
-            or item.get("mime_type")
-            or item.get("content_type")
-            or ""
+            item.get("mime") or item.get("mime_type") or item.get("content_type") or ""
         ).strip()
         if not mime:
             mime = {

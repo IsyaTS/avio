@@ -534,6 +534,99 @@ async def test_ask_llm_routes_qualification_turn_to_single_llm_path(
     assert str(out) == "ADDRESS_FLOW"
 
 
+@pytest.mark.asyncio
+async def test_single_llm_reply_applies_humanize_postprocess(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    state = core.SalesState(tenant=101, contact_id=5099)
+    state.user_message_count = 2
+
+    monkeypatch.setenv("SALES_EVAL_LITE", "1")
+    monkeypatch.setattr(core, "save_sales_state", lambda current: None, raising=False)
+    monkeypatch.setattr(core, "record_bot_reply", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(core, "_build_human_mode_messages", lambda messages: list(messages), raising=False)
+    monkeypatch.setattr(core, "_build_reply_grounding", lambda **kwargs: {}, raising=False)
+    monkeypatch.setattr(core, "_state_facts_snapshot", lambda _state: {}, raising=False)
+    monkeypatch.setattr(core, "_resolve_persona_rules_context", lambda **kwargs: "", raising=False)
+    monkeypatch.setattr(
+        core,
+        "_apply_persona_sequence_obligations",
+        lambda reply, **kwargs: str(reply or "").strip(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        core,
+        "_apply_persona_delivery_obligations",
+        lambda reply, **kwargs: str(reply or "").strip(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        core,
+        "_enforce_next_required_fact_question",
+        lambda reply, **kwargs: (str(reply or "").strip(), ""),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        core,
+        "_stabilize_followup_price_reference",
+        lambda reply, **kwargs: str(reply or "").strip(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        core,
+        "_apply_base_answer_quality_floor",
+        lambda reply, **kwargs: str(reply or "").strip(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        core,
+        "_ensure_dialog_greeting_on_first_reply",
+        lambda reply, *_args, **_kwargs: str(reply or "").strip(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        core,
+        "_humanize_reply_text",
+        lambda reply, **kwargs: f"humanized::{str(reply or '').strip()}",
+        raising=False,
+    )
+    monkeypatch.setattr(core, "_resolve_chat_completion_callable", lambda client: object(), raising=False)
+
+    async def _fake_llm_call(_create_fn, **kwargs):
+        if kwargs.get("response_format"):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '{"action":"respond","intent":"general","intent_tags":[],'
+                                '"question_strategy":{"should_ask":false,"question_goal":"","question_fact_key":""},'
+                                '"claims":[],"fact_updates":[],"selected_item_ref":"",'
+                                '"reply_plan":{"tone":"persona","brief":true,"ack":true}}'
+                            )
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="Тестовый ответ"))]
+        )
+
+    monkeypatch.setattr(core, "_llm_call_with_deadline", _fake_llm_call, raising=False)
+
+    out = await core._single_llm_reply(
+        object(),
+        [{"role": "system", "content": "persona"}, {"role": "user", "content": "здравствуйте"}],
+        core.PersonaHints(language="ru"),
+        state,
+        "telegram",
+        5099,
+        101,
+        "здравствуйте",
+    )
+    assert str(out).startswith("humanized::Тестовый ответ")
+
+
 def test_safe_minimal_fallback_replays_core_persona_dialog_without_slot_loop(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -829,6 +922,8 @@ async def test_build_llm_messages_persists_city_without_pending(monkeypatch: pyt
 @pytest.mark.anyio
 async def test_build_llm_messages_persists_standalone_city_reply(monkeypatch: pytest.MonkeyPatch):
     state = core.SalesState(tenant=101, contact_id=13)
+    state.pending_fact_key = "city"
+    state.last_bot_reply = "Подскажите, пожалуйста, в каком городе нужна установка?"
     monkeypatch.setattr(core, "load_sales_state", lambda tenant, contact_id: state, raising=False)
     monkeypatch.setattr(core, "save_sales_state", lambda current: None, raising=False)
     monkeypatch.setattr(core, "load_persona", lambda tenant, channel: "", raising=False)
@@ -1171,6 +1266,12 @@ def test_required_facts_from_persona_text(persona: str, expected: list[str]):
     assert core._required_facts_from_persona_text(persona) == expected
 
 
+def test_line_to_question_prefers_quoted_question_fragment() -> None:
+    line = 'Спросить, что из каталога приглянулось - "Что из каталога приглянулось?"'
+    out = core._line_to_question(line)
+    assert out == "Что из каталога приглянулось?"
+
+
 def test_compose_reply_skips_already_asked_question_block():
     state = core.SalesState(tenant=1, contact_id=42)
     core._remember_question_state(state, "В каком городе нужна установка?")
@@ -1349,6 +1450,87 @@ def test_extract_price_spans_supports_narrow_nbsp_grouping():
     assert 33900 in values
 
 
+def test_catalog_claim_coverage_flags_catalog_text_without_claims():
+    items = [{"title": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ", "price": 26500}]
+    issues = core._catalog_claim_coverage_issues(
+        "Могу предложить Гарда 7.5 Бетон снежный — 26 500 ₽",
+        policy={},
+        grounding_items=items,
+    )
+    assert "catalog_item_mentioned_without_validated_claims" in issues
+
+
+def test_catalog_claim_coverage_allows_identity_and_price_claims():
+    item = {"title": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ", "price": 26500}
+    item_id = core._catalog_item_identity(item)
+    policy = {
+        "claims": [
+            {
+                "type": "catalog_item_identity",
+                "subject": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ",
+                "item_id": item_id,
+                "attribute": "",
+                "value": "",
+            },
+            {
+                "type": "catalog_price",
+                "subject": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ",
+                "item_id": item_id,
+                "attribute": "price",
+                "value": "26 500 ₽",
+            },
+        ]
+    }
+    issues = core._catalog_claim_coverage_issues(
+        "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ — 26 500 ₽",
+        policy=policy,
+        grounding_items=[item],
+    )
+    assert issues == []
+
+
+def test_catalog_claim_coverage_flags_attribute_like_details_without_attribute_claim():
+    item = {"title": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ", "price": 26500}
+    item_id = core._catalog_item_identity(item)
+    policy = {
+        "claims": [
+            {
+                "type": "catalog_item_identity",
+                "subject": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ",
+                "item_id": item_id,
+                "attribute": "",
+                "value": "",
+            },
+            {
+                "type": "catalog_price",
+                "subject": "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ",
+                "item_id": item_id,
+                "attribute": "price",
+                "value": "26 500 ₽",
+            },
+        ]
+    }
+    issues = core._catalog_claim_coverage_issues(
+        "ГАРДА 7.5 БЕТОН СНЕЖНЫЙ — 26 500 ₽, у нее две панели и современный дизайн с максимальной шумоизоляцией.",
+        policy=policy,
+        grounding_items=[item],
+    )
+    assert "attribute_like_details_without_validated_claim" in issues
+
+
+def test_ensure_dialog_greeting_not_injected_mid_dialog():
+    state = core.SalesState(tenant=1, contact_id=123)
+    state.user_message_count = 3
+    state.history = [
+        {"role": "user", "content": "здравствуйте"},
+        {"role": "assistant", "content": "Добрый день! В каком городе установка?"},
+    ]
+    persona = "Первое сообщение в диалоге всегда начинайте с приветствия."
+    source = "Если дверь не открывается, могу предложить варианты из каталога."
+    out = core._ensure_dialog_greeting_on_first_reply(source, state, persona_context=persona)
+    assert out == source
+
+
 def test_rewrite_loses_context_anchors_detects_loss():
     candidate = "На Гоголя 31 ставили недавно, проём обычно 90 см. Что из каталога приглянулось?"
     rewrite = "Что из каталога приглянулось, уже что-то выбрали или подсказать варианты?"
@@ -1390,6 +1572,30 @@ async def test_audit_persona_reply_does_not_downgrade_to_generic_clarify():
 def test_extract_questions_from_text_detects_question_cues_without_qmark():
     questions = core._extract_questions_from_text("подскажите, пожалуйста адрес установки")
     assert questions == ["подскажите, пожалуйста адрес установки?"]
+
+
+def test_limit_questions_drops_extra_question_sentence_with_cue():
+    text = (
+        "Спасибо, адрес записал. Есть ли у вас предпочтения по цвету или отделке двери? "
+        "Могу сразу предложить пару популярных моделей для квартиры или отправить каталог с фото — как удобнее?"
+    )
+
+    out = core._limit_questions(text, max_questions=1)
+
+    assert out.count("?") == 1
+    assert "как удобнее" not in out.lower()
+
+
+def test_wrap_llm_reply_applies_final_one_question_guard():
+    from libs.core.sales_core.reply_runtime import ReplyRuntime, ReplyRuntimeDeps
+
+    runtime = ReplyRuntime(ReplyRuntimeDeps(style_guard=""))
+    out = runtime.wrap_llm_reply(
+        "Спасибо, адрес записал. Есть ли предпочтения по цвету? Когда вам удобнее на замер?"
+    )
+
+    assert str(out).count("?") == 1
+    assert "когда вам удобнее" not in str(out).lower()
 
 
 def test_compose_reply_keeps_info_block_when_required_missing():
@@ -2633,6 +2839,83 @@ def test_enforce_next_required_fact_question_keeps_substantive_question_reply():
     )
     assert out == reply
     assert pending == ""
+
+
+def test_enforce_next_required_fact_question_appends_model_step_when_reply_skips_it() -> None:
+    state = core.SalesState(tenant=101, contact_id=2)
+    persona = (
+        "## Диалог-скрипт\n"
+        "1) Уточнить город\n"
+        "2) Уточнить тип объекта\n"
+        "3) Уточнить адрес установки\n"
+        "4) Спросить, что из каталога приглянулось - \"Что из каталога приглянулось?\"\n"
+    )
+    known_facts = {
+        "city": "уфа",
+        "object_type": "квартира",
+        "address": "космонавтов 87",
+    }
+    reply = "Из популярных вариантов могу предложить гермес гост мет/мдф 17 500 ₽."
+    out, pending = core._enforce_next_required_fact_question(
+        reply,
+        state=state,
+        persona_context=persona,
+        known_facts=known_facts,
+        user_text="космонавтов 87",
+        grounding={},
+    )
+    assert "что из каталога приглянулось" in out.lower()
+    assert pending == "model"
+
+
+def test_has_substantive_non_question_payload_treats_ack_stub_as_non_substantive() -> None:
+    assert core._has_substantive_non_question_payload("Понял.") is False
+    assert core._has_substantive_non_question_payload("Космонавтов 76, понял.") is False
+
+
+def test_enforce_next_required_fact_question_does_not_keep_address_ack_stub_without_object_type() -> None:
+    state = core.SalesState(tenant=101, contact_id=778)
+    persona = (
+        "## Диалог-скрипт\n"
+        "1) Уточнить город\n"
+        "2) Уточнить адрес установки\n"
+        "3) Уточнить тип объекта (квартира или частный дом)\n"
+    )
+    known_facts = {
+        "city": "уфа",
+        "address": "космонавтов 76",
+    }
+    reply = "Космонавтов 76, понял."
+    out, pending = core._enforce_next_required_fact_question(
+        reply,
+        state=state,
+        persona_context=persona,
+        known_facts=known_facts,
+        user_text="космонавтов 76",
+        grounding={},
+    )
+    out_low = out.lower()
+    assert "квартир" in out_low or "частн" in out_low
+    assert pending == "object_type"
+
+
+def test_stabilize_followup_price_reference_keeps_previous_anchor() -> None:
+    state = core.SalesState(tenant=101, contact_id=3)
+    state.last_bot_reply = "Да, всё верно: с учётом скидки будет 24 500 ₽."
+    out = core._stabilize_followup_price_reference(
+        "Да, это финальная цена 23 900 ₽ с установкой.",
+        state=state,
+        user_text="это цена с установкой или ещё не окончательная?",
+        grounding={"items": []},
+    )
+    assert "24 500" in out
+    assert "23 900" not in out
+
+
+def test_normalize_shouting_case_softens_long_uppercase_words() -> None:
+    out = core._normalize_shouting_case("Ещё могу предложить вариант ГАРДА 7,5 БЕТОН СНЕЖНЫЙ и ПВХ панель.")
+    assert "гарда" in out
+    assert "ПВХ" in out
 
 
 def test_catalog_truth_guard_does_not_pick_extreme_by_object_without_object_evidence():

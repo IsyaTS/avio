@@ -49,16 +49,17 @@ def test_register_verify_flow(monkeypatch):
     }
     resp = client.post("/auth/register", data=form)
     assert resp.status_code == 200
+    assert 'reachGoal", "register"' in resp.text
     assert "html" in sent
     token = _extract_token(sent["html"])
     assert token
 
-    verify = client.get(f"/auth/verify?token={token}", allow_redirects=False)
+    verify = client.get(f"/auth/verify?token={token}", follow_redirects=False)
     assert verify.status_code in (302, 303)
     location = verify.headers.get("location", "")
     assert location.startswith("/client/settings")
 
-    settings = client.get("/client/settings", allow_redirects=False)
+    settings = client.get("/client/settings", follow_redirects=False)
     assert settings.status_code == 200
 
 
@@ -124,3 +125,61 @@ def test_client_settings_magic_link_still_works(monkeypatch):
     client = _build_client(monkeypatch)
     resp = client.get("/client/1/settings", params={"k": "test-public-key"})
     assert resp.status_code == 200
+
+
+def test_landing_contact_requires_phone_or_telegram(monkeypatch):
+    client = _build_client(monkeypatch)
+    resp = client.post(
+        "/api/landing/contact",
+        json={"name": "Тест", "contact": "   ", "message": "Нужен пилот"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body.get("detail") == "contact_required"
+
+
+def test_landing_contact_rejects_invalid_phone_length(monkeypatch):
+    client = _build_client(monkeypatch)
+    resp = client.post(
+        "/api/landing/contact",
+        json={"name": "Тест", "contact": "7999123456789", "message": "Нужен пилот"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body.get("detail") == "invalid_phone_length"
+
+
+def test_landing_contact_sends_notification(monkeypatch):
+    called = {}
+    from apps.api.web import auth as auth_module
+
+    async def _capture_notify(
+        tenant_id: int,
+        *,
+        name: str,
+        contact: str,
+        message: str,
+        source_ip: str,
+        user_agent: str,
+    ) -> None:
+        called["tenant_id"] = tenant_id
+        called["name"] = name
+        called["contact"] = contact
+        called["message"] = message
+        called["source_ip"] = source_ip
+        called["user_agent"] = user_agent
+
+    monkeypatch.setattr(auth_module, "_notify_landing_contact", _capture_notify)
+    client = _build_client(monkeypatch)
+
+    resp = client.post(
+        "/api/landing/contact",
+        json={
+            "name": "Иван",
+            "contact": "@ivan_sales",
+            "message": "Нужно подключить Avito и Telegram",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json().get("ok") is True
+    assert called.get("contact") == "@ivan_sales"

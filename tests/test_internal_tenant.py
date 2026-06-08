@@ -1,9 +1,13 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from libs.core.internal import tenant as tenant_module
+
+
+pytestmark = pytest.mark.integration
 
 
 def _build_app():

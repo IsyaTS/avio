@@ -27,6 +27,7 @@ const ChannelsTab: React.FC = () => {
         <TelegramCard />
         <AvitoCard />
         <MaxCard />
+        <MaxPersonalCard />
         <AmoCRMCard />
       </div>
     </div>
@@ -429,6 +430,9 @@ const AvitoCard: React.FC = () => {
   const [status, setStatus] = useState('Проверяем статус…');
   const [badge, setBadge] = useState<'ok' | 'warn' | 'err' | 'idle'>('idle');
   const [connected, setConnected] = useState(false);
+  const [accounts, setAccounts] = useState<Array<Record<string, any>>>([]);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [displayNameDraft, setDisplayNameDraft] = useState('');
 
   const statusUrl = useMemo(() => buildUrl('/v1/oauth/avito/status', api), [api]);
   const authorizeUrl = useMemo(() => buildUrl('/v1/oauth/avito/authorize', api), [api]);
@@ -439,6 +443,8 @@ const AvitoCard: React.FC = () => {
     try {
       const data = await requestJson<Record<string, any>>(statusUrl);
       const isConnected = Boolean(data.connected);
+      const accountList = Array.isArray(data.accounts) ? data.accounts : [];
+      setAccounts(accountList);
       setConnected(isConnected);
       if (isConnected) {
         setStatus('Подключено');
@@ -464,18 +470,26 @@ const AvitoCard: React.FC = () => {
   };
 
   const connect = async () => {
+    const popup = window.open('', 'avito-oauth', 'width=640,height=760');
+    if (!popup) {
+      toast.error('Разрешите всплывающие окна для подключения Avito');
+      return;
+    }
     try {
-      if (connected) {
-        await ensureWebhook();
-      }
       const data = await requestJson<Record<string, any>>(authorizeUrl);
       const target = data.authorize_url || data.url;
       if (!target) {
         throw new Error('authorize_url missing');
       }
-      window.open(target, 'avito-oauth', 'width=640,height=760,noopener=yes,noreferrer=yes');
+      popup.location.href = String(target);
+      try {
+        popup.opener = null;
+      } catch {
+        // Some browsers do not allow changing opener after navigation.
+      }
       toast.success('Окно авторизации открыто');
     } catch (error) {
+      popup.close();
       toast.error('Не удалось начать авторизацию');
     }
   };
@@ -490,6 +504,57 @@ const AvitoCard: React.FC = () => {
     }
   };
 
+  const accountUrl = (accountId: unknown, action: 'primary' | 'disconnect' | 'webhook') =>
+    buildUrl(`/v1/oauth/avito/accounts/${accountId}/${action}`, api);
+
+  const accountRenameUrl = (accountId: unknown) => buildUrl(`/v1/oauth/avito/accounts/${accountId}/rename`, api);
+
+  const makePrimary = async (accountId: unknown) => {
+    try {
+      await requestJson(accountUrl(accountId, 'primary'), { method: 'POST' });
+      toast.success('Основной аккаунт обновлён');
+      fetchStatus(true).catch(() => undefined);
+    } catch {
+      toast.error('Не удалось сделать аккаунт основным');
+    }
+  };
+
+  const verifyAccountWebhook = async (accountId: unknown) => {
+    try {
+      await requestJson(accountUrl(accountId, 'webhook'), { method: 'POST' });
+      toast.success('Webhook проверен');
+    } catch {
+      toast.error('Не удалось проверить webhook');
+    }
+  };
+
+  const disconnectAccount = async (accountId: unknown) => {
+    try {
+      await requestJson(accountUrl(accountId, 'disconnect'), { method: 'POST' });
+      toast.success('Аккаунт отключён');
+      fetchStatus(true).catch(() => undefined);
+    } catch {
+      toast.error('Не удалось отключить аккаунт');
+    }
+  };
+
+  const startRename = (account: Record<string, any>) => {
+    setEditingAccountId(String(account.account_id || ''));
+    setDisplayNameDraft(String(account.display_name || account.account_login || '').trim());
+  };
+
+  const saveRename = async (accountId: unknown) => {
+    try {
+      await postJson(accountRenameUrl(accountId), { display_name: displayNameDraft.trim() });
+      toast.success('Название сохранено');
+      setEditingAccountId(null);
+      setDisplayNameDraft('');
+      fetchStatus(true).catch(() => undefined);
+    } catch {
+      toast.error('Не удалось сохранить название');
+    }
+  };
+
   return (
     <div className="card space-y-4">
       <div className="flex items-center justify-between">
@@ -501,7 +566,7 @@ const AvitoCard: React.FC = () => {
       </div>
       <div className="flex flex-wrap gap-3">
         <button className="btn" onClick={connect}>
-          {connected ? 'Обновить авторизацию' : 'Подключить Avito'}
+          {connected ? 'Подключить ещё аккаунт' : 'Подключить Avito'}
         </button>
         <button className="btn-secondary" onClick={() => fetchStatus()}>
           Проверить статус
@@ -510,6 +575,75 @@ const AvitoCard: React.FC = () => {
           <button className="btn-ghost" onClick={disconnect}>
             Отключить
           </button>
+        )}
+      </div>
+      <div className="space-y-2">
+        {accounts.length === 0 ? (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
+            Не подключено
+          </div>
+        ) : (
+          accounts.map((account) => {
+            const accountId = account.account_id;
+            const editActive = editingAccountId === String(accountId || '');
+            const title = account.display_name || account.account_login || `ID ${String(accountId || '').slice(-6)}`;
+            return (
+              <div key={String(accountId)} className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    {editActive ? (
+                      <div className="flex max-w-xs items-center gap-2">
+                        <input
+                          className="input h-9"
+                          value={displayNameDraft}
+                          autoFocus
+                          maxLength={120}
+                          placeholder="Название аккаунта"
+                          onChange={(event) => setDisplayNameDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') saveRename(accountId).catch(() => undefined);
+                            if (event.key === 'Escape') setEditingAccountId(null);
+                          }}
+                        />
+                        <button className="btn-secondary h-9 px-3" onClick={() => saveRename(accountId)}>
+                          Сохранить
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-sm font-semibold text-slate-900">{title}</div>
+                    )}
+                    <div className="text-xs text-slate-500">
+                      ID {String(accountId || '').slice(-8)}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {account.is_primary && <span className="badge badge-success">Основной</span>}
+                    <span className="badge badge-neutral">{account.status || 'active'}</span>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {!account.is_primary && account.status === 'active' && (
+                    <button className="btn-ghost" onClick={() => makePrimary(accountId)}>
+                      Сделать основным
+                    </button>
+                  )}
+                  {account.status === 'active' && (
+                    <button className="btn-ghost" onClick={() => verifyAccountWebhook(accountId)}>
+                      Проверить webhook
+                    </button>
+                  )}
+                  {!editActive && (
+                    <button className="btn-ghost" onClick={() => startRename(account)}>
+                      Переименовать
+                    </button>
+                  )}
+                  <button className="btn-ghost text-red-600" onClick={() => disconnectAccount(accountId)}>
+                    Отключить
+                  </button>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
     </div>
@@ -608,6 +742,153 @@ const MaxCard: React.FC = () => {
       </div>
       <div className="text-xs text-slate-400">
         Подключение работает через официальный Bot API MAX. После подключения будет зарегистрирован вебхук.
+      </div>
+    </div>
+  );
+};
+
+const MaxPersonalCard: React.FC = () => {
+  const { api } = useClient();
+  const [status, setStatus] = useState('Проверяем статус…');
+  const [badge, setBadge] = useState<'ok' | 'warn' | 'err' | 'idle'>('idle');
+  const [connected, setConnected] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [accountTitle, setAccountTitle] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const fetchQr = async (quiet = false): Promise<boolean> => {
+    if (!api.tenantId || !api.key) return false;
+    try {
+      const data = await requestJson<Record<string, any>>(buildUrl('/v1/max-personal/session/qr', api, { _: Date.now() }));
+      const nextQr = String(data.qr_png_data_url || '').trim();
+      if (nextQr) {
+        setQrDataUrl(nextQr);
+        return true;
+      }
+      setQrDataUrl(null);
+      return false;
+    } catch {
+      setQrDataUrl(null);
+      if (!quiet) toast.error('QR недоступен, попробуйте запустить сессию заново');
+      return false;
+    }
+  };
+
+  const fetchStatus = async (quiet = false) => {
+    if (!api.tenantId || !api.key) return;
+    try {
+      const data = await requestJson<Record<string, any>>(buildUrl('/v1/max-personal/status', api, { _: Date.now() }));
+      const currentStatus = String(data.status || 'idle');
+      const isConnected = Boolean(data.connected);
+      const account = (data.account || {}) as Record<string, any>;
+      const title = String(account.display_name || account.username || account.phone || '').trim();
+      setAccountTitle(title);
+      setConnected(isConnected);
+      if (isConnected) {
+        setStatus('Подключено');
+        setBadge('ok');
+        setQrDataUrl(null);
+        return;
+      }
+      if (currentStatus === 'waiting_qr' || currentStatus === 'authorizing' || data.qr_required) {
+        setStatus('Ожидает QR');
+        setBadge('warn');
+        void fetchQr(true);
+        return;
+      }
+      if (currentStatus === 'reauth_required') {
+        setStatus('Нужна повторная авторизация');
+        setBadge('warn');
+      } else if (currentStatus === 'error') {
+        setStatus('Ошибка сессии');
+        setBadge('err');
+      } else {
+        setStatus('Не подключено');
+        setBadge('warn');
+      }
+      setQrDataUrl(null);
+      if (!quiet && data.last_error) {
+        toast.error(String(data.last_error));
+      }
+    } catch {
+      setStatus('Статус недоступен');
+      setBadge('err');
+      setQrDataUrl(null);
+      if (!quiet) toast.error('Не удалось получить статус MAX');
+    }
+  };
+
+  useEffect(() => {
+    if (!api.tenantId || !api.key) return;
+    fetchStatus(true).catch(() => undefined);
+    const timer = window.setInterval(() => {
+      fetchStatus(true).catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [api.tenantId, api.key]);
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      await postJson(buildUrl('/v1/max-personal/connect', api), { force: true });
+      toast.success('MAX запущен, получаем QR…');
+      await fetchStatus(true);
+      const hasQr = await fetchQr(true);
+      if (!hasQr) {
+        toast('QR ещё подготавливается, подождите 3-10 секунд');
+      }
+    } catch {
+      toast.error('Не удалось запустить MAX');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshQr = async () => {
+    await connect();
+  };
+
+  const logout = async () => {
+    setBusy(true);
+    try {
+      await postJson(buildUrl('/v1/max-personal/session/logout', api), {});
+      toast.success('MAX отключён');
+      await fetchStatus(true);
+    } catch {
+      toast.error('Не удалось отключить MAX');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="card-title">MAX</div>
+          <div className="card-subtitle flex items-center gap-2">
+            Подключение личного аккаунта по QR <Hint text="Канал подключает личный MAX-аккаунт через QR. Исходящие и входящие сообщения идут в общую логику Avio." />
+          </div>
+        </div>
+        <StatusBadge state={badge} label={status} />
+      </div>
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        {qrDataUrl ? (
+          <img src={qrDataUrl} alt="QR MAX" className="mx-auto h-52 w-52 rounded-xl bg-white p-3" />
+        ) : (
+          <div className="text-center text-sm text-slate-400">QR появится после запуска сессии</div>
+        )}
+      </div>
+      {accountTitle ? (
+        <div className="text-xs text-slate-500">Аккаунт: {accountTitle}</div>
+      ) : null}
+      <div className="flex flex-wrap gap-3">
+        <button className="btn-secondary" onClick={refreshQr} disabled={busy}>
+          Обновить QR
+        </button>
+        <button className="btn-ghost" onClick={logout} disabled={busy}>
+          Отключиться
+        </button>
       </div>
     </div>
   );

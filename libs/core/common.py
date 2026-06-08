@@ -93,10 +93,7 @@ def normalize_echo_text(text: str) -> str:
         return ""
     return re.sub(r"\s+", " ", text.strip().lower())
 
-_FALLBACK_REPLY_DEFAULT = (
-    os.getenv("SMART_REPLY_FALLBACK_TEXT")
-    or "Принял запрос. Скидываю весь каталог. Если нужно PDF — напишите «каталог pdf»."
-)
+_FALLBACK_REPLY_DEFAULT = "Секунду, сейчас позову менеджера"
 
 
 def default_fallback_reply(_tenant: int | None = None) -> str:

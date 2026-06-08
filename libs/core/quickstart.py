@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from libs.core.sales_core import read_persona, write_persona, read_tenant_config, write_tenant_config
+from libs.core.sales_core import (
+    read_persona,
+    write_persona,
+    read_tenant_config,
+    write_tenant_config,
+)
 
 
 @dataclass(frozen=True)
@@ -66,8 +71,7 @@ _CTA_MAP: Dict[str, str] = {
 
 def list_quickstart_templates() -> List[Dict[str, str]]:
     return [
-        {"id": t.id, "title": t.title, "summary": t.summary, "focus": t.focus}
-        for t in _TEMPLATES
+        {"id": t.id, "title": t.title, "summary": t.summary, "focus": t.focus} for t in _TEMPLATES
     ]
 
 
@@ -91,7 +95,6 @@ def _build_persona_text(
     script: List[str],
     goal_key: str,
 ) -> str:
-    goal_text = _GOAL_MAP.get(goal_key, _GOAL_MAP["lead"])
     return (
         f"Продукт/услуга: {offer.strip() or 'опишите ключевые товары и услуги'}.\n"
         f"Фокус ценности: {template.focus}.\n"
@@ -122,7 +125,7 @@ def _build_persona_text(
         + "\n".join(
             f"- Вопрос: {item.get('q','').strip()} → Ответ: {item.get('a','').strip()}"
             for item in faq
-            if (item.get('q') or '').strip() and (item.get('a') or '').strip()
+            if (item.get("q") or "").strip() and (item.get("a") or "").strip()
         )
         + "\n"
     )
@@ -186,10 +189,10 @@ def apply_quickstart(tenant: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     write_persona(tenant, persona_text, channel=None)
 
     if apply_all:
-        for channel in ("telegram", "avito", "max"):
+        for channel in ("telegram", "avito", "max", "max_personal"):
             write_persona(tenant, persona_text, channel=channel)
     else:
-        for channel in ("telegram", "avito", "max"):
+        for channel in ("telegram", "avito", "max", "max_personal"):
             existing = read_persona(tenant, channel)
             if not (existing or "").strip():
                 write_persona(tenant, persona_text, channel=channel)
@@ -245,7 +248,7 @@ def refresh_persona_headers(tenant: int, cfg: Dict[str, Any]) -> None:
         )
 
     if qs.get("apply_all"):
-        for channel in ("telegram", "avito", "max"):
+        for channel in ("telegram", "avito", "max", "max_personal"):
             text = read_persona(tenant, channel)
             if text and (_needs_replace(text) or qs.get("auto_persona")):
                 write_persona(

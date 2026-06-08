@@ -6,7 +6,6 @@ import json
 import os
 import pathlib
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -41,10 +40,7 @@ _redis_client: redis.Redis | None = None
 # Internal auth token that waweb expects in X-Auth-Token. It may be provided
 # via WA_WEB_TOKEN or WEBHOOK_SECRET depending on deployment. Use either.
 WA_INTERNAL_TOKEN = (
-    os.getenv("WA_INTERNAL_TOKEN")
-    or os.getenv("WA_WEB_TOKEN")
-    or os.getenv("WEBHOOK_SECRET")
-    or ""
+    os.getenv("WA_INTERNAL_TOKEN") or os.getenv("WA_WEB_TOKEN") or os.getenv("WEBHOOK_SECRET") or ""
 ).strip()
 _DEFAULT_WORKER_BASE = getattr(settings, "DEFAULT_WORKER_BASE_URL", "http://worker:8000")
 
@@ -161,10 +157,7 @@ def client_spa_assets(request: Any | None, entry: str = "index.html") -> dict[st
 
     manifest = _read_client_spa_manifest()
     entry_info = (
-        manifest.get(entry)
-        or manifest.get("index.html")
-        or manifest.get("src/main.tsx")
-        or {}
+        manifest.get(entry) or manifest.get("index.html") or manifest.get("src/main.tsx") or {}
     )
     js_files: list[str] = []
     css_files: list[str] = []
@@ -295,11 +288,7 @@ def _admin_token() -> str:
 
 
 def _webhook_secret() -> str:
-    return (
-        getattr(settings, "WEBHOOK_SECRET", "")
-        or os.getenv("WEBHOOK_SECRET")
-        or ""
-    ).strip()
+    return (getattr(settings, "WEBHOOK_SECRET", "") or os.getenv("WEBHOOK_SECRET") or "").strip()
 
 
 def _coerce_header_value(raw: Any) -> str:
@@ -434,7 +423,11 @@ def public_base_url(request: Any | None = None) -> str:
     proto = _first_header(headers, "x-forwarded-proto", "x-forwarded-scheme")
 
     if host:
-        proto = proto or getattr(getattr(request, "url", None), "full", "").split("://", 1)[0] or "https"
+        proto = (
+            proto
+            or getattr(getattr(request, "url", None), "full", "").split("://", 1)[0]
+            or "https"
+        )
         return f"{proto}://{host}".rstrip("/")
 
     url_obj = getattr(request, "url", None)
@@ -507,6 +500,15 @@ def webhook_url() -> str:
         url = f"{url}{separator}{encoded}"
     return url
 
+
+def _coerce_tenant_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        tenant_id = int(str(value).strip())
+    except Exception:
+        return None
+    return tenant_id if tenant_id > 0 else None
 
 
 async def wa_post(
@@ -624,7 +626,11 @@ def tg_http(
             return resp.status, raw, headers
     except urllib.error.HTTPError as exc:
         raw = exc.read()
-        headers = {key: value for key, value in getattr(exc, "headers", {}).items()} if getattr(exc, "headers", None) else {}
+        headers = (
+            {key: value for key, value in getattr(exc, "headers", {}).items()}
+            if getattr(exc, "headers", None)
+            else {}
+        )
         return exc.code, raw, headers
     except Exception as exc:  # pragma: no cover
         return 0, str(exc).encode(), {}
@@ -769,8 +775,7 @@ def valid_key(tenant: int, kk: str) -> bool:
     if not candidate:
         return False
     if candidate == "test-public-key" and (
-        bool(os.getenv("PYTEST_CURRENT_TEST"))
-        or (os.getenv("TESTING") or "").strip() == "1"
+        bool(os.getenv("PYTEST_CURRENT_TEST")) or (os.getenv("TESTING") or "").strip() == "1"
     ):
         return True
 

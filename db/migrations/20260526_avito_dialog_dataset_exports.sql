@@ -1,0 +1,12 @@
+ALTER TABLE avito_history_export_jobs
+  ADD COLUMN IF NOT EXISTS dialog_dataset_file_path TEXT,
+  ADD COLUMN IF NOT EXISTS dialog_dataset_file_size INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS dialog_dataset_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS export_summary_path TEXT,
+  ADD COLUMN IF NOT EXISTS export_summary_size INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS export_pipeline_version TEXT,
+  ADD COLUMN IF NOT EXISTS ai_schema_calls_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS legacy_contextual_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS checkpoint_path TEXT,
+  ADD COLUMN IF NOT EXISTS checkpoint_available BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS checkpoint_stage TEXT;

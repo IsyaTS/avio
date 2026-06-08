@@ -1,0 +1,15 @@
+{
+  "integrations": {
+    "max_personal": {
+      "enabled": true,
+      "outbound_enabled": true,
+      "event_secret": "O_C4FWQrpVRIq6ZlCcNzrS7TJg0",
+      "session_status": "authorized",
+      "updated_at": 1780909273
+    }
+  },
+  "behavior": {
+    "max_personal_reply_enabled": true,
+    "max_personal_smart_reply_enabled": true
+  }
+}

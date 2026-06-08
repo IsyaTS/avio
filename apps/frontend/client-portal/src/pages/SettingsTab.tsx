@@ -163,7 +163,12 @@ const SettingsTab: React.FC = () => {
     behaviorDefaults.max_reply_enabled !== false
   );
   const [sendCatalogTg, setSendCatalogTg] = useState(
-    Boolean(behaviorDefaults.send_catalog_on_first_message)
+    behaviorDefaults.send_catalog_on_first_message !== false
+  );
+  const [sendCatalogMax, setSendCatalogMax] = useState(
+    behaviorDefaults.send_catalog_on_first_message_max !== undefined
+      ? behaviorDefaults.send_catalog_on_first_message_max !== false
+      : behaviorDefaults.send_catalog_on_first_message !== false
   );
   const [brainMode, setBrainMode] = useState<'smart' | 'classic'>(
     String(behaviorDefaults.brain_mode || '').toLowerCase() === 'classic' ||
@@ -216,11 +221,23 @@ const SettingsTab: React.FC = () => {
     if (!settingsReady || hasDraft) return;
     const cfg = settings?.cfg || {};
     const passport = (cfg as Record<string, any>).passport || {};
+    const behavior = (cfg as Record<string, any>).behavior || {};
     if (!brand && passport.brand) setBrand(passport.brand);
     if (!agent && passport.agent_name) setAgent(passport.agent_name);
     if (!currency && passport.currency) setCurrency(passport.currency);
     if (!tone && passport.tone) setTone(passport.tone);
     if (!personaBase && settings?.persona) setPersonaBase(settings.persona || '');
+    if (!avitoPhoneTemplate && typeof behavior.avito_phone_tg_template === 'string') {
+      setAvitoPhoneTemplate(behavior.avito_phone_tg_template || '');
+    }
+    if (typeof behavior.brain_mode === 'string') {
+      const mode = String(behavior.brain_mode).toLowerCase();
+      if (mode === 'classic' || mode === 'prod' || mode === 'legacy') {
+        setBrainMode('classic');
+      } else if (mode === 'smart') {
+        setBrainMode('smart');
+      }
+    }
     const personas = settings?.personas || {};
     if (!personaTelegram && typeof personas.telegram === 'string') {
       setPersonaTelegram(personas.telegram || '');
@@ -239,6 +256,7 @@ const SettingsTab: React.FC = () => {
     currency,
     tone,
     personaBase,
+    avitoPhoneTemplate,
     personaTelegram,
     personaAvito,
     personaMax,
@@ -360,6 +378,7 @@ const SettingsTab: React.FC = () => {
         setMaxReplyEnabled(draft.maxReplyEnabled);
       }
       if (typeof draft.sendCatalogTg === 'boolean') setSendCatalogTg(draft.sendCatalogTg);
+      if (typeof draft.sendCatalogMax === 'boolean') setSendCatalogMax(draft.sendCatalogMax);
       if (typeof draft.brainMode === 'string') {
         const mode = String(draft.brainMode).toLowerCase();
         setBrainMode(mode === 'classic' || mode === 'prod' || mode === 'legacy' ? 'classic' : 'smart');
@@ -398,6 +417,7 @@ const SettingsTab: React.FC = () => {
       telegramReplyEnabled,
       maxReplyEnabled,
       sendCatalogTg,
+      sendCatalogMax,
       brainMode,
       autoPhotoEnabled,
       autoPhotoMax,
@@ -427,6 +447,7 @@ const SettingsTab: React.FC = () => {
     telegramReplyEnabled,
     maxReplyEnabled,
     sendCatalogTg,
+    sendCatalogMax,
     brainMode,
     autoPhotoEnabled,
     autoPhotoMax,
@@ -582,6 +603,7 @@ const SettingsTab: React.FC = () => {
       telegram_reply_enabled: telegramReplyEnabled,
       max_reply_enabled: maxReplyEnabled,
       send_catalog_on_first_message: sendCatalogTg,
+      send_catalog_on_first_message_max: sendCatalogMax,
       brain_mode: brainMode,
       auto_photo_enabled: autoPhotoEnabled,
       auto_photo_max: autoPhotoMax ? Number(autoPhotoMax) : 0,
@@ -968,6 +990,17 @@ const SettingsTab: React.FC = () => {
             <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
               Отправлять PDF-каталог первым сообщением (Telegram)
               <Hint text="Если включено, бот отправит PDF сразу после первого сообщения клиента." />
+            </span>
+          </label>
+          <label className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 md:col-span-2">
+            <input
+              type="checkbox"
+              checked={sendCatalogMax}
+              onChange={(e) => setSendCatalogMax(e.target.checked)}
+            />
+            <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              Отправлять PDF-каталог первым сообщением (MAX)
+              <Hint text="Если включено, бот отправит PDF сразу после первого сообщения клиента в MAX." />
             </span>
           </label>
           <label className="space-y-2">

@@ -12,7 +12,7 @@
 
   const rawBase = typeof state.public_base === 'string' ? state.public_base.trim() : '';
   const windowOrigin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : '';
-  const publicBase = (rawBase || windowOrigin || '').replace(/\/$/, '');
+  const publicBase = (windowOrigin || rawBase || '').replace(/\/$/, '');
 
   function absoluteUrl(input) {
     if (!input) return '';
@@ -94,10 +94,10 @@
       const analyticsLink = buildAnalyticsLink(item.key);
 
       const anchor = document.createElement('a');
-      anchor.href = connectLink;
+      anchor.href = settingsLink;
       anchor.target = '_blank';
       anchor.rel = 'noopener';
-      anchor.textContent = 'Открыть ссылку';
+      anchor.textContent = 'Открыть ЛК';
       linkTd.appendChild(anchor);
       tr.appendChild(linkTd);
 
@@ -123,11 +123,11 @@
       const copyLinkBtn = document.createElement('button');
       copyLinkBtn.type = 'button';
       copyLinkBtn.className = 'btn btn--secondary';
-      copyLinkBtn.textContent = 'Ссылка';
+      copyLinkBtn.textContent = 'Ссылка ЛК';
       copyLinkBtn.addEventListener('click', async () => {
         try {
-          await navigator.clipboard.writeText(connectLink);
-          setMessage('Ссылка скопирована');
+          await navigator.clipboard.writeText(settingsLink);
+          setMessage('Ссылка на ЛК скопирована');
         } catch (error) {
           setMessage('Не удалось скопировать ссылку', 'alert');
         }
@@ -139,8 +139,16 @@
       openSettingsBtn.target = '_blank';
       openSettingsBtn.rel = 'noopener';
       openSettingsBtn.className = 'btn btn--secondary';
-      openSettingsBtn.textContent = 'Настройки';
+      openSettingsBtn.textContent = 'ЛК';
       actionsTd.appendChild(openSettingsBtn);
+
+      const openConnectBtn = document.createElement('a');
+      openConnectBtn.href = connectLink;
+      openConnectBtn.target = '_blank';
+      openConnectBtn.rel = 'noopener';
+      openConnectBtn.className = 'btn btn--secondary';
+      openConnectBtn.textContent = 'WhatsApp';
+      actionsTd.appendChild(openConnectBtn);
 
       const openAnalyticsBtn = document.createElement('a');
       openAnalyticsBtn.href = analyticsLink;
@@ -219,7 +227,7 @@
       const connectLink = buildConnectLink(keyValue);
       const settingsLink = buildSettingsLink(keyValue);
       setMessage(
-        `Ключ готов · <a href="${connectLink}" target="_blank" rel="noopener">подключение</a> · <a href="${settingsLink}" target="_blank" rel="noopener">настройки</a>`,
+        `Ключ готов · <a href="${settingsLink}" target="_blank" rel="noopener">ЛК</a> · <a href="${connectLink}" target="_blank" rel="noopener">WhatsApp</a>`,
         'muted',
         true
       );
@@ -273,7 +281,7 @@
       const connectLink = buildConnectLink(keyValue);
       const settingsLink = buildSettingsLink(keyValue);
       setMessage(
-        `Ключ сохранён · <a href="${connectLink}" target="_blank" rel="noopener">подключение</a> · <a href="${settingsLink}" target="_blank" rel="noopener">настройки</a>`,
+        `Ключ сохранён · <a href="${settingsLink}" target="_blank" rel="noopener">ЛК</a> · <a href="${connectLink}" target="_blank" rel="noopener">WhatsApp</a>`,
         'muted',
         true
       );

@@ -37,6 +37,88 @@ async def test_build_llm_messages_includes_summary():
     assert "SPIN:" in system_text
 
 
+@pytest.mark.anyio
+async def test_build_llm_messages_does_not_capture_city_from_opening_greeting_typo():
+    tenant = 101
+    contact_id = 910101
+    core.reset_sales_state(tenant, contact_id)
+
+    await core.build_llm_messages(
+        contact_id,
+        "здравсвтуйте",
+        channel="telegram",
+        tenant=tenant,
+    )
+
+    state = core.load_sales_state(tenant, contact_id)
+    assert "city" not in (state.facts or {})
+    assert "city" not in (state.known_slots or {})
+
+
+@pytest.mark.anyio
+async def test_build_llm_messages_captures_standalone_city_only_after_city_prompt():
+    tenant = 101
+    contact_id = 910102
+    core.reset_sales_state(tenant, contact_id)
+    state = core.load_sales_state(tenant, contact_id)
+    state.pending_fact_key = "city"
+    state.last_bot_reply = "Подскажите, пожалуйста, в каком городе нужна установка?"
+    core.save_sales_state(state)
+
+    await core.build_llm_messages(
+        contact_id,
+        "уфа",
+        channel="telegram",
+        tenant=tenant,
+    )
+
+    updated = core.load_sales_state(tenant, contact_id)
+    assert str((updated.facts or {}).get("city") or "").lower() == "уфа"
+
+
+@pytest.mark.anyio
+async def test_build_llm_messages_captures_object_type_without_pending_fact():
+    tenant = 101
+    contact_id = 910103
+    core.reset_sales_state(tenant, contact_id)
+
+    await core.build_llm_messages(
+        contact_id,
+        "для квартиры",
+        channel="max_personal",
+        tenant=tenant,
+    )
+
+    updated = core.load_sales_state(tenant, contact_id)
+    assert str((updated.facts or {}).get("object_type") or "").strip() == "apartment"
+
+
+@pytest.mark.anyio
+async def test_build_llm_messages_resets_max_personal_state_on_channel_mismatch():
+    tenant = 101
+    contact_id = 910104
+    core.reset_sales_state(tenant, contact_id)
+    state = core.load_sales_state(tenant, contact_id)
+    state.channel = "whatsapp"
+    state.history = [{"role": "user", "content": "legacy"}]
+    state.facts = {"city": "мусор"}
+    state.known_slots = {"city": "мусор"}
+    state.last_bot_reply = "Для квартиры или частного дома выбираете?"
+    core.save_sales_state(state)
+
+    await core.build_llm_messages(
+        contact_id,
+        "для квартиры",
+        channel="max_personal",
+        tenant=tenant,
+    )
+
+    updated = core.load_sales_state(tenant, contact_id)
+    assert updated.channel == "max_personal"
+    assert str((updated.facts or {}).get("object_type") or "").strip() == "apartment"
+    assert str((updated.facts or {}).get("city") or "").strip() != "мусор"
+
+
 def test_rule_based_reply_uses_sales_strategies(monkeypatch):
     tenant = 0
     contact_id = 202
@@ -145,6 +227,18 @@ def test_rule_based_reply_respects_persona_hints(tmp_core):
 
     parts = [block.strip() for block in reply.split("\n\n") if block.strip()]
     assert len(parts) <= 6
+
+
+def test_max_personal_falls_back_to_telegram_persona(tmp_core):
+    tenant = 12
+    tmp_core.ensure_tenant_files(tenant)
+    tenant_root = tmp_core.tenant_dir(tenant)
+    (tenant_root / "persona.md").write_text("base persona", encoding="utf-8")
+    (tenant_root / "persona_telegram.md").write_text("telegram persona", encoding="utf-8")
+
+    persona = tmp_core.read_persona(tenant, "max_personal")
+
+    assert persona == "telegram persona"
 
 
 def test_rule_based_reply_omits_explain_line_without_flag(monkeypatch):

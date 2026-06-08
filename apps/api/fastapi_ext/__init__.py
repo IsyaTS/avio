@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json as _json
 from dataclasses import dataclass
@@ -124,7 +123,7 @@ class Request:
         self.app = app
         self.method = method.upper()
         self.path = path
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url.rstrip("/")
         self.query_params = _QueryParams(query_params)
         self.headers = _HeaderMap(headers)
         self.cookies = {str(k): v for k, v in cookies.items()}
@@ -192,7 +191,12 @@ class APIRouter:
         name: Optional[str] = None,
     ) -> None:
         final_path = _join_paths(self.prefix, path)
-        route = _Route(path=final_path, methods=[m.upper() for m in methods], endpoint=endpoint, name=name or endpoint.__name__)
+        route = _Route(
+            path=final_path,
+            methods=[m.upper() for m in methods],
+            endpoint=endpoint,
+            name=name or endpoint.__name__,
+        )
         self.routes.append(route)
 
     def _route(
@@ -208,52 +212,79 @@ class APIRouter:
 
         return decorator
 
-    def get(self, path: str, *, name: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def get(
+        self, path: str, *, name: Optional[str] = None
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return self._route(path, methods=["GET"], name=name)
 
-    def post(self, path: str, *, name: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def post(
+        self, path: str, *, name: Optional[str] = None
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return self._route(path, methods=["POST"], name=name)
 
     def include_router(self, router: "APIRouter", *, prefix: str = "") -> None:
         for route in router.routes:
             combined = _join_paths(prefix, route.path)
-            self.routes.append(_Route(path=combined, methods=route.methods, endpoint=route.endpoint, name=route.name))
+            self.routes.append(
+                _Route(
+                    path=combined, methods=route.methods, endpoint=route.endpoint, name=route.name
+                )
+            )
 
 
 class FastAPI:
     def __init__(self, *, title: str | None = None) -> None:
         self.title = title or "FastAPI"
         self.router = APIRouter()
-        self._middlewares: List[Callable[[Request, Callable[[Request], Awaitable[Any]]], Awaitable[Any]]] = []
+        self._middlewares: List[
+            Callable[[Request, Callable[[Request], Awaitable[Any]]], Awaitable[Any]]
+        ] = []
         self._mounts: Dict[str, Tuple[str, Any]] = {}
         self._static_mounts: List[Tuple[str, StaticFiles]] = []
 
-    def add_api_route(self, path: str, endpoint: Callable[..., Any], *, methods: Iterable[str], name: Optional[str] = None) -> None:
+    def add_api_route(
+        self,
+        path: str,
+        endpoint: Callable[..., Any],
+        *,
+        methods: Iterable[str],
+        name: Optional[str] = None,
+    ) -> None:
         self.router.add_api_route(path, endpoint, methods=methods, name=name)
 
-    def get(self, path: str, *, name: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def get(
+        self, path: str, *, name: Optional[str] = None
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return self.router.get(path, name=name)
 
-    def post(self, path: str, *, name: Optional[str] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def post(
+        self, path: str, *, name: Optional[str] = None
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         return self.router.post(path, name=name)
 
     def include_router(self, router: APIRouter, *, prefix: str = "") -> None:
         self.router.include_router(router, prefix=prefix)
 
-    def mount(self, path: str, app: Any, *, name: Optional[str] = None) -> None:  # pragma: no cover - unused in tests
-        final = path if path.startswith('/') else f'/{path}'
-        prefix = '/' if final == '/' else final.rstrip('/')
+    def mount(
+        self, path: str, app: Any, *, name: Optional[str] = None
+    ) -> None:  # pragma: no cover - unused in tests
+        final = path if path.startswith("/") else f"/{path}"
+        prefix = "/" if final == "/" else final.rstrip("/")
         if name:
             self._mounts[name] = (prefix, app)
         if isinstance(app, StaticFiles):
             self._static_mounts.append((prefix, app))
         return None
 
-    def middleware(self, name: str) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    def middleware(
+        self, name: str
+    ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
         if name.lower() != "http":
             raise ValueError("Only 'http' middleware supported in shim")
 
-        def decorator(func: Callable[[Request, Callable[[Request], Awaitable[Any]]], Awaitable[Any]]):
+        def decorator(
+            func: Callable[[Request, Callable[[Request], Awaitable[Any]]], Awaitable[Any]],
+        ):
             self._middlewares.append(func)
             return func
 
@@ -262,16 +293,18 @@ class FastAPI:
     def url_path_for(self, name: str, **params: Any) -> str:
         if name in self._mounts:
             mount_path, _ = self._mounts[name]
-            sub_path = str(params.get('path', '')).strip('/')
-            if mount_path == '/':
-                return f"/{sub_path}" if sub_path else '/'
+            sub_path = str(params.get("path", "")).strip("/")
+            if mount_path == "/":
+                return f"/{sub_path}" if sub_path else "/"
             return f"{mount_path}/{sub_path}" if sub_path else mount_path
         for route in self.router.routes:
             if route.name == name:
                 return _apply_params(route.path, params)
         raise KeyError(name)
 
-    async def _call(self, request: Request, endpoint: Callable[..., Any], params: Dict[str, Any]) -> Any:
+    async def _call(
+        self, request: Request, endpoint: Callable[..., Any], params: Dict[str, Any]
+    ) -> Any:
         request.path_params = params
         kwargs = await _build_kwargs(request, endpoint, params)
         result = endpoint(**kwargs)
@@ -372,10 +405,10 @@ class FastAPI:
         handled_by_mount = False
         result: Any
         for mount_prefix, static_app in self._static_mounts:
-            if mount_prefix == '/':
-                rel_path = path_val.lstrip('/')
+            if mount_prefix == "/":
+                rel_path = path_val.lstrip("/")
             elif path_val == mount_prefix:
-                rel_path = ''
+                rel_path = ""
             elif path_val.startswith(f"{mount_prefix}/"):
                 rel_path = path_val[len(mount_prefix) + 1 :]
             else:
@@ -406,15 +439,21 @@ class FastAPI:
         if "content-length" not in response.headers:
             response.headers["content-length"] = str(len(response.body or b""))
 
-        await send({"type": "http.response.start", "status": response.status_code, "headers": [
-            (str(key).encode("latin1"), str(value).encode("latin1")) for key, value in response.headers.items()
-        ]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": response.status_code,
+                "headers": [
+                    (str(key).encode("latin1"), str(value).encode("latin1"))
+                    for key, value in response.headers.items()
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": response.body, "more_body": False})
 
         background = getattr(response, "background", None)
         if isinstance(background, BackgroundTasks):
             await background.run()
-
 
 
 def _join_paths(prefix: str, path: str) -> str:

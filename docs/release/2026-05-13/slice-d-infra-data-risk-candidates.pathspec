@@ -1,0 +1,14 @@
+.dockerignore
+.editorconfig
+.env.example
+.github/workflows/smoke.yml
+.gitignore
+compose/ci/docker-compose.yml
+config/tenants/
+db/init/
+db/migrations/
+docker-compose.yml
+infra/caddy/Caddyfile
+libs/config/
+ops/deploy.sh
+pyproject.toml

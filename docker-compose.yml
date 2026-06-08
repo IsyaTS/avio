@@ -30,10 +30,11 @@ services:
     environment:
       TENANTS_DIR: /data/tenants
       TG_SESSIONS_DIR: /app/tg-sessions
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
       WORKER_BASE_URL: http://tgworker:8000
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       WAWEB_BASE_URL: http://waweb:9001
+      MAX_PERSONAL_WORKER_URL: http://maxworker:9010
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       PUBLIC_KEY: ${PUBLIC_KEY}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
@@ -71,7 +72,7 @@ services:
       WORKER_BASE_URL: http://tgworker:8000
       TG_SESSIONS_DIR: /app/tg-sessions
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://avio:AvioPg_2025_strong@postgres:5432/avio}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       OUTBOX_ENABLED: 1
       OUTBOX_WHITELIST: ${OUTBOX_WHITELIST:-*}
@@ -85,6 +86,7 @@ services:
       INCOMING_QUEUE_KEY: inbox:message_in
       OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-45}
       PLANNER_ATTEMPTS: ${PLANNER_ATTEMPTS:-3}
+      MAX_PERSONAL_WORKER_URL: http://maxworker:9010
     depends_on:
       app:
         condition: service_started
@@ -144,6 +146,50 @@ services:
       - ./data/tenants:/data/tenants
       - ./tg-sessions:/app/tg-sessions:rw
 
+  maxworker:
+    container_name: avio-maxworker-1
+    build:
+      context: .
+      dockerfile: apps/maxworker/Dockerfile
+    cpus: "2.0"
+    mem_limit: 3g
+    memswap_limit: 3g
+    pids_limit: 220
+    stop_grace_period: 20s
+    env_file: .env
+    environment:
+      MAXWORKER_PORT: 9010
+      MAX_PERSONAL_WORKER_TOKEN: ${MAX_PERSONAL_WORKER_TOKEN:-}
+      MAX_PERSONAL_SESSIONS_DIR: /data/max-personal-sessions
+      MAX_PERSONAL_MOCK: ${MAX_PERSONAL_MOCK:-0}
+      MAX_PERSONAL_BROWSER_HEADLESS: ${MAX_PERSONAL_BROWSER_HEADLESS:-1}
+      MAX_PERSONAL_MAX_BROWSER_SESSIONS: ${MAX_PERSONAL_MAX_BROWSER_SESSIONS:-1}
+      MAX_PERSONAL_ALLOWED_TENANTS: ${MAX_PERSONAL_ALLOWED_TENANTS:-101}
+      MAX_PERSONAL_IDLE_BROWSER_TTL_SECONDS: ${MAX_PERSONAL_IDLE_BROWSER_TTL_SECONDS:-900}
+      MAX_PERSONAL_EXPIRED_QR_CLEANUP_GRACE_SECONDS: ${MAX_PERSONAL_EXPIRED_QR_CLEANUP_GRACE_SECONDS:-60}
+      MAX_PERSONAL_KILL_SWITCH: ${MAX_PERSONAL_KILL_SWITCH:-0}
+      MAX_PERSONAL_OUTBOUND_DISABLED: ${MAX_PERSONAL_OUTBOUND_DISABLED:-0}
+    command:
+      [
+        "/bin/sh",
+        "-lc",
+        "Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & export DISPLAY=:99 && sleep 2 && exec npm run start",
+      ]
+    volumes:
+      - ./data/max-personal-sessions:/data/max-personal-sessions
+      - ./data/tenants:/data/tenants:ro
+    restart: unless-stopped
+    expose: ["9010"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:9010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   wabaileys:
     container_name: avio-wabaileys-1
     build:
@@ -190,7 +236,6 @@ services:
       app:
         condition: service_started
     ports:
-      - "0.0.0.0:80:80"
       - "0.0.0.0:443:443"
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
@@ -199,5 +244,6 @@ services:
 
 volumes:
   pg-data:
+  redis-data:
   caddy-data:
   caddy-config:

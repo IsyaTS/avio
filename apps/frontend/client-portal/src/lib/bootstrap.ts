@@ -9,9 +9,33 @@ export type ClientUrls = Record<string, string | undefined> & {
   upload_catalog?: string;
   csv_get?: string;
   csv_save?: string;
-  training_upload?: string;
-  training_status?: string;
-  whatsapp_export?: string;
+  avito_history_probe?: string;
+  avito_history_probe_status?: string;
+  avito_history_export?: string;
+  avito_history_export_status?: string;
+  avito_history_export_download?: string;
+  avito_history_export_dialog_dataset_download?: string;
+  avito_history_export_export_summary_download?: string;
+  avito_history_export_contextual_download?: string;
+  avito_history_export_review_cases_download?: string;
+  avito_history_export_rejected_summary_download?: string;
+  avito_history_export_domain_schema_download?: string;
+  avito_history_export_business_rules_draft_download?: string;
+  avito_history_export_active?: string;
+  avito_history_export_latest?: string;
+  avito_history_export_files?: string;
+  avito_history_export_delete?: string;
+  avito_history_export_cancel?: string;
+  avito_history_export_activate_dataset?: string;
+  avito_history_export_deactivate_dataset?: string;
+  avito_oauth_accounts?: string;
+  avito_oauth_account_primary?: string;
+  avito_oauth_account_rename?: string;
+  avito_oauth_account_disconnect?: string;
+  avito_oauth_account_webhook?: string;
+  contextual_cases_import?: string;
+  contextual_cases_status?: string;
+  contextual_cases_settings?: string;
   dialogs_list?: string;
   dialogs_detail?: string;
   dialogs_send?: string;
@@ -99,11 +123,11 @@ export function resolveTenantId(state: BootstrapState): number | null {
 }
 
 export function resolveAccessKey(state: BootstrapState): string {
+  if (state.key) return state.key;
+  if (state.public_key) return state.public_key;
   const params = new URLSearchParams(window.location.search);
   const fromQuery = (params.get('k') || '').trim();
   if (fromQuery) return fromQuery;
-  if (state.key) return state.key;
-  if (state.public_key) return state.public_key;
   const cookieMatch = document.cookie.match(/(?:^|;\s*)client_key=([^;]+)/);
   if (cookieMatch && cookieMatch[1]) {
     return decodeURIComponent(cookieMatch[1]);

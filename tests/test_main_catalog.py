@@ -76,7 +76,7 @@ def test_resolve_catalog_attachment_uses_request_url(sandbox):
         "http://testserver/internal/tenant/2/catalog-file?path=uploads/catalog.pdf"
     )
     assert "&token=" in attachment["url"]
-    assert caption.startswith("Каталог в PDF")
+    assert caption == ""
 
 
 def test_read_catalog_handles_cp1251_when_marked_utf8(sandbox):
@@ -252,6 +252,40 @@ def test_read_catalog_auto_maps_russian_headers(sandbox):
     assert "25 000" in pages[0]
 
 
+def test_read_catalog_maps_object_type_from_russian_header(sandbox):
+    core, _ = sandbox
+    tenant = 9
+    core.ensure_tenant_files(tenant)
+
+    uploads = core.tenant_dir(tenant) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    path = uploads / "catalog.csv"
+    path.write_text(
+        "Наименование;Цена, руб.;Тип помещения\n"
+        "VITRA;55900;частный дом\n"
+        "LUXOR;39500;квартира\n",
+        encoding="utf-8",
+    )
+
+    cfg = core.read_tenant_config(tenant)
+    cfg["catalogs"] = [
+        {
+            "name": "uploaded",
+            "path": "uploads/catalog.csv",
+            "type": "csv",
+            "encoding": "utf-8",
+            "delimiter": ";",
+        }
+    ]
+    core.write_tenant_config(tenant, cfg)
+
+    items = core._read_catalog(tenant)
+    assert items
+    kinds = {str(item.get("title")): str(item.get("object_type")) for item in items}
+    assert kinds.get("VITRA") == "house"
+    assert kinds.get("LUXOR") == "apartment"
+
+
 def test_read_catalog_respects_persona_csv_mapping(sandbox):
     core, _ = sandbox
     tenant = 8
@@ -293,3 +327,42 @@ meta:
     assert row.get("title") == "«Уфа»"
     assert row.get("price") == "19990"
     assert row.get("color") == "Белый"
+
+
+def test_read_catalog_persona_csv_without_delimiter_autodetects_comma(sandbox):
+    core, _ = sandbox
+    tenant = 9
+    core.ensure_tenant_files(tenant)
+
+    catalogs = core.tenant_dir(tenant) / "catalogs"
+    catalogs.mkdir(parents=True, exist_ok=True)
+    path = catalogs / "catalog.csv"
+    path.write_text(
+        "Название,Цена,Цвет\n"
+        "ТЕРМО ЭВЕРЕСТ,39900,Бетон снежный\n"
+        "ПРОТЕРМО,37400,Шоколад\n",
+        encoding="utf-8",
+    )
+
+    core.write_persona(
+        tenant,
+        """
+meta:
+  catalog_csv_path: "catalogs/catalog.csv"
+""",
+    )
+
+    items = core._read_catalog(tenant)
+    assert items
+    assert str(items[0].get("title") or "").strip() == "ТЕРМО ЭВЕРЕСТ"
+    assert core._item_price_int(items[0]) == 39900
+    assert core._item_price_int(items[1]) == 37400
+
+
+def test_item_price_int_prefers_plausible_price_when_model_name_contains_digits(sandbox):
+    core, _ = sandbox
+    item = {
+        "title": "3Д ТЕРМО СТЕКЛО",
+        "price": '3Д ТЕРМО СТЕКЛО,66500,"1,5 ММ",110 ММ',
+    }
+    assert core._item_price_int(item) == 66500

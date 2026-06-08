@@ -42,7 +42,9 @@ async def ensure_schema() -> None:
         try:
             await exec_fn(stmt)
         except Exception:
-            logger.exception("avito_analytics_tokens_ensure_failed statement=%s", stmt.strip().split("\n", 1)[0])
+            logger.exception(
+                "avito_analytics_tokens_ensure_failed statement=%s", stmt.strip().split("\n", 1)[0]
+            )
             raise
 
 
@@ -72,7 +74,9 @@ def _row_to_model(row: Mapping[str, Any] | Any) -> AvitoAnalyticsToken | None:
         if refresh_enc:
             refresh_token = decrypt_str(str(refresh_enc))
     except EncryptionError:
-        logger.warning("avito_analytics_token_decrypt_failed account_id=%s", account_id, exc_info=True)
+        logger.warning(
+            "avito_analytics_token_decrypt_failed account_id=%s", account_id, exc_info=True
+        )
     created_raw = data.get("created_at")
     updated_raw = data.get("updated_at")
     expires_raw = data.get("expires_at")
@@ -125,7 +129,7 @@ async def list_tokens() -> list[AvitoAnalyticsToken]:
             ORDER BY updated_at DESC NULLS LAST
             """
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("avito_analytics_tokens_list_failed")
         raise
     return [model for model in (_row_to_model(row) for row in rows) if model]

@@ -6,6 +6,13 @@ services:
     depends_on:
       mocktg:
         condition: service_started
+  worker:
+    environment:
+      OUTBOX_ENABLED: "0"
+      OUTBOX_DB_WORKER: "0"
+      INBOX_ENABLED: "1"
+      INCOMING_QUEUE_KEY: inbox:message_in
+      SMART_REPLY_ENABLED: "1"
   mocktg:
     image: python:3.11-slim
     command: ["python", "/mock/mock_tgworker.py"]

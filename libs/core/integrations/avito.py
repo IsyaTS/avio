@@ -12,6 +12,8 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from libs.core import sales_core as core_module
+from libs.core.lib.numbers import coerce_int as _coerce_int_shared
+
 settings = core_module.settings  # type: ignore[attr-defined]
 read_tenant_config = core_module.read_tenant_config  # type: ignore[attr-defined]
 write_tenant_config = core_module.write_tenant_config  # type: ignore[attr-defined]
@@ -30,7 +32,7 @@ class AvitoOAuthError(RuntimeError):
 
 
 def build_authorize_url(
-    state: str,
+    state: str | None,
     *,
     redirect_uri: str | None = None,
     scope: str | None = None,
@@ -39,8 +41,9 @@ def build_authorize_url(
     params: dict[str, str] = {
         "response_type": "code",
         "client_id": getattr(settings, "AVITO_CLIENT_ID", "").strip(),
-        "state": state,
     }
+    if state:
+        params["state"] = state
     if redirect:
         params["redirect_uri"] = redirect
     scope_value = (scope or DEFAULT_SCOPE or "").strip()
@@ -102,12 +105,7 @@ async def exchange_code_for_token(tenant: int, code: str) -> dict[str, Any]:
 
 
 def _coerce_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(str(value).strip())
-    except Exception:
-        return None
+    return _coerce_int_shared(value)
 
 
 _ACCOUNT_TENANT_CACHE: dict[int, int] = {}
@@ -164,6 +162,27 @@ def find_tenant_by_account(account_id: Any) -> Optional[int]:
     cached = _ACCOUNT_TENANT_CACHE.get(account_val)
     if cached is not None:
         return cached
+    try:
+        from libs.core.repo import avito_accounts
+        import asyncio
+
+        async def _find() -> Optional[int]:
+            account = await avito_accounts.find_active_by_account_id(int(account_val))
+            if account and account.get("tenant_id") is not None:
+                return int(account["tenant_id"])
+            return None
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            found = asyncio.run(_find())
+            if found is not None:
+                _cache_account_mapping(found, account_val)
+                return found
+    except Exception:
+        pass
 
     tenants_root = getattr(core_module, "TENANTS_DIR", None)
     if tenants_root is None:
@@ -285,9 +304,12 @@ async def resolve_chat_participant_profile(
         return dict(cached[1])
 
     try:
-        token, integration = await ensure_access_token(int(tenant))
+        if account_val is not None:
+            token, integration = await ensure_access_token_for_account(int(tenant), int(account_val))
+        else:
+            token, integration = await ensure_access_token(int(tenant))
     except Exception:
-        logger.exception("avito_chat_profile_token_failed tenant=%s", tenant)
+        logger.exception("avito_chat_profile_token_failed tenant=%s account_id=%s", tenant, account_val)
         return {}
 
     if account_val is None:
@@ -307,7 +329,9 @@ async def resolve_chat_participant_profile(
                 payload = response.json()
             except Exception:
                 payload = {}
-            info = _extract_chat_participant_profile(payload, author_id=author_id, account_id=account_val)
+            info = _extract_chat_participant_profile(
+                payload, author_id=author_id, account_id=account_val
+            )
             if info:
                 _CHAT_PROFILE_CACHE[cache_key] = (now, dict(info))
                 return dict(info)
@@ -334,7 +358,9 @@ async def resolve_chat_participant_profile(
                 if str(item.get("id") or "").strip() != chat_text:
                     continue
                 found = True
-                info = _extract_chat_participant_profile(item, author_id=author_id, account_id=account_val)
+                info = _extract_chat_participant_profile(
+                    item, author_id=author_id, account_id=account_val
+                )
                 if info:
                     _CHAT_PROFILE_CACHE[cache_key] = (now, dict(info))
                     return dict(info)
@@ -386,6 +412,45 @@ async def resolve_tenant_by_chat(chat_id: str) -> tuple[Optional[int], Optional[
     cached = _CHAT_ACCOUNT_CACHE.get(chat_key)
     if cached and now - cached[0] <= _CHAT_ACCOUNT_TTL_SECONDS:
         return cached[1], cached[2]
+
+    try:
+        from libs.core.repo import avito_accounts
+
+        tenants_seen: set[tuple[int, int]] = set()
+        tenants_root = getattr(core_module, "TENANTS_DIR", None)
+        rows: list[dict[str, Any]] = []
+        if tenants_root is not None:
+            try:
+                entries = list(tenants_root.iterdir())
+            except Exception:
+                entries = []
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                try:
+                    tenant_id = int(entry.name)
+                except Exception:
+                    continue
+                try:
+                    rows.extend(await avito_accounts.list_accounts(tenant_id))
+                except Exception:
+                    continue
+        for row in rows:
+            tenant_id = _coerce_int(row.get("tenant_id"))
+            account_id = _coerce_int(row.get("account_id"))
+            if tenant_id is None or account_id is None or (tenant_id, account_id) in tenants_seen:
+                continue
+            tenants_seen.add((tenant_id, account_id))
+            try:
+                token, _ = await ensure_access_token_for_account(tenant_id, account_id)
+                if await _chat_exists(token, account_id, chat_key):
+                    _CHAT_ACCOUNT_CACHE[chat_key] = (now, int(tenant_id), int(account_id))
+                    _cache_account_mapping(int(tenant_id), int(account_id))
+                    return int(tenant_id), int(account_id)
+            except Exception:
+                continue
+    except Exception:
+        pass
 
     tenants_root = getattr(core_module, "TENANTS_DIR", None)
     if tenants_root is None:
@@ -471,6 +536,11 @@ async def _refresh_access_token(tenant: int, integration: Mapping[str, Any]) -> 
         logger.warning("Avito token refresh decode failed: %s", exc)
         raise AvitoOAuthError("Failed to decode Avito token response") from exc
 
+    access_token = str(payload.get("access_token") or "").strip()
+    if not access_token:
+        logger.warning("Avito token refresh returned no access_token tenant=%s", tenant)
+        raise AvitoOAuthError("Avito token refresh returned no access token")
+
     merged = dict(integration)
     merged.update(payload)
     expires_in = _coerce_int(payload.get("expires_in"))
@@ -482,7 +552,7 @@ async def _refresh_access_token(tenant: int, integration: Mapping[str, Any]) -> 
     return stored
 
 
-async def refresh_access_token(tenant: int) -> dict[str, Any]:
+async def _refresh_access_token_legacy(tenant: int) -> dict[str, Any]:
     integration = get_integration(int(tenant))
     if not integration:
         raise AvitoOAuthError("Avito integration is not configured for tenant")
@@ -498,7 +568,7 @@ async def refresh_access_token(tenant: int) -> dict[str, Any]:
     return refreshed
 
 
-async def ensure_access_token(tenant: int) -> Tuple[str, dict[str, Any]]:
+async def _ensure_access_token_legacy(tenant: int) -> Tuple[str, dict[str, Any]]:
     integration = get_integration(int(tenant))
     if not integration:
         raise AvitoOAuthError("Avito integration is not configured for tenant")
@@ -534,6 +604,120 @@ async def ensure_access_token(tenant: int) -> Tuple[str, dict[str, Any]]:
     return token, integration
 
 
+async def refresh_access_token(tenant: int) -> dict[str, Any]:
+    from libs.core.services import avito_account_tokens
+    from libs.core.repo import avito_accounts
+
+    account = await avito_accounts.get_primary_account(int(tenant))
+    if account and account.get("account_id") is not None:
+        return await avito_account_tokens.refresh_access_token_for_account(
+            int(tenant),
+            int(account["account_id"]),
+        )
+    return await _refresh_access_token_legacy(int(tenant))
+
+
+async def ensure_access_token(tenant: int) -> Tuple[str, dict[str, Any]]:
+    from libs.core.services import avito_account_tokens
+
+    return await avito_account_tokens.ensure_primary_access_token(int(tenant))
+
+
+async def ensure_access_token_for_account(
+    tenant: int,
+    account_id: int,
+) -> Tuple[str, dict[str, Any]]:
+    from libs.core.services import avito_account_tokens
+
+    return await avito_account_tokens.ensure_access_token_for_account(int(tenant), int(account_id))
+
+
+async def refresh_access_token_for_account(tenant: int, account_id: int) -> dict[str, Any]:
+    from libs.core.services import avito_account_tokens
+
+    return await avito_account_tokens.refresh_access_token_for_account(int(tenant), int(account_id))
+
+
+async def get_account_integration(tenant: int, account_id: int) -> Optional[dict[str, Any]]:
+    from libs.core.repo import avito_accounts
+
+    return await avito_accounts.get_account(int(tenant), int(account_id))
+
+
+async def list_accounts(tenant: int, *, include_disconnected: bool = False) -> list[dict[str, Any]]:
+    from libs.core.repo import avito_accounts
+
+    accounts = await avito_accounts.list_accounts(
+        int(tenant),
+        include_disconnected=include_disconnected,
+    )
+    if accounts:
+        return accounts
+    legacy = get_integration(int(tenant)) or {}
+    account_id = _coerce_int(legacy.get("account_id"))
+    if account_id is None or not (legacy.get("access_token") or legacy.get("refresh_token")):
+        return []
+    account = await avito_accounts.upsert_account_tokens(
+        int(tenant),
+        int(account_id),
+        legacy,
+        account_login=str(legacy.get("account_login") or "") or None,
+        is_primary=True,
+    )
+    return [dict(account)] if account else []
+
+
+async def get_primary_account(tenant: int) -> Optional[dict[str, Any]]:
+    from libs.core.repo import avito_accounts
+
+    account = await avito_accounts.get_primary_account(int(tenant))
+    if account:
+        return account
+    accounts = await list_accounts(int(tenant))
+    return accounts[0] if accounts else None
+
+
+async def upsert_oauth_account_from_payload(
+    tenant: int,
+    token_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    from libs.core.services import avito_account_tokens
+
+    return await avito_account_tokens.upsert_oauth_account_from_payload(int(tenant), token_payload)
+
+
+async def set_primary_account(tenant: int, account_id: int) -> Optional[dict[str, Any]]:
+    from libs.core.repo import avito_accounts
+
+    account = await avito_accounts.set_primary_account(int(tenant), int(account_id))
+    if account:
+        avito_accounts.sync_primary_mirror_to_tenant_config(int(tenant), account)
+    return account
+
+
+async def update_account_display_name(
+    tenant: int,
+    account_id: int,
+    display_name: str | None,
+) -> Optional[dict[str, Any]]:
+    from libs.core.repo import avito_accounts
+
+    return await avito_accounts.update_account_display_name(
+        int(tenant),
+        int(account_id),
+        display_name,
+    )
+
+
+async def disconnect_account(tenant: int, account_id: int) -> Optional[dict[str, Any]]:
+    from libs.core.repo import avito_accounts
+
+    account = await avito_accounts.disconnect_account(int(tenant), int(account_id))
+    primary = await avito_accounts.get_primary_account(int(tenant))
+    avito_accounts.sync_primary_mirror_to_tenant_config(int(tenant), primary)
+    return account
+
+
 async def ensure_account_info(
     tenant: int,
     integration: Mapping[str, Any],
@@ -563,6 +747,22 @@ async def sync_account_info(tenant: int) -> dict[str, Any]:
     if not token:
         raise AvitoOAuthError("Avito access token is not configured for tenant")
     updated = await ensure_account_info(int(tenant), integration, token=token)
+    account_id = _coerce_int(updated.get("account_id"))
+    if account_id is not None:
+        try:
+            from libs.core.repo import avito_accounts
+
+            account = await avito_accounts.upsert_account_tokens(
+                int(tenant),
+                int(account_id),
+                updated,
+                account_login=str(updated.get("account_login") or "") or None,
+                is_primary=True,
+            )
+            if account:
+                return dict(account)
+        except Exception:
+            logger.debug("avito_account_row_sync_failed tenant=%s", tenant, exc_info=True)
     return dict(updated)
 
 
@@ -610,20 +810,14 @@ async def _fetch_account_info(token: str) -> Optional[dict[str, Any]]:
 def _extract_account_info(payload: Any) -> Optional[dict[str, Any]]:
     def normalize(item: Mapping[str, Any]) -> Optional[dict[str, Any]]:
         candidate = (
-            item.get("id")
-            or item.get("account_id")
-            or item.get("accountId")
-            or item.get("account")
+            item.get("id") or item.get("account_id") or item.get("accountId") or item.get("account")
         )
         account = _coerce_int(candidate)
         if account is None:
             return None
         info: dict[str, Any] = {"account_id": account}
         name_candidate = (
-            item.get("login")
-            or item.get("name")
-            or item.get("title")
-            or item.get("username")
+            item.get("login") or item.get("name") or item.get("title") or item.get("username")
         )
         if isinstance(name_candidate, str) and name_candidate.strip():
             info["account_login"] = name_candidate.strip()
@@ -648,9 +842,13 @@ async def ensure_webhook(
     tenant: int,
     url: str,
     *,
+    account_id: int | None = None,
     event_types: Sequence[str] | None = None,
 ) -> bool:
-    token, _ = await ensure_access_token(int(tenant))
+    if account_id is not None:
+        token, _ = await ensure_access_token_for_account(int(tenant), int(account_id))
+    else:
+        token, _ = await ensure_access_token(int(tenant))
     types = list(event_types) if event_types else ["messages"]
     existing = await _list_webhooks(token)
     normalized_url = url.rstrip("/")
@@ -698,9 +896,7 @@ async def _list_webhooks(token: str) -> list[dict[str, Any]]:
     if response.status_code == 401:
         raise AvitoOAuthError("Avito token unauthorized while listing webhooks")
     if response.status_code >= 500:
-        logger.warning(
-            "avito_webhook_list_server_error status=%s", response.status_code
-        )
+        logger.warning("avito_webhook_list_server_error status=%s", response.status_code)
         return []
     if response.status_code >= 400:
         logger.info(
@@ -718,21 +914,20 @@ async def _list_webhooks(token: str) -> list[dict[str, Any]]:
     result = []
     if isinstance(payload, Mapping):
         if isinstance(payload.get("subscriptions"), list):
-            result = [
-                dict(item)
-                for item in payload["subscriptions"]
-                if isinstance(item, Mapping)
-            ]
+            result = [dict(item) for item in payload["subscriptions"] if isinstance(item, Mapping)]
     elif isinstance(payload, list):
         result = [dict(item) for item in payload if isinstance(item, Mapping)]
     return result
 
 
-async def delete_webhook(tenant: int, url: str) -> bool:
+async def delete_webhook(tenant: int, url: str, *, account_id: int | None = None) -> bool:
     url_value = str(url or "").strip()
     if not url_value:
         return False
-    token, _ = await ensure_access_token(int(tenant))
+    if account_id is not None:
+        token, _ = await ensure_access_token_for_account(int(tenant), int(account_id))
+    else:
+        token, _ = await ensure_access_token(int(tenant))
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -791,7 +986,10 @@ async def get_voice_files(
     if not ids:
         return {}
 
-    token, integration = await ensure_access_token(int(tenant))
+    if account_id is not None:
+        token, integration = await ensure_access_token_for_account(int(tenant), int(account_id))
+    else:
+        token, integration = await ensure_access_token(int(tenant))
     account_val = _coerce_int(account_id if account_id is not None else integration.get("account_id"))
     if account_val is None:
         raise AvitoOAuthError("Avito account id is missing for getVoiceFiles")
@@ -808,7 +1006,10 @@ async def get_voice_files(
 
     response = await _request(token)
     if response.status_code == 401 and integration.get("refresh_token"):
-        refreshed = await _refresh_access_token(int(tenant), integration)
+        if account_val is not None:
+            refreshed = await refresh_access_token_for_account(int(tenant), int(account_val))
+        else:
+            refreshed = await refresh_access_token(int(tenant))
         refreshed_token = str(refreshed.get("access_token") or "").strip()
         if refreshed_token:
             response = await _request(refreshed_token)

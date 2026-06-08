@@ -4,14 +4,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import statistics
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from libs.core.integrations import avito_analytics as avito_api
 from libs.core.sales_core import settings
@@ -53,7 +52,9 @@ def _cache_key(account_id: int, period: int, sla: int, params: Mapping[str, Any]
     return f"avito:analytics:v2:{account_id}:{period}:{sla}:{params_hash}"
 
 
-async def _get_cache(account_id: int, period: int, sla: int, params: Mapping[str, Any] | None) -> dict[str, Any] | None:
+async def _get_cache(
+    account_id: int, period: int, sla: int, params: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
     redis_conn = getattr(settings, "r", None)
     if not redis_conn:
         return None
@@ -71,7 +72,11 @@ async def _get_cache(account_id: int, period: int, sla: int, params: Mapping[str
 
 
 async def _set_cache(
-    account_id: int, period: int, sla: int, params: Mapping[str, Any] | None, payload: Mapping[str, Any]
+    account_id: int,
+    period: int,
+    sla: int,
+    params: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
 ) -> None:
     redis_conn = getattr(settings, "r", None)
     if not redis_conn:
@@ -133,7 +138,9 @@ def _extract_stats(payload: Any) -> list[Mapping[str, Any]]:
                                 continue
                             views += float(stat.get("uniqViews") or stat.get("views") or 0)
                             contacts += float(stat.get("uniqContacts") or stat.get("contacts") or 0)
-                            favorites += float(stat.get("uniqFavorites") or stat.get("favorites") or 0)
+                            favorites += float(
+                                stat.get("uniqFavorites") or stat.get("favorites") or 0
+                            )
                             calls += float(stat.get("calls") or 0)
                     normalized.append(
                         {
@@ -167,7 +174,9 @@ def _extract_operations(payload: Any) -> list[Mapping[str, Any]]:
 
 
 def _operation_amount(op: Mapping[str, Any]) -> float:
-    amount = float(op.get("amountTotal") or op.get("amountRub") or op.get("amount") or op.get("sum") or 0)
+    amount = float(
+        op.get("amountTotal") or op.get("amountRub") or op.get("amount") or op.get("sum") or 0
+    )
     name = str(op.get("operationName") or "").lower()
     op_type = str(op.get("operationType") or "").lower()
     service_type = str(op.get("serviceType") or "").lower()
@@ -235,8 +244,20 @@ def _parse_ts(val: Any) -> datetime | None:
 
 
 def _classify_direction(msg: Mapping[str, Any], seller_id: int | None) -> str:
-    direction = str(msg.get("direction") or msg.get("type") or msg.get("author_type") or msg.get("authorType") or "").lower()
-    sender = msg.get("senderId") or msg.get("authorId") or msg.get("author_id") or msg.get("user_id") or msg.get("userId")
+    direction = str(
+        msg.get("direction")
+        or msg.get("type")
+        or msg.get("author_type")
+        or msg.get("authorType")
+        or ""
+    ).lower()
+    sender = (
+        msg.get("senderId")
+        or msg.get("authorId")
+        or msg.get("author_id")
+        or msg.get("user_id")
+        or msg.get("userId")
+    )
     if direction in {"incoming", "from_client", "buyer", "in"}:
         return "in"
     if direction in {"outgoing", "from_seller", "seller", "out"}:
@@ -258,7 +279,9 @@ class SLAStats:
     slow_buckets: Counter
 
 
-def _calc_sla(chats: Sequence[Mapping[str, Any]], seller_id: int | None, sla_minutes: int) -> SLAStats:
+def _calc_sla(
+    chats: Sequence[Mapping[str, Any]], seller_id: int | None, sla_minutes: int
+) -> SLAStats:
     frt: list[float] = []
     unanswered = 0
     total = 0
@@ -308,10 +331,14 @@ def _calc_sla(chats: Sequence[Mapping[str, Any]], seller_id: int | None, sla_min
                 slow["lt_60m"] += 1
         if last_in and (last_out is None or last_out < last_in):
             unanswered += 1
-    return SLAStats(first_response_seconds=frt, unanswered=unanswered, chats_total=total, slow_buckets=slow)
+    return SLAStats(
+        first_response_seconds=frt, unanswered=unanswered, chats_total=total, slow_buckets=slow
+    )
 
 
-async def _list_all_items(token: str, warnings: list[str], started: float, *, fast: bool = False) -> tuple[list[Mapping[str, Any]], Any]:
+async def _list_all_items(
+    token: str, warnings: list[str], started: float, *, fast: bool = False
+) -> tuple[list[Mapping[str, Any]], Any]:
     all_items: list[Mapping[str, Any]] = []
     pages_raw: list[Any] = []
     page = 1
@@ -326,7 +353,9 @@ async def _list_all_items(token: str, warnings: list[str], started: float, *, fa
         while attempts < 4:
             attempts += 1
             try:
-                payload = await avito_api.list_items(token, page=page, per_page=per_page, statuses=avito_api.ALL_ITEM_STATUSES)
+                payload = await avito_api.list_items(
+                    token, page=page, per_page=per_page, statuses=avito_api.ALL_ITEM_STATUSES
+                )
                 break
             except avito_api.AvitoAPIError as exc:
                 if exc.status == 429:
@@ -401,7 +430,9 @@ async def _fetch_chats_sample(
     sample_limit = _CHAT_SAMPLE_LIMIT if not fast else min(_CHAT_SAMPLE_LIMIT, 50)
     while len(chats) < sample_limit:
         try:
-            payload = await avito_api.messenger_list_chats(token, user_id, limit=limit, offset=offset)
+            payload = await avito_api.messenger_list_chats(
+                token, user_id, limit=limit, offset=offset
+            )
         except avito_api.AvitoAPIError as exc:
             if exc.status == 429:
                 warnings.append("chats_rate_limited")
@@ -439,7 +470,9 @@ async def _fetch_chats_all(
             warnings.append("chats_time_budget_exceeded")
             break
         try:
-            payload = await avito_api.messenger_list_chats(token, user_id, limit=limit, offset=offset)
+            payload = await avito_api.messenger_list_chats(
+                token, user_id, limit=limit, offset=offset
+            )
         except avito_api.AvitoAPIError as exc:
             if exc.status == 429:
                 warnings.append("chats_rate_limited")
@@ -486,7 +519,12 @@ async def _attach_messages(
 
 
 async def _load_messages_for_chat(
-    token: str, user_id: int | None, chat: Mapping[str, Any], warnings: list[str], *, fast: bool = False
+    token: str,
+    user_id: int | None,
+    chat: Mapping[str, Any],
+    warnings: list[str],
+    *,
+    fast: bool = False,
 ) -> None:
     chat_id = chat.get("id") or chat.get("chat_id") or chat.get("chatId")
     messages: list[Any] = []
@@ -498,7 +536,9 @@ async def _load_messages_for_chat(
             warnings.append("messages_truncated")
             break
         try:
-            payload = await avito_api.messenger_get_messages(token, user_id, str(chat_id), limit=limit, offset=offset)
+            payload = await avito_api.messenger_get_messages(
+                token, user_id, str(chat_id), limit=limit, offset=offset
+            )
         except avito_api.AvitoAPIError as exc:
             if exc.status in {403, 404}:
                 break
@@ -516,7 +556,9 @@ async def _load_messages_for_chat(
     chat["_messages"] = messages
 
 
-def _build_items_table(items: Sequence[Mapping[str, Any]], stats: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _build_items_table(
+    items: Sequence[Mapping[str, Any]], stats: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
     stats_map: dict[str, Mapping[str, Any]] = {}
     for st in stats:
         iid = st.get("id") or st.get("itemId") or st.get("item_id")
@@ -544,7 +586,11 @@ def _build_items_table(items: Sequence[Mapping[str, Any]], stats: Sequence[Mappi
     return table
 
 
-def _calc_summary(items_table: Sequence[Mapping[str, Any]], operations: Sequence[Mapping[str, Any]], sla_stats: SLAStats) -> dict[str, Any]:
+def _calc_summary(
+    items_table: Sequence[Mapping[str, Any]],
+    operations: Sequence[Mapping[str, Any]],
+    sla_stats: SLAStats,
+) -> dict[str, Any]:
     views = sum(float(row.get("views") or 0) for row in items_table)
     contacts = sum(float(row.get("contacts") or 0) for row in items_table)
     calls = sum(float(row.get("calls") or 0) for row in items_table)
@@ -567,19 +613,28 @@ def _calc_losses(sla_stats: SLAStats, params: Mapping[str, Any] | None) -> dict[
     p = params or {}
     avg_check = float(p.get("avg_check") or 0)
     close_rate_chat = float(p.get("close_rate_chat") or 0)
-    close_rate_call = float(p.get("close_rate_call") or 0)
-    margin = float(p.get("gross_margin") or 0) / 100 if p.get("gross_margin") not in (None, "") else 0
+    margin = (
+        float(p.get("gross_margin") or 0) / 100 if p.get("gross_margin") not in (None, "") else 0
+    )
     loss_factor = float(p.get("loss_factor_slow_response") or 0)
     unanswered = sla_stats.unanswered
     slow = sla_stats.slow_buckets.get("breach", 0)
-    revenue_unanswered = unanswered * avg_check * close_rate_chat if avg_check and close_rate_chat else None
-    revenue_slow = slow * avg_check * close_rate_chat * loss_factor if avg_check and close_rate_chat and loss_factor else None
+    revenue_unanswered = (
+        unanswered * avg_check * close_rate_chat if avg_check and close_rate_chat else None
+    )
+    revenue_slow = (
+        slow * avg_check * close_rate_chat * loss_factor
+        if avg_check and close_rate_chat and loss_factor
+        else None
+    )
     return {
         "unanswered_leads": unanswered,
         "slow_response_leads": slow,
         "revenue_at_risk_unanswered": revenue_unanswered,
         "revenue_at_risk_slow": revenue_slow,
-        "profit_at_risk_unanswered": revenue_unanswered * margin if revenue_unanswered is not None and margin else None,
+        "profit_at_risk_unanswered": revenue_unanswered * margin
+        if revenue_unanswered is not None and margin
+        else None,
     }
 
 
@@ -594,7 +649,11 @@ async def build_report(
 ) -> dict[str, Any]:
     if fast is None:
         fast = _FAST_MODE
-    cached = None if force_refresh else await _get_cache(account_id, period_days, sla_minutes, calc_params)
+    cached = (
+        None
+        if force_refresh
+        else await _get_cache(account_id, period_days, sla_minutes, calc_params)
+    )
     if cached:
         return cached
 
@@ -627,10 +686,23 @@ async def build_report(
         except Exception:
             item_ids.append(str(iid))
 
-    stats_items, stats_raw = await _fetch_stats_v1(token, int(user_id), item_ids, date_from, date_to, warnings, started)
+    stats_items, stats_raw = await _fetch_stats_v1(
+        token, int(user_id), item_ids, date_from, date_to, warnings, started
+    )
 
-    calls_payload, balance_payload, operations_payload, chats_payload, ratings_payload, autoload_payload, cpx_payload, job_payload = await asyncio.gather(
-        avito_api.get_calls_stats(token, user_id, date_from, date_to, item_ids=item_ids[:200]) if user_id else asyncio.sleep(0, result=None),
+    (
+        calls_payload,
+        balance_payload,
+        operations_payload,
+        chats_payload,
+        ratings_payload,
+        autoload_payload,
+        cpx_payload,
+        job_payload,
+    ) = await asyncio.gather(
+        avito_api.get_calls_stats(token, user_id, date_from, date_to, item_ids=item_ids[:200])
+        if user_id
+        else asyncio.sleep(0, result=None),
         avito_api.get_balance(token, user_id) if user_id else asyncio.sleep(0, result=None),
         avito_api.get_operations(token, date_from, date_to),
         avito_api.messenger_list_chats(token, user_id, limit=50, offset=0),
@@ -691,8 +763,12 @@ async def build_report(
         },
         "messaging": {
             "sla": {
-                "median_first_response_sec": statistics.median(sla_stats.first_response_seconds) if sla_stats.first_response_seconds else None,
-                "p90_first_response_sec": statistics.quantiles(sla_stats.first_response_seconds, n=10)[-1]
+                "median_first_response_sec": statistics.median(sla_stats.first_response_seconds)
+                if sla_stats.first_response_seconds
+                else None,
+                "p90_first_response_sec": statistics.quantiles(
+                    sla_stats.first_response_seconds, n=10
+                )[-1]
                 if len(sla_stats.first_response_seconds) >= 10
                 else None,
                 "lt_5m": sla_stats.slow_buckets.get("lt_5m", 0),
@@ -720,7 +796,7 @@ async def build_report(
             "balance": balance_payload,
             "calls": calls_payload,
             "chats": chats_payload,
-            "chats_pages": chats_pages if 'chats_pages' in locals() else None,
+            "chats_pages": chats_pages if "chats_pages" in locals() else None,
             "ratings": ratings_payload,
             "autoload": autoload_payload,
             "cpx": cpx_payload,

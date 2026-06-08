@@ -7,6 +7,9 @@ import pytest
 from apps.worker import main as worker_module
 
 
+pytestmark = pytest.mark.unit
+
+
 class _FakeResponse:
     def __init__(
         self,

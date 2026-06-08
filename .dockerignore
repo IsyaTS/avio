@@ -1,32 +1,34 @@
-# VCS and local env
+# Ignore VCS and local environment files
 .git
 .gitignore
 .env
 .env.*
 !.env.example
-.env_recovery/
-
-# Python local artifacts
 .venv/
+app/.venv/
+
+# Ignore local runtime artifacts that should not be copied into the image
+app/tenants/
+data/tenants/*/uploads/
+data/tenants/*/exports/
+data/tenants/*/recordings/
+data/redis/
+tmp_extract/
+tgworker/sessions/
+waweb/node_modules/
+wabaileys/node_modules/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# Runtime and local state
+# runtime data
 data/
-tg-sessions/
-tmp_extract/
 **/wa_state/
 
-# JS dependencies
-node_modules/
-apps/frontend/client-portal/node_modules/
-apps/waweb/node_modules/
-apps/wabaileys/node_modules/
-
-# Editor and OS
-.idea/
-.vscode/
-.DS_Store
+# local diagnostics / generated worktrees
+.codex
+.env_recovery/
+screens/
+kabinet/
+avio-connect-flow/
+infra/caddy/Caddyfile.backup.*
+infra/caddy/Caddyfile.bak.*

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import pathlib
 from dataclasses import dataclass
 import logging
@@ -9,7 +8,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from libs.core import db
-from .indexer import TrainingIndex, TrainingExample
+from .indexer import TrainingIndex
 from libs.core.training import utils as training_utils
 
 
@@ -31,6 +30,17 @@ def _read_tenant_config(tenant: int) -> Dict[str, Any]:
 
     cfg = _read_tenant_config_fn(tenant)
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _learning_min_score(learn: Any, default: float = 0.18) -> float:
+    if not isinstance(learn, dict):
+        return default
+    raw = learn.get("min_score", learn.get("min_similarity", default))
+    try:
+        value = float(raw)
+    except Exception:
+        value = default
+    return max(0.0, min(1.0, value))
 
 
 def _latest_index_path(tenant: int) -> Optional[pathlib.Path]:
@@ -56,7 +66,13 @@ def ensure_training_index(tenant: int) -> Optional[TrainingIndex]:
             size = path.stat().st_size if path.exists() else 0
         except Exception:
             size = 0
-        _log.info(f"{_LOG_PREFIX} index loaded tenant=%s path=%s size=%sB pairs=%s", tenant, str(path), size, len(idx.items))
+        _log.info(
+            f"{_LOG_PREFIX} index loaded tenant=%s path=%s size=%sB pairs=%s",
+            tenant,
+            str(path),
+            size,
+            len(idx.items),
+        )
         return idx
     except Exception:
         _log.exception(f"{_LOG_PREFIX} index_load_failed tenant=%s", tenant, exc_info=True)
@@ -91,23 +107,51 @@ def retrieve_examples(tenant: int, query: str, k: int = 3) -> List[RetrievedExam
         return []
     try:
         q_vec = idx.vectorizer.transform([query])
-        import numpy as np  # type: ignore
+        if hasattr(idx.matrix, "vectors") and hasattr(q_vec, "vectors"):
+            doc_vectors = getattr(idx.matrix, "vectors", []) or []
+            query_vectors = getattr(q_vec, "vectors", []) or []
+            q_dict = query_vectors[0] if query_vectors else {}
+            scored: list[tuple[int, float]] = []
+            if q_dict:
+                for idx_num, doc in enumerate(doc_vectors):
+                    if not doc:
+                        continue
+                    score = 0.0
+                    if len(q_dict) <= len(doc):
+                        for term, weight in q_dict.items():
+                            score += float(weight) * float(doc.get(term, 0.0))
+                    else:
+                        for term, weight in doc.items():
+                            score += float(weight) * float(q_dict.get(term, 0.0))
+                    if score > 0:
+                        scored.append((idx_num, float(score)))
+            scored.sort(key=lambda item: item[1], reverse=True)
+            order = [item[0] for item in scored]
+            score_lookup = {item[0]: item[1] for item in scored}
+        else:
+            import numpy as np  # type: ignore
 
-        scores = (q_vec @ idx.matrix.T).toarray().ravel()
-        order = np.argsort(-scores)
+            scores = (q_vec @ idx.matrix.T).toarray().ravel()
+            order = np.argsort(-scores)
+            score_lookup = {int(i): float(scores[int(i)]) for i in order if scores[int(i)] > 0}
         out: List[RetrievedExample] = []
         for i in order:
             ex = idx.items[int(i)]
             if len(ex.q.strip()) < min_chars or len(ex.a.strip()) < min_chars:
                 continue
-            score = float(scores[int(i)])
+            score = float(score_lookup.get(int(i), 0.0))
             # lightweight floor: skip zero/negative matches
             if score <= 0:
                 continue
             out.append(RetrievedExample(q=ex.q, a=ex.a, score=score, meta=ex.meta))
             if len(out) >= top_k:
                 break
-        _log.debug(f"{_LOG_PREFIX} retrieve tenant=%s query_len=%s returned=%s", tenant, len(query or ""), len(out))
+        _log.debug(
+            f"{_LOG_PREFIX} retrieve tenant=%s query_len=%s returned=%s",
+            tenant,
+            len(query or ""),
+            len(out),
+        )
         return out
     except Exception:
         _log.exception(f"{_LOG_PREFIX} retrieve_failed tenant=%s", tenant, exc_info=True)
@@ -152,6 +196,7 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
         top_k = max(1, int((learn or {}).get("top_k", k)))
     except Exception:
         top_k = k
+    min_score = _learning_min_score(learn)
 
     examples = await db.get_training_examples_for_retrieval(tenant, limit=max(top_k * 5, 20))
     examples = [ex for ex in examples if not ex.get("is_bad")]
@@ -164,7 +209,9 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
     exact_matches: List[RetrievedExample] = []
     if sanitized_query:
         for idx, ex in enumerate(examples):
-            q_text = texts[idx] if idx < len(texts) else training_utils.sanitize_text(ex.get("q_text"))
+            q_text = (
+                texts[idx] if idx < len(texts) else training_utils.sanitize_text(ex.get("q_text"))
+            )
             if q_text and q_text.lower() == sanitized_query.lower():
                 a_text = training_utils.sanitize_text(ex.get("a_text"))
                 if len(q_text.strip()) < min_chars or len(a_text.strip()) < min_chars:
@@ -181,7 +228,9 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
                     break
     if exact_matches:
         try:
-            await db.increment_training_examples_usage([int(ex.meta.get("id")) for ex in exact_matches if ex.meta.get("id")])
+            await db.increment_training_examples_usage(
+                [int(ex.meta.get("id")) for ex in exact_matches if ex.meta.get("id")]
+            )
         except Exception:
             _log.debug(f"{_LOG_PREFIX} usage_increment_failed tenant=%s", tenant, exc_info=True)
         try:
@@ -200,10 +249,13 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
 
     if use_embeddings:
         try:
-            from libs.core.training import embeddings as emb_mod  # local import to avoid hard dep at import time
+            from libs.core.training import (
+                embeddings as emb_mod,
+            )  # local import to avoid hard dep at import time
 
             q_vec = await emb_mod.embed_query(sanitized_query)
             if q_vec:
+
                 def _cosine(v1: List[float], v2: List[float]) -> float:
                     if not v1 or not v2:
                         return 0.0
@@ -265,7 +317,9 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
 
                 tfidf_scores = (q_vec @ matrix.T).toarray().ravel()
                 order = np.argsort(-tfidf_scores)
-                scores = [(int(i), float(tfidf_scores[int(i)])) for i in order if tfidf_scores[int(i)] > 0]
+                scores = [
+                    (int(i), float(tfidf_scores[int(i)])) for i in order if tfidf_scores[int(i)] > 0
+                ]
         except Exception:
             _log.exception(f"{_LOG_PREFIX} tfidf_retrieve_failed tenant=%s", tenant)
             return []
@@ -273,6 +327,8 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
     out: List[RetrievedExample] = []
     seen_ids: set[int] = set()
     for idx, score in scores:
+        if float(score) < min_score:
+            continue
         if idx in seen_ids or idx >= len(examples):
             continue
         ex = examples[idx]
@@ -293,7 +349,9 @@ async def _retrieve_examples_from_db(tenant: int, query: str, k: int = 3) -> Lis
             break
 
     try:
-        await db.increment_training_examples_usage([int(ex.meta.get("id")) for ex in out if ex.meta.get("id")])
+        await db.increment_training_examples_usage(
+            [int(ex.meta.get("id")) for ex in out if ex.meta.get("id")]
+        )
     except Exception:
         _log.debug(f"{_LOG_PREFIX} usage_increment_failed tenant=%s", tenant, exc_info=True)
     try:
@@ -327,15 +385,19 @@ async def retrieve_examples_async(tenant: int, query: str, k: int = 3) -> List[R
 async def build_examples_block_async(tenant: int, query: str) -> str:
     cfg = _read_tenant_config(tenant)
     learn = cfg.get("learning") if isinstance(cfg, dict) else {}
+    if isinstance(learn, dict) and learn.get("enabled") is False:
+        return ""
     try:
-        top_k = max(1, min(1, int((learn or {}).get("top_k", 1))))
+        top_k = max(1, min(2, int((learn or {}).get("top_k", 2))))
     except Exception:
-        top_k = 1
+        top_k = 2
     results = await retrieve_examples_async(tenant, query, k=top_k)
     if not results:
         return ""
     lines: List[str] = [
-        "Примеры обучающих диалогов (если вопрос похож — отвечай максимально близко к примеру, без добавления новых фактов):"
+        "Проверенные примеры ответов менеджера для самообучения.",
+        "Если текущий вопрос похож, используй пример как образец смысла и формулировки; адаптируй только под текущие факты диалога.",
+        "Не выдумывай факты из примера, если они не подтверждены в текущем диалоге:",
     ]
     for ex in results[:top_k]:
         q = (ex.q or "").strip()

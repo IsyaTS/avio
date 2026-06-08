@@ -29,6 +29,7 @@ import qrcode
 from fastapi.encoders import jsonable_encoder
 from prometheus_client import Counter, Gauge
 from libs.core.lib.transport_utils import message_in_asdict
+from libs.core.lib.tg_slots import decode_virtual_tenant
 from libs.core.message_envelope import detect_message_kind, normalize_attachment_type, sanitize_display_name
 from libs.core.metrics import MESSAGE_IN_COUNTER, MESSAGE_OUT_COUNTER, SEND_FAIL_COUNTER
 from libs.core.schemas import Attachment, MessageIn
@@ -84,6 +85,7 @@ async def _log_self_identity_async(tenant: int, client: TelegramClient) -> None:
         )
     except Exception:
         LOGGER.exception("tg_diag:self_identity_failed tenant_id=%s", tenant)
+
 
 def _resolve_session_dir() -> Path:
     raw = (os.getenv("TG_SESSIONS_DIR") or "/app/tg-sessions").strip()
@@ -147,6 +149,39 @@ if ATTACHMENT_FETCH_RETRY_DELAY < 0.0:
 TENANTS_DIR = Path((os.getenv("TENANTS_DIR") or "/data/tenants").strip())
 
 
+def _storage_tenant_id(raw_tenant: int) -> int:
+    try:
+        tenant_value = int(raw_tenant)
+    except Exception:
+        return 0
+    base_tenant, _slot = decode_virtual_tenant(tenant_value)
+    if base_tenant > 0:
+        return int(base_tenant)
+    return tenant_value
+
+
+def _resolve_local_attachment_path(path_hint: Any, tenant: int) -> Path | None:
+    raw = str(path_hint or "").strip()
+    if not raw:
+        return None
+    try:
+        tenant_root = (TENANTS_DIR / str(_storage_tenant_id(int(tenant)))).resolve()
+    except Exception:
+        return None
+    candidate = Path(raw)
+    try:
+        resolved = candidate.resolve() if candidate.is_absolute() else (tenant_root / candidate).resolve()
+    except Exception:
+        return None
+    try:
+        resolved.relative_to(tenant_root)
+    except Exception:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
 def _try_read_internal_attachment(url: str, tenant: int) -> tuple[bytes | None, str | None, str | None]:
     raw_url = str(url or "").strip()
     if not raw_url:
@@ -166,14 +201,14 @@ def _try_read_internal_attachment(url: str, tenant: int) -> tuple[bytes | None, 
         tenant_from_url = int(parts[2])
     except Exception:
         return None, None, None
-    if int(tenant_from_url) != int(tenant):
+    if int(tenant_from_url) != _storage_tenant_id(int(tenant)):
         return None, None, None
     query = parse_qs(parsed.query or "", keep_blank_values=False)
     raw_rel = (query.get("path") or [""])[0]
     rel = str(raw_rel or "").strip().lstrip("/")
     if not rel:
         return None, None, None
-    tenant_root = (TENANTS_DIR / str(int(tenant))).resolve()
+    tenant_root = (TENANTS_DIR / str(_storage_tenant_id(int(tenant)))).resolve()
     candidate = (tenant_root / rel).resolve()
     try:
         candidate.relative_to(tenant_root)
@@ -1148,8 +1183,6 @@ class TelegramSessionManager:
             state.qr_login = None
             self._update_metrics()
 
-
-
     async def submit_password(self, tenant: int, password: str) -> TwoFASubmitResult:
         await self.wait_until_ready()
         secret = password or ""
@@ -1517,6 +1550,7 @@ class TelegramSessionManager:
             tenant,
         )
         return TwoFASubmitResult(status_code=200, body={"ok": True})
+
     def _register_handlers(self, tenant: int, client: TelegramClient) -> None:
         if getattr(client, "_avio_handlers_registered", False):
             return
@@ -2612,41 +2646,14 @@ class TelegramSessionManager:
                 async with httpx.AsyncClient(timeout=ATTACHMENT_FETCH_TIMEOUT) as session:
                     for attachment in attachments_list:
                         url = attachment.get("url") if isinstance(attachment, dict) else None
-                        if not url:
-                            continue
+                        direct_path: Path | None = None
                         data: bytes | None = None
                         local_name: str | None = None
                         local_mime: str | None = None
-                        local_data, local_name, local_mime = _try_read_internal_attachment(str(url), int(tenant))
-                        if local_data is not None:
-                            data = local_data
-                        else:
-                            last_fetch_error: Exception | None = None
-                            for attempt in range(1, ATTACHMENT_FETCH_RETRIES + 1):
-                                try:
-                                    resp = await session.get(url)
-                                    resp.raise_for_status()
-                                    data = resp.content
-                                    break
-                                except httpx.HTTPError as exc:
-                                    last_fetch_error = exc
-                                    if attempt < ATTACHMENT_FETCH_RETRIES and ATTACHMENT_FETCH_RETRY_DELAY > 0:
-                                        await asyncio.sleep(ATTACHMENT_FETCH_RETRY_DELAY * attempt)
-                        try:
-                            if data is None:
-                                raise last_fetch_error or RuntimeError("attachment_fetch_failed")
-                        except Exception as exc:
-                            EVENT_ERRORS.labels("attachment_fetch").inc()
-                            LOGGER.error(
-                                "stage=send_fetch_fail tenant_id=%s url=%s attempts=%s error=%s",
-                                tenant,
-                                url,
-                                ATTACHMENT_FETCH_RETRIES,
-                                exc,
-                            )
-                            continue
+                        last_fetch_error: Exception | None = None
                         caption = None
                         if isinstance(attachment, dict):
+                            direct_path = _resolve_local_attachment_path(attachment.get("path"), int(tenant))
                             caption = attachment.get("caption") or attachment.get("text")
                             filename_hint = (
                                 attachment.get("filename")
@@ -2664,11 +2671,43 @@ class TelegramSessionManager:
                             filename_hint = None
                             attachment_type = ""
                             attachment_mime = ""
+                        if direct_path is None:
+                            if not url:
+                                continue
+                            local_data, local_name, local_mime = _try_read_internal_attachment(str(url), int(tenant))
+                            if local_data is not None:
+                                data = local_data
+                            else:
+                                for attempt in range(1, ATTACHMENT_FETCH_RETRIES + 1):
+                                    try:
+                                        resp = await session.get(url)
+                                        resp.raise_for_status()
+                                        data = resp.content
+                                        break
+                                    except httpx.HTTPError as exc:
+                                        last_fetch_error = exc
+                                        if attempt < ATTACHMENT_FETCH_RETRIES and ATTACHMENT_FETCH_RETRY_DELAY > 0:
+                                            await asyncio.sleep(ATTACHMENT_FETCH_RETRY_DELAY * attempt)
+                            try:
+                                if data is None:
+                                    raise last_fetch_error or RuntimeError("attachment_fetch_failed")
+                            except Exception as exc:
+                                EVENT_ERRORS.labels("attachment_fetch").inc()
+                                LOGGER.error(
+                                    "stage=send_fetch_fail tenant_id=%s url=%s attempts=%s error=%s",
+                                    tenant,
+                                    url,
+                                    ATTACHMENT_FETCH_RETRIES,
+                                    exc,
+                                )
+                                continue
                         filename = None
                         if isinstance(filename_hint, str) and filename_hint.strip():
                             filename = Path(filename_hint).name
                             if not filename:
                                 filename = None
+                        if not filename and direct_path is not None:
+                            filename = direct_path.name
                         if not filename and local_name:
                             filename = local_name
                         is_voice_note = attachment_type == "voice" or (
@@ -2685,16 +2724,19 @@ class TelegramSessionManager:
                         if text and not sent_text:
                             caption_text = text
                             sent_text = True
-                        file_payload: Any = io.BytesIO(data)
-                        if filename:
-                            try:
-                                file_payload.name = filename  # type: ignore[attr-defined]
-                            except Exception:
-                                # fallback: try to wrap in InputFile with explicit name
+                        if direct_path is not None:
+                            file_payload: Any = str(direct_path)
+                        else:
+                            file_payload = io.BytesIO(data)
+                            if filename:
                                 try:
-                                    file_payload = InputFile(file=file_payload, name=filename)
+                                    file_payload.name = filename  # type: ignore[attr-defined]
                                 except Exception:
-                                    pass
+                                    # fallback: try to wrap in InputFile with explicit name
+                                    try:
+                                        file_payload = InputFile(file=file_payload, name=filename)
+                                    except Exception:
+                                        pass
                         result = await client.send_file(
                             entity,
                             file=file_payload,

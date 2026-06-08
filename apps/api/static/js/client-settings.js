@@ -27,8 +27,8 @@ function getLocation() {
     uploadCatalog: '/pub/catalog/upload',
     csvGet: '/pub/catalog/csv',
     csvSave: '/pub/catalog/csv',
-    trainingUpload: '/pub/training/upload',
-    trainingStatus: '/pub/training/status',
+    avitoHistoryProbe: '/client/{tenant}/avito/history/probe',
+    avitoHistoryProbeStatus: '/client/{tenant}/avito/history/probe/{job_id}',
   };
 
   if (typeof window !== 'undefined') {
@@ -315,12 +315,6 @@ function getLocation() {
       csvSave: typeof safeUrls.csv_save === 'string' && safeUrls.csv_save
         ? safeUrls.csv_save
         : undefined,
-      trainingUpload: typeof safeUrls.training_upload === 'string' && safeUrls.training_upload
-        ? safeUrls.training_upload
-        : undefined,
-      trainingStatus: typeof safeUrls.training_status === 'string' && safeUrls.training_status
-        ? safeUrls.training_status
-        : undefined,
     };
   };
 
@@ -501,285 +495,6 @@ function getLocation() {
       }
     }
     throw lastError || new Error('Не удалось загрузить настройки');
-  }
-
-  function bindExportClicks() {
-    const button = document.getElementById('export-download');
-    if (!button) {
-      window.__EXPORT_BIND_OK__ = false;
-      return false;
-    }
-
-    if (button.dataset && button.dataset.bound === '1') {
-      window.__EXPORT_BIND_OK__ = true;
-      return true;
-    }
-
-    const statusNode = document.getElementById('export-status');
-    const daysInput = document.getElementById('exp-days');
-    const limitInput = document.getElementById('exp-limit');
-    const perInput = document.getElementById('exp-per');
-
-    const resolveEndpoint = (raw) => {
-      const candidate = resolveEndpointUrl(raw, withTenant(), endpoints.whatsappExport);
-      if (candidate) {
-        return candidate;
-      }
-      const fallbackUrl = resolveEndpointUrl(endpoints.whatsappExport, withTenant());
-      return fallbackUrl || '/pub/wa/export';
-    };
-
-    const updateStatus = (message, variant = 'muted') => {
-      if (!statusNode) return;
-      statusNode.className = `status-text ${variant}`.trim();
-      statusNode.textContent = message || '';
-    };
-
-    const parseNumber = (value, { min = null, fallback = 0 } = {}) => {
-      const numeric = Number.parseInt((value ?? '').toString().trim(), 10);
-      if (!Number.isFinite(numeric)) {
-        return fallback;
-      }
-      if (min !== null && numeric < min) {
-        return min;
-      }
-      return numeric;
-    };
-
-    const parseFilename = (headerValue) => {
-      if (!headerValue) {
-        return '';
-      }
-      const match = headerValue.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-      if (!match) {
-        return '';
-      }
-      const encoded = (match[1] || match[2] || '').trim();
-      if (!encoded) {
-        return '';
-      }
-      try {
-        return decodeURIComponent(encoded);
-      } catch (error) {
-        return encoded;
-      }
-    };
-
-    const parseCountHeader = (headers, name) => {
-      const raw = headers.get(name);
-      if (!raw) return null;
-      const parsed = Number.parseInt(raw, 10);
-      return Number.isFinite(parsed) ? parsed : null;
-    };
-
-    const buildDefaultFilename = () => {
-      const now = new Date();
-      const y = now.getUTCFullYear();
-      const m = String(now.getUTCMonth() + 1).padStart(2, '0');
-      const d = String(now.getUTCDate()).padStart(2, '0');
-      return `whatsapp_export_${y}-${m}-${d}.zip`;
-    };
-
-    const requestArchive = async (endpointUrl, payload) => {
-      const response = await fetch(endpointUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (response.status === 204) {
-        return { status: 204 };
-      }
-
-      if (!response.ok) {
-        let detail = '';
-        let reason = '';
-        try {
-          const data = await response.clone().json();
-          if (data && typeof data === 'object') {
-            const { detail: detailValue, reason: reasonValue, message } = data;
-            if (typeof reasonValue === 'string') {
-              reason = reasonValue;
-            }
-            if (typeof detailValue === 'string') {
-              detail = detailValue;
-            } else if (Array.isArray(detailValue)) {
-              detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
-            } else if (detailValue && typeof detailValue === 'object') {
-              const parts = [];
-              Object.entries(detailValue).forEach(([keyName, value]) => {
-                if (value == null) return;
-                const text = Array.isArray(value) ? value.join(', ') : String(value);
-                parts.push(`${keyName}: ${text}`);
-              });
-              detail = parts.join('; ');
-            }
-            if (!detail && typeof message === 'string') {
-              detail = message;
-            }
-          }
-        } catch (error) {
-          try {
-            detail = (await response.text()) || '';
-          } catch (_) {
-            detail = '';
-          }
-        }
-
-        const message = (reason || detail || `Ошибка экспорта (HTTP ${response.status})`).trim() || 'Ошибка экспорта';
-        const exportError = new Error(message);
-        if (detail) exportError.detail = detail;
-        if (reason) exportError.reason = reason;
-        exportError.status = response.status;
-        throw exportError;
-      }
-
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.startsWith('application/zip')) {
-        let detail = '';
-        try {
-          if (contentType.includes('application/json')) {
-            const data = await response.clone().json();
-            if (data && typeof data === 'object') {
-              const { detail: detailValue, message } = data;
-              if (typeof detailValue === 'string') {
-                detail = detailValue;
-              } else if (Array.isArray(detailValue)) {
-                detail = detailValue.map((item) => (item == null ? '' : String(item))).filter(Boolean).join(', ');
-              } else if (detailValue && typeof detailValue === 'object') {
-                const parts = [];
-                Object.entries(detailValue).forEach(([keyName, value]) => {
-                  if (value == null) return;
-                  const text = Array.isArray(value) ? value.join(', ') : String(value);
-                  parts.push(`${keyName}: ${text}`);
-                });
-                detail = parts.join('; ');
-              }
-              if (!detail && typeof message === 'string') {
-                detail = message;
-              }
-            }
-          } else {
-            detail = (await response.text()) || '';
-          }
-        } catch (error) {
-          try {
-            detail = (await response.text()) || '';
-          } catch (_) {
-            detail = '';
-          }
-        }
-        const exportError = new Error((detail || 'Ответ сервера не является ZIP-архивом').trim());
-        exportError.status = response.status;
-        if (detail) exportError.detail = detail;
-        throw exportError;
-      }
-
-      const blob = await response.blob();
-      const disposition = response.headers.get('content-disposition') || response.headers.get('Content-Disposition') || '';
-      const filename = parseFilename(disposition) || buildDefaultFilename();
-
-      return {
-        status: 200,
-        blob,
-        filename,
-        dialogCount: parseCountHeader(response.headers, 'X-Dialog-Count'),
-        messageCount: parseCountHeader(response.headers, 'X-Message-Count'),
-      };
-    };
-
-    button.type = 'button';
-
-    button.addEventListener('click', async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-
-      const state = readStateFromDom();
-      const urls = state && typeof state === 'object' ? state.urls || {} : {};
-      const maxDays = resolveMaxDays(state);
-      const tenantValue = determineTenant(state, { fallbackDefault: false });
-      if (!Number.isFinite(tenantValue) || tenantValue <= 0) {
-        updateStatus('не удалось определить tenant', 'alert');
-        return;
-      }
-
-      const tenant = tenantValue;
-      const key = typeof state.key === 'string' ? state.key : '';
-      const endpoint = resolveEndpoint(urls.whatsapp_export);
-      if (!endpoint) {
-        updateStatus('Ссылка для экспорта недоступна', 'alert');
-        return;
-      }
-
-      let days = parseNumber(daysInput ? daysInput.value : '', { min: 0, fallback: 0 });
-      if (maxDays !== null && days > maxDays) {
-        days = maxDays;
-      }
-      if (daysInput) {
-        daysInput.value = String(days);
-      }
-
-      const limit = parseNumber(limitInput ? limitInput.value : '', { min: 1, fallback: 200 });
-      if (limitInput) {
-        limitInput.value = String(limit);
-      }
-
-      if (perInput) {
-        perInput.value = '0';
-      }
-
-      const payload = { tenant, key, days, limit, per: 0 };
-
-      console.info('[client-settings] export tenant=%s', tenant);
-
-      button.disabled = true;
-      updateStatus('Готовим архив…', 'muted');
-
-      try {
-        const result = await requestArchive(endpoint, payload);
-        if (result.status === 204) {
-          updateStatus('Нет диалогов за период', 'alert');
-          return;
-        }
-
-        const blobUrl = URL.createObjectURL(result.blob);
-        const anchor = document.createElement('a');
-        anchor.href = blobUrl;
-        anchor.download = result.filename || 'whatsapp_export.zip';
-        document.body.appendChild(anchor);
-        anchor.click();
-        setTimeout(() => {
-          try {
-            URL.revokeObjectURL(blobUrl);
-          } catch (error) {
-            console.warn('Failed to revoke export blob URL', error);
-          }
-          anchor.remove();
-        }, 120);
-
-        if (result.dialogCount != null && result.messageCount != null) {
-          updateStatus(`Сформировано: ${result.dialogCount} диалогов, ${result.messageCount} сообщений`, 'muted');
-        } else {
-          updateStatus('Архив сформирован', 'muted');
-        }
-      } catch (error) {
-        const message = (error && error.message) || 'Не удалось скачать архив';
-        updateStatus(message, 'alert');
-        try {
-          console.error('WhatsApp export failed', error);
-        } catch (_) {}
-      } finally {
-        button.disabled = false;
-      }
-    });
-
-    if (button.dataset) {
-      button.dataset.bound = '1';
-    }
-
-    window.__EXPORT_BIND_OK__ = true;
-
-    return true;
   }
 
   const extractVersion = (src) => {
@@ -1084,9 +799,8 @@ function getLocation() {
       uploadCatalog: normalizeEndpointPath(urls.upload_catalog, '/pub/catalog/upload'),
       csvGet: normalizeEndpointPath(urls.csv_get, '/pub/catalog/csv'),
       csvSave: normalizeEndpointPath(urls.csv_save, '/pub/catalog/csv'),
-      trainingUpload: normalizeEndpointPath(urls.training_upload, '/pub/training/upload'),
-      trainingStatus: normalizeEndpointPath(urls.training_status, '/pub/training/status'),
-      whatsappExport: normalizeEndpointPath(urls.whatsapp_export, '/pub/wa/export'),
+      avitoHistoryProbe: normalizeEndpointPath(urls.avito_history_probe, `/client/${tenant}/avito/history/probe`),
+      avitoHistoryProbeStatus: normalizeEndpointPath(urls.avito_history_probe_status, `/client/${tenant}/avito/history/probe/{job_id}`),
     };
 
     const telegram = {
@@ -1125,17 +839,12 @@ function getLocation() {
     csvAddRow: document.getElementById('csv-add-row'),
     csvSave: document.getElementById('csv-save'),
     csvRefresh: document.getElementById('csv-refresh'),
-    trainingUploadForm: document.getElementById('training-upload-form'),
-    trainingUploadInput: document.querySelector('#training-upload-form input[name="file"]'),
-    trainingUploadSubmit: document.querySelector('#training-upload-form [data-role="training-upload-submit"], #training-upload-submit'),
-    trainingUploadMessage: document.getElementById('training-upload-message'),
-    trainingCheckStatus: document.getElementById('training-check-status'),
-    trainingStatus: document.getElementById('training-status'),
-    expDays: document.getElementById('exp-days'),
-    expLimit: document.getElementById('exp-limit'),
-    expPer: document.getElementById('exp-per'),
-    exportDownload: document.getElementById('export-download'),
-    exportStatus: document.getElementById('export-status'),
+    avitoHistoryFrom: document.getElementById('avito-history-from'),
+    avitoHistoryTo: document.getElementById('avito-history-to'),
+    avitoHistoryLimit: document.getElementById('avito-history-limit'),
+    avitoHistoryProbe: document.getElementById('avito-history-probe'),
+    avitoHistoryStatus: document.getElementById('avito-history-status'),
+    avitoHistorySummary: document.getElementById('avito-history-summary'),
     tgIntegrationCard: document.querySelector('.integration-card[data-tg-initial-status]'),
     tgStatus: document.getElementById('tg-integration-status'),
     tgRefresh: document.getElementById('tg-integration-refresh'),
@@ -2979,111 +2688,113 @@ function getLocation() {
     }
   }
 
-  // -------- Обучение: загрузка диалогов --------
-  async function refreshTrainingStatus() {
-    if (!dom.trainingStatus) return;
-    try {
-      const url = resolveEndpointUrl(endpoints.trainingStatus, withTenant());
-      if (!url) {
-        throw new Error('Сервис недоступен');
-      }
-      const response = await fetch(url, { cache: 'no-store' });
-      if (!response.ok) throw new Error(await response.text());
-      const data = await response.json();
-      const info = data.info || {};
-      const manifest = data.manifest || {};
-      const pairs = manifest.pairs || info.pairs || 0;
-      const ts = manifest.created_at || info.indexed_at || 0;
-      const when = ts ? new Date(ts * 1000).toLocaleString() : '';
-      const stats = data.export_stats || {};
-      const parts = [];
-      if (pairs) parts.push(`Индекс: ${pairs} пар · ${when}`);
-      if (stats && (stats.total_found != null)) {
-        parts.push(`Экспорт: в БД ${stats.total_found}, после аноним. ${stats.after_anonymize}, к выгрузке ${stats.after_filters}`);
-      }
-      dom.trainingStatus.textContent = parts.length ? parts.join(' · ') : 'Данные об обучении пока не загружены';
-      dom.trainingStatus.className = 'status-text muted';
-    } catch (error) {
-      dom.trainingStatus.textContent = `Не удалось получить статус: ${error.message}`;
-      dom.trainingStatus.className = 'status-text alert';
+  // -------- Avito: проверка доступности старой истории --------
+  function bindAvitoHistoryProbe() {
+    if (!dom.avitoHistoryProbe) return;
+    if (dom.avitoHistoryProbe.dataset.bound === '1') return;
+    dom.avitoHistoryProbe.dataset.bound = '1';
+
+    const today = new Date();
+    const prior = new Date(today.getTime() - 30 * 86400000);
+    const toDateValue = (value) => value.toISOString().slice(0, 10);
+    if (dom.avitoHistoryTo && !dom.avitoHistoryTo.value) {
+      dom.avitoHistoryTo.value = toDateValue(today);
     }
-  }
+    if (dom.avitoHistoryFrom && !dom.avitoHistoryFrom.value) {
+      dom.avitoHistoryFrom.value = toDateValue(prior);
+    }
 
-  function bindTrainingUpload() {
-    if (!dom.trainingUploadForm) return;
-
-    const sendTraining = async (event) => {
-      if (event) event.preventDefault();
-      if (dom.trainingUploadForm.dataset.state === 'uploading') return;
-      const file = dom.trainingUploadInput && dom.trainingUploadInput.files && dom.trainingUploadInput.files[0];
-      if (!file) {
-        setStatus(dom.trainingUploadMessage, 'Выберите файл перед загрузкой', 'alert');
-        return;
-      }
-      const formData = new FormData();
-      formData.append('file', file);
-      const targetUrlRaw = (dom.trainingUploadForm.dataset.uploadUrl || '').trim();
-      const targetUrl = resolveEndpointUrl(targetUrlRaw || endpoints.trainingUpload, withTenant(), endpoints.trainingUpload);
-      if (!targetUrl) {
-        setStatus(dom.trainingUploadMessage, 'Не найдён адрес загрузки данных', 'alert');
-        return;
-      }
-      dom.trainingUploadForm.dataset.state = 'uploading';
-      try {
-        const response = await fetch(targetUrl, {
-          method: 'POST',
-          body: formData,
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest',
-            Accept: 'application/json, text/plain, */*',
-          },
-          redirect: 'manual',
-        });
-
-        if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
-          setStatus(dom.trainingUploadMessage, 'Файл принят, обновляем статус…', 'muted');
-          await refreshTrainingStatus();
-          delete dom.trainingUploadForm.dataset.state;
-          return;
-        }
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(text || `Ошибка загрузки (HTTP ${response.status})`);
-        }
-
-        const data = await response.json();
-        if (!data.ok) throw new Error(data.error || 'Не удалось загрузить');
-        setStatus(dom.trainingUploadMessage, `Загружено примеров: ${data.pairs || ''}`, 'muted');
-        if (dom.trainingUploadInput) dom.trainingUploadInput.value = '';
-        await refreshTrainingStatus();
-      } catch (error) {
-        setStatus(dom.trainingUploadMessage, `Ошибка загрузки: ${error.message}`, 'alert');
-      } finally {
-        delete dom.trainingUploadForm.dataset.state;
-      }
+    const formatDate = (value) => {
+      if (!value) return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '—';
+      return date.toLocaleString();
     };
 
-    dom.trainingUploadForm.addEventListener('submit', (event) => {
+    const errorLabel = (code) => {
+      const labels = {
+        not_connected: 'Avito не подключен',
+        unauthorized: 'Avito требует повторного подключения',
+        no_permission: 'Нет доступа к Messenger API',
+        rate_limited: 'Avito ограничил запросы',
+        invalid_period: 'Проверьте период',
+        unexpected_error: 'Не удалось проверить историю',
+      };
+      return labels[code] || 'Не удалось проверить историю';
+    };
+
+    const renderSummary = (job) => {
+      if (!dom.avitoHistorySummary) return;
+      if (!job || job.status === 'running') {
+        dom.avitoHistorySummary.textContent = '';
+        return;
+      }
+      const parts = [
+        `Чаты: ${job.chats_seen || 0}`,
+        `С сообщениями: ${job.chats_with_messages || 0}`,
+        `Сообщения: ${job.messages_seen || 0}`,
+        `За период: ${job.messages_in_period || 0}`,
+        `Самое старое: ${formatDate(job.oldest_message_at)}`,
+        `Самое новое: ${formatDate(job.newest_message_at)}`,
+      ];
+      const errors = job.api_errors_summary && typeof job.api_errors_summary === 'object'
+        ? Object.entries(job.api_errors_summary)
+          .filter(([, count]) => Number(count) > 0)
+          .map(([key, count]) => `${key}: ${count}`)
+        : [];
+      if (errors.length) {
+        parts.push(`Ошибки API: ${errors.join(', ')}`);
+      }
+      dom.avitoHistorySummary.textContent = parts.join(' · ');
+    };
+
+    dom.avitoHistoryProbe.addEventListener('click', async (event) => {
       event.preventDefault();
-      sendTraining(event);
-    });
-    if (dom.trainingUploadSubmit) {
-      dom.trainingUploadSubmit.addEventListener('click', (event) => {
-        event.preventDefault();
-        sendTraining(event);
-      });
-    }
-    if (dom.trainingUploadInput) {
-      dom.trainingUploadInput.addEventListener('change', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const file = dom.trainingUploadInput.files && dom.trainingUploadInput.files[0];
-        if (file) {
-          setStatus(dom.trainingUploadMessage, `Выбран файл ${file.name}`, 'muted');
+      if (dom.avitoHistoryProbe.dataset.state === 'loading') return;
+      const endpoint = resolveEndpointUrl(endpoints.avitoHistoryProbe, withTenant());
+      if (!endpoint) {
+        setStatus(dom.avitoHistoryStatus, 'Не найден адрес проверки истории', 'alert');
+        return;
+      }
+      const payload = {
+        period_from: dom.avitoHistoryFrom ? dom.avitoHistoryFrom.value : '',
+        period_to: dom.avitoHistoryTo ? dom.avitoHistoryTo.value : '',
+        chat_limit: dom.avitoHistoryLimit ? dom.avitoHistoryLimit.value : '100',
+      };
+      dom.avitoHistoryProbe.dataset.state = 'loading';
+      dom.avitoHistoryProbe.disabled = true;
+      setStatus(dom.avitoHistoryStatus, 'Проверяем доступ...', 'muted');
+      renderSummary(null);
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail || `Ошибка проверки (HTTP ${response.status})`);
         }
-      });
-    }
+        const job = data.job || {};
+        renderSummary(job);
+        if (job.status === 'failed') {
+          setStatus(dom.avitoHistoryStatus, errorLabel(job.error_code), 'alert');
+        } else if ((job.messages_in_period || 0) <= 0) {
+          setStatus(dom.avitoHistoryStatus, 'История доступна, но сообщений за период не найдено', 'muted');
+        } else {
+          setStatus(dom.avitoHistoryStatus, 'История доступна', 'muted');
+        }
+      } catch (error) {
+        setStatus(dom.avitoHistoryStatus, `Не удалось проверить историю: ${error.message}`, 'alert');
+      } finally {
+        delete dom.avitoHistoryProbe.dataset.state;
+        dom.avitoHistoryProbe.disabled = false;
+      }
+    });
   }
 
   function bindFollowUps() {
@@ -3096,6 +2807,10 @@ function getLocation() {
       } catch (_) {}
       return;
     }
+    if (dom.followupRules.dataset.followupsBound === '1') {
+      return;
+    }
+    dom.followupRules.dataset.followupsBound = '1';
     if (dom.followupAdd) {
       dom.followupAdd.addEventListener('click', (e) => {
         e.preventDefault();
@@ -3860,26 +3575,11 @@ function getLocation() {
   }
 
   function bootstrapClientSettings() {
-    safeInvoke('export-init', bindExportClicks);
     safeInvoke('catalog-init', bindCatalogUpload);
-    safeInvoke('training-init', bindTrainingUpload);
+    safeInvoke('avito-history-init', bindAvitoHistoryProbe);
     safeInvoke('csv-controls', bindCsvControls);
     safeInvoke('followups-init', bindFollowUps);
     setTimeout(fetchCsvAndRender, 0);
-    try {
-      const trainingPromise = refreshTrainingStatus();
-      if (trainingPromise && typeof trainingPromise.catch === 'function') {
-        trainingPromise.catch((error) => {
-          try {
-            console.error('[client-settings] training status init failed', error);
-          } catch (_) {}
-        });
-      }
-    } catch (error) {
-      try {
-        console.error('[client-settings] training status init failed', error);
-      } catch (_) {}
-    }
     try {
       const telegramPromise = refreshTelegramStatus();
       if (telegramPromise && typeof telegramPromise.catch === 'function') {

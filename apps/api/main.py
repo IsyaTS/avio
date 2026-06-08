@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import pathlib
-import os, json, re, time, mimetypes, uuid
-from urllib.parse import quote, parse_qsl, urlencode, urlparse
+import os
+import json
+import re
+import time
+import mimetypes
+from urllib.parse import parse_qsl, urlencode, urlparse
 from typing import Any
 
 import importlib
 import importlib.machinery
 import importlib.util
 import sys
+from contextlib import asynccontextmanager
 from types import ModuleType
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from fastapi.staticfiles import StaticFiles
 import logging
@@ -49,6 +54,8 @@ try:
     from libs.core.services import catalog_flow as catalog_flow_service
 except ImportError:
     catalog_flow_service = None  # type: ignore
+
+from libs.core.services import ops_health
 
 
 def _load_web_module_from_source(module_name: str, full_name: str) -> ModuleType:
@@ -120,8 +127,8 @@ webhooks_router = _webhooks_mod.router  # type: ignore[attr-defined]
 process_incoming = _webhooks_mod.process_incoming  # type: ignore[attr-defined]
 
 from libs.core.internal.tenant import router as internal_tenant_router
+from libs.core.repo import tenant_configs
 
-import importlib.util as _importlib_util
 
 from apps.worker import outbox as outbox_worker
 
@@ -135,6 +142,7 @@ ROOT = pathlib.Path(__file__).resolve().parent
 
 try:  # рабочие БД-хелперы; при отсутствии БД заменяются заглушками
     from . import db as db_module  # type: ignore
+
     resolve_or_create_contact = db_module.resolve_or_create_contact
     link_lead_contact = db_module.link_lead_contact
     insert_message_in = db_module.insert_message_in
@@ -154,11 +162,14 @@ except ImportError:  # pragma: no cover - фоллбек для окружени
     async def upsert_lead(*_: object, **__: object) -> None:  # type: ignore[override]
         return None
 
+
 def _init_logging():
     level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     fmt = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
     logging.basicConfig(level=level, format=fmt)
+    for logger_name in ("httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     # Explicit stdout handlers for custom loggers
     for name in ("training", "wa"):
@@ -198,6 +209,11 @@ from libs.core.common import (
     handoff_silence_meta_key,
     whitelist_contains_number,
 )
+from apps.api.web.services.send_transport_runtime import (
+    SendTransportDeps,
+    handle_send_transport_message,
+)
+
 _FALSE_OUTBOX_VALUES = {"0", "false", "no", "off", "disabled"}
 
 
@@ -278,7 +294,9 @@ def _waweb_send_url(tenant: int) -> str:
 
 
 def _wabaileys_base_url() -> str:
-    base = getattr(settings, "BAILEYS_URL", "") or os.getenv("BAILEYS_URL") or "http://wabaileys:9002"
+    base = (
+        getattr(settings, "BAILEYS_URL", "") or os.getenv("BAILEYS_URL") or "http://wabaileys:9002"
+    )
     return str(base).rstrip("/")
 
 
@@ -298,9 +316,7 @@ def _normalize_internal_attachment_url(raw_url: str) -> str:
         return url_value
 
     internal_base = (
-        settings.APP_INTERNAL_URL
-        or os.getenv("APP_INTERNAL_URL")
-        or "http://app:8000"
+        settings.APP_INTERNAL_URL or os.getenv("APP_INTERNAL_URL") or "http://app:8000"
     ).rstrip("/")
     base_netloc = urlparse(internal_base).netloc
     token = (getattr(C, "WA_INTERNAL_TOKEN", "") or "").strip()
@@ -463,17 +479,35 @@ async def _ensure_worker_healthy() -> None:
 
 
 _docs_enabled = _env_flag("ENABLE_API_DOCS", default=True)
+
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):  # pragma: no cover - lifecycle wiring
+    await _startup_run_provider_token_migration()
+    await _startup_run_auth_migration()
+    await _startup_run_tenant_config_migration()
+    await _startup_log_revision()
+    await _client_mod.client_avito_history_export_runtime.startup_resume_exports(runtime_module=_client_mod.client_avito_history_export_runtime, common_module=C, logger=logging.getLogger("app.avito_history_exports"), enabled=not IS_TESTING)
+    await _startup_outbox_worker()
+    try:
+        yield
+    finally:
+        await _shutdown_outbox_worker()
+
+
 app = FastAPI(
     title="avio-api",
     docs_url="/docs" if _docs_enabled else None,
     redoc_url="/redoc" if _docs_enabled else None,
     openapi_url="/openapi.json" if _docs_enabled else None,
+    lifespan=_app_lifespan,
 )
 
 
 @app.head("/")
 async def root_head() -> Response:
     return Response(status_code=200)
+
+
 static_dir = ROOT / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -495,9 +529,7 @@ async def _log_alembic_revision_on_startup() -> None:
         asyncpg_module = getattr(module, "asyncpg", None)
         undefined_table_error = getattr(asyncpg_module, "UndefinedTableError", None)
         if undefined_table_error and isinstance(exc, undefined_table_error):
-            logger.info(
-                "alembic_revision=unavailable (alembic_version table missing)"
-            )
+            logger.info("alembic_revision=unavailable (alembic_version table missing)")
             return
         logger.exception("failed to query Alembic revision")
         return
@@ -507,7 +539,6 @@ async def _log_alembic_revision_on_startup() -> None:
         logger.warning("alembic_revision=unavailable")
 
 
-@app.on_event("startup")
 async def _startup_run_provider_token_migration() -> None:
     if IS_TESTING:
         return
@@ -526,7 +557,6 @@ async def _startup_run_provider_token_migration() -> None:
         )
 
 
-@app.on_event("startup")
 async def _startup_run_auth_migration() -> None:
     if IS_TESTING:
         return
@@ -546,40 +576,70 @@ async def _startup_run_auth_migration() -> None:
         raise
 
 
-@app.on_event("startup")
+async def _startup_run_tenant_config_migration() -> None:
+    if IS_TESTING:
+        return
+    try:
+        tenant_configs.ensure_schema()
+    except Exception:
+        logging.getLogger("app.migrations").exception(
+            "tenant_config_migration_failed",
+        )
+
+
 async def _startup_log_revision() -> None:
     if IS_TESTING:
         return
     await _log_alembic_revision_on_startup()
 
 
-@app.on_event("startup")
 async def _startup_outbox_worker() -> None:
     if IS_TESTING:
         return
     if not OUTBOX_DB_WORKER_ENABLED:
-        logging.getLogger("app.outbox_worker").info(
-            "event=outbox_worker_disabled"
-        )
+        logging.getLogger("app.outbox_worker").info("event=outbox_worker_disabled")
         return
     try:
         await outbox_worker.start()
     except Exception:
-        logging.getLogger("app.outbox_worker").exception(
-            "event=outbox_worker_start_failed"
-        )
+        logging.getLogger("app.outbox_worker").exception("event=outbox_worker_start_failed")
 
 
-@app.on_event("shutdown")
 async def _shutdown_outbox_worker() -> None:
     if not OUTBOX_DB_WORKER_ENABLED:
         return
     try:
         await outbox_worker.stop()
     except Exception:
-        logging.getLogger("app.outbox_worker").exception(
-            "event=outbox_worker_stop_failed"
-        )
+        logging.getLogger("app.outbox_worker").exception("event=outbox_worker_stop_failed")
+
+
+def _send_transport_deps() -> SendTransportDeps:
+    return SendTransportDeps(
+        admin_token_fn=_admin_token,
+        channel_endpoints=CHANNEL_ENDPOINTS,
+        message_to_dict_fn=transport_message_asdict,
+        normalize_whatsapp_recipient_fn=normalize_whatsapp_recipient,
+        whatsapp_address_error=WhatsAppAddressError,
+        tenant_whatsapp_provider_fn=tenant_whatsapp_provider,
+        whatsapp_send_url_fn=_whatsapp_send_url,
+        prepare_whatsapp_payload_fn=_prepare_whatsapp_payload,
+        outbox_enabled_fn=_outbox_enabled,
+        get_outbox_whitelist_fn=get_outbox_whitelist,
+        whitelist_contains_number_fn=whitelist_contains_number,
+        get_redis_client_fn=lambda: _r or getattr(settings, "r", None),
+        outbox_queue_key=OUTBOX_QUEUE_KEY,
+        send_strategy=SEND_STRATEGY,
+        mark_handoff_silence_fn=_mark_handoff_silence,
+        ensure_worker_healthy_fn=_ensure_worker_healthy,
+        transport_client_fn=_transport_client,
+        resolve_or_create_contact_fn=resolve_or_create_contact,
+        upsert_lead_fn=upsert_lead,
+        link_lead_contact_fn=link_lead_contact,
+        message_out_counter=MESSAGE_OUT_COUNTER,
+        send_fail_counter=SEND_FAIL_COUNTER,
+        logger=transport_logger,
+    )
 
 
 @app.get("/metrics")
@@ -590,359 +650,16 @@ async def metrics_endpoint() -> Response:
 
 @app.post("/send")
 async def send_transport_message(request: Request, message: TransportMessage) -> Response:
-    admin_token = _admin_token()
-    header_token = (request.headers.get("X-Admin-Token") or "").strip()
-    if admin_token and header_token != admin_token:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-    if not message.has_content:
-        raise HTTPException(status_code=400, detail="empty_message")
-
-    payload = transport_message_asdict(message)
-    manager_flag = False
-    lead_from_meta = 0
-    try:
-        manager_flag = (request.query_params.get("manager") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-    except Exception:
-        manager_flag = False
-    channel = message.channel
-    wa_provider: str | None = None
-    endpoint = CHANNEL_ENDPOINTS.get(channel)
-    if channel == "whatsapp":
-        wa_provider = tenant_whatsapp_provider(message.tenant)
-        endpoint = _whatsapp_send_url(wa_provider, message.tenant)
-    if not endpoint:
-        raise HTTPException(status_code=400, detail="channel_unknown")
-
-    request_headers: dict[str, str] | None = None
-    raw_to_value = payload.get("to")
-    normalized_to = raw_to_value
-    whitelist_number: str | None = None
-    normalized_e164: str | None = None
-
-    if channel == "whatsapp":
-        try:
-            digits, jid = normalize_whatsapp_recipient(raw_to_value)
-        except WhatsAppAddressError as exc:
-            reason = str(exc) or "invalid"
-            explanations = {
-                "empty": "empty",
-                "invalid_length": "expected 10-15 digits",
-                "invalid_domain": "expected @c.us jid",
-            }
-            message_text = explanations.get(reason, reason)
-            status_label = "invalid_to"
-            MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-            transport_logger.warning(
-                "event=message_out channel=%s tenant=%s to=%s status=%s reason=%s",
-                channel,
-                message.tenant,
-                payload.get("to") or "-",
-                status_label,
-                message_text,
-            )
-            return JSONResponse(
-                {"error": f"invalid_to: {message_text}"},
-                status_code=400,
-            )
-        payload["to"] = jid
-        normalized_to = jid
-        whitelist_number = digits
-        normalized_e164 = f"+{digits}"
-
-    if not _outbox_enabled():
-        status_label = "outbox_disabled"
-        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-        transport_logger.warning(
-            "event=message_out channel=%s tenant=%s to=%s status=%s",
-            channel,
-            message.tenant,
-            normalized_to or payload.get("to") or "-",
-            status_label,
-        )
-        return JSONResponse({"error": "outbox_disabled"}, status_code=403)
-
-    if channel == "whatsapp" and whitelist_number is not None:
-        whitelist = get_outbox_whitelist()
-        if not whitelist.allow_all and not whitelist_contains_number(
-            whitelist, whitelist_number
-        ):
-            status_label = "not_whitelisted"
-            MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-            transport_logger.warning(
-                "event=message_out channel=%s tenant=%s to=%s status=%s normalized_to=%s raw_to=%s "
-                "whitelist=%s reason=%s",
-                channel,
-                message.tenant,
-                normalized_to or "-",
-                status_label,
-                normalized_e164 or (whitelist_number and f"+{whitelist_number}") or "-",
-                raw_to_value or "-",
-                whitelist.raw_value,
-                "not_found",
-            )
-            return JSONResponse({"error": "not_whitelisted"}, status_code=403)
-
-    if channel == "whatsapp":
-        payload = _prepare_whatsapp_payload(payload, message.tenant)
-        if wa_provider == "baileys":
-            payload["tenant"] = int(message.tenant)
-            payload["tenant_id"] = int(message.tenant)
-
-        strategy_override = ""
-        try:
-            strategy_override = (request.query_params.get("strategy") or "").strip().lower()
-        except Exception:
-            strategy_override = ""
-
-        use_queue = SEND_STRATEGY == "redis" and strategy_override != "direct"
-
-        if use_queue:
-            redis_client = _r or getattr(settings, "r", None)
-            if redis_client is None:
-                transport_logger.error(
-                    "event=message_out channel=%s tenant=%s to=%s status=queue_unavailable",
-                    channel,
-                    message.tenant,
-                    normalized_to or "-",
-                )
-                raise HTTPException(status_code=502, detail="queue_unavailable")
-
-            meta_payload: dict[str, Any] = {}
-            if isinstance(message.meta, dict):
-                try:
-                    meta_payload = json.loads(
-                        json.dumps(message.meta, ensure_ascii=False)
-                    )
-                except Exception:
-                    meta_payload = dict(message.meta)
-            if not manager_flag and isinstance(meta_payload, dict):
-                raw_manager = meta_payload.get("manager")
-                if isinstance(raw_manager, str):
-                    manager_flag = raw_manager.strip().lower() in {"1", "true", "yes", "on"}
-                else:
-                    manager_flag = bool(raw_manager)
-
-            lead_hint = None
-            if isinstance(meta_payload, dict):
-                lead_hint = meta_payload.get("lead_id") or meta_payload.get("leadId")
-            try:
-                lead_from_meta = int(lead_hint) if lead_hint is not None else 0
-            except Exception:
-                lead_from_meta = 0
-
-            base_lead_id = (
-                lead_from_meta if lead_from_meta and lead_from_meta > 0 else int(time.time() * 1000)
-            )
-
-            digits_only = ""
-            if isinstance(normalized_to, str):
-                digits_only = normalized_to.split("@", 1)[0]
-
-            contact_id = 0
-            if digits_only:
-                try:
-                    contact_id = await resolve_or_create_contact(whatsapp_phone=digits_only)
-                except Exception:
-                    contact_id = 0
-
-            lead_resolved = base_lead_id
-            try:
-                lead_resolved = await upsert_lead(
-                    base_lead_id,
-                    channel="whatsapp",
-                    tenant_id=int(message.tenant),
-                    peer=normalized_to or digits_only or None,
-                    contact=digits_only or None,
-                    title=(f"WhatsApp {digits_only}" if digits_only else None),
-                )
-            except Exception:
-                lead_resolved = base_lead_id
-
-            if lead_resolved and contact_id:
-                try:
-                    await link_lead_contact(
-                        lead_resolved,
-                        contact_id,
-                        channel="whatsapp",
-                        peer=normalized_to or digits_only,
-                    )
-                except Exception:
-                    pass
-
-            lead_for_queue = lead_resolved if lead_resolved and lead_resolved > 0 else base_lead_id
-            if isinstance(meta_payload, dict):
-                meta_payload.setdefault("lead_id", lead_for_queue)
-
-            queue_message_id = (
-                payload.get("message_id")
-                or payload.get("meta", {}).get("message_id")
-                or getattr(message, "message_id", None)
-                or str(uuid.uuid4())
-            )
-
-            queue_item: dict[str, Any] = {
-                "lead_id": lead_for_queue,
-                "tenant_id": int(message.tenant),
-                "tenant": int(message.tenant),
-                "provider": "whatsapp",
-                "ch": "whatsapp",
-                "channel": "whatsapp",
-                "to": payload.get("to"),
-                "text": payload.get("text") or "",
-                "attachments": payload.get("attachments", []),
-                "attachment": payload.get("attachment"),
-                "meta": meta_payload,
-                "message_id": queue_message_id,
-                "queued_at": time.time(),
-                "origin": "app.send",
-            }
-            if wa_provider == "baileys":
-                raw_to_jid = payload.get("to_jid")
-                if isinstance(raw_to_jid, str) and raw_to_jid.strip():
-                    queue_item["to_jid"] = raw_to_jid.strip()
-            if contact_id:
-                queue_item["contact_id"] = contact_id
-            await _mark_handoff_silence(
-                tenant=message.tenant,
-                lead_id=lead_for_queue,
-                manager_flag=manager_flag,
-            )
-
-            try:
-                await redis_client.lpush(
-                    OUTBOX_QUEUE_KEY, json.dumps(queue_item, ensure_ascii=False)
-                )
-            except Exception as exc:
-                transport_logger.error(
-                    "event=message_out channel=%s tenant=%s to=%s status=queue_push_failed error=%s",
-                    channel,
-                    message.tenant,
-                    normalized_to or "-",
-                    exc,
-                )
-                raise HTTPException(status_code=502, detail="queue_push_failed") from exc
-
-            MESSAGE_OUT_COUNTER.labels(channel, "queued").inc()
-            transport_logger.info(
-                "event=message_out channel=%s tenant=%s to=%s status=queued strategy=redis",
-                channel,
-                message.tenant,
-                normalized_to or "-",
-            )
-            return JSONResponse({"ok": True, "queued": True, "strategy": "redis"})
-
-        if wa_provider != "baileys":
-            token = _admin_token()
-            request_headers = {"X-Auth-Token": token}
-            await _ensure_worker_healthy()
-
-    try:
-        client = _transport_client(channel, wa_provider if channel == "whatsapp" else None)
-        request_kwargs: dict[str, Any] = {
-            "json": payload,
-            "timeout": httpx.Timeout(12.0),
-        }
-        if channel == "telegram":
-            attachments_payload = payload.get("attachments")
-            has_attachments = isinstance(attachments_payload, list) and len(attachments_payload) > 0
-            request_kwargs["timeout"] = httpx.Timeout(90.0 if has_attachments else 25.0)
-        if channel == "whatsapp":
-            timeout_value = 300.0 if (wa_provider or "waweb") != "baileys" else 60.0
-            request_kwargs["timeout"] = httpx.Timeout(timeout_value)
-        if request_headers:
-            request_kwargs["headers"] = request_headers
-        response = await client.post(endpoint, **request_kwargs)
-    except httpx.HTTPError as exc:
-        status_label = "http_error"
-        SEND_FAIL_COUNTER.labels(channel, status_label).inc()
-        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-        transport_logger.error(
-            "event=message_out channel=%s tenant=%s to=%s status=%s error=%s",
-            channel,
-            message.tenant,
-            normalized_to or payload.get("to") or "-",
-            status_label,
-            exc,
-        )
-        raise HTTPException(status_code=502, detail="worker_unreachable") from exc
-
-    if (
-        response.status_code == 409
-        and response.headers.get("X-Reauth", "").strip() == "1"
-    ):
-        status_label = "reauth"
-        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-        transport_logger.warning(
-            "event=message_out channel=%s tenant=%s to=%s status=%s",
-            channel,
-            message.tenant,
-            normalized_to or "-",
-            status_label,
-        )
-        reauth_headers = {
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "X-Reauth": "1",
-        }
-        return JSONResponse(
-            {"ok": False, "state": "need_qr", "error": "relogin_required"},
-            status_code=409,
-            headers=reauth_headers,
-        )
-
-    if not (200 <= response.status_code < 300):
-        status_label = "remote_error"
-        reason = f"status_{response.status_code}"
-        SEND_FAIL_COUNTER.labels(channel, reason).inc()
-        MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-        transport_logger.warning(
-            "event=message_out channel=%s tenant=%s to=%s status=%s http_status=%s",
-            channel,
-            message.tenant,
-            normalized_to or "-",
-            status_label,
-            response.status_code,
-        )
-        media_type = response.headers.get("Content-Type") or "application/json"
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            media_type=media_type,
-        )
-
-    status_label = "success"
-    MESSAGE_OUT_COUNTER.labels(channel, status_label).inc()
-    transport_logger.info(
-        "event=message_out channel=%s tenant=%s to=%s status=%s",
-        channel,
-        message.tenant,
-        normalized_to or "-",
-        status_label,
-    )
-    await _mark_handoff_silence(
-        tenant=message.tenant,
-        lead_id=lead_from_meta,
-        manager_flag=manager_flag,
-    )
-    try:
-        body = response.json()
-    except Exception:
-        body = {"ok": True}
-    return JSONResponse(body, status_code=response.status_code)
+    return await handle_send_transport_message(request, message, _send_transport_deps())
 
 
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
+
 def _ok(data: dict | None = None, status: int = 200):
     return JSONResponse({"ok": True, **(data or {})}, status_code=status)
+
 
 def _err(msg: str, status: int = 400):
     return JSONResponse({"ok": False, "error": msg}, status_code=status)
@@ -964,6 +681,7 @@ def _resolve_catalog_attachment(cfg, tenant, request=None):
 def healthcheck():
     """Lightweight container health endpoint."""
     return JSONResponse({"ok": True})
+
 
 async def _handle(request: Request):
     query_token = (request.query_params.get("token") or "").strip()
@@ -1016,10 +734,9 @@ async def _handle(request: Request):
 
     return await process_incoming(body, request)
 
+
 @webhook.api_route("/internal/tenant/{tenant}/catalog-file", methods=["GET", "HEAD"])
-async def internal_catalog_file(
-    tenant: int, path: str, request: Request, token: str = ""
-):
+async def internal_catalog_file(tenant: int, path: str, request: Request, token: str = ""):
     if not C.is_internal_request_authorized(request, token=token):
         internal_token = (getattr(C, "WA_INTERNAL_TOKEN", "") or "").strip()
         query_token = ""
@@ -1049,7 +766,9 @@ async def internal_catalog_file(
     try:
         cfg = core.load_tenant(tenant)
         integrations = cfg.get("integrations", {}) if isinstance(cfg, dict) else {}
-        uploaded_meta = integrations.get("uploaded_catalog") if isinstance(integrations, dict) else {}
+        uploaded_meta = (
+            integrations.get("uploaded_catalog") if isinstance(integrations, dict) else {}
+        )
         if isinstance(uploaded_meta, dict):
             meta_path = (uploaded_meta.get("path") or "").replace("\\", "/")
             if meta_path == str(safe):
@@ -1074,6 +793,7 @@ async def internal_catalog_file(
 
     return response
 
+
 # монтирование роутеров
 app.include_router(admin_router)
 app.include_router(auth_router)
@@ -1083,6 +803,7 @@ app.include_router(client_router)
 app.include_router(internal_tenant_router)
 app.include_router(webhook)
 app.include_router(webhooks_router)
+
 
 @app.post("/internal/tenant/{tenant}/wa/qr")
 async def internal_tenant_wa_qr(tenant: int, request: Request):
@@ -1149,6 +870,7 @@ async def internal_tenant_wa_qr(tenant: int, request: Request):
     wa_logger.info("saved_wa_qr tenant=%s ts=%s", tenant_id, ts_value)
     return _ok({"tenant": tenant_id, "ts": ts_value})
 
+
 # Basic health endpoint for Docker healthcheck
 @app.get("/health")
 async def health():
@@ -1156,6 +878,19 @@ async def health():
         {"ok": True, "status": "healthy", "version": C.asset_version()},
         status_code=200,
     )
+
+
+@app.get("/internal/health/deep")
+async def internal_deep_health(request: Request, tenants: str = "1,3") -> JSONResponse:
+    if not C.is_internal_request_authorized(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    redis_client = None
+    try:
+        redis_client = C.redis_client()
+    except Exception:
+        redis_client = None
+    payload = await ops_health.build_deep_health(redis_client=redis_client, tenants=tenants)
+    return JSONResponse(payload, status_code=200 if payload.get("ok") else 503)
 
 
 async def _bypass_client_settings_cache(request: Request, call_next):
@@ -1169,6 +904,7 @@ async def _bypass_client_settings_cache(request: Request, call_next):
                     del response.headers[header_name]
     finally:
         return response
+
 
 # Simple request logging middleware. Tests can stub FastAPI with lightweight
 # stand-ins, so register the middleware only if the instance exposes the

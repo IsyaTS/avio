@@ -2,18 +2,18 @@
 {% block content %}
   <section class="auth-wrap">
     <div class="auth-card">
-      <h1>Сброс пароля</h1>
-      <p class="lead">Мы отправим ссылку для сброса на ваш email.</p>
+      <h1 class="auth-title">Сброс пароля</h1>
+      <p class="auth-lead">Мы отправим ссылку для сброса на ваш email.</p>
       {% if error %}
-        <div class="alert">{{ error }}</div>
+        <div class="auth-alert">{{ error }}</div>
       {% endif %}
-      <form method="post" action="/auth/forgot">
+      <form method="post" action="/auth/forgot" class="auth-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <label>
-          <span>Email</span>
-          <input type="email" name="email" required autocomplete="email" />
+        <label class="auth-field">
+          <span class="auth-label">Email</span>
+          <input class="auth-input" type="email" name="email" required autocomplete="email" />
         </label>
-        <button class="btn btn--primary" type="submit">Отправить ссылку</button>
+        <button class="btn btn--primary auth-submit" type="submit">Отправить ссылку</button>
       </form>
       <div class="auth-links">
         <a href="/login">Вернуться к входу</a>

@@ -15,9 +15,33 @@
         'upload_catalog': '/pub/catalog/upload',
         'csv_get': '/pub/catalog/csv',
         'csv_save': '/pub/catalog/csv',
-        'training_upload': '/pub/training/upload',
-        'training_status': '/pub/training/status',
-        'whatsapp_export': '/pub/wa/export',
+        'avito_history_probe': '/client/' ~ tenant_id ~ '/avito/history/probe',
+        'avito_history_probe_status': '/client/' ~ tenant_id ~ '/avito/history/probe/{job_id}',
+        'avito_history_export': '/client/' ~ tenant_id ~ '/avito/history/export',
+        'avito_history_export_status': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}',
+        'avito_history_export_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/download',
+        'avito_history_export_dialog_dataset_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/dialog-dataset/download',
+        'avito_history_export_export_summary_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/export-summary/download',
+        'avito_history_export_contextual_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/contextual/download',
+        'avito_history_export_review_cases_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/review-cases/download',
+        'avito_history_export_rejected_summary_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/rejected-summary/download',
+        'avito_history_export_domain_schema_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/domain-schema/download',
+        'avito_history_export_business_rules_draft_download': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/business-rules-draft/download',
+        'avito_history_export_active': '/client/' ~ tenant_id ~ '/avito/history/export/active',
+        'avito_history_export_latest': '/client/' ~ tenant_id ~ '/avito/history/export/latest',
+        'avito_history_export_files': '/client/' ~ tenant_id ~ '/avito/history/export/files',
+        'avito_history_export_delete': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}',
+        'avito_history_export_cancel': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/cancel',
+        'avito_history_export_activate_dataset': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/activate-dataset',
+        'avito_history_export_deactivate_dataset': '/client/' ~ tenant_id ~ '/avito/history/export/{job_id}/deactivate-dataset',
+        'avito_oauth_accounts': '/v1/oauth/avito/accounts',
+        'avito_oauth_account_primary': '/v1/oauth/avito/accounts/{account_id}/primary',
+        'avito_oauth_account_rename': '/v1/oauth/avito/accounts/{account_id}/rename',
+        'avito_oauth_account_disconnect': '/v1/oauth/avito/accounts/{account_id}/disconnect',
+        'avito_oauth_account_webhook': '/v1/oauth/avito/accounts/{account_id}/webhook',
+        'contextual_cases_import': '/client/' ~ tenant_id ~ '/contextual-cases/import/{job_id}',
+        'contextual_cases_status': '/client/' ~ tenant_id ~ '/contextual-cases/status',
+        'contextual_cases_settings': '/client/' ~ tenant_id ~ '/contextual-cases/settings',
         'dialogs_list': '/api/dialogs',
         'dialogs_detail': '/api/dialogs/{lead_id}',
         'dialogs_send': '/api/dialogs/{lead_id}/send',
@@ -30,7 +54,6 @@
 <script src="/static/js/boot.js?v={{ asset_version }}" defer></script>
 <script src="/static/js/catalog-upload.js?v={{ asset_version }}" defer></script>
 <script src="/static/js/client-settings.js?v={{ asset_version }}" defer></script>
-<script src="/static/js/followups-inline.js?v={{ asset_version }}" defer></script>
 {% endset %}
 {% block content %}
 <section class="surface stack" data-testid="client-hero">
@@ -58,7 +81,6 @@
     <button class="tab" data-tab-target="behavior">Поведение</button>
     <button class="tab" data-tab-target="catalog">Каталог</button>
     <button class="tab" data-tab-target="training">Диалоги и обучение</button>
-    <button class="tab" data-tab-target="export">Экспорт переписок</button>
     <button class="tab" data-tab-target="channels">Каналы</button>
     <button class="tab" data-tab-target="followups">Отложенные сообщения</button>
     <button class="tab" data-tab-target="stats">Статистика</button>
@@ -146,6 +168,10 @@
             <input type="checkbox" id="behavior-send-catalog-telegram">
             <span class="label" style="margin:0;">Отправлять PDF-каталог первым сообщением (Telegram)</span>
         </label>
+        <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="behavior-send-catalog-max">
+            <span class="label" style="margin:0;">Отправлять PDF-каталог первым сообщением (MAX)</span>
+        </label>
         <label>
             <span class="label">Тип мозгов</span>
             <select id="behavior-brain-mode">
@@ -206,6 +232,7 @@
     const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
     const avitoSmartReplyToggle = document.getElementById('behavior-avito-smart-reply');
     const sendCatalogTgToggle = document.getElementById('behavior-send-catalog-telegram');
+    const sendCatalogMaxToggle = document.getElementById('behavior-send-catalog-max');
     const brainModeNode = document.getElementById('behavior-brain-mode');
     const triggerRows = document.getElementById('trigger-rows');
     const addTriggerBtn = document.getElementById('add-trigger');
@@ -358,6 +385,15 @@
       const flag = behavior.send_catalog_on_first_message;
       sendCatalogTgToggle.checked = flag === undefined ? true : !!flag;
     }
+    if (sendCatalogMaxToggle) {
+      const maxFlag = behavior.send_catalog_on_first_message_max;
+      if (maxFlag === undefined) {
+        const fallback = behavior.send_catalog_on_first_message;
+        sendCatalogMaxToggle.checked = fallback === undefined ? true : !!fallback;
+      } else {
+        sendCatalogMaxToggle.checked = !!maxFlag;
+      }
+    }
     if (avitoPhoneTemplateNode) {
       avitoPhoneTemplateNode.value = behavior.avito_phone_tg_template || '';
     }
@@ -397,6 +433,7 @@
         avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
         avito_smart_reply_enabled: avitoSmartReplyToggle ? !!avitoSmartReplyToggle.checked : false,
         send_catalog_on_first_message: sendCatalogTgToggle ? !!sendCatalogTgToggle.checked : true,
+        send_catalog_on_first_message_max: sendCatalogMaxToggle ? !!sendCatalogMaxToggle.checked : true,
         brain_mode: brainModeNode ? String(brainModeNode.value || 'smart') : 'smart',
         triggers: collectTriggers(),
         photo_expected_markers: photoMarkersNode ? normalizePhrases(photoMarkersNode.value) : [],
@@ -507,6 +544,7 @@
         const avitoPhoneTemplateNode = document.getElementById('behavior-avito-phone-template');
         const avitoSmartReplyToggle = document.getElementById('behavior-avito-smart-reply');
         const sendCatalogTgToggle = document.getElementById('behavior-send-catalog-telegram');
+        const sendCatalogMaxToggle = document.getElementById('behavior-send-catalog-max');
         const brainModeNode = document.getElementById('behavior-brain-mode');
         const photoMarkersNode = document.getElementById('behavior-photo-markers');
         const photoReplyNode = document.getElementById('behavior-photo-reply');
@@ -553,6 +591,7 @@
               avito_phone_tg_template: avitoPhoneTemplateNode ? avitoPhoneTemplateNode.value : '',
               avito_smart_reply_enabled: avitoSmartReplyToggle ? !!avitoSmartReplyToggle.checked : false,
               send_catalog_on_first_message: sendCatalogTgToggle ? !!sendCatalogTgToggle.checked : true,
+              send_catalog_on_first_message_max: sendCatalogMaxToggle ? !!sendCatalogMaxToggle.checked : true,
               brain_mode: brainModeNode ? String(brainModeNode.value || 'smart') : 'smart',
               photo_expected_markers: photoMarkersNode ? photoMarkersNode.value : '',
               photo_expected_reply: photoReplyNode ? photoReplyNode.value : '',
@@ -637,6 +676,9 @@
           if (sendCatalogTgToggle && typeof behaviorDraft.send_catalog_on_first_message === 'boolean') {
             sendCatalogTgToggle.checked = behaviorDraft.send_catalog_on_first_message;
           }
+          if (sendCatalogMaxToggle && typeof behaviorDraft.send_catalog_on_first_message_max === 'boolean') {
+            sendCatalogMaxToggle.checked = behaviorDraft.send_catalog_on_first_message_max;
+          }
           if (brainModeNode && typeof behaviorDraft.brain_mode === 'string') {
             const mode = String(behaviorDraft.brain_mode || '').toLowerCase();
             brainModeNode.value = (mode === 'classic' || mode === 'prod' || mode === 'legacy') ? 'classic' : 'smart';
@@ -720,51 +762,39 @@
         <p class="section-subtitle">Добавляйте собственные примеры диалогов, чтобы ассистент отвечал по вашим сценариям.</p>
     </div>
 
-    <div class="surface stack" style="gap:12px;">
-        <h3 class="section-title" style="font-size:1.1rem;">Загрузка своих диалогов</h3>
-        <form id="training-upload-form"
-              class="stack"
-              style="gap:12px;"
-              method="post"
-              enctype="multipart/form-data"
-              action="/client/{{ tenant_id }}/training/upload{% if key %}?k={{ key }}{% endif %}"
-              data-upload-url="/client/{{ tenant_id }}/training/upload{% if key %}?k={{ key }}{% endif %}">
+    <div class="surface stack" style="gap:12px;" data-testid="avito-history-probe">
+        <div class="stack" style="gap:6px;">
+            <h3 class="section-title" style="font-size:1.1rem;">История Avito</h3>
+            <p class="section-subtitle">Проверьте, доступны ли старые диалоги после подключения Avito.</p>
+        </div>
+        <div class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: end;">
             <label class="grid" style="grid-template-columns: 1fr;">
-                <span class="label">Файл (JSONL/JSON/CSV)</span>
-                <input id="training-upload-file" type="file" name="file" accept=".jsonl,.json,.csv" required>
+                <span class="label">С</span>
+                <input id="avito-history-from" type="date">
             </label>
-            <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-                <button type="submit" class="btn btn--secondary" id="training-upload-submit" data-role="training-upload-submit">Загрузить диалоги</button>
-                <button type="button" id="training-check-status" class="btn btn--secondary">Проверить статус</button>
-                <span id="training-upload-message" class="status-text"></span>
-            </div>
-            <div id="training-status" class="status-text muted"></div>
-        </form>
-    </div>
-</section>
-
-<section class="surface stack tab-panel hidden" data-tab-panel="export" data-testid="client-export">
-    <div class="stack" style="gap: 6px;">
-        <h2 class="section-title" style="font-size:1.35rem;">Экспорт переписок</h2>
-        <p class="section-subtitle">Скачайте архив диалогов WhatsApp.</p>
-    </div>
-    <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: center;">
-        <label class="grid" style="grid-template-columns: 1fr;">
-            <span class="label">Дней назад</span>
-            <input id="exp-days" type="number" value="30" min="0" step="1">
-        </label>
-        <label class="grid" style="grid-template-columns: 1fr;">
-            <span class="label">Количество диалогов</span>
-            <input id="exp-limit" type="number" value="200" min="1" step="1">
-        </label>
-        <label class="grid" style="grid-template-columns: 1fr;">
-            <span class="label">Сообщений на диалог</span>
-            <input id="exp-per" type="number" value="0" min="0" step="1">
-        </label>
-    </div>
-    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-        <button class="btn" id="export-download" type="button">Скачать архив</button>
-        <span id="export-status" class="status-text"></span>
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">По</span>
+                <input id="avito-history-to" type="date">
+            </label>
+            <label class="grid" style="grid-template-columns: 1fr;">
+                <span class="label">Лимит чатов</span>
+                <select id="avito-history-limit">
+                    <option value="100">100</option>
+                    <option value="500">500</option>
+                    <option value="1000">1000</option>
+                    <option value="2000">2000</option>
+                    <option value="3000">3000</option>
+                    <option value="5000">5000</option>
+                    <option value="7000">7000</option>
+                    <option value="10000">10000</option>
+                </select>
+            </label>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+            <button class="btn btn--secondary" id="avito-history-probe" type="button">Проверить доступ к истории</button>
+            <span id="avito-history-status" class="status-text"></span>
+        </div>
+        <div id="avito-history-summary" class="status-text muted" aria-live="polite"></div>
     </div>
 </section>
 
@@ -801,9 +831,177 @@
                 <a class="btn" href="/connect/avito?tenant={{ tenant }}{% if key %}&k={{ key }}{% endif %}">Открыть страницу подключения</a>
             </div>
         </div>
+        <div class="channel-card" data-channel="max-personal" style="display:flex; flex-direction:column; gap:10px;">
+            <div class="channel-header">
+                <div class="channel-title">MAX (QR)</div>
+                <span class="chip" data-channel-status="max_personal">—</span>
+            </div>
+            <div class="status-text muted" id="max-personal-account" style="min-height: 1.2em;"></div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button class="btn btn--secondary" type="button" id="max-personal-refresh">Обновить QR</button>
+                <button class="btn btn--secondary" type="button" id="max-personal-logout">Отключиться</button>
+            </div>
+            <div id="max-personal-qr-wrap" class="hidden" style="background:#fff; border:1px solid rgba(15,23,42,0.08); border-radius:10px; padding:10px; width: fit-content;">
+                <img id="max-personal-qr" alt="MAX QR" style="display:block; width:220px; height:220px; object-fit:contain;" />
+            </div>
+        </div>
     </div>
     <div id="channels-message" class="status-text muted"></div>
 </section>
+
+<script>
+  (function () {
+    const tenant = {{ tenant | tojson }};
+    const key = {{ key | tojson }};
+    const statusChip = document.querySelector('[data-channel-status="max_personal"]');
+    const msgNode = document.getElementById('channels-message');
+    const accountNode = document.getElementById('max-personal-account');
+    const refreshBtn = document.getElementById('max-personal-refresh');
+    const logoutBtn = document.getElementById('max-personal-logout');
+    const qrWrap = document.getElementById('max-personal-qr-wrap');
+    const qrImg = document.getElementById('max-personal-qr');
+
+    if (!tenant || !refreshBtn || !logoutBtn || !statusChip) return;
+
+    const withAuth = (path) => {
+      const sep = path.includes('?') ? '&' : '?';
+      if (key) return `${path}${sep}tenant=${encodeURIComponent(String(tenant))}&k=${encodeURIComponent(String(key))}`;
+      return `${path}${sep}tenant=${encodeURIComponent(String(tenant))}`;
+    };
+
+    const setChannelMessage = (text, isError) => {
+      if (!msgNode) return;
+      msgNode.textContent = text || '';
+      msgNode.className = isError ? 'status-text alert' : 'status-text muted';
+    };
+
+    const setStatus = (label) => {
+      statusChip.textContent = label || '—';
+    };
+
+    const showQr = (dataUrl) => {
+      if (!qrWrap || !qrImg) return;
+      const val = String(dataUrl || '').trim();
+      if (!val) {
+        qrWrap.classList.add('hidden');
+        qrImg.removeAttribute('src');
+        return;
+      }
+      qrImg.src = val;
+      qrWrap.classList.remove('hidden');
+    };
+
+    const fetchJson = async (url, options) => {
+      const response = await fetch(url, options || {});
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (err) {
+        payload = {};
+      }
+      if (!response.ok) {
+        const detail = (payload && (payload.detail || payload.error)) || `HTTP ${response.status}`;
+        throw new Error(String(detail));
+      }
+      return payload || {};
+    };
+
+    const loadQr = async (quiet) => {
+      try {
+        const qrPayload = await fetchJson(withAuth('/v1/max-personal/session/qr'));
+        showQr(qrPayload.qr_png_data_url || '');
+        return true;
+      } catch (err) {
+        showQr('');
+        if (!quiet) setChannelMessage(`MAX: ${err.message || err}`, true);
+        return false;
+      }
+    };
+
+    const refreshStatus = async (quiet) => {
+      try {
+        const payload = await fetchJson(withAuth('/v1/max-personal/status'));
+        const status = String(payload.status || '').trim().toLowerCase() || 'idle';
+        const account = payload.account && typeof payload.account === 'object' ? payload.account : {};
+        const accountLabel = String(account.display_name || account.username || account.phone || '').trim();
+        if (accountNode) {
+          accountNode.textContent = accountLabel ? `Аккаунт: ${accountLabel}` : '';
+        }
+        if (status === 'authorized' || payload.connected) {
+          setStatus('Подключено');
+          showQr('');
+          return;
+        }
+        if (status === 'waiting_qr' || status === 'authorizing' || payload.qr_required) {
+          setStatus('Ожидает QR');
+          await loadQr(true);
+          return;
+        }
+        if (status === 'reauth_required') {
+          setStatus('Нужен вход');
+          showQr('');
+          return;
+        }
+        if (status === 'error') {
+          setStatus('Ошибка');
+          showQr('');
+          return;
+        }
+        setStatus('Не подключен');
+        showQr('');
+      } catch (err) {
+        setStatus('Недоступно');
+        if (!quiet) setChannelMessage(`MAX: ${err.message || err}`, true);
+      }
+    };
+
+    const startConnect = async () => {
+      refreshBtn.disabled = true;
+      setChannelMessage('Запускаем сессию MAX, подождите…', false);
+      try {
+        await fetchJson(withAuth('/v1/max-personal/connect'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: false }),
+        });
+        setChannelMessage('MAX запущен. Получаем QR…', false);
+        await refreshStatus(true);
+        const hasQr = await loadQr(true);
+        if (hasQr) {
+          setChannelMessage('MAX запущен. Сканируйте QR.', false);
+        } else {
+          setChannelMessage('QR ещё подготавливается, подождите 3-10 секунд…', false);
+        }
+      } catch (err) {
+        setChannelMessage(`MAX: ${err.message || err}`, true);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    };
+
+    const logoutSession = async () => {
+      logoutBtn.disabled = true;
+      try {
+        await fetchJson(withAuth('/v1/max-personal/session/logout'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        setChannelMessage('MAX отключён.', false);
+        await refreshStatus(true);
+      } catch (err) {
+        setChannelMessage(`MAX: ${err.message || err}`, true);
+      } finally {
+        logoutBtn.disabled = false;
+      }
+    };
+
+    refreshBtn.addEventListener('click', startConnect);
+    logoutBtn.addEventListener('click', logoutSession);
+    refreshStatus(true);
+    window.setInterval(() => refreshStatus(true), 5000);
+  })();
+</script>
 
 <section class="surface stack tab-panel hidden" data-tab-panel="followups" data-testid="client-followups">
     <div class="stack" style="gap: 6px;">
@@ -980,6 +1178,41 @@
       return badge;
     }
 
+    function avitoAccountLabel(dialog) {
+      if (!dialog || dialog.channel !== 'avito') return '';
+      return String(
+        dialog.avito_account_display_name ||
+        dialog.avito_account_login ||
+        (dialog.avito_account_id ? `ID ${String(dialog.avito_account_id).slice(-8)}` : '')
+      ).trim();
+    }
+
+    function avitoCityLabel(dialog) {
+      if (!dialog || dialog.channel !== 'avito') return '';
+      const city = String(dialog.avito_item_city || '').trim();
+      if (city) return city;
+      return dialog.avito_item_city_status === 'error' ? 'город не определён' : '';
+    }
+
+    function appendAvitoMeta(target, dialog) {
+      if (!target || !dialog || dialog.channel !== 'avito') return;
+      const account = avitoAccountLabel(dialog);
+      const city = avitoCityLabel(dialog);
+      if (!account && !city) return;
+      if (account) {
+        const node = document.createElement('span');
+        node.className = 'badge';
+        node.textContent = `Аккаунт: ${account}`;
+        target.appendChild(node);
+      }
+      if (city) {
+        const node = document.createElement('span');
+        node.className = 'badge';
+        node.textContent = `Город объявления: ${city}`;
+        target.appendChild(node);
+      }
+    }
+
     function renderDialogs(list) {
       if (!listNode) return;
       listNode.innerHTML = '';
@@ -1001,6 +1234,7 @@
         title.className = 'dialog-title';
         title.textContent = dialog.title || `Лид ${dialog.id}`;
         meta.appendChild(title);
+        appendAvitoMeta(meta, dialog);
 
         const preview = document.createElement('div');
         preview.className = 'dialog-preview';
@@ -1316,6 +1550,7 @@
       if (channelNode) {
         channelNode.innerHTML = '';
         channelNode.appendChild(channelBadge(dialog.channel || 'channel'));
+        appendAvitoMeta(channelNode, dialog);
       }
       if (emptyNode) emptyNode.classList.add('hidden');
       if (threadNode) threadNode.classList.remove('hidden');

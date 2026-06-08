@@ -137,6 +137,7 @@ def _prepare_app(
 
     stub = StubTransportClient(response_factory)
     monkeypatch.setattr(main_module, "_transport_client", lambda channel, provider=None: stub)
+
     async def _noop_healthcheck() -> None:
         return None
 

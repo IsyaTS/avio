@@ -1,26 +1,18 @@
-import csv
 import io
 import json
-import mimetypes
 import os
 import pathlib
 import random
 import re
-from urllib.parse import urlparse
 import time
 import uuid
 import asyncio
-import statistics
-import urllib.parse
-from typing import Any, Dict, Optional, Mapping
-from urllib.parse import quote, quote_plus
+from typing import Any, Mapping
 
 import logging
-from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, BackgroundTasks, File, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field, ValidationError
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
+from fastapi import APIRouter, File, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 
 from . import common as C
 from . import auth_utils
@@ -30,11 +22,8 @@ from libs.core import catalog as catalog_module
 from libs.core import catalog_index
 from libs.core import onboarding_chat
 from libs.core import quickstart as quickstart_module
-from libs.core.training import indexer as training_indexer
-from libs.core.training import exporter as training_exporter
-from libs.core.training import suggestions as training_suggestions
 from libs.core import db as db
-from libs.core.sales_core import ask_llm, build_llm_messages
+from libs.core.repo import avito_accounts, avito_item_contexts
 from libs.core.response_pipeline import run_response_pipeline
 from libs.core.common import (
     OUTBOX_QUEUE_KEY,
@@ -42,7 +31,28 @@ from libs.core.common import (
     handoff_silence_meta_key,
     default_fallback_reply,
 )
-from libs.core.export import whatsapp as whatsapp_exporter
+from libs.core.lib.tg_slots import (
+    TG_SLOT_MAX,
+    TG_SLOT_MIN,
+    virtual_tenant_id as _virtual_tenant_id_shared,
+)
+from libs.core.services.behavior_settings import merge_behavior_settings, sanitize_behavior_triggers
+from libs.core.services.tenant_config_merge import (
+    merge_passport_settings_form,
+    merge_tenant_config_for_settings,
+)
+from .services import client_analytics_runtime, client_avito_history_export_runtime, client_avito_history_runtime
+from .services import client_assets_runtime
+from .services import client_contextual_cases_runtime
+from .services import client_catalog_runtime
+from .services import client_dialogs_runtime
+from .services import client_dialog_helpers_runtime
+from .services import client_feedback_runtime
+from .services import client_ops_runtime
+from .services import client_reply_split_runtime
+from .services import client_settings_runtime
+from .services import client_training_runtime
+import httpx
 
 # NOTE: expose frequently used helpers after ensuring aliases are registered
 build_pdf_index = catalog_index.build_pdf_index
@@ -64,13 +74,123 @@ update_tenant_insights = onboarding_chat.update_tenant_insights
 router = APIRouter()
 _log = logging.getLogger("training")
 _LOG_PREFIX = "[training]"
-_wa_log = logging.getLogger("wa_export")
 _dialogs_log = logging.getLogger("client.dialogs")
-TG_SLOT_MIN = 1
-TG_SLOT_MAX = 5
-TG_SLOT_MULTIPLIER = 1000
 
 _CLIENT_SETTINGS_JS: str | None = None
+
+def _client_dialogs_runtime_deps() -> client_dialogs_runtime.ClientDialogsDeps:
+    return client_dialogs_runtime.ClientDialogsDeps(
+        resolve_tenant_and_key_fn=_resolve_tenant_and_key,
+        db_module=db,
+        isoformat_fn=_isoformat,
+        normalize_attachments_fn=_normalize_message_attachments,
+        parse_tg_slot_fn=_parse_tg_slot_from_source,
+        load_silence_status_fn=_load_silence_status,
+        load_telegram_slot_profiles_fn=_load_telegram_slot_profiles,
+        common_module=C,
+        is_technical_max_title_fn=_is_technical_max_title,
+        run_response_pipeline_fn=run_response_pipeline,
+        default_fallback_reply_fn=default_fallback_reply,
+        apply_custom_punctuation_style_fn=_apply_custom_punctuation_style,
+        split_reply_for_test_send_fn=_split_reply_for_test_send,
+        delay_seconds_value_fn=_delay_seconds_value,
+        smart_reply_delay_min_seconds=SMART_REPLY_DELAY_MIN_SECONDS,
+        smart_reply_delay_max_seconds=SMART_REPLY_DELAY_MAX_SECONDS,
+        smart_reply_split_part_delay_enabled=SMART_REPLY_SPLIT_PART_DELAY_ENABLED,
+        smart_reply_split_channels=SMART_REPLY_SPLIT_CHANNELS,
+        smart_reply_split_part_delay_min_seconds=SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
+        smart_reply_split_part_delay_max_seconds=SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS,
+        read_photo_manifest_fn=_read_photo_manifest,
+        photo_public_url_fn=_photo_public_url,
+        tg_slot_min=TG_SLOT_MIN,
+        tg_slot_max=TG_SLOT_MAX,
+        outbox_queue_key=OUTBOX_QUEUE_KEY,
+        time_module=time,
+        json_module=json,
+        asyncio_module=asyncio,
+        dialogs_logger=_dialogs_log,
+        avito_accounts_repo=avito_accounts,
+        avito_item_contexts_repo=avito_item_contexts,
+    )
+
+def _client_feedback_runtime_deps() -> client_feedback_runtime.ClientFeedbackDeps:
+    return client_feedback_runtime.ClientFeedbackDeps(
+        resolve_tenant_and_key_fn=_resolve_tenant_and_key,
+        db_module=db,
+        sanitize_training_text_fn=_sanitize_training_text,
+        isoformat_fn=_isoformat,
+        dialogs_logger=_dialogs_log,
+    )
+
+def _client_analytics_runtime_deps() -> client_analytics_runtime.ClientAnalyticsDeps:
+    return client_analytics_runtime.ClientAnalyticsDeps(
+        resolve_tenant_and_key_fn=_resolve_tenant_and_key,
+        db_module=db,
+    )
+
+def _client_settings_runtime_deps() -> client_settings_runtime.ClientSettingsDeps:
+    return client_settings_runtime.ClientSettingsDeps(
+        authorize_client_settings_request_fn=_authorize_client_settings_request,
+        resolve_key_fn=_resolve_key,
+        auth_fn=_auth,
+        common_module=C,
+        auth_utils_module=auth_utils,
+        quickstart_module=quickstart_module,
+        render_template_fn=render_template,
+        merge_passport_settings_form_fn=merge_passport_settings_form,
+        merge_behavior_settings_fn=merge_behavior_settings,
+        sanitize_behavior_triggers_fn=sanitize_behavior_triggers,
+        export_max_days=EXPORT_MAX_DAYS,
+        tg_slot_min=TG_SLOT_MIN,
+        tg_slot_max=TG_SLOT_MAX,
+        getenv_fn=os.getenv,
+        json_module=json,
+        logger=_log,
+    )
+
+
+def _client_training_runtime_deps() -> client_training_runtime.ClientTrainingDeps:
+    return client_training_runtime.ClientTrainingDeps(
+        authorize_client_settings_request_fn=_authorize_client_settings_request,
+        db_module=db,
+        settings_module=C.settings,
+        logger=_log,
+        log_prefix=_LOG_PREFIX,
+        httpx_module=httpx,
+        time_module=time,
+    )
+
+def _client_catalog_runtime_deps() -> client_catalog_runtime.ClientCatalogDeps:
+    def _public_module():
+        from . import public as public_module
+
+        return public_module
+
+    return client_catalog_runtime.ClientCatalogDeps(
+        authorize_client_settings_request_fn=_authorize_client_settings_request,
+        common_module=C,
+        public_module_fn=_public_module,
+        write_catalog_csv_fn=write_catalog_csv,
+        catalog_index_error_cls=CatalogIndexError,
+        detect_encoding_fn=_detect_encoding,
+        detect_csv_delimiter_fn=_detect_csv_delimiter,
+        strip_bom_fn=_strip_bom,
+        max_upload_size_bytes=MAX_UPLOAD_SIZE_BYTES,
+        time_module=time,
+        uuid_module=uuid,
+    )
+
+
+def _client_ops_runtime_deps() -> client_ops_runtime.ClientOpsDeps:
+    return client_ops_runtime.ClientOpsDeps(
+        resolve_tenant_and_key_fn=_resolve_tenant_and_key,
+        redis_client_fn=C.redis_client,
+        handoff_silence_key_fn=handoff_silence_key,
+        handoff_silence_meta_key_fn=handoff_silence_meta_key,
+        outbox_queue_key=OUTBOX_QUEUE_KEY,
+        json_module=json,
+    )
+
 
 MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB safety cap for catalog uploads
 
@@ -81,10 +201,6 @@ except (TypeError, ValueError):
     EXPORT_MAX_DAYS = DEFAULT_EXPORT_MAX_DAYS
 if EXPORT_MAX_DAYS <= 0:
     EXPORT_MAX_DAYS = DEFAULT_EXPORT_MAX_DAYS
-
-WHATSAPP_LIMIT_DIALOGS_MAX = 2000
-WHATSAPP_PER_LIMIT_MAX = 20000
-DEFAULT_WHATSAPP_BATCH_SIZE = 200
 
 SMART_REPLY_SPLIT_ENABLED = (os.getenv("SMART_REPLY_SPLIT_ENABLED") or "1").strip().lower() in {
     "1",
@@ -106,14 +222,18 @@ try:
     SMART_REPLY_SPLIT_MAX_PARTS = max(2, int(os.getenv("SMART_REPLY_SPLIT_MAX_PARTS", "6")))
 except Exception:
     SMART_REPLY_SPLIT_MAX_PARTS = 6
-_SMART_REPLY_SPLIT_CHANNELS_RAW = (os.getenv("SMART_REPLY_SPLIT_CHANNELS") or "telegram,avito,whatsapp,max").strip()
+_SMART_REPLY_SPLIT_CHANNELS_RAW = (
+    os.getenv("SMART_REPLY_SPLIT_CHANNELS") or "telegram,avito,whatsapp,max,max_personal"
+).strip()
 SMART_REPLY_SPLIT_CHANNELS = {
     part.strip().lower() for part in _SMART_REPLY_SPLIT_CHANNELS_RAW.split(",") if part.strip()
 }
 if not SMART_REPLY_SPLIT_CHANNELS:
-    SMART_REPLY_SPLIT_CHANNELS = {"telegram", "avito", "whatsapp", "max"}
+    SMART_REPLY_SPLIT_CHANNELS = {"telegram", "avito", "whatsapp", "max", "max_personal"}
 
-SMART_REPLY_SPLIT_PART_DELAY_ENABLED = (os.getenv("SMART_REPLY_SPLIT_PART_DELAY_ENABLED") or "1").strip().lower() in {
+SMART_REPLY_SPLIT_PART_DELAY_ENABLED = (
+    os.getenv("SMART_REPLY_SPLIT_PART_DELAY_ENABLED") or "1"
+).strip().lower() in {
     "1",
     "true",
     "yes",
@@ -144,18 +264,8 @@ try:
     )
 except Exception:
     SMART_REPLY_DELAY_MAX_SECONDS = max(120, SMART_REPLY_DELAY_MIN_SECONDS)
-def _resolve_whatsapp_export_url(request: Request, tenant: int) -> str:
-    try:
-        return str(request.url_for("whatsapp_export", tenant=tenant))
-    except Exception:
-        try:
-            base_url = str(request.url_for("whatsapp_export"))
-            if "tenant=" not in base_url:
-                separator = "&" if "?" in base_url else "?"
-                return f"{base_url}{separator}tenant={tenant}"
-            return base_url
-        except Exception:
-            return "/export/whatsapp"
+
+
 def _load_client_settings_js() -> str:
     global _CLIENT_SETTINGS_JS
     if _CLIENT_SETTINGS_JS is not None:
@@ -175,431 +285,25 @@ def _load_client_settings_js() -> str:
     return _CLIENT_SETTINGS_JS
 
 
-_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-_EOS_MARKER = "<<eos>>"
-_ACK_CAP_NEXT_WORD_RE = re.compile(
-    r"(?iu)\b(ок|понял|принял|услышал|ладно|хорошо)\s+([А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{0,40})\b"
-)
-_GREETING_PREFIX_RE = re.compile(
-    r"^\s*(здравствуйте|добрый(?:й|е)|доброго|привет|салам|доброе утро|добрый вечер)\b",
-    re.IGNORECASE,
-)
-_QUESTION_START_RE = re.compile(
-    r"\b(в каком|какой|какая|какие|где|когда|сколько|что|как|подскажите|уточните|нужен ли|нужна ли)\b",
-    re.IGNORECASE,
-)
-_SEGMENT_CONNECTOR_RE = re.compile(
-    r"\s+(?:но|а|если|когда|чтобы|потом|также|при этом|после этого)\s+",
-    re.IGNORECASE,
-)
-_URL_TOKEN_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-_TG_HANDLE_RE = re.compile(r"(?<!\w)@[\w\d_]{4,}")
-_PHONE_TOKEN_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\-\s()]{8,}\d)(?!\d)")
-
-
-def _punct_style_segment(text: str, comma_index: int) -> tuple[str, int]:
-    out_chars: list[str] = []
-    idx = int(comma_index or 0)
-    eos_pending = False
-    for ch in text:
-        if ch in {".", "!"}:
-            if not eos_pending:
-                out_chars.append(_EOS_MARKER)
-                eos_pending = True
-            continue
-        if ch == ",":
-            idx += 1
-            if idx % 2 == 0:
-                continue
-        if not ch.isspace():
-            eos_pending = False
-        out_chars.append(ch)
-    return "".join(out_chars), idx
-
-
-def _lowercase_after_removed_sentence_endings(text: str) -> str:
-    candidate = str(text or "")
-    if not candidate:
-        return ""
-    if _EOS_MARKER not in candidate:
-        return candidate
-    parts = candidate.split(_EOS_MARKER)
-    merged = parts[0].rstrip()
-    for part in parts[1:]:
-        chunk = part.lstrip()
-        if chunk:
-            first = chunk[0]
-            if first.isalpha():
-                chunk = first.lower() + chunk[1:]
-        if merged and chunk:
-            merged = f"{merged} {chunk}"
-        elif chunk:
-            merged = chunk
-    return merged.strip()
-
-
-def _lowercase_after_acknowledgement(text: str) -> str:
-    candidate = str(text or "")
-    if not candidate:
-        return ""
-
-    def _repl(match: re.Match[str]) -> str:
-        head = match.group(1)
-        word = match.group(2)
-        if not word:
-            return match.group(0)
-        return f"{head} {word[0].lower()}{word[1:]}"
-
-    return _ACK_CAP_NEXT_WORD_RE.sub(_repl, candidate)
-
-
 def _apply_custom_punctuation_style(text: str) -> str:
-    candidate = str(text or "")
-    if not candidate:
-        return ""
-    parts: list[str] = []
-    pos = 0
-    comma_idx = 0
-    for match in _URL_RE.finditer(candidate):
-        if match.start() > pos:
-            segment, comma_idx = _punct_style_segment(candidate[pos : match.start()], comma_idx)
-            parts.append(segment)
-        parts.append(match.group(0))
-        pos = match.end()
-    if pos < len(candidate):
-        tail, comma_idx = _punct_style_segment(candidate[pos:], comma_idx)
-        parts.append(tail)
-    styled = "".join(parts)
-    styled = re.sub(r"[ \t]{2,}", " ", styled)
-    styled = re.sub(r"[ \t]+\n", "\n", styled)
-    styled = re.sub(r"\n{3,}", "\n\n", styled)
-    styled = re.sub(r"\s+([,?])", r"\1", styled)
-    styled = re.sub(r",{2,}", ",", styled)
-    styled = re.sub(r"\?{2,}", "?", styled)
-    styled = _lowercase_after_removed_sentence_endings(styled)
-    styled = _lowercase_after_acknowledgement(styled)
-    return styled.strip()
-
-
-def _extract_standalone_tokens(text: str) -> list[str]:
-    candidate = str(text or "").strip()
-    if not candidate:
-        return []
-    tokens: list[tuple[int, int, str]] = []
-    for rx in (_URL_TOKEN_RE, _TG_HANDLE_RE, _PHONE_TOKEN_RE):
-        for match in rx.finditer(candidate):
-            token = str(match.group(0) or "").strip()
-            if token:
-                tokens.append((match.start(), match.end(), token))
-    if not tokens:
-        return [candidate]
-    tokens.sort(key=lambda item: (item[0], item[1]))
-    merged: list[tuple[int, int, str]] = []
-    for start, end, token in tokens:
-        if merged and start < merged[-1][1]:
-            continue
-        merged.append((start, end, token))
-    out: list[str] = []
-    cursor = 0
-    for start, end, token in merged:
-        prefix = candidate[cursor:start].strip(" ,")
-        if prefix:
-            out.append(prefix)
-        out.append(token)
-        cursor = end
-    tail = candidate[cursor:].strip(" ,")
-    if tail:
-        out.append(tail)
-    return [item for item in out if item]
-
-
-def _split_long_segment_by_words(text: str, max_len: int) -> list[str]:
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not clean:
-        return []
-    if len(clean) <= max_len:
-        return [clean]
-    words = clean.split(" ")
-    out: list[str] = []
-    current = ""
-    for word in words:
-        if not word:
-            continue
-        candidate = f"{current} {word}".strip() if current else word
-        if current and len(candidate) > max_len:
-            if re.match(r"^\d", word) and len(candidate) <= max_len + 14:
-                current = candidate
-                continue
-            out.append(current.strip())
-            current = word
-        else:
-            current = candidate
-    if current.strip():
-        out.append(current.strip())
-    if len(out) >= 2 and len(out[-1]) < 12:
-        combined = f"{out[-2]} {out[-1]}".strip()
-        if len(combined) <= max_len + 20:
-            out[-2] = combined
-            out.pop()
-    return [part for part in out if part]
-
-
-def _split_long_segment_by_connectors(text: str, max_len: int) -> list[str]:
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not clean:
-        return []
-    if len(clean) <= max_len:
-        return [clean]
-
-    out: list[str] = []
-    remaining = clean
-    min_cut = max(48, int(max_len * 0.5))
-    while len(remaining) > max_len:
-        window = remaining[: max_len + 1]
-        split_pos = -1
-        for match in _SEGMENT_CONNECTOR_RE.finditer(window):
-            if match.start() >= min_cut:
-                split_pos = int(match.start())
-        if split_pos <= 0:
-            break
-        head = remaining[:split_pos].strip(" ,")
-        if len(head) < min_cut:
-            break
-        if head:
-            out.append(head)
-        remaining = remaining[split_pos:].strip(" ,")
-        if not remaining:
-            break
-    if remaining:
-        out.append(remaining)
-    return [part for part in out if part]
-
-
-def _split_greeting_question_combo(text: str) -> list[str]:
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not clean:
-        return [clean] if clean else []
-    if not _GREETING_PREFIX_RE.search(clean):
-        return [clean]
-    match = _QUESTION_START_RE.search(clean)
-    if not match:
-        return [clean]
-    split_at = int(match.start())
-    if split_at <= 6:
-        return [clean]
-    head = clean[:split_at].strip(" ,")
-    tail = clean[split_at:].strip(" ,")
-    if not head or not tail:
-        return [clean]
-    if len(head) > 56:
-        return [clean]
-    if "?" not in clean and len(tail) < 10:
-        return [clean]
-    return [head, tail]
-
-
-def _merge_short_split_parts(parts: list[str], max_len: int) -> list[str]:
-    if not parts:
-        return []
-    def _is_atomic_contact_or_link(chunk: str) -> bool:
-        raw = re.sub(r"\s+", " ", str(chunk or "")).strip(" ,")
-        if not raw:
-            return False
-        if re.fullmatch(r"https?://\S+", raw, flags=re.IGNORECASE):
-            return True
-        if re.fullmatch(r"@[\w\d_]{4,}", raw):
-            return True
-        if re.fullmatch(r"(?:\+?\d[\d\-\s()]{8,}\d)", raw):
-            return True
-        return False
-    merged: list[str] = []
-    min_part = max(36, int(max_len * 0.33))
-    for part in parts:
-        candidate = re.sub(r"\s+", " ", str(part or "")).strip(" ,")
-        if not candidate:
-            continue
-        if _is_atomic_contact_or_link(candidate):
-            merged.append(candidate)
-            continue
-        if merged and len(candidate) < min_part:
-            prev = merged[-1]
-            if _is_atomic_contact_or_link(prev):
-                merged.append(candidate)
-                continue
-            if _GREETING_PREFIX_RE.match(prev) and _QUESTION_START_RE.match(candidate):
-                merged.append(candidate)
-                continue
-            combined = f"{merged[-1]} {candidate}".strip()
-            if len(combined) <= max_len + 6:
-                merged[-1] = combined
-                continue
-        merged.append(candidate)
-    if len(merged) >= 2 and len(merged[0]) < min_part:
-        if not (_GREETING_PREFIX_RE.match(merged[0]) and _QUESTION_START_RE.match(merged[1])):
-            combined = f"{merged[0]} {merged[1]}".strip()
-            if len(combined) <= max_len + 6:
-                merged[1] = combined
-                merged = merged[1:]
-
-    tail_connectors = ("и", "но", "а", "или", "если", "чтобы", "потом", "также")
-    idx = 0
-    while idx < len(merged) - 1:
-        last_word = merged[idx].split(" ")[-1].lower()
-        if last_word in tail_connectors:
-            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
-            if len(combined) <= max_len + 6:
-                merged[idx] = combined
-                del merged[idx + 1]
-                continue
-        if re.search(r'[»"]\s*$', merged[idx]) and re.match(r"^\d", merged[idx + 1]):
-            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
-            if len(combined) <= max_len + 20:
-                merged[idx] = combined
-                del merged[idx + 1]
-                continue
-        if "—" in merged[idx] and re.match(r"^\d", merged[idx + 1]):
-            combined = f"{merged[idx]} {merged[idx + 1]}".strip()
-            if len(combined) <= max_len + 20:
-                merged[idx] = combined
-                del merged[idx + 1]
-                continue
-        idx += 1
-    return merged
-
-
-def _split_long_segment(text: str, max_len: int) -> list[str]:
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not clean:
-        return []
-    if len(clean) <= max_len:
-        return [clean]
-
-    comma_parts = [part.strip() for part in clean.split(",") if part.strip()]
-    if len(comma_parts) > 1 and any(len(part) < 8 for part in comma_parts):
-        conn_parts = _split_long_segment_by_connectors(clean, max_len)
-        out_parts: list[str] = []
-        for part in conn_parts:
-            out_parts.extend(_split_long_segment_by_words(part, max_len))
-        normalized = [part for part in out_parts if part]
-        if len(normalized) >= 2:
-            return normalized
-    if len(comma_parts) <= 1:
-        dash_parts = [part.strip() for part in re.split(r"\s*[—–;]\s*", clean) if part.strip()]
-        if len(dash_parts) > 1:
-            expanded: list[str] = []
-            for part in dash_parts:
-                expanded.extend(_split_long_segment_by_connectors(part, max_len))
-            out_parts: list[str] = []
-            for part in expanded:
-                out_parts.extend(_split_long_segment_by_words(part, max_len))
-            return [part for part in out_parts if part]
-        conn_parts = _split_long_segment_by_connectors(clean, max_len)
-        out_parts: list[str] = []
-        for part in conn_parts:
-            out_parts.extend(_split_long_segment_by_words(part, max_len))
-        return [part for part in out_parts if part]
-
-    out: list[str] = []
-    current = ""
-    for idx, part in enumerate(comma_parts):
-        suffix = "," if idx < len(comma_parts) - 1 else ""
-        piece = f"{part}{suffix}".strip()
-        candidate = f"{current} {piece}".strip() if current else piece
-        if current and len(candidate) > max_len:
-            out.extend(_split_long_segment_by_words(current, max_len))
-            current = piece
-        else:
-            current = candidate
-    if current.strip():
-        out.extend(_split_long_segment_by_words(current, max_len))
-    return [part.strip() for part in out if part.strip()]
+    return client_reply_split_runtime.apply_custom_punctuation_style(text)
 
 
 def _split_reply_for_test_send(reply_text: str, channel: str) -> list[str]:
-    clean = re.sub(r"\s+", " ", str(reply_text or "")).strip()
-    if not clean:
-        return []
-    ch = str(channel or "").strip().lower()
-    if not SMART_REPLY_SPLIT_ENABLED or ch not in SMART_REPLY_SPLIT_CHANNELS:
-        return [clean]
-    greeting_combo = _split_greeting_question_combo(clean)
-    has_multi_questions = clean.count("?") > 1
-    has_paragraphs = "\n\n" in clean
-    if (
-        len(clean) < SMART_REPLY_SPLIT_MIN_LEN
-        and len(greeting_combo) <= 1
-        and not has_multi_questions
-        and not has_paragraphs
-    ):
-        return [clean]
-
-    parts: list[str] = []
-    blocks = [blk.strip() for blk in re.split(r"\n{2,}", clean) if blk.strip()]
-    if not blocks:
-        blocks = [clean]
-
-    for block in blocks:
-        greeting_split = _split_greeting_question_combo(block)
-        for segment in greeting_split:
-            seg = segment.strip()
-            if not seg:
-                continue
-            dash_chunks = [part.strip() for part in re.split(r"\s*[—–;]\s*", seg) if part.strip()]
-            if not dash_chunks:
-                dash_chunks = [seg]
-            q_chunks: list[str] = []
-            for dash_chunk in dash_chunks:
-                q_chunks.extend([q.strip() for q in re.findall(r"[^?]+(?:\?|$)", dash_chunk) if q.strip()])
-            if not q_chunks:
-                q_chunks = [seg]
-            for chunk in q_chunks:
-                parts.extend(_split_long_segment(chunk, SMART_REPLY_SPLIT_MAX_LEN))
-
-    deduped: list[str] = []
-    prev_norm = ""
-    for part in parts:
-        line = re.sub(r"\s+", " ", part).strip(" ,")
-        if not line:
-            continue
-        if re.fullmatch(r"[.!,;:()\-\s]+", line):
-            continue
-        norm = line.casefold()
-        if norm == prev_norm:
-            continue
-        deduped.append(line)
-        prev_norm = norm
-    if not deduped:
-        return [clean]
-    tokenized: list[str] = []
-    for part in deduped:
-        tokenized.extend(_extract_standalone_tokens(part))
-    deduped = tokenized or deduped
-    deduped = _merge_short_split_parts(deduped, SMART_REPLY_SPLIT_MAX_LEN)
-    if len(deduped) <= SMART_REPLY_SPLIT_MAX_PARTS:
-        return deduped
-    head = deduped[: SMART_REPLY_SPLIT_MAX_PARTS - 1]
-    tail = " ".join(deduped[SMART_REPLY_SPLIT_MAX_PARTS - 1 :]).strip()
-    if tail:
-        head.append(tail)
-    return [part for part in head if part]
+    config = client_reply_split_runtime.ReplySplitConfig(
+        enabled=SMART_REPLY_SPLIT_ENABLED,
+        min_len=SMART_REPLY_SPLIT_MIN_LEN,
+        max_len=SMART_REPLY_SPLIT_MAX_LEN,
+        max_parts=SMART_REPLY_SPLIT_MAX_PARTS,
+        channels=SMART_REPLY_SPLIT_CHANNELS,
+    )
+    return client_reply_split_runtime.split_reply_for_test_send(reply_text, channel, config)
 
 
 def _delay_seconds_value(min_seconds: int, max_seconds: int) -> float:
     if max_seconds <= min_seconds:
         return float(min_seconds)
     return float(random.randint(min_seconds, max_seconds))
-
-
-class WhatsAppExportPayload(BaseModel):
-    tenant: int
-    key: Optional[str] = None
-    days: Optional[int] = Field(default=None, ge=0)
-    days_back: Optional[int] = Field(default=None, ge=0)
-    limit: Optional[int] = Field(default=None, ge=0)
-    limit_dialogs: Optional[int] = Field(default=None, ge=0)
-    per: Optional[int] = Field(default=None, ge=0)
-    per_conversation_limit: Optional[int] = Field(default=None, ge=0)
-    batch_size_dialogs: Optional[int] = Field(default=None, ge=0)
 
 
 def _sanitize_text(text: str) -> str:
@@ -616,12 +320,7 @@ def _sanitize_text(text: str) -> str:
 
 
 def _sanitize_training_text(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = str(text).replace("\r", " ").replace("\n", " ").strip()
-    while "  " in cleaned:
-        cleaned = cleaned.replace("  ", " ")
-    return cleaned
+    return client_training_runtime.sanitize_training_text(text)
 
 
 def _detect_encoding(payload: bytes) -> str:
@@ -726,7 +425,9 @@ def _auth(tenant: int, key: str) -> bool:
     return C.valid_key(int(tenant), key or "")
 
 
-def _resolve_tenant_and_key(request: Request, tenant: int | str | None) -> tuple[int, str] | Response:
+def _resolve_tenant_and_key(
+    request: Request, tenant: int | str | None
+) -> tuple[int, str] | Response:
     tenant_raw = tenant if tenant is not None else request.query_params.get("tenant")
     try:
         tenant_id = int(str(tenant_raw).strip())
@@ -740,6 +441,39 @@ def _resolve_tenant_and_key(request: Request, tenant: int | str | None) -> tuple
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return tenant_id, key
 
+
+async def _authorize_client_settings_request(
+    request: Request,
+    tenant: int | str | None,
+) -> tuple[int, str] | Response:
+    tenant_raw = tenant if tenant is not None else request.query_params.get("tenant")
+    try:
+        tenant_id = int(str(tenant_raw).strip())
+    except Exception:
+        return JSONResponse({"detail": "invalid_tenant"}, status_code=400)
+    if tenant_id <= 0:
+        return JSONResponse({"detail": "invalid_tenant"}, status_code=400)
+
+    key = _resolve_key(request, request.query_params.get("k"))
+    session_user = await auth_utils.get_current_user(request)
+    session_tenant = int(session_user.get("tenant_id") or 0) if isinstance(session_user, dict) else 0
+    if session_tenant > 0 and session_tenant == tenant_id:
+        resolved_key = key
+        if not resolved_key:
+            resolved_key = (C.get_tenant_pubkey(int(tenant_id)) or "").strip()
+            if not resolved_key:
+                keys = C.list_keys(int(tenant_id))
+                resolved_key = (keys[0].get("key") if keys else "") or ""
+        return tenant_id, resolved_key
+
+    if not _auth(tenant_id, key):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return tenant_id, key
+
+
+client_avito_history_runtime.register_routes(router, _authorize_client_settings_request, C, _log)
+client_avito_history_export_runtime.register_routes(router, _authorize_client_settings_request, C, _log)
+client_contextual_cases_runtime.register_routes(router, _authorize_client_settings_request, C, _log)
 
 def _isoformat(value: Any) -> str | None:
     if isinstance(value, datetime):
@@ -757,118 +491,41 @@ def _isoformat(value: Any) -> str | None:
 
 
 def _parse_tg_slot_from_source(source: Any) -> int | None:
-    text = str(source or "").strip().lower()
-    if not text:
-        return None
-    patterns = [
-        r"tg_slot[:=](\d+)",
-        r"telegram[:_](\d+)",
-        r"slot[:=](\d+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if not match:
-            continue
-        try:
-            slot = int(match.group(1))
-        except Exception:
-            continue
-        if TG_SLOT_MIN <= slot <= TG_SLOT_MAX:
-            return slot
-    return None
+    return client_dialog_helpers_runtime.parse_tg_slot_from_source(
+        source,
+        slot_min=TG_SLOT_MIN,
+        slot_max=TG_SLOT_MAX,
+    )
+
+
+def _is_technical_max_title(value: Any) -> bool:
+    return client_dialog_helpers_runtime.is_technical_max_title(value)
 
 
 def _tg_slot_tenant(tenant_id: int, slot: int) -> int:
-    if slot <= 1:
-        return int(tenant_id)
-    return int(tenant_id) * TG_SLOT_MULTIPLIER + int(slot)
+    return client_dialog_helpers_runtime.tg_slot_tenant(
+        tenant_id,
+        slot,
+        virtual_tenant_id_fn=_virtual_tenant_id_shared,
+    )
 
 
 def _load_telegram_slot_profiles(tenant_id: int) -> list[dict[str, Any]]:
-    cfg = C.read_tenant_config(int(tenant_id)) or {}
-    telegram_cfg = cfg.get("telegram") if isinstance(cfg, Mapping) else {}
-    if not isinstance(telegram_cfg, Mapping):
-        telegram_cfg = {}
-    slot_count_raw = telegram_cfg.get("slot_count")
-    try:
-        slot_count = int(slot_count_raw)
-    except Exception:
-        slot_count = 1
-    slot_count = max(TG_SLOT_MIN, min(TG_SLOT_MAX, slot_count))
-    slot_enabled_cfg = telegram_cfg.get("slot_enabled")
-    enabled_map: dict[int, bool] = {}
-    if isinstance(slot_enabled_cfg, Mapping):
-        for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
-            raw = slot_enabled_cfg.get(str(slot), slot_enabled_cfg.get(slot))
-            enabled_map[slot] = bool(raw is not False)
-    else:
-        for slot in range(TG_SLOT_MIN, TG_SLOT_MAX + 1):
-            enabled_map[slot] = True
-
-    profiles: list[dict[str, Any]] = []
-    for slot in range(TG_SLOT_MIN, slot_count + 1):
-        if not enabled_map.get(slot, True):
-            continue
-        virtual_tenant = _tg_slot_tenant(int(tenant_id), slot)
-        path = f"/status?{urllib.parse.urlencode({'tenant': virtual_tenant})}"
-        code, body, _ = C.tg_http("GET", path, timeout=5.0)
-        if code < 200 or code >= 300:
-            continue
-        try:
-            payload = json.loads(body.decode("utf-8", errors="ignore"))
-        except Exception:
-            payload = {}
-        if not isinstance(payload, Mapping) or not bool(payload.get("authorized")):
-            continue
-        account_title = str(payload.get("account_title") or "").strip()
-        account_username = str(payload.get("account_username") or "").strip()
-        account_phone = str(payload.get("account_phone") or "").strip()
-        label = account_title or (f"@{account_username}" if account_username else "") or (f"+{account_phone}" if account_phone else "")
-        if not label:
-            label = f"Telegram #{slot}"
-        profiles.append(
-            {
-                "slot": slot,
-                "label": label,
-                "username": account_username or None,
-                "phone": account_phone or None,
-            }
-        )
-    return profiles
+    return client_dialog_helpers_runtime.load_telegram_slot_profiles(
+        tenant_id,
+        common_module=C,
+        slot_min=TG_SLOT_MIN,
+        slot_max=TG_SLOT_MAX,
+        virtual_tenant_id_fn=_virtual_tenant_id_shared,
+    )
 
 
 def _ts_iso(ts: int | None) -> str | None:
-    if not ts:
-        return None
-    try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
-    except Exception:
-        return None
+    return client_dialog_helpers_runtime.ts_iso(ts)
 
 
 def _channel_reply_enabled(cfg: Mapping[str, Any], channel: str) -> bool:
-    behavior = cfg.get("behavior") if isinstance(cfg, Mapping) else None
-    behavior_map = behavior if isinstance(behavior, Mapping) else {}
-    channel_norm = (channel or "").strip().lower()
-    if channel_norm == "telegram":
-        for key in ("telegram_reply_enabled", "telegram_smart_reply_enabled", "telegram_ai_enabled"):
-            if key in behavior_map:
-                return bool(behavior_map.get(key))
-        root_flag = behavior_map.get("telegram_reply_enabled")
-        if root_flag is not None:
-            return bool(root_flag)
-        return True
-    if channel_norm == "max":
-        for key in ("max_reply_enabled", "max_smart_reply_enabled", "max_ai_enabled"):
-            if key in behavior_map:
-                return bool(behavior_map.get(key))
-        root_flag = behavior_map.get("max_reply_enabled")
-        if root_flag is not None:
-            return bool(root_flag)
-        return True
-    if channel_norm == "avito":
-        return True
-    return True
+    return client_dialog_helpers_runtime.channel_reply_enabled(cfg, channel)
 
 
 def _load_silence_status(
@@ -876,87 +533,36 @@ def _load_silence_status(
     lead_id: int,
     channel: str,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "active": False,
-        "reason": None,
-        "since": None,
-        "ttl_seconds": None,
-        "auto_reply_enabled": True,
-    }
-    try:
-        cfg = C.read_tenant_config(tenant_id)
-    except Exception:
-        cfg = {}
-    result["auto_reply_enabled"] = _channel_reply_enabled(cfg, channel)
-    redis_client = C.redis_client()
-    silence_key = handoff_silence_key(int(tenant_id), int(lead_id))
-    if not silence_key:
-        return result
-    try:
-        raw_ts = redis_client.get(silence_key)
-    except Exception:
-        raw_ts = None
-    if not raw_ts:
-        return result
-    result["active"] = True
-    try:
-        ts_val = int(raw_ts)
-    except Exception:
-        ts_val = None
-    result["since"] = _ts_iso(ts_val)
-    try:
-        ttl = redis_client.ttl(silence_key)
-    except Exception:
-        ttl = None
-    if isinstance(ttl, int) and ttl >= 0:
-        result["ttl_seconds"] = ttl
-    meta_key = handoff_silence_meta_key(int(tenant_id), int(lead_id))
-    try:
-        meta_raw = redis_client.get(meta_key) if meta_key else None
-    except Exception:
-        meta_raw = None
-    if isinstance(meta_raw, str) and meta_raw.strip():
-        try:
-            payload = json.loads(meta_raw)
-        except Exception:
-            payload = {}
-        if isinstance(payload, dict):
-            reason = payload.get("reason")
-            if isinstance(reason, str) and reason.strip():
-                result["reason"] = reason.strip()
-    if not result.get("reason"):
-        result["reason"] = "silence_active"
-    return result
+    return client_dialog_helpers_runtime.load_silence_status(
+        tenant_id,
+        lead_id,
+        channel,
+        common_module=C,
+        silence_key_fn=handoff_silence_key,
+        silence_meta_key_fn=handoff_silence_meta_key,
+    )
 
 
 def _tenant_root(tenant: int) -> pathlib.Path:
-    return pathlib.Path(C.tenant_dir(tenant))
+    return client_dialog_helpers_runtime.tenant_root(tenant, common_module=C)
 
 
 def _photo_manifest_path(tenant: int) -> pathlib.Path:
-    return _tenant_root(tenant) / "uploads" / "photos" / "manifest.json"
+    return client_dialog_helpers_runtime.photo_manifest_path(tenant, common_module=C)
 
 
 def _read_photo_manifest(tenant: int) -> list[dict[str, Any]]:
-    path = _photo_manifest_path(tenant)
-    if not path.exists() or not path.is_file():
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except Exception:
-        return []
-    if isinstance(raw, list):
-        return [entry for entry in raw if isinstance(entry, dict)]
-    return []
+    return client_dialog_helpers_runtime.read_photo_manifest(tenant, common_module=C)
 
 
 def _photo_public_url(request: Request, tenant_id: int, key: str, photo_id: str) -> str:
-    base = C.public_url(request, f"/pub/files/photos/{photo_id}")
-    if not base:
-        return ""
-    joiner = "&" if "?" in base else "?"
-    return f"{base}{joiner}tenant={tenant_id}&k={quote_plus(key)}"
+    return client_dialog_helpers_runtime.photo_public_url(
+        request,
+        tenant_id,
+        key,
+        photo_id,
+        common_module=C,
+    )
 
 
 def _normalize_message_attachments(
@@ -965,51 +571,13 @@ def _normalize_message_attachments(
     key: str,
     attachments: Any,
 ) -> list[dict[str, Any]]:
-    raw = attachments
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except Exception:
-            raw = None
-    if isinstance(raw, Mapping):
-        raw = [dict(raw)]
-    if not isinstance(raw, list):
-        return []
-    normalized: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            continue
-        entry = dict(item)
-        url = entry.get("url")
-        photo_id = str(entry.get("photo_id") or "").strip()
-        if not url and photo_id:
-            entry["url"] = _photo_public_url(request, tenant_id, key, photo_id)
-        elif isinstance(url, str) and url.startswith("telegram://"):
-            parts = url.replace("telegram://", "").split("/")
-            if len(parts) >= 3:
-                peer_id = parts[1]
-                message_id = parts[2]
-                entry["url"] = C.public_url(
-                    request,
-                    f"/pub/tg/media/{peer_id}/{message_id}?tenant={tenant_id}&k={quote_plus(key)}",
-                )
-        elif isinstance(url, str):
-            parsed = urlparse(url)
-            if parsed.netloc in {"app:8000", "app"}:
-                rebuilt = parsed.path or ""
-                if parsed.query:
-                    rebuilt = f"{rebuilt}?{parsed.query}"
-                entry["url"] = C.public_url(request, rebuilt)
-        if not entry.get("url"):
-            peer_id = entry.get("peer_id")
-            message_id = entry.get("message_id")
-            if peer_id and message_id:
-                entry["url"] = C.public_url(
-                    request,
-                    f"/pub/tg/media/{peer_id}/{message_id}?tenant={tenant_id}&k={quote_plus(key)}",
-                )
-        normalized.append(entry)
-    return normalized
+    return client_dialog_helpers_runtime.normalize_message_attachments(
+        request,
+        tenant_id,
+        key,
+        attachments,
+        common_module=C,
+    )
 
 
 def _safe_path(tenant: int, relative: str | pathlib.Path | None) -> pathlib.Path | None:
@@ -1029,200 +597,26 @@ def _safe_path(tenant: int, relative: str | pathlib.Path | None) -> pathlib.Path
     return None
 
 
-def _catalog_csv_path(tenant: int, cfg: dict | None = None) -> tuple[pathlib.Path | None, str | None, str | None]:
-    if cfg is None or not isinstance(cfg, dict):
-        cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        return None, None, None
-
-    catalogs = cfg.get("catalogs") if isinstance(cfg.get("catalogs"), list) else []
-    for entry in catalogs:
-        if not isinstance(entry, dict):
-            continue
-        csv_rel = entry.get("csv_path") or (entry.get("path") if entry.get("type") == "csv" else None)
-        from_index = False
-        if not csv_rel and entry.get("type") == "pdf" and entry.get("index_path"):
-            csv_rel = str(pathlib.Path(entry["index_path"]).with_suffix(".csv"))
-            from_index = True
-        candidate = _safe_path(tenant, csv_rel)
-        if candidate and candidate.exists():
-            # CSV produced from PDF index is always UTF-8 (no BOM)
-            if from_index:
-                encoding = "utf-8"
-            else:
-                encoding = entry.get("encoding") if isinstance(entry.get("encoding"), str) else "utf-8"
-            try:
-                rel = str(candidate.relative_to(_tenant_root(tenant)))
-            except Exception:
-                rel = str(candidate)
-            return candidate, encoding, rel
-    # Fallback: look into integrations metadata written by public upload handler
-    try:
-        integrations = cfg.get("integrations") if isinstance(cfg, dict) else {}
-        uploaded = integrations.get("uploaded_catalog") if isinstance(integrations, dict) else {}
-        if isinstance(uploaded, dict) and uploaded.get("csv_path"):
-            candidate = _safe_path(tenant, uploaded.get("csv_path"))
-            if candidate and candidate.exists():
-                try:
-                    rel = str(candidate.relative_to(_tenant_root(tenant)))
-                except Exception:
-                    rel = str(candidate)
-                # Use Excel-friendly default encoding (write_catalog_csv uses utf-8-sig)
-                return candidate, "utf-8-sig", rel
-    except Exception:
-        pass
-    return None, None, None
+def _catalog_csv_path(
+    tenant: int, cfg: dict | None = None
+) -> tuple[pathlib.Path | None, str | None, str | None]:
+    return client_catalog_runtime.catalog_csv_path(
+        tenant,
+        cfg,
+        deps=_client_catalog_runtime_deps(),
+    )
 
 
 def read_csv_table(
     tenant: int, cfg: dict | None = None
 ) -> dict[str, list[list[str]] | list[str] | str]:
     csv_path, encoding_hint, relative = _catalog_csv_path(tenant, cfg)
-    if not csv_path or not csv_path.exists():
-        raise FileNotFoundError("csv_not_ready")
-
-    raw = csv_path.read_bytes()
-    encoding = encoding_hint or _detect_encoding(raw)
-    text = raw.decode(encoding or "utf-8", errors="ignore")
-
-    delimiter = _detect_csv_delimiter(text)
-
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-
-    header_raw: list[str] | None = None
-    for raw_header in reader:
-        if not raw_header:
-            continue
-        cleaned_header: list[str] = []
-        for idx, cell in enumerate(raw_header):
-            value = cell if isinstance(cell, str) else ("" if cell is None else str(cell))
-            if idx == 0:
-                value = _strip_bom(value)
-            cleaned_header.append(value)
-        if not any((value or "").strip() for value in cleaned_header):
-            continue
-        header_raw = cleaned_header
-        break
-
-    if not header_raw:
-        return {
-            "columns": [],
-            "rows": [],
-            "encoding": encoding or "utf-8",
-            "path": relative or "",
-            "delimiter": delimiter,
-            "csv_text": text,
-        }
-
-    normalized: list[str] = []
-    seen: dict[str, int] = {}
-    for idx, cell in enumerate(header_raw):
-        raw_value = cell or ""
-        if not isinstance(raw_value, str):
-            raw_value = str(raw_value)
-        name = _strip_bom(raw_value).strip()
-        if not name:
-            name = f"column_{idx + 1}"
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 0
-        normalized.append(name)
-
-    columns = normalized[:]
-    data_rows: list[list[str]] = []
-    for row in reader:
-        if not row:
-            continue
-        cleaned_cells: list[str] = []
-        for idx, value in enumerate(row):
-            if isinstance(value, str):
-                cell_text = value
-            elif value is None:
-                cell_text = ""
-            else:
-                cell_text = str(value)
-            if idx == 0:
-                cell_text = _strip_bom(cell_text)
-            cleaned_cells.append(cell_text)
-
-        trimmed_cells = [cell.strip() for cell in cleaned_cells]
-        if not any(trimmed_cells):
-            continue
-        non_empty = [cell for cell in trimmed_cells if cell]
-        if len(non_empty) == 1 and non_empty[0] == ".":
-            continue
-
-        while len(columns) < len(cleaned_cells):
-            columns.append(f"column_{len(columns) + 1}")
-        ordered: list[str] = []
-        for idx_col in range(len(columns)):
-            if idx_col < len(trimmed_cells):
-                ordered.append(trimmed_cells[idx_col])
-            else:
-                ordered.append("")
-        data_rows.append(ordered)
-
-    import re as _re
-
-    base_to_indices: dict[str, list[int]] = {}
-    for idx, col in enumerate(columns):
-        base = _re.sub(r"_(\d+)$", "", col)
-        base_to_indices.setdefault(base, []).append(idx)
-
-    merged_columns: list[str] = []
-    seen_bases: set[str] = set()
-    for col in columns:
-        base = _re.sub(r"_(\d+)$", "", col)
-        if base in seen_bases:
-            continue
-        seen_bases.add(base)
-        merged_columns.append(base)
-
-    if any(len(idxs) > 1 for idxs in base_to_indices.values()):
-        merged_rows: list[list[str]] = []
-        for row in data_rows:
-            merged_row: list[str] = []
-            for base in merged_columns:
-                indices = base_to_indices.get(base, [])
-                if not indices:
-                    merged_row.append("")
-                    continue
-                values: list[str] = []
-                for index in indices:
-                    if index < len(row):
-                        val = row[index]
-                        text = val.strip() if isinstance(val, str) else str(val or "").strip()
-                        if text and text not in values:
-                            values.append(text)
-                merged_row.append(" ".join(values))
-            merged_rows.append(merged_row)
-        columns = merged_columns
-        data_rows = merged_rows
-
-    if data_rows:
-        keep_idx: list[int] = []
-        for idx in range(len(columns)):
-            any_non_empty = any(
-                (row[idx].strip() if isinstance(row[idx], str) else str(row[idx] or "").strip())
-                for row in data_rows
-                if idx < len(row)
-            )
-            if any_non_empty:
-                keep_idx.append(idx)
-        if keep_idx and len(keep_idx) < len(columns):
-            columns = [columns[i] for i in keep_idx]
-            data_rows = [[(row[i] if i < len(row) else "") for i in keep_idx] for row in data_rows]
-
-    return {
-        "columns": columns,
-        "rows": data_rows,
-        "encoding": encoding or "utf-8",
-        "path": relative or "",
-        "delimiter": delimiter,
-        "csv_text": text,
-    }
+    return client_catalog_runtime.read_csv_table_from_path(
+        csv_path,
+        encoding_hint,
+        relative,
+        deps=_client_catalog_runtime_deps(),
+    )
 
 
 def write_csv_table(
@@ -1231,540 +625,79 @@ def write_csv_table(
     rows: Any,
     cfg: dict | None = None,
 ) -> int:
-    if not isinstance(columns, list) or not all(isinstance(col, str) for col in columns):
-        raise ValueError("invalid_columns")
-    if not isinstance(rows, list):
-        raise ValueError("invalid_rows")
-
     csv_path, _, _ = _catalog_csv_path(tenant, cfg)
-    if not csv_path:
-        raise FileNotFoundError("csv_not_ready")
-
-    serializable_rows: list[list[str]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            ordered = [str(row.get(col, "") or "") for col in columns]
-            serializable_rows.append(ordered)
-        elif isinstance(row, list):
-            ordered = [str(row[idx]) if idx < len(row) else "" for idx in range(len(columns))]
-            serializable_rows.append(ordered)
-        else:
-            raise ValueError("invalid_row")
-
-    encoding = "utf-8-sig"
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", encoding=encoding, newline="") as handle:
-        writer = csv.writer(handle, delimiter=";", quoting=csv.QUOTE_MINIMAL)
-        clean_columns: list[str] = []
-        for col in columns:
-            name = (col or "").strip().lstrip("\ufeff")
-            clean_columns.append(name)
-        writer.writerow(clean_columns)
-        for row in serializable_rows:
-            out_row: list[str] = []
-            for cell in row:
-                text = str(cell or "")
-                if text:
-                    text = (
-                        text.replace("\r\n", " ")
-                        .replace("\r", " ")
-                        .replace("\n", " ")
-                        .replace("\t", " ")
-                    )
-                    text = re.sub(r"\s+", " ", text).strip()
-                out_row.append(text)
-            writer.writerow(out_row)
-
-    return len(serializable_rows)
+    return client_catalog_runtime.write_csv_table_to_path(
+        csv_path,
+        columns,
+        rows,
+    )
 
 
 @router.get("/client/{tenant}/settings")
 async def client_settings(tenant: int, request: Request):
-    raw_query_key = (request.query_params.get("k") or "").strip()
-    raw_cookie_key = ""
-    try:
-        raw_cookie_key = (request.cookies.get("client_key") or "").strip() if request.cookies else ""
-    except Exception:
-        raw_cookie_key = ""
-
-    client_key = raw_query_key or raw_cookie_key
-    provided_key = _resolve_key(request, client_key)
-    session_user = await auth_utils.get_current_user(request)
-    session_allowed = bool(session_user and int(session_user.get("tenant_id") or 0) == int(tenant))
-    if not session_allowed:
-        if not auth_utils.magic_link_enabled() or not _auth(tenant, provided_key):
-            return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    tenant_key = (C.get_tenant_pubkey(int(tenant)) or "").strip()
-    key = client_key
-    if session_allowed:
-        if (not key) or (not C.valid_key(int(tenant), key)):
-            key = tenant_key
-            if not key:
-                keys = C.list_keys(int(tenant))
-                key = (keys[0].get("key") if keys else "") or ""
-
-    C.ensure_tenant_files(tenant)
-    cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        cfg = {}
-
-    persona = C.read_persona(tenant)
-    personas = {
-        "telegram": C.read_persona(tenant, "telegram"),
-        "avito": C.read_persona(tenant, "avito"),
-        "max": C.read_persona(tenant, "max"),
-    }
-
-    passport_raw = cfg.get("passport", {})
-    passport = passport_raw if isinstance(passport_raw, dict) else {}
-
-    behavior_raw = cfg.get("behavior", {})
-    behavior_cfg = behavior_raw if isinstance(behavior_raw, dict) else {}
-    triggers_raw = behavior_cfg.get("triggers") if isinstance(behavior_cfg.get("triggers"), list) else []
-    behavior_state = {
-        "brain_mode": (
-            "classic"
-            if str(behavior_cfg.get("brain_mode") or "").strip().lower() in {"classic", "prod", "legacy"}
-            or bool(behavior_cfg.get("human_reply_mode"))
-            else "smart"
-        ),
-        "auto_reply": bool(behavior_cfg.get("auto_reply")),
-        "auto_reply_text": behavior_cfg.get("auto_reply_text") or "",
-        "avito_smart_reply_enabled": bool(behavior_cfg.get("avito_smart_reply_enabled")),
-        "send_catalog_on_first_message": behavior_cfg.get("send_catalog_on_first_message"),
-        "max_reply_enabled": behavior_cfg.get("max_reply_enabled"),
-        "auto_photo_enabled": bool(behavior_cfg.get("auto_photo_enabled")),
-        "auto_photo_max": behavior_cfg.get("auto_photo_max") or 0,
-        "triggers": triggers_raw,
-        "photo_expected_markers": behavior_cfg.get("photo_expected_markers") or [],
-        "photo_expected_reply": behavior_cfg.get("photo_expected_reply") or "",
-        "photo_expected_ttl": behavior_cfg.get("photo_expected_ttl") or 0,
-    }
-
-    integrations_raw = cfg.get("integrations", {})
-    integrations = integrations_raw if isinstance(integrations_raw, dict) else {}
-    uploaded_meta = integrations.get("uploaded_catalog", {})
-    if isinstance(uploaded_meta, str):
-        uploaded_display = uploaded_meta
-    elif isinstance(uploaded_meta, dict):
-        uploaded_display = uploaded_meta.get("original") or uploaded_meta.get("path") or ""
-    else:
-        uploaded_display = ""
-
-    urls = {
-        "settings": f"/client/{tenant}/settings",
-        "settings_get": "/pub/settings/get",
-        "settings_save": "/pub/settings/save",
-        "save_settings": f"/client/{tenant}/settings/save",
-        "save_behavior": f"/client/{tenant}/behavior/save",
-        "save_persona": f"/client/{tenant}/persona",
-        "quickstart_templates": f"/client/{tenant}/quickstart/templates",
-        "quickstart_apply": f"/client/{tenant}/quickstart/apply",
-        "save_followups": f"/client/{tenant}/follow-ups",
-        "get_followups": f"/client/{tenant}/follow-ups",
-        "upload_catalog": "/pub/catalog/upload",
-        "csv_get": "/pub/catalog/csv",
-        "csv_save": "/pub/catalog/csv",
-        "photos_list": "/pub/files/photos/list",
-        "photos_upload": "/pub/files/photos/upload",
-        "photos_delete": "/pub/files/photos/{photo_id}",
-        "photos_file": "/pub/files/photos/{photo_id}",
-        "photos_meta": "/pub/files/photos/{photo_id}/meta",
-        "training_upload": "/pub/training/upload",
-        "training_status": "/pub/training/status",
-        "whatsapp_export": "/pub/wa/export",
-        "dialogs_list": "/api/dialogs",
-        "dialogs_detail": "/api/dialogs/{lead_id}",
-        "dialogs_send": "/api/dialogs/{lead_id}/send",
-        "dialogs_unsilence": "/api/dialogs/{lead_id}/unsilence",
-        "dialogs_test": "/api/dialogs/test",
-        "tenant_stats": "/api/tenant/stats",
-        "analytics_summary": "/api/analytics/summary",
-        "feedback_stats": "/api/feedback/stats",
-        "feedback_quality": "/api/feedback/quality",
-        "feedback": "/api/feedback",
-        "training_suggestions": f"/client/{tenant}/training/suggestions",
-        "training_suggestions_refresh": f"/client/{tenant}/training/suggestions/refresh",
-        "training_suggestions_accept": f"/client/{tenant}/training/suggestions/accept",
-        "training_tg_harvest": f"/client/{tenant}/training/telegram/harvest",
-        "training_tg_accept": f"/client/{tenant}/training/telegram/accept",
-    }
-
-    webhook_secret = getattr(C.settings, "WEBHOOK_SECRET", "") if hasattr(C, "settings") else ""
-    webhook_secret = (webhook_secret or "").strip()
-
-    state = {
-        "tenant": tenant,
-        "key": key,
-        "public_key": tenant_key,
-        "primary_key": tenant_key,
-        "urls": urls,
-        "max_days": EXPORT_MAX_DAYS,
-        "webhook_secret": webhook_secret,
-        "behavior": behavior_state,
-    }
-
-    form_payload = {
-        "brand": passport.get("brand", ""),
-        "agent": passport.get("agent_name", ""),
-        "catalog_file": uploaded_display,
-    }
-
-    state_payload = dict(state)
-    state_payload["form"] = form_payload
-    state_payload["behavior"] = behavior_state
-    state_payload["personas"] = personas
-    state_payload["quickstart_templates"] = quickstart_module.list_quickstart_templates()
-    client_state_json = json.dumps(state_payload)
-
-    asset_version_value = C.asset_version()
-
-    context = {
-        "request": request,
-        "tenant": tenant,
-        "tenant_id": tenant,
-        "key": key,
-        "public_key": tenant_key,
-        "persona": persona,
-        "personas": personas,
-        "form": form_payload,
-        "title": f"Настройки клиента · Tenant {tenant}",
-        "subtitle": passport.get("brand") or "Личный кабинет клиента",
-        "urls": urls,
-        "state": state,
-        "state_payload": state_payload,
-        "client_state_json": client_state_json,
-        "primary_key": tenant_key,
-        "max_days": EXPORT_MAX_DAYS,
-        "client_settings_version": C.client_settings_version(),
-        "webhook_secret": webhook_secret,
-        "asset_version": asset_version_value,
-        "behavior": behavior_state,
-    }
-    use_legacy_settings = (os.getenv("TESTING") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    template_name = "client/settings.html" if use_legacy_settings else "client/spa.html"
-    response = render_template(template_name, context)
-    response.headers["Cache-Control"] = "no-store"
-    if key:
-        try:
-            response.set_cookie(
-                "client_key",
-                key,
-                **auth_utils.cookie_params(
-                    request,
-                    ttl_seconds=14 * 24 * 3600,
-                    httponly=True,
-                ),
-            )
-        except Exception:
-            pass
-    return response
+    return await client_settings_runtime.client_settings(
+        tenant,
+        request,
+        deps=_client_settings_runtime_deps(),
+    )
 
 
 @router.get("/client/settings")
 async def client_settings_short(request: Request):
-    session_user = await auth_utils.get_current_user(request)
-    if not session_user:
-        return RedirectResponse(url="/login")
-    tenant_id = int(session_user.get("tenant_id") or 0)
-    if tenant_id <= 0:
-        return JSONResponse({"detail": "invalid_tenant"}, status_code=400)
-    return await client_settings(tenant_id, request)
+    return await client_settings_runtime.client_settings_short(
+        request,
+        deps=_client_settings_runtime_deps(),
+    )
 
 
 @router.post("/client/{tenant}/settings/save")
 async def save_form(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = await request.json()
-
-    cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        cfg = {}
-
-    passport = cfg.get("passport")
-    if not isinstance(passport, dict):
-        passport = {}
-    cfg["passport"] = passport
-    passport.update(
-        {
-            "brand": payload.get("brand") or passport.get("brand", ""),
-            "agent_name": payload.get("agent") or passport.get("agent_name", ""),
-        }
+    return await client_settings_runtime.save_form(
+        tenant,
+        request,
+        deps=_client_settings_runtime_deps(),
     )
-
-    passport["currency"] = "₽"
-    try:
-        quickstart_module.refresh_persona_headers(tenant, cfg)
-    except Exception:
-        _log.warning("quickstart_refresh_failed tenant=%s", tenant)
-    C.write_tenant_config(tenant, cfg)
-    return {"ok": True}
 
 
 def _sanitize_triggers(payload: Any) -> list[dict[str, Any]]:
-    if not isinstance(payload, list):
-        return []
-    result: list[dict[str, Any]] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        phrases_raw = item.get("phrases") or item.get("keywords") or []
-        phrases: list[str] = []
-        if isinstance(phrases_raw, (list, tuple, set)):
-            for ph in phrases_raw:
-                if isinstance(ph, str) and ph.strip():
-                    phrases.append(ph.strip())
-        elif isinstance(phrases_raw, str) and phrases_raw.strip():
-            for ph in phrases_raw.split(","):
-                if ph.strip():
-                    phrases.append(ph.strip())
-        if not phrases:
-            continue
-        channels_raw = item.get("channels") or ["telegram", "avito", "whatsapp", "max"]
-        channels: list[str] = []
-        if isinstance(channels_raw, (list, tuple, set)):
-            for ch in channels_raw:
-                if isinstance(ch, str) and ch.strip():
-                    channels.append(ch.strip().lower())
-        elif isinstance(channels_raw, str) and channels_raw.strip():
-            channels.append(channels_raw.strip().lower())
-        if not channels:
-            channels = ["telegram", "avito", "whatsapp", "max"]
-        result.append(
-            {
-                "phrases": phrases,
-                "channels": channels,
-                "silence": bool(item.get("silence", True)),
-                "notify": bool(item.get("notify", False)),
-            }
-        )
-    return result
+    return sanitize_behavior_triggers(payload)
 
 
 @router.post("/client/{tenant}/behavior/save")
 async def save_behavior(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = await request.json()
-    cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        cfg = {}
-    behavior = cfg.get("behavior")
-    if not isinstance(behavior, dict):
-        behavior = {}
-    behavior["auto_reply"] = bool(payload.get("auto_reply"))
-    behavior["auto_reply_enabled"] = behavior["auto_reply"]
-    behavior["auto_reply_text"] = payload.get("auto_reply_text") or ""
-    behavior["avito_phone_tg_template"] = payload.get("avito_phone_tg_template") or ""
-    behavior["avito_smart_reply_enabled"] = bool(payload.get("avito_smart_reply_enabled"))
-    requested_brain_mode = str(payload.get("brain_mode") or "").strip().lower()
-    if requested_brain_mode not in {"smart", "classic"}:
-        requested_brain_mode = "smart"
-    behavior["brain_mode"] = requested_brain_mode
-    # Backward compatibility with older checks in core.
-    behavior["human_reply_mode"] = requested_brain_mode == "classic"
-    if payload.get("max_reply_enabled") is not None:
-        behavior["max_reply_enabled"] = bool(payload.get("max_reply_enabled"))
-    if payload.get("telegram_reply_enabled") is not None:
-        behavior["telegram_reply_enabled"] = bool(payload.get("telegram_reply_enabled"))
-    if payload.get("send_catalog_on_first_message") is not None:
-        behavior["send_catalog_on_first_message"] = bool(payload.get("send_catalog_on_first_message"))
-    if payload.get("auto_photo_enabled") is not None:
-        behavior["auto_photo_enabled"] = bool(payload.get("auto_photo_enabled"))
-    try:
-        auto_photo_max = int(payload.get("auto_photo_max") or 0)
-    except Exception:
-        auto_photo_max = 0
-    behavior["auto_photo_max"] = auto_photo_max if auto_photo_max >= 0 else 0
-    behavior["triggers"] = _sanitize_triggers(payload.get("triggers"))
-    markers_raw = payload.get("photo_expected_markers") or []
-    markers: list[str] = []
-    if isinstance(markers_raw, (list, tuple, set)):
-        for ph in markers_raw:
-            if isinstance(ph, str) and ph.strip():
-                markers.append(ph.strip())
-    elif isinstance(markers_raw, str) and markers_raw.strip():
-        for ph in markers_raw.split(","):
-            if ph.strip():
-                markers.append(ph.strip())
-    behavior["photo_expected_markers"] = markers
-    reply_text = payload.get("photo_expected_reply") or ""
-    behavior["photo_expected_reply"] = reply_text if isinstance(reply_text, str) else str(reply_text)
-    try:
-        ttl_val = int(payload.get("photo_expected_ttl") or 0)
-    except Exception:
-        ttl_val = 0
-    behavior["photo_expected_ttl"] = ttl_val if ttl_val > 0 else 0
-    cfg["behavior"] = behavior
-    C.write_tenant_config(tenant, cfg)
-    return {"ok": True}
+    return await client_settings_runtime.save_behavior(
+        tenant,
+        request,
+        deps=_client_settings_runtime_deps(),
+    )
 
 
 @router.get("/client/{tenant}/follow-ups")
-def get_follow_ups(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        cfg = {}
-    follow_up_rules = cfg.get("follow_up")
-    if not isinstance(follow_up_rules, list):
-        follow_up_rules = []
-    return {"ok": True, "rules": follow_up_rules}
+async def get_follow_ups(tenant: int, request: Request):
+    return await client_settings_runtime.get_follow_ups(
+        tenant,
+        request,
+        deps=_client_settings_runtime_deps(),
+    )
 
 
 @router.post("/client/{tenant}/follow-ups")
 async def save_follow_ups(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    tg_slot_raw = payload.get("tg_slot")
-    try:
-        tg_slot = int(tg_slot_raw)
-    except Exception:
-        tg_slot = 1
-    if tg_slot < TG_SLOT_MIN or tg_slot > TG_SLOT_MAX:
-        tg_slot = TG_SLOT_MIN
-    rules_raw = payload.get("rules")
-    if not isinstance(rules_raw, list):
-        rules_raw = []
-
-    validated: list[dict[str, object]] = []
-    allowed_channels = {"telegram", "avito", "whatsapp", "max", "any", "*"}
-
-    for rule in rules_raw:
-        if not isinstance(rule, dict):
-            continue
-        channel = str(rule.get("channel") or "").strip().lower() or "any"
-        if channel not in allowed_channels:
-            channel = "any"
-        try:
-            delay_minutes = int(rule.get("delay_minutes") or 0)
-        except Exception:
-            delay_minutes = 0
-        text_value = str(rule.get("text") or "").strip()
-        if not text_value:
-            continue
-        try:
-            max_attempts = int(rule.get("max_attempts") or 1)
-        except Exception:
-            max_attempts = 1
-        if max_attempts < 0:
-            max_attempts = 0
-        trigger_on_answer = bool(rule.get("trigger_on_answer"))
-        if delay_minutes <= 0 and not trigger_on_answer:
-            continue
-        stop_notice_after = bool(rule.get("stop_notice_after"))
-        active = bool(rule.get("active", True))
-        condition = rule.get("condition")
-        if not isinstance(condition, (dict, list)):
-            condition = None
-        capture = rule.get("capture")
-        if not isinstance(capture, dict):
-            capture = None
-        validated.append(
-            {
-                "channel": channel,
-                "delay_minutes": delay_minutes if delay_minutes > 0 else 0,
-                "text": text_value,
-                "max_attempts": max_attempts,
-                "active": active,
-                "trigger_on_answer": trigger_on_answer,
-                "condition": condition,
-                "capture": capture,
-                "stop_notice_after": stop_notice_after,
-            }
-        )
-
-    cfg = C.read_tenant_config(tenant)
-    if not isinstance(cfg, dict):
-        cfg = {}
-    cfg["follow_up"] = validated
-    C.write_tenant_config(tenant, cfg)
-    return {"ok": True, "rules_saved": len(validated)}
+    return await client_settings_runtime.save_follow_ups(
+        tenant,
+        request,
+        deps=_client_settings_runtime_deps(),
+    )
 
 
 @router.get("/api/dialogs")
 async def list_dialogs_api(request: Request, tenant: int | str | None = None, limit: int = 200):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-
-    try:
-        limit_val = int(limit)
-    except Exception:
-        limit_val = 200
-    if limit_val <= 0:
-        limit_val = 50
-    limit_val = min(limit_val, 500)
-
-    dialogs_raw = await db.fetch_dialogs_for_tenant(tenant_id, limit=limit_val)
-    dialogs: list[dict[str, Any]] = []
-
-    def _title_is_numeric(value: str) -> bool:
-        return value.strip().isdigit() if isinstance(value, str) else False
-
-    for entry in dialogs_raw:
-        channel_name = (entry.get("channel") or "").strip().lower() or "unknown"
-        if channel_name not in {"telegram", "avito", "whatsapp", "max", "unknown"}:
-            continue
-        lead_id = entry.get("id")
-        try:
-            lead_ref = int(lead_id)
-        except Exception:
-            lead_ref = 0
-        raw_title = entry.get("title")
-        raw_contact = entry.get("contact")
-        raw_peer = entry.get("peer")
-        avito_login = entry.get("avito_login")
-        telegram_username = entry.get("telegram_username")
-        if channel_name == "avito":
-            title = avito_login or raw_title or raw_contact
-            if title and _title_is_numeric(str(title)):
-                title = avito_login
-            if not title:
-                title = "Avito · клиент"
-        elif channel_name == "telegram":
-            title = raw_title or telegram_username or raw_contact
-            if title and _title_is_numeric(str(title)):
-                title = telegram_username
-            if not title:
-                title = "Telegram · клиент"
-        else:
-            title = raw_title or raw_contact or raw_peer
-        if not title:
-            title = f"Лид {lead_ref}" if lead_ref else "Лид"
-        lead_ref_str = str(lead_ref)
-        dialogs.append(
-            {
-                "id": lead_ref_str,
-                "id_num": lead_ref,
-                "id_str": lead_ref_str,
-                "channel": channel_name,
-                "title": title,
-                "contact": entry.get("contact"),
-                "last_message": entry.get("last_message"),
-                "last_ts": _isoformat(entry.get("last_ts")),
-                "unread": 0,
-            }
-        )
-
-    return {"ok": True, "dialogs": dialogs}
+    return await client_dialogs_runtime.list_dialogs_api(
+        request,
+        tenant=tenant,
+        limit=limit,
+        deps=_client_dialogs_runtime_deps(),
+    )
 
 
 @router.get("/api/dialogs/{lead_id}")
@@ -1775,105 +708,14 @@ async def get_dialog_messages_api(
     limit: int = 50,
     before: str | None = None,
 ):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-
-    lead_meta = await db.get_lead_dialog_metadata(lead_id)
-    if not lead_meta or int(lead_meta.get("tenant_id") or 0) != int(tenant_id):
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-
-    try:
-        limit_val = int(limit)
-    except Exception:
-        limit_val = 50
-    if limit_val <= 0:
-        limit_val = 20
-    limit_val = min(limit_val, 200)
-
-    before_dt: datetime | None = None
-    if before:
-        try:
-            before_dt = datetime.fromisoformat(before)
-        except Exception:
-            try:
-                before_dt = datetime.fromtimestamp(float(before))
-            except Exception:
-                before_dt = None
-
-    messages = await db.list_messages_for_lead(tenant_id, lead_id, limit=limit_val, before=before_dt)
-    if messages:
-        def _sort_key(item: dict) -> tuple[float, int]:
-            ts_value = item.get("created_at")
-            ts_num = 0.0
-            if isinstance(ts_value, datetime):
-                try:
-                    ts_num = ts_value.timestamp()
-                except Exception:
-                    ts_num = 0.0
-            elif isinstance(ts_value, str):
-                try:
-                    ts_num = datetime.fromisoformat(ts_value).timestamp()
-                except Exception:
-                    ts_num = 0.0
-            msg_id = item.get("id")
-            try:
-                msg_id_val = int(msg_id)
-            except Exception:
-                msg_id_val = 0
-            return (ts_num, msg_id_val)
-
-        messages = sorted(messages, key=_sort_key)
-    message_ids = [msg.get("id") for msg in messages if msg.get("id")]
-    feedback_ids = await db.list_feedback_message_ids(tenant_id, message_ids)
-    formatted = []
-    for msg in messages:
-        msg_id = msg.get("id")
-        attachments = _normalize_message_attachments(
-            request,
-            tenant_id,
-            key or "",
-            msg.get("attachments"),
-        )
-        msg_slot = _parse_tg_slot_from_source(msg.get("source"))
-        formatted.append(
-            {
-                "id": msg_id,
-                "direction": msg.get("direction") or 0,
-                "text": msg.get("text") or "",
-                "ts": _isoformat(msg.get("created_at")),
-                "status": msg.get("status") or "",
-                "from_bot": bool(msg.get("is_bot")),
-                "feedbacked": bool(msg_id and msg_id in feedback_ids),
-                "attachments": attachments,
-                "source": msg.get("source") or "",
-                "tg_slot": msg_slot,
-            }
-        )
-
-    silence = _load_silence_status(tenant_id, lead_id, lead_meta.get("channel") or "")
-    telegram_accounts: list[dict[str, Any]] = []
-    selected_tg_slot: int | None = None
-    if (lead_meta.get("channel") or "").strip().lower() == "telegram":
-        telegram_accounts = _load_telegram_slot_profiles(tenant_id)
-        try:
-            redis_client = C.redis_client()
-            raw_slot = redis_client.get(f"tg:lead_slot:{int(tenant_id)}:{int(lead_id)}")
-            selected_tg_slot = int(raw_slot) if raw_slot is not None else None
-        except Exception:
-            selected_tg_slot = None
-
-    return {
-        "ok": True,
-        "dialog_id": lead_id,
-        "channel": lead_meta.get("channel"),
-        "title": lead_meta.get("title") or lead_meta.get("contact"),
-        "messages": formatted,
-        "telegram_accounts": telegram_accounts,
-        "selected_tg_slot": selected_tg_slot,
-        "silence": silence,
-    }
+    return await client_dialogs_runtime.get_dialog_messages_api(
+        lead_id,
+        request,
+        tenant=tenant,
+        limit=limit,
+        before=before,
+        deps=_client_dialogs_runtime_deps(),
+    )
 
 
 @router.post("/api/dialogs/{lead_id}/send")
@@ -1882,330 +724,41 @@ async def send_dialog_message_api(
     request: Request,
     tenant: int | str | None = None,
 ):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, key = auth
-
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    text = (payload.get("text") or "").strip()
-    photo_id = (payload.get("photo_id") or "").strip()
-    attachment: dict[str, Any] | None = None
-    if photo_id:
-        entries = _read_photo_manifest(tenant_id)
-        photo_entry = next((item for item in entries if str(item.get("id") or "") == photo_id), None)
-        if not photo_entry:
-            return JSONResponse({"detail": "photo_not_found"}, status_code=404)
-        attachment = {
-            "type": "image",
-            "path": photo_entry.get("path"),
-            "filename": photo_entry.get("original") or photo_entry.get("filename"),
-            "mime": photo_entry.get("mime"),
-            "size": photo_entry.get("size"),
-            "url": _photo_public_url(request, tenant_id, key, photo_id),
-        }
-    if not text and not attachment:
-        return JSONResponse({"detail": "empty_text"}, status_code=400)
-    display_text = text or "Фото"
-
-    lead_meta = await db.get_lead_dialog_metadata(lead_id)
-    if not lead_meta or int(lead_meta.get("tenant_id") or 0) != int(tenant_id):
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-
-    channel = (lead_meta.get("channel") or "").strip().lower()
-    if channel not in {"telegram", "avito", "max"}:
-        return JSONResponse({"detail": "unsupported_channel"}, status_code=400)
-
-    telegram_user_id: int | None = None
-    if channel == "telegram":
-        tg_raw = lead_meta.get("telegram_user_id") or lead_meta.get("peer")
-        try:
-            telegram_user_id = int(tg_raw)
-        except Exception:
-            telegram_user_id = None
-        if telegram_user_id is not None and telegram_user_id <= 0:
-            telegram_user_id = None
-
-    try:
-        message_id = await db.insert_message_out(
-            lead_id,
-            display_text,
-            None,
-            status="queued",
-            tenant_id=tenant_id,
-            channel=channel,
-            telegram_user_id=telegram_user_id,
-            telegram_username=lead_meta.get("telegram_username"),
-            title=lead_meta.get("title"),
-            attachments=[attachment] if attachment else None,
-            source=f"manager:tg_slot:{tg_slot}" if channel == "telegram" else "manager",
-        )
-    except Exception:
-        _dialogs_log.exception("dialog_send_insert_failed tenant=%s lead=%s", tenant_id, lead_id)
-        return JSONResponse({"detail": "db_error"}, status_code=500)
-    if not message_id:
-        return JSONResponse({"detail": "db_error"}, status_code=500)
-
-    queue_item: dict[str, Any] = {
-        "lead_id": lead_id,
-        "tenant_id": tenant_id,
-        "tenant": tenant_id,
-        "provider": channel,
-        "ch": channel,
-        "channel": channel,
-        "text": text,
-        "origin": "dialogs.ui",
-        "_message_db_id": message_id,
-        "_resolved_lead_id": lead_id,
-        "queued_at": time.time(),
-    }
-    if attachment:
-        queue_item["attachment"] = attachment
-    if telegram_user_id:
-        queue_item["telegram_user_id"] = telegram_user_id
-        queue_item["peer"] = telegram_user_id
-        queue_item["tg_slot"] = tg_slot
-    elif lead_meta.get("peer"):
-        queue_item["peer"] = lead_meta.get("peer")
-    if lead_meta.get("contact"):
-        queue_item["contact"] = lead_meta.get("contact")
-    if lead_meta.get("title"):
-        queue_item["title"] = lead_meta.get("title")
-
-    try:
-        redis_client = C.redis_client()
-    except Exception:
-        return JSONResponse({"detail": "queue_unavailable"}, status_code=503)
-
-    try:
-        payload = json.dumps(queue_item, ensure_ascii=False)
-    except Exception:
-        payload = None
-
-    if not payload:
-        return JSONResponse({"detail": "queue_error"}, status_code=502)
-
-    try:
-        lpush_fn = getattr(redis_client, "lpush", None)
-        if callable(lpush_fn):
-            if asyncio.iscoroutinefunction(lpush_fn):  # pragma: no cover - async redis client
-                await lpush_fn(OUTBOX_QUEUE_KEY, payload)
-            else:
-                lpush_fn(OUTBOX_QUEUE_KEY, payload)
-        else:
-            raise RuntimeError("redis_lpush_missing")
-    except Exception:
-        _dialogs_log.exception(
-            "dialog_send_enqueue_failed tenant=%s lead=%s channel=%s", tenant_id, lead_id, channel
-        )
-        return JSONResponse({"detail": "queue_error"}, status_code=502)
-
-    message_payload = {
-        "id": message_id,
-        "direction": 1,
-        "text": display_text,
-        "ts": _isoformat(datetime.now(timezone.utc)),
-        "status": "queued",
-        "from_bot": False,
-    }
-    return {"ok": True, "queued": True, "message": message_payload}
+    return await client_dialogs_runtime.send_dialog_message_api(
+        lead_id,
+        request,
+        tenant=tenant,
+        deps=_client_dialogs_runtime_deps(),
+    )
 
 
 @router.post("/api/dialogs/test")
 async def test_dialog_api(request: Request, tenant: int | str | None = None):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    text = str(payload.get("text") or "").strip()
-    if not text:
-        return JSONResponse({"detail": "empty_text"}, status_code=400)
-
-    channel = str(payload.get("channel") or "telegram").strip().lower() or "telegram"
-    if channel not in {"telegram", "avito", "whatsapp", "max"}:
-        channel = "telegram"
-    delay_enabled = bool(payload.get("delay_enabled", True))
-    force_delay = bool(payload.get("force_delay", False))
-
-    history_raw = payload.get("history") or []
-    history: list[dict[str, str]] = []
-    if isinstance(history_raw, list):
-        for item in history_raw[-12:]:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "").strip().lower()
-            if role not in {"user", "assistant"}:
-                continue
-            content = str(item.get("text") or item.get("content") or "").strip()
-            if not content:
-                continue
-            history.append({"role": role, "content": content})
-    had_assistant_before = any(item.get("role") == "assistant" for item in history)
-    emulate_channels = bool(payload.get("emulate_channels", True))
-
-    contact_id_raw = payload.get("contact_id")
-    try:
-        contact_id = int(contact_id_raw if contact_id_raw is not None else 0)
-    except Exception:
-        contact_id = 0
-    if contact_id < 0:
-        contact_id = 0
-
-    lead_id_raw = payload.get("lead_id")
-    try:
-        lead_id = int(lead_id_raw if lead_id_raw is not None else 0)
-    except Exception:
-        lead_id = 0
-    if lead_id < 0:
-        lead_id = 0
-    if contact_id <= 0 and lead_id > 0:
-        try:
-            resolved_contact = await db.get_contact_id_by_lead(int(lead_id))
-            contact_id = int(resolved_contact or 0)
-        except Exception:
-            contact_id = 0
-
-    try:
-        result = await run_response_pipeline(
-            tenant_id=tenant_id,
-            channel=channel,
-            user_text=text,
-            history=[] if emulate_channels else history,
-            contact_id=contact_id,
-            enable_photos=False,
-        )
-        reply_text = result.reply_text
-    except Exception:
-        reply_text = default_fallback_reply()
-    reply_text = _apply_custom_punctuation_style(str(reply_text or "").strip())
-
-    reply_parts = _split_reply_for_test_send(reply_text, channel)
-    if not reply_parts:
-        reply_parts = [default_fallback_reply()]
-
-    timeline: list[dict[str, Any]] = []
-    at_ms = 0
-    if delay_enabled and (had_assistant_before or force_delay):
-        at_ms += int(_delay_seconds_value(SMART_REPLY_DELAY_MIN_SECONDS, SMART_REPLY_DELAY_MAX_SECONDS) * 1000)
-    for idx, part in enumerate(reply_parts):
-        if (
-            delay_enabled
-            and idx > 0
-            and SMART_REPLY_SPLIT_PART_DELAY_ENABLED
-            and channel in SMART_REPLY_SPLIT_CHANNELS
-            and SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS > 0
-        ):
-            at_ms += int(
-                _delay_seconds_value(
-                    SMART_REPLY_SPLIT_PART_DELAY_MIN_SECONDS,
-                    SMART_REPLY_SPLIT_PART_DELAY_MAX_SECONDS,
-                )
-                * 1000
-            )
-        timeline.append({"text": str(part or "").strip(), "at_ms": at_ms})
-    return {
-        "ok": True,
-        "reply": (timeline[0]["text"] if timeline else ""),
-        "replies": timeline,
-        "delay_enabled": delay_enabled,
-    }
+    return await client_dialogs_runtime.test_dialog_api(
+        request,
+        tenant=tenant,
+        deps=_client_dialogs_runtime_deps(),
+    )
 
 
 @router.post("/api/dialogs/{lead_id}/unsilence")
-async def dialogs_unsilence_api(
-    request: Request, lead_id: int, tenant: int | str | None = None
-):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    try:
-        lead_id = int(lead_id)
-    except Exception:
-        return JSONResponse({"detail": "invalid_lead"}, status_code=400)
-    if lead_id <= 0:
-        return JSONResponse({"detail": "invalid_lead"}, status_code=400)
-
-    try:
-        redis_client = C.redis_client()
-    except Exception:
-        return JSONResponse({"detail": "redis_unavailable"}, status_code=503)
-
-    silence_key = handoff_silence_key(tenant_id, lead_id)
-    meta_key = handoff_silence_meta_key(tenant_id, lead_id)
-    try:
-        deleted = redis_client.delete(silence_key, meta_key)
-    except Exception:
-        return JSONResponse({"detail": "redis_error"}, status_code=500)
-
-    return {"ok": True, "deleted": int(deleted or 0)}
+async def dialogs_unsilence_api(request: Request, lead_id: int, tenant: int | str | None = None):
+    return await client_ops_runtime.dialogs_unsilence_api(
+        request,
+        lead_id,
+        tenant=tenant,
+        deps=_client_ops_runtime_deps(),
+    )
 
 
 @router.get("/api/tenant/stats")
 async def tenant_stats_api(request: Request, tenant: int | str | None = None, sample: int = 500):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-
-    try:
-        redis_client = C.redis_client()
-    except Exception:
-        return JSONResponse({"detail": "redis_unavailable"}, status_code=503)
-
-    sample_limit = max(0, min(int(sample or 0), 2000))
-    try:
-        outbox_len = int(redis_client.llen(OUTBOX_QUEUE_KEY))
-    except Exception:
-        outbox_len = 0
-    try:
-        followup_len = int(redis_client.zcard("followup:schedule"))
-    except Exception:
-        followup_len = 0
-
-    tenant_outbox = 0
-    sampled = 0
-    if sample_limit > 0:
-        try:
-            items = redis_client.lrange(OUTBOX_QUEUE_KEY, 0, sample_limit - 1)
-        except Exception:
-            items = []
-        sampled = len(items)
-        for raw in items:
-            try:
-                payload = json.loads(raw) if raw else {}
-            except Exception:
-                payload = {}
-            tenant_raw = payload.get("tenant_id") or payload.get("tenant")
-            try:
-                tenant_val = int(tenant_raw)
-            except Exception:
-                continue
-            if tenant_val == int(tenant_id):
-                tenant_outbox += 1
-
-    return {
-        "ok": True,
-        "tenant_id": tenant_id,
-        "outbox_total": outbox_len,
-        "outbox_tenant": tenant_outbox,
-        "followup_scheduled_len": followup_len,
-        "sampled": sampled,
-    }
-
-
-def _normalize_question_text(text: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Zа-яА-Я0-9\\s]", " ", text or "")
-    cleaned = re.sub(r"\\s+", " ", cleaned).strip().lower()
-    return cleaned
+    return await client_ops_runtime.tenant_stats_api(
+        request,
+        tenant=tenant,
+        sample=sample,
+        deps=_client_ops_runtime_deps(),
+    )
 
 
 @router.get("/api/analytics/summary")
@@ -2214,246 +767,21 @@ async def analytics_summary_api(
     tenant: int | str | None = None,
     days: int = 7,
 ):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-
-    data = await db.get_tenant_message_stats(int(tenant_id), days=int(days), limit=30000)
-    rows = data.get("rows") if isinstance(data, dict) else []
-    if not rows:
-        return {
-            "ok": True,
-            "period_days": int(days),
-            "messages": {"incoming": 0, "outgoing": 0, "by_day": [], "by_channel": {}},
-            "response_time": {"avg_seconds": 0, "median_seconds": 0, "samples": 0},
-            "outgoing_mix": {"bot": 0, "manager": 0, "followup": 0},
-            "top_questions": [],
-        }
-
-    by_day: dict[str, dict[str, int]] = {}
-    by_channel: dict[str, dict[str, int]] = {}
-    incoming = 0
-    outgoing = 0
-    outgoing_mix = {"bot": 0, "manager": 0, "followup": 0}
-    question_counts: dict[str, int] = {}
-    per_lead: dict[int, list[dict[str, Any]]] = {}
-
-    for row in rows:
-        created = row.get("created_at")
-        day_key = ""
-        if isinstance(created, datetime):
-            day_key = created.date().isoformat()
-        elif isinstance(created, str):
-            try:
-                day_key = datetime.fromisoformat(created).date().isoformat()
-            except Exception:
-                day_key = ""
-        if not day_key:
-            day_key = "unknown"
-        day_bucket = by_day.setdefault(day_key, {"incoming": 0, "outgoing": 0})
-
-        channel = (row.get("channel") or "unknown").lower()
-        channel_bucket = by_channel.setdefault(channel, {"incoming": 0, "outgoing": 0})
-
-        direction = int(row.get("direction") or 0)
-        if direction == 0:
-            incoming += 1
-            day_bucket["incoming"] += 1
-            channel_bucket["incoming"] += 1
-            text = str(row.get("text") or "")
-            norm = _normalize_question_text(text)
-            if len(norm) >= 3:
-                question_counts[norm] = question_counts.get(norm, 0) + 1
-        else:
-            outgoing += 1
-            day_bucket["outgoing"] += 1
-            channel_bucket["outgoing"] += 1
-            src = str(row.get("source") or "").lower()
-            is_bot = bool(row.get("is_bot"))
-            if src == "followup":
-                outgoing_mix["followup"] += 1
-            elif src == "manager" or not is_bot:
-                outgoing_mix["manager"] += 1
-            else:
-                outgoing_mix["bot"] += 1
-
-        try:
-            lead_id = int(row.get("lead_id") or 0)
-        except Exception:
-            lead_id = 0
-        if lead_id > 0:
-            per_lead.setdefault(lead_id, []).append(row)
-
-    response_times: list[float] = []
-    for lead_rows in per_lead.values():
-        lead_rows_sorted = sorted(
-            lead_rows,
-            key=lambda r: (r.get("created_at") or datetime.min, r.get("id") or 0),
-        )
-        for idx, item in enumerate(lead_rows_sorted):
-            if int(item.get("direction") or 0) != 0:
-                continue
-            base_time = item.get("created_at")
-            if not isinstance(base_time, datetime):
-                try:
-                    base_time = datetime.fromisoformat(str(base_time))
-                except Exception:
-                    base_time = None
-            if not base_time:
-                continue
-            next_out: Optional[datetime] = None
-            for nxt in lead_rows_sorted[idx + 1 :]:
-                if int(nxt.get("direction") or 0) != 1:
-                    continue
-                out_time = nxt.get("created_at")
-                if not isinstance(out_time, datetime):
-                    try:
-                        out_time = datetime.fromisoformat(str(out_time))
-                    except Exception:
-                        out_time = None
-                if out_time and out_time >= base_time:
-                    next_out = out_time
-                    break
-            if next_out:
-                delta = (next_out - base_time).total_seconds()
-                if 0 <= delta <= 24 * 3600:
-                    response_times.append(delta)
-
-    avg_seconds = float(sum(response_times) / len(response_times)) if response_times else 0.0
-    median_seconds = float(statistics.median(response_times)) if response_times else 0.0
-
-    top_questions = [
-        {"text": text, "count": count}
-        for text, count in sorted(question_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
-    ]
-
-    by_day_list = [
-        {"date": day, "incoming": vals["incoming"], "outgoing": vals["outgoing"]}
-        for day, vals in sorted(by_day.items(), key=lambda kv: kv[0])
-        if day != "unknown"
-    ]
-
-    return {
-        "ok": True,
-        "period_days": int(days),
-        "messages": {
-            "incoming": incoming,
-            "outgoing": outgoing,
-            "by_day": by_day_list,
-            "by_channel": by_channel,
-        },
-        "response_time": {
-            "avg_seconds": round(avg_seconds, 1),
-            "median_seconds": round(median_seconds, 1),
-            "samples": len(response_times),
-        },
-        "outgoing_mix": outgoing_mix,
-        "top_questions": top_questions,
-    }
+    return await client_analytics_runtime.analytics_summary_api(
+        request,
+        tenant=tenant,
+        days=days,
+        deps=_client_analytics_runtime_deps(),
+    )
 
 
 @router.post("/api/feedback")
 async def submit_feedback_api(request: Request, tenant: int | str | None = None):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    message_id = payload.get("message_id")
-    try:
-        message_ref = int(message_id)
-    except Exception:
-        return JSONResponse({"detail": "invalid_message"}, status_code=400)
-    if message_ref <= 0:
-        return JSONResponse({"detail": "invalid_message"}, status_code=400)
-
-    rating = (payload.get("rating") or "").strip().lower()
-    if rating not in {"like", "dislike"}:
-        return JSONResponse({"detail": "invalid_rating"}, status_code=400)
-
-    comment_raw = payload.get("comment") if rating == "dislike" else payload.get("comment") or ""
-    comment = str(comment_raw).strip() if comment_raw is not None else ""
-    expected_answer_raw = payload.get("expected_answer") if rating == "dislike" else payload.get("expected_answer") or ""
-    expected_answer = str(expected_answer_raw).strip() if expected_answer_raw is not None else ""
-    sanitized_expected = _sanitize_training_text(expected_answer) if expected_answer else ""
-    if rating == "dislike":
-        if not expected_answer:
-            return JSONResponse({"detail": "expected_answer_required"}, status_code=400)
-        if not sanitized_expected:
-            sanitized_expected = expected_answer.strip()
-
-    metadata = await db.get_message_metadata(message_ref)
-    if not metadata or int(metadata.get("tenant_id") or 0) != int(tenant_id):
-        return JSONResponse({"detail": "not_found"}, status_code=404)
-    if int(metadata.get("direction") or 0) != 1:
-        return JSONResponse({"detail": "feedback_not_allowed"}, status_code=400)
-    if not bool(metadata.get("is_bot")):
-        return JSONResponse({"detail": "feedback_not_allowed"}, status_code=400)
-
-    lead_id = metadata.get("lead_id")
-    q_text = ""
-    try:
-        created_at = metadata.get("created_at")
-        if isinstance(created_at, str):
-            created_at = datetime.fromisoformat(created_at)
-        if created_at is None or not isinstance(created_at, datetime):
-            created_at = datetime.now(timezone.utc)
-        previous = await db.get_previous_incoming_message(int(tenant_id), int(lead_id or 0), before=created_at)
-        if previous and previous.get("text"):
-            q_text = _sanitize_training_text(str(previous.get("text") or ""))
-    except Exception:
-        q_text = ""
-
-    if await db.feedback_exists(tenant_id, message_ref):
-        return {"ok": True, "feedback_id": None, "already_exists": True}
-
-    feedback_id = await db.create_message_feedback(
-        tenant_id,
-        message_ref,
-        rating,
-        comment or sanitized_expected or None,
-        lead_id=lead_id,
-        expected_answer=sanitized_expected or expected_answer or None,
+    return await client_feedback_runtime.submit_feedback_api(
+        request,
+        tenant=tenant,
+        deps=_client_feedback_runtime_deps(),
     )
-    if not feedback_id:
-        return JSONResponse({"detail": "feedback_failed"}, status_code=500)
-
-    try:
-        message_text = _sanitize_training_text(str(metadata.get("text") or ""))
-        source = "like" if rating == "like" else "correction"
-        a_text = message_text if rating == "like" else expected_answer
-        if q_text and a_text:
-            await db.record_training_example(
-                tenant_id,
-                lead_id=lead_id,
-                message_id=message_ref,
-                source=source,
-                source_feedback_id=feedback_id,
-                q_text=q_text,
-                a_text=_sanitize_training_text(a_text),
-                is_bad=False,
-                embedding_status="pending",
-            )
-    except Exception:
-        _dialogs_log.exception("training_example_create_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
-
-    if rating == "dislike":
-        try:
-            await db.mark_bad_bot_message(
-                tenant_id,
-                message_ref,
-                feedback_id=feedback_id,
-                reason=comment or expected_answer or "dislike",
-            )
-        except Exception:
-            _dialogs_log.exception("mark_bad_bot_failed tenant=%s lead=%s msg=%s", tenant_id, lead_id, message_ref)
-
-    return {"ok": True, "feedback_id": feedback_id}
 
 
 @router.get("/api/feedback/stats")
@@ -2469,39 +797,29 @@ async def feedback_stats_api(request: Request, tenant: int | str | None = None):
 
 @router.get("/api/feedback/quality")
 async def feedback_quality_api(request: Request, tenant: int | str | None = None):
-    auth = _resolve_tenant_and_key(request, tenant)
-    if isinstance(auth, Response):
-        return auth
-    tenant_id, _ = auth
-    try:
-        limit_val = int(request.query_params.get("limit", "50"))
-    except Exception:
-        limit_val = 50
-    rows = await db.list_recent_disliked_feedback(tenant_id, limit=limit_val)
-    items = []
-    for row in rows or []:
-        items.append(
-            {
-                "id": row.get("feedback_id"),
-                "message_id": row.get("message_id"),
-                "lead_id": row.get("lead_id"),
-                "user_text": row.get("user_text") or "",
-                "bot_text": row.get("bot_text") or "",
-                "expected": row.get("expected_answer") or row.get("comment") or "",
-                "created_at": _isoformat(row.get("feedback_created_at")),
-            }
-        )
-    return {"ok": True, "items": items}
+    return await client_feedback_runtime.feedback_quality_api(
+        request,
+        tenant=tenant,
+        deps=_client_feedback_runtime_deps(),
+    )
 
 
 @router.post("/client/{tenant}/settings/json")
 async def save_json(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
     try:
         raw = await request.body()
-        cfg = json.loads(raw.decode("utf-8"))
+        incoming = json.loads(raw.decode("utf-8"))
+        existing = C.read_tenant_config(tenant)
+        if not isinstance(existing, dict):
+            existing = {}
+        if isinstance(incoming, Mapping):
+            cfg = merge_tenant_config_for_settings(existing, incoming)
+        else:
+            cfg = existing
         C.write_tenant_config(tenant, cfg)
         return {"ok": True}
     except Exception as exc:
@@ -2510,9 +828,10 @@ async def save_json(tenant: int, request: Request):
 
 @router.post("/client/{tenant}/persona")
 async def save_persona(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
     payload = await request.json()
     channel_raw = payload.get("channel")
     channel = None
@@ -2532,22 +851,35 @@ async def save_persona(tenant: int, request: Request):
     return {"ok": True}
 
 
+@router.get("/client/{tenant}/assets")
+async def client_assets_list(tenant: int, request: Request):
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, _key = auth
+    return await client_assets_runtime.list_assets_status(int(tenant))
+
+
 @router.get("/client/{tenant}/quickstart/templates")
 async def quickstart_templates(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
     return {"ok": True, "templates": quickstart_module.list_quickstart_templates()}
 
 
 @router.post("/client/{tenant}/quickstart/apply")
 async def quickstart_apply(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
     payload = await request.json()
     try:
-        result = quickstart_module.apply_quickstart(int(tenant), payload if isinstance(payload, dict) else {})
+        result = quickstart_module.apply_quickstart(
+            int(tenant), payload if isinstance(payload, dict) else {}
+        )
     except Exception:
         _log.exception("quickstart_apply_failed tenant=%s", tenant)
         return JSONResponse({"detail": "quickstart_failed"}, status_code=500)
@@ -2556,1101 +888,48 @@ async def quickstart_apply(tenant: int, request: Request):
 
 @router.post("/client/{tenant}/catalog/upload")
 async def catalog_upload(tenant: int, request: Request, file: UploadFile = File(...)):
-    """Upload CSV/Excel/PDF and persist a CSV for editing in the UI.
-
-    This mirrors the robust public upload flow to ensure PDF → CSV generation
-    and consistent metadata, avoiding divergence between routes.
-    """
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    filename = (file.filename or "").strip()
-    if not filename:
-        return {"ok": False, "error": "empty_file"}
-
-    allowed = {".csv", ".xlsx", ".xls", ".pdf"}
-    ext = pathlib.Path(filename).suffix.lower()
-    if ext not in allowed:
-        return {"ok": False, "error": "unsupported_type"}
-
-    raw = await file.read()
-    if not raw:
-        return {"ok": False, "error": "empty_file"}
-    if len(raw) > MAX_UPLOAD_SIZE_BYTES:
-        return {
-            "ok": False,
-            "error": "file_too_large",
-            "max_size_bytes": MAX_UPLOAD_SIZE_BYTES,
-        }
-
-    # Persist original upload under tenant/uploads
-    C.ensure_tenant_files(tenant)
-    tenant_root = pathlib.Path(C.tenant_dir(tenant))
-    uploads_dir = tenant_root / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-
-    safe_name = f"catalog_{uuid.uuid4().hex}{ext}"
-    dest_path = uploads_dir / safe_name
-    dest_path.write_bytes(raw)
-    relative_path = str(pathlib.Path("uploads") / safe_name)
-
-    # Parse/normalize rows using the same helpers as the public route
-    try:
-        from . import public as _pub
-        if ext == ".csv":
-            normalized_rows, meta = _pub._read_csv_bytes(raw)
-        elif ext in {".xlsx", ".xls"}:
-            normalized_rows, meta = _pub._read_excel_bytes(raw)
-        else:
-            saved_rel = dest_path.relative_to(tenant_root)
-            normalized_rows, meta, manifest_rel = _pub._process_pdf(
-                tenant=int(tenant),
-                saved_path=dest_path,
-                tenant_root=tenant_root,
-                saved_rel_path=saved_rel,
-                original_name=filename,
-            )
-    except CatalogIndexError as exc:
-        return {"ok": False, "error": "catalog_index_failed", "detail": str(exc)}
-    except Exception as exc:
-        return {"ok": False, "error": "processing_failed", "detail": str(exc)}
-
-    # Write canonical CSV under tenant/catalogs for consistent discovery
-    try:
-        # Persist under a stable name to avoid UI path churn
-        csv_rel_path, ordered_columns = write_catalog_csv(int(tenant), normalized_rows, "catalog", meta)
-    except Exception as exc:
-        return {"ok": False, "error": "csv_write_failed", "detail": str(exc)}
-
-    # Update tenant config: newest first, preserve prior entries with different path
-    cfg_raw = C.read_tenant_config(tenant)
-    cfg = dict(cfg_raw) if isinstance(cfg_raw, dict) else {}
-    catalogs = cfg.get("catalogs") if isinstance(cfg.get("catalogs"), list) else []
-    catalog_type = "pdf" if ext == ".pdf" else ("excel" if ext in {".xlsx", ".xls"} else "csv")
-    entry: dict[str, object] = {"name": "uploaded", "path": relative_path, "type": catalog_type, "csv_path": csv_rel_path}
-    if isinstance(meta, dict):
-        if meta.get("encoding"):
-            entry["encoding"] = meta.get("encoding")  # type: ignore[index]
-        if meta.get("delimiter") is not None:
-            entry["delimiter"] = meta.get("delimiter")  # type: ignore[index]
-        # For PDF persist index metadata
-        for k in ("index_path", "indexed_at", "chunk_count", "sha1"):
-            if meta.get(k) is not None:
-                entry[k] = meta.get(k)  # type: ignore[index]
-    cfg["catalogs"] = [entry] + [e for e in catalogs if isinstance(e, dict) and e.get("path") != relative_path]
-
-    # Also surface upload metadata for UI status panel
-    integrations_raw = cfg.get("integrations")
-    if isinstance(integrations_raw, dict):
-        integrations = dict(integrations_raw)
-    else:
-        integrations = {}
-    cfg["integrations"] = integrations
-    uploaded_meta: dict[str, object] = {
-        "path": relative_path,
-        "original": filename,
-        "uploaded_at": int(time.time()),
-        "type": catalog_type,
-        "size": len(raw),
-        "mime": (mimetypes.guess_type(filename)[0] or "application/octet-stream"),
-        "csv_path": csv_rel_path,
-    }
-    if isinstance(meta, dict):
-        if meta.get("pipeline"):
-            uploaded_meta["pipeline"] = meta.get("pipeline")  # type: ignore[index]
-        if catalog_type == "csv" and meta.get("encoding"):
-            uploaded_meta["encoding"] = meta.get("encoding")  # type: ignore[index]
-        if catalog_type == "csv" and meta.get("delimiter") is not None:
-            uploaded_meta["delimiter"] = meta.get("delimiter")  # type: ignore[index]
-        extraction_meta = meta.get("extraction")
-        if isinstance(extraction_meta, dict):
-            uploaded_meta["extraction"] = extraction_meta
-        if catalog_type == "pdf":
-            # Normalize index metadata keys to a stable shape
-            idx = {
-                "path": meta.get("index_path"),
-                "generated_at": meta.get("indexed_at"),
-                "chunks": meta.get("chunk_count"),
-                "pages": meta.get("page_count"),
-                "sha1": meta.get("sha1"),
-            }
-            idx = {k: v for k, v in idx.items() if v is not None}
-            if idx:
-                uploaded_meta["index"] = idx
-    integrations["uploaded_catalog"] = uploaded_meta
-    C.write_tenant_config(tenant, cfg)
-
-    accept_header = (request.headers.get("accept") or "").lower()
-    sec_fetch_mode = (request.headers.get("sec-fetch-mode") or "").lower()
-    sec_fetch_dest = (request.headers.get("sec-fetch-dest") or "").lower()
-    wants_html = (
-        "text/html" in accept_header
-        or "application/xhtml+xml" in accept_header
-        or sec_fetch_mode == "navigate"
-        or sec_fetch_dest == "document"
-    )
-    if wants_html and (request.headers.get("x-requested-with", "").lower() != "xmlhttprequest"):
-        redirect_url = str(request.url_for("client_settings", tenant=str(tenant)))
-        if key:
-            redirect_url = f"{redirect_url}?k={quote_plus(key)}"
-        return RedirectResponse(url=redirect_url, status_code=303)
-
-    return {
-        "ok": True,
-        "filename": filename,
-        "stored_as": safe_name,
-        "csv_path": csv_rel_path,
-        "path": csv_rel_path,
-        "items_total": len(normalized_rows),
-        "columns": ordered_columns,
-    }
-
-
-@router.post("/client/{tenant}/training/upload")
-async def training_upload(tenant: int, request: Request, file: UploadFile = File(...)):
-    """Upload dialogues (JSONL/JSON/CSV), build a per-tenant TF-IDF index, and persist manifest.
-
-    Accepts the following formats:
-    - JSONL: one JSON per line. Either {"q","a"} or {"messages":[{"role","content"}, ...]}
-    - JSON: list of above objects or a single {messages:[...]}
-    - CSV: columns like (q,a) or (question,answer) or (user,assistant)
-    """
-
-    started_at = time.time()
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    filename = (file.filename or "").strip()
-    if not filename:
-        return {"ok": False, "error": "empty_file"}
-
-    allowed = {".jsonl", ".json", ".csv"}
-    ext = pathlib.Path(filename).suffix.lower()
-    if ext not in allowed:
-        return {"ok": False, "error": "unsupported_type"}
-
-    raw = await file.read()
-    if not raw:
-        return {"ok": False, "error": "empty_file"}
-    if len(raw) > MAX_UPLOAD_SIZE_BYTES:
-        return {
-            "ok": False,
-            "error": "file_too_large",
-            "max_size_bytes": MAX_UPLOAD_SIZE_BYTES,
-        }
-
-    C.ensure_tenant_files(tenant)
-    tenant_path = pathlib.Path(C.tenant_dir(tenant))
-    uploads_dir = tenant_path / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-
-    safe_name = f"training_{uuid.uuid4().hex}{ext}"
-    dest_path = uploads_dir / safe_name
-    try:
-        with open(dest_path, "wb") as fh:
-            fh.write(raw)
-    except Exception:
-        _log.exception(f"{_LOG_PREFIX} failed to store upload", exc_info=True)
-        return {"ok": False, "error": "store_failed"}
-
-    # Parse examples
-    try:
-        _log.info(f"{_LOG_PREFIX} upload start tenant=%s filename=%s size=%s bytes", tenant, filename, len(raw))
-        if ext == ".jsonl":
-            examples = training_indexer.parse_jsonl(raw)
-        elif ext == ".json":
-            examples = training_indexer.parse_json(raw)
-        else:
-            examples = training_indexer.parse_csv(raw)
-        _log.info(f"{_LOG_PREFIX} parsed examples tenant=%s count=%s", tenant, len(examples))
-    except Exception as exc:
-        _log.exception(f"{_LOG_PREFIX} parse_failed tenant=%s filename=%s", tenant, filename, exc_info=True)
-        return {"ok": False, "error": "parse_failed", "detail": str(exc)}
-
-    if not examples:
-        return {"ok": False, "error": "no_examples"}
-
-    # Build index
-    index = training_indexer.build_index(examples)
-    if not index:
-        return {"ok": False, "error": "index_failed"}
-
-    indexes_dir = tenant_path / "indexes"
-    indexes_dir.mkdir(parents=True, exist_ok=True)
-    index_path = indexes_dir / f"training_{index.sha1}.pkl"
-    try:
-        index.save(index_path)
-    except Exception:
-        _log.exception(f"{_LOG_PREFIX} index_save_failed tenant=%s path=%s", tenant, str(index_path), exc_info=True)
-        return {"ok": False, "error": "index_save_failed"}
-
-    # Save manifest and update tenant config
-    relative_source = str((dest_path.relative_to(tenant_path))) if dest_path.is_relative_to(tenant_path) else str(dest_path)
-    manifest = training_indexer.save_manifest(index, index_path=index_path, source_relpath=relative_source, original_name=filename)
-
-    cfg = C.read_tenant_config(tenant)
-    integrations = cfg.setdefault("integrations", {})
-    integrations["uploaded_training"] = {
-        "path": relative_source,
-        "pairs": manifest.get("pairs"),
-        "indexed_at": manifest.get("created_at"),
-        "index_path": str(index_path.relative_to(tenant_path)) if index_path.is_relative_to(tenant_path) else str(index_path),
-        "sha1": manifest.get("sha1"),
-        "original": filename,
-    }
-    C.write_tenant_config(tenant, cfg)
-
-    took = time.time() - started_at
-    _log.info(f"{_LOG_PREFIX} upload complete tenant=%s pairs=%s index=%s took=%.3fs", tenant, len(index.items), str(index_path), took)
-    return {"ok": True, "pairs": len(index.items), "stored_as": safe_name}
-
-
-def _finalize_whatsapp_export(
-    stats: Dict[str, Any],
-    tenant: int,
-    days_back: int,
-    limit_dialogs: Optional[int],
-    per_limit: Optional[int],
-    batch_size: int,
-    started_at: float,
-) -> None:
-    took_ms = int((time.time() - started_at) * 1000)
-    dialogs_selected = int(stats.get("dialog_count") or 0)
-    messages_selected = int(stats.get("message_count") or 0)
-    meta = stats.get("meta") if isinstance(stats.get("meta"), dict) else {}
-    meta.update(
-        {
-            "dialogs_selected": dialogs_selected,
-            "messages_selected": messages_selected,
-            "batch_size_dialogs": batch_size,
-            "duration_ms": took_ms,
-        }
-    )
-    stats["meta"] = meta
-    _wa_log.info(
-        "[wa_export] stream_complete tenant=%s days_back=%s limit=%s per=%s dialogs=%s messages=%s batch_size=%s duration_ms=%s",
+    return await client_catalog_runtime.catalog_upload(
         tenant,
-        days_back,
-        limit_dialogs if limit_dialogs is not None else "none",
-        per_limit if per_limit is not None else "none",
-        dialogs_selected,
-        messages_selected,
-        batch_size,
-        took_ms,
+        request,
+        file,
+        deps=_client_catalog_runtime_deps(),
     )
-
-
-def _cleanup_export_file(path: str | os.PathLike[str] | pathlib.Path) -> None:
-    target = pathlib.Path(path)
-    try:
-        target.unlink(missing_ok=True)
-    except FileNotFoundError:
-        return
-    except Exception as exc:
-        try:
-            _wa_log.warning("[wa_export] cleanup_failed path=%s error=%s", target, exc)
-        except Exception:
-            pass
-
-
-async def _prepare_whatsapp_export_response(
-    tenant_raw: int,
-    key: str,
-    days_back_raw: int | None,
-    limit_dialogs_raw: int | None,
-    per_limit_raw: int | None,
-    batch_size_raw: int | None,
-    background: BackgroundTasks,
-    started_at: float | None = None,
-):
-    started = started_at if started_at is not None else time.time()
-
-    try:
-        tenant = int(tenant_raw)
-    except (TypeError, ValueError):
-        _wa_log.warning("[wa_export] invalid_tenant tenant=%s", tenant_raw)
-        return JSONResponse({"detail": "invalid_tenant"}, status_code=422)
-
-    if tenant <= 0:
-        _wa_log.warning("[wa_export] invalid_tenant tenant=%s", tenant)
-        return JSONResponse({"detail": "invalid_tenant"}, status_code=422)
-
-    cleaned_key = (key or "").strip()
-    if not _auth(tenant, cleaned_key):
-        _wa_log.warning("[wa_export] unauthorized tenant=%s", tenant)
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    try:
-        days_back = int(days_back_raw or 0)
-    except (TypeError, ValueError):
-        days_back = 0
-    if days_back < 0:
-        days_back = 0
-    if days_back > EXPORT_MAX_DAYS:
-        detail = f"days_back_too_large:max={EXPORT_MAX_DAYS};reduce_window"
-        _wa_log.warning("[wa_export] days_exceeded tenant=%s days_back=%s", tenant, days_back)
-        return JSONResponse({"detail": detail}, status_code=422)
-
-    limit_dialogs: Optional[int] = None
-    try:
-        limit_candidate = int(limit_dialogs_raw) if limit_dialogs_raw is not None else None
-    except (TypeError, ValueError):
-        limit_candidate = None
-    if limit_candidate is not None and limit_candidate > 0:
-        if limit_candidate > WHATSAPP_LIMIT_DIALOGS_MAX:
-            detail = f"limit_dialogs_too_large:max={WHATSAPP_LIMIT_DIALOGS_MAX};reduce_window_or_limit"
-            _wa_log.warning(
-                "[wa_export] limit_exceeded tenant=%s limit=%s", tenant, limit_candidate
-            )
-            return JSONResponse({"detail": detail}, status_code=422)
-        limit_dialogs = limit_candidate
-
-    per_limit: Optional[int] = None
-    try:
-        per_candidate = int(per_limit_raw) if per_limit_raw is not None else None
-    except (TypeError, ValueError):
-        per_candidate = None
-    if per_candidate is not None and per_candidate > 0:
-        if per_candidate > WHATSAPP_PER_LIMIT_MAX:
-            detail = f"per_limit_too_large:max={WHATSAPP_PER_LIMIT_MAX};reduce_per_limit"
-            _wa_log.warning(
-                "[wa_export] per_exceeded tenant=%s per=%s", tenant, per_candidate
-            )
-            return JSONResponse({"detail": detail}, status_code=422)
-        per_limit = per_candidate
-
-    try:
-        batch_size_candidate = (
-            int(batch_size_raw) if batch_size_raw is not None else DEFAULT_WHATSAPP_BATCH_SIZE
-        )
-    except (TypeError, ValueError):
-        batch_size_candidate = DEFAULT_WHATSAPP_BATCH_SIZE
-    if batch_size_candidate <= 0:
-        batch_size_candidate = DEFAULT_WHATSAPP_BATCH_SIZE
-    batch_size_dialogs = batch_size_candidate
-
-    now_utc = datetime.now(timezone.utc)
-    since = now_utc - timedelta(days=days_back)
-
-    cfg = C.read_tenant_config(tenant)
-    passport = cfg.get("passport", {}) if isinstance(cfg, dict) else {}
-    default_agent = getattr(C.settings, "AGENT_NAME", "Менеджер")
-    agent_name = (passport.get("agent_name") or default_agent).strip() or default_agent
-
-    tenant_tz: ZoneInfo | None = None
-    if isinstance(cfg, dict):
-        settings_raw = cfg.get("settings")
-        settings_cfg = settings_raw if isinstance(settings_raw, dict) else {}
-        tz_candidates = [
-            cfg.get("timezone"),
-            cfg.get("tz"),
-            settings_cfg.get("timezone"),
-            passport.get("timezone"),
-        ]
-        for tz_candidate in tz_candidates:
-            if not tz_candidate:
-                continue
-            name = str(tz_candidate).strip()
-            if not name:
-                continue
-            try:
-                tenant_tz = ZoneInfo(name)
-                break
-            except Exception:
-                _wa_log.warning("[wa_export] invalid_timezone tenant=%s tz=%s", tenant, name)
-                continue
-
-    try:
-        zip_path, stats = await whatsapp_exporter.build_whatsapp_zip(
-            tenant=tenant,
-            since=since,
-            until=now_utc,
-            limit_dialogs=limit_dialogs,
-            per_message_limit=per_limit,
-            agent_name=agent_name,
-            tz=tenant_tz,
-            batch_size_dialogs=batch_size_dialogs,
-        )
-    except getattr(db, "DatabaseUnavailableError", RuntimeError) as exc:
-        _wa_log.error("[wa_export] db_unavailable tenant=%s error=%s", tenant, exc)
-        return JSONResponse({"detail": "db_unavailable"}, status_code=503)
-    except getattr(whatsapp_exporter, "ExportSafetyError", RuntimeError) as exc:
-        _wa_log.error("[wa_export] safety_abort tenant=%s reason=%s", tenant, exc)
-        return JSONResponse({"detail": "export_blocked", "reason": str(exc)}, status_code=409)
-    except Exception:  # pragma: no cover - unexpected errors are surfaced
-        _wa_log.exception("[wa_export] export_failed tenant=%s", tenant)
-        return JSONResponse({"detail": "export_failed"}, status_code=500)
-
-    stats = stats if isinstance(stats, dict) else {}
-    meta = stats.get("meta") if isinstance(stats.get("meta"), dict) else {}
-
-    if zip_path is None:
-        _wa_log.info(
-            "[wa_export] empty tenant=%s days_back=%s limit=%s dialogs=%s messages=%s",
-            tenant,
-            days_back,
-            limit_dialogs if limit_dialogs is not None else "none",
-            meta.get("dialog_count", 0),
-            meta.get("messages_in_range", 0),
-        )
-        _wa_log.info(
-            "[wa_export] empty tenant=%s days_back=%s limit=%s",
-            tenant,
-            days_back,
-            limit_dialogs if limit_dialogs is not None else "none",
-        )
-        return Response(status_code=204, headers={"Cache-Control": "no-store"})
-
-    now_local = now_utc.astimezone(tenant_tz or whatsapp_exporter.EXPORT_TZ)
-    filename = f"whatsapp_export_{now_local.strftime('%Y-%m-%d')}.zip"
-    response = FileResponse(path=zip_path, media_type="application/zip", filename=filename)
-
-    safe_filename = filename.replace("\"", r"\"")
-    response.headers["Content-Disposition"] = (
-        f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{quote(filename)}"
-    )
-    response.headers["X-Dialog-Count"] = str(stats.get("dialog_count", 0))
-    response.headers["X-Message-Count"] = str(stats.get("message_count", 0))
-    response.headers["Cache-Control"] = "no-store"
-    if "content-encoding" in response.headers:
-        del response.headers["content-encoding"]
-
-    took = time.time() - started
-    _wa_log.info(
-        "[wa_export] complete tenant=%s days_back=%s limit=%s per=%s dialogs=%s messages=%s took=%.3fs batch=%s top5=%s filtered_groups=%s",
-        tenant,
-        days_back,
-        limit_dialogs if limit_dialogs is not None else "none",
-        per_limit if per_limit is not None else "none",
-        stats.get("dialog_count", 0),
-        stats.get("message_count", 0),
-        took,
-        batch_size_dialogs,
-        stats.get("top_five"),
-        meta.get("filtered_groups") if meta else None,
-    )
-
-    background.add_task(
-        _finalize_whatsapp_export,
-        stats,
-        tenant,
-        days_back,
-        limit_dialogs,
-        per_limit,
-        batch_size_dialogs,
-        started,
-    )
-
-    background.add_task(_cleanup_export_file, pathlib.Path(zip_path))
-
-    return response
-
-
-@router.post("/export/whatsapp", name="whatsapp_export")
-async def whatsapp_export(request: Request, background: BackgroundTasks):
-    started_at = time.time()
-
-    try:
-        raw_body = await request.json()
-    except Exception:
-        raw_body = {}
-
-    if not isinstance(raw_body, dict):
-        raw_body = {}
-
-    try:
-        payload = WhatsAppExportPayload(**raw_body)
-    except ValidationError as exc:
-        _wa_log.warning("[wa_export] invalid_payload errors=%s", exc.errors())
-        return JSONResponse({"detail": "invalid_payload", "errors": exc.errors()}, status_code=422)
-
-    return await _prepare_whatsapp_export_response(
-        tenant_raw=payload.tenant,
-        key=payload.key or "",
-        days_back_raw=payload.days if payload.days is not None else payload.days_back,
-        limit_dialogs_raw=payload.limit if payload.limit is not None else payload.limit_dialogs,
-        per_limit_raw=payload.per if payload.per is not None else payload.per_conversation_limit,
-        batch_size_raw=payload.batch_size_dialogs,
-        started_at=started_at,
-        background=background,
-    )
-
-
-@router.get("/client/{tenant}/export/whatsapp")
-async def client_whatsapp_export(tenant: int, request: Request, background: BackgroundTasks):
-    started_at = time.time()
-    qp = request.query_params
-    key = _resolve_key(request, qp.get("k"))
-
-    return await _prepare_whatsapp_export_response(
-        tenant_raw=tenant,
-        key=key,
-        days_back_raw=qp.get("days") or qp.get("days_back"),
-        limit_dialogs_raw=qp.get("limit") or qp.get("limit_dialogs"),
-        per_limit_raw=qp.get("per") or qp.get("per_conversation_limit"),
-        batch_size_raw=qp.get("batch_size_dialogs"),
-        started_at=started_at,
-        background=background,
-    )
-
-
-@router.get("/client/{tenant}/training/export")
-async def training_export(
-    tenant: int,
-    request: Request,
-    days: int = 30,
-    limit: int = 10000,
-    per: int = 0,
-):
-    """Export WhatsApp dialogs into a ZIP containing one text file per chat."""
-
-    started_at = time.time()
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        _log.warning(f"{_LOG_PREFIX} unauthorized export tenant=%s", tenant)
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    qp = request.query_params
-
-    def _parse_int(name: str, default: int, minimum: int) -> int:
-        raw = qp.get(name)
-        if raw is None:
-            raw = default
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            return default
-        return value if value >= minimum else minimum
-
-    lookback_days = _parse_int("days", days, 0)
-    limit_val = _parse_int("limit", limit, 0)
-    per_val = _parse_int("per", per, 0)
-
-    now_utc = datetime.now(timezone.utc)
-    since_ts = now_utc.timestamp() - (lookback_days * 86400) if lookback_days > 0 else None
-
-    _log.info(
-        "%s export start tenant=%s days=%s limit=%s per=%s",
-        _LOG_PREFIX,
-        tenant,
-        lookback_days,
-        limit_val,
-        per_val,
-    )
-
-    try:
-        dialogs = await db.export_dialogs(
-            tenant_id=tenant,
-            channel="whatsapp",
-            exclude_groups=True,
-            since_ts=since_ts,
-            max_conversations=limit_val,
-            per_conversation_limit=per_val,
-        )
-    except getattr(db, "DatabaseUnavailableError", RuntimeError) as exc:
-        _log.error("%s export db_unavailable tenant=%s", _LOG_PREFIX, tenant, exc_info=True)
-        return JSONResponse(
-            {"detail": "db_unavailable", "error": str(exc)},
-            status_code=503,
-        )
-    except Exception as exc:  # pragma: no cover
-        _log.exception("%s export unexpected_error tenant=%s", _LOG_PREFIX, tenant)
-        return JSONResponse({"detail": "export_failed", "error": str(exc)}, status_code=500)
-
-    dialog_count = len(dialogs)
-    message_count = sum(len(d.get("messages") or []) for d in dialogs)
-    _log.info(
-        "%s export fetched tenant=%s dialogs=%s messages=%s since_ts=%s",
-        _LOG_PREFIX,
-        tenant,
-        dialog_count,
-        message_count,
-        since_ts if since_ts is not None else "none",
-    )
-
-    if dialog_count == 0:
-        _log.info(
-            "%s export empty tenant=%s days=%s reason=no_private_dialogs",
-            _LOG_PREFIX,
-            tenant,
-            lookback_days,
-        )
-        return Response(status_code=204, headers={"Cache-Control": "no-store"})
-
-    archive_buffer, filenames = training_exporter.build_text_archive(dialogs)
-    file_count = len(filenames)
-    archive_bytes = archive_buffer.getvalue()
-
-    _log.info(
-        "%s export archive_ready tenant=%s files=%s dialogs=%s",
-        _LOG_PREFIX,
-        tenant,
-        file_count,
-        dialog_count,
-    )
-
-    ts_tag = now_utc.strftime("%Y%m%d_%H%M%S")
-    headers = {
-        "Content-Disposition": f"attachment; filename=\"training_export_{ts_tag}.zip\"",
-        "X-Dialog-Count": str(dialog_count),
-        "X-File-Count": str(file_count),
-        "X-Message-Count": str(message_count),
-        "X-Since-Ts": str(int(since_ts) if since_ts is not None else 0),
-        "Cache-Control": "no-store",
-    }
-
-    took = time.time() - started_at
-    _log.info(
-        "%s export complete tenant=%s files=%s size_bytes=%s took=%.3fs",
-        _LOG_PREFIX,
-        tenant,
-        file_count,
-        len(archive_bytes),
-        took,
-    )
-
-    return Response(content=archive_bytes, media_type="application/zip", headers=headers)
-
-
-@router.get("/client/{tenant}/training/status")
-async def training_status(tenant: int, request: Request):
-    started_at = time.time()
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    _log.info("status tenant=%s", tenant)
-    cfg = C.read_tenant_config(tenant)
-    info = (cfg.get("integrations", {}) or {}).get("uploaded_training") if isinstance(cfg, dict) else None
-    info = info or {}
-    # Read manifest if present for richer data
-    rel = (info.get("index_path") or "").strip()
-    manifest = {}
-    pairs = None
-    sha1 = None
-    size_bytes = None
-    index_path_str = rel
-    if rel:
-        idx_path = pathlib.Path(C.tenant_dir(tenant)) / rel
-        man_path = idx_path.with_suffix(".manifest.json")
-        try:
-            manifest = json.loads(man_path.read_text(encoding="utf-8"))
-        except Exception:
-            manifest = {}
-        try:
-            if idx_path.exists():
-                size_bytes = idx_path.stat().st_size
-        except Exception:
-            size_bytes = None
-        pairs = manifest.get("pairs") if isinstance(manifest, dict) else None
-        sha1 = manifest.get("sha1") if isinstance(manifest, dict) else None
-        index_path_str = str(idx_path.relative_to(pathlib.Path(C.tenant_dir(tenant)))) if idx_path.exists() else rel
-    # Optional export stats (dry computation) for UI
-    qp = request.query_params
-    try:
-        lookback_days = max(0, int(qp.get("days") or 30))
-    except Exception:
-        lookback_days = 30
-    try:
-        limit_val = max(1, int(qp.get("limit") or 200))
-    except Exception:
-        limit_val = 200
-    try:
-        per_val = max(0, int(qp.get("per") or 0))
-    except Exception:
-        per_val = 0
-    try:
-        min_pairs = max(0, int(qp.get("min_turns") or 0))
-    except Exception:
-        min_pairs = 0
-    strict_val = 1 if str(qp.get("strict") or 0).strip().lower() in {"1","true","yes","on"} else 0
-    anon_flag = str(qp.get("anonymize") or 0).strip().lower() in {"1","true","yes","on"}
-
-    since_ts = int(time.time()) - (lookback_days * 86400) if lookback_days > 0 else None
-    per_limit = per_val if per_val > 0 else 0
-    try:
-        dialogs = await db.export_dialogs(
-            tenant_id=tenant,
-            channel="whatsapp",
-            exclude_groups=True,
-            since_ts=since_ts,
-            max_conversations=limit_val,
-            per_conversation_limit=per_limit,
-        )
-    except Exception:
-        dialogs = []
-    found_before = len(dialogs)
-    norm_dialogs: list[dict] = []
-    for d in dialogs[:limit_val]:
-        msgs = []
-        for m in list(d.get("messages", []) or []):
-            role = (m.get("role") or "").strip()
-            if not role:
-                direction = m.get("direction")
-                is_assistant = isinstance(direction, int) and direction == 1
-                role = "assistant" if is_assistant else "user"
-            text = m.get("content") or m.get("text") or ""
-            if anon_flag:
-                text = training_exporter.scrub(text) or "[REDACTED]"
-            msgs.append({"role": role, "content": text, "ts": m.get("ts")})
-        norm_dialogs.append({
-            "lead_id": d.get("lead_id"),
-            "contact_id": d.get("contact_id"),
-            "messages": msgs,
-        })
-    after_anon = len(norm_dialogs)
-    kept = 0
-    dropped = {"only_assistant": 0, "min_turns": 0, "anonymized_empty": 0}
-    for d in norm_dialogs:
-        msgs = d.get("messages", []) or []
-        last_user = False
-        pairs = 0
-        any_nonempty = any((m.get("content") or "").strip() for m in msgs)
-        any_assistant = any((m.get("role") == "assistant") for m in msgs)
-        for m in msgs:
-            role = (m.get("role") or "").strip()
-            if role == "user":
-                if not last_user:
-                    last_user = True
-            elif role == "assistant" and last_user:
-                pairs += 1
-                last_user = False
-        if strict_val == 1:
-            if not any_assistant:
-                dropped["only_assistant"] += 1
-                continue
-            if pairs < min_pairs:
-                dropped["min_turns"] += 1
-                continue
-            if not any_nonempty:
-                dropped["anonymized_empty"] += 1
-                continue
-        kept += 1
-
-    # Read last export stats
-    last_export = {}
-    try:
-        exp_path = pathlib.Path(C.tenant_dir(tenant)) / "exports" / "last_export.json"
-        if exp_path.exists():
-            last_export = json.loads(exp_path.read_text(encoding="utf-8"))
-    except Exception:
-        last_export = {}
-
-    out = {
-        "ok": True,
-        "info": info,
-        "manifest": manifest,
-        "pairs": pairs,
-        "sha1": sha1,
-        "index_path": index_path_str,
-        "size": size_bytes,
-        "last_export": last_export,
-        "export_stats": {
-            "total_found": found_before,
-            "after_anonymize": after_anon,
-            "after_filters": kept,
-            "dropped": dropped,
-        },
-    }
-    _log.info(f"{_LOG_PREFIX} status done tenant=%s pairs=%s size=%sB took=%.3fs", tenant, pairs or 0, size_bytes or 0, time.time() - started_at)
-    return out
-
-
-@router.get("/client/{tenant}/training/suggestions")
-async def training_suggestions_list(tenant: int, request: Request, limit: int = 20):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    items = await db.list_training_suggestions(int(tenant), limit=limit)
-    return {"ok": True, "items": items}
-
-
-@router.post("/client/{tenant}/training/suggestions/refresh")
-async def training_suggestions_refresh(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    try:
-        days = max(1, int(payload.get("days") or 7))
-    except Exception:
-        days = 7
-    try:
-        min_count = max(2, int(payload.get("min_count") or 5))
-    except Exception:
-        min_count = 5
-    try:
-        max_items = max(5, int(payload.get("max_items") or 20))
-    except Exception:
-        max_items = 20
-    try:
-        suggestions = await training_suggestions.refresh_training_suggestions(
-            int(tenant),
-            days=days,
-            min_count=min_count,
-            max_items=max_items,
-        )
-    except Exception:
-        _log.exception("training_suggestions_refresh_failed tenant=%s", tenant)
-        return JSONResponse({"detail": "suggestions_failed"}, status_code=500)
-    items = [
-        {"q_text": s.q_text, "a_text": s.a_text, "count": s.count}
-        for s in suggestions
-    ]
-    return {"ok": True, "items": items}
-
-
-@router.post("/client/{tenant}/training/suggestions/accept")
-async def training_suggestions_accept(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = await request.json()
-    ids = payload.get("ids") if isinstance(payload, dict) else None
-    if not isinstance(ids, list):
-        return JSONResponse({"detail": "invalid_ids"}, status_code=400)
-    await db.activate_training_examples([int(x) for x in ids if str(x).isdigit()])
-    return {"ok": True}
-
-
-def _tgworker_base_url() -> str:
-    cleaned = str(getattr(C.settings, "TGWORKER_BASE_URL", "") or "").strip()
-    return cleaned.rstrip("/") or "http://tgworker:8000"
-
-
-async def _tgworker_request(method: str, path: str, *, json_body: dict[str, Any] | None = None) -> tuple[int, Any]:
-    import httpx
-
-    url = f"{_tgworker_base_url()}{path}"
-    headers = {"X-Admin-Token": C.settings.ADMIN_TOKEN}
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(method, url, headers=headers, json=json_body)
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"error": "invalid_json"}
-        return resp.status_code, data
 
 
 @router.post("/client/{tenant}/training/telegram/harvest")
 async def training_tg_harvest(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    limit_dialogs = int(payload.get("limit_dialogs") or 15)
-    limit_messages = int(payload.get("limit_messages") or 300)
-    if limit_dialogs < 1:
-        limit_dialogs = 15
-    if limit_messages < 50:
-        limit_messages = 300
-    if not C.settings.ADMIN_TOKEN:
-        return JSONResponse({"detail": "tgworker_admin_missing"}, status_code=500)
-    status, data = await _tgworker_request(
-        "POST",
-        "/tg/qa",
-        json_body={
-            "tenant": int(tenant),
-            "limit_dialogs": limit_dialogs,
-            "limit_messages": limit_messages,
-        },
+    return await client_training_runtime.training_tg_harvest(
+        tenant,
+        request,
+        deps=_client_training_runtime_deps(),
     )
-    if status >= 400:
-        return JSONResponse(data or {"detail": "tgworker_error"}, status_code=status)
-    return {"ok": True, "items": data.get("items", []), "meta": data.get("meta", {})}
 
 
 @router.post("/client/{tenant}/training/telegram/accept")
 async def training_tg_accept(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    payload = await request.json()
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list):
-        return JSONResponse({"detail": "invalid_items"}, status_code=400)
-    saved = 0
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        q_text = _sanitize_training_text(str(item.get("q_text") or ""))
-        a_text = _sanitize_training_text(str(item.get("a_text") or ""))
-        if not q_text or not a_text:
-            continue
-        await db.record_training_example(
-            int(tenant),
-            lead_id=None,
-            message_id=None,
-            source="tg_harvest",
-            source_feedback_id=None,
-            q_text=q_text,
-            a_text=a_text,
-            is_active=True,
-        )
-        saved += 1
-    return {"ok": True, "saved": saved}
-
-
-@router.get("/client/{tenant}/training/dry-run")
-async def training_dry_run(
-    tenant: int,
-    request: Request,
-    days: int = 30,
-    limit: int = 1000,
-    per: int = 0,
-    anonymize: int = 1,
-    min_turns: int = 0,
-    strict: int = 0,
-    provider: str | None = None,
-):
-    started_at = time.time()
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        _log.warning(f"{_LOG_PREFIX} unauthorized dry_run tenant=%s", tenant)
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    qp = request.query_params
-    lookback_days = max(0, int(qp.get("days") or days or 30))
-    limit_val = max(1, int(qp.get("limit") or limit or 1000))
-    per_val = max(0, int(qp.get("per") or per or 0))
-    min_pairs = max(0, int(qp.get("min_turns") or min_turns or 0))
-    strict_val = 1 if str(qp.get("strict") or strict or 0).strip().lower() in {"1","true","yes","on"} else 0
-    anon_flag = str(qp.get("anonymize") or anonymize or 1).strip().lower() in {"1","true","yes","on"}
-    provider_val = (qp.get("provider") or provider or "").strip() or None
-
-    since_ts = int(time.time()) - (lookback_days * 86400) if lookback_days > 0 else None
-    per_limit = per_val if per_val > 0 else 0
-    t0 = time.time()
-    dialogs = await db.export_dialogs(
-        tenant_id=tenant,
-        channel="whatsapp",
-        exclude_groups=True,
-        since_ts=since_ts,
-        max_conversations=limit_val,
-        per_conversation_limit=per_limit,
+    return await client_training_runtime.training_tg_accept(
+        tenant,
+        request,
+        deps=_client_training_runtime_deps(),
     )
-    db_time = time.time() - t0
-    found_before = len(dialogs)
-
-    norm_dialogs: list[dict] = []
-    for d in dialogs[:limit_val]:
-        msgs = []
-        for m in list(d.get("messages", []) or []):
-            role = (m.get("role") or "").strip()
-            if not role:
-                direction = m.get("direction")
-                role = "assistant" if (isinstance(direction, int) and direction == 1) else "user"
-            text = m.get("content") or m.get("text") or ""
-            if anon_flag:
-                text = training_exporter.scrub(text) or "[REDACTED]"
-            msgs.append({"role": role, "content": text, "ts": m.get("ts")})
-        norm_dialogs.append({"lead_id": d.get("lead_id"), "messages": msgs})
-
-    dropped = {"short_dialog": 0, "only_assistant": 0, "anonymized_empty": 0, "min_turns": 0}
-    items = []
-    for d in norm_dialogs:
-        msgs = d.get("messages", []) or []
-        last_user = False
-        pairs = 0
-        any_nonempty = any((m.get("content") or "").strip() for m in msgs)
-        any_assistant = any((m.get("role") == "assistant") for m in msgs)
-        for m in msgs:
-            role = (m.get("role") or "").strip()
-            if role == "user":
-                if not last_user:
-                    last_user = True
-            elif role == "assistant" and last_user:
-                pairs += 1
-                last_user = False
-        if strict_val == 1:
-            if not any_assistant:
-                dropped["only_assistant"] += 1
-                continue
-            if pairs < min_pairs:
-                dropped["min_turns"] += 1
-                continue
-            if not any_nonempty:
-                dropped["anonymized_empty"] += 1
-                continue
-        items.append(d)
-
-    sample = items[:3]
-    result = {
-        "ok": True,
-        "db_time": round(db_time, 3),
-        "total_found": found_before,
-        "after_anonymize": len(norm_dialogs),
-        "after_filters": len(items),
-        "dropped": dropped,
-        "examples": sample,
-    }
-    _log.info(f"{_LOG_PREFIX} dry_run tenant=%s found=%s after=%s dropped=%s took=%.3fs", tenant, found_before, len(items), dropped, time.time() - started_at)
-    return JSONResponse(result, status_code=200)
-
-
-@router.get("/client/{tenant}/training/logs/tail")
-async def training_logs_tail(tenant: int, request: Request, lines: int = 200):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        _log.warning(f"{_LOG_PREFIX} unauthorized logs_tail tenant=%s", tenant)
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    try:
-        root = pathlib.Path(__file__).resolve().parents[2]
-        log_path = root / "logs" / "training.log"
-        if not log_path.exists():
-            return JSONResponse({"ok": True, "log": ""}, status_code=200)
-        n = max(1, min(int(lines), 2000))
-        data = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        tail = "\n".join(data[-n:])
-        return Response(content=tail, media_type="text/plain; charset=utf-8", headers={"Cache-Control": "no-store"})
-    except Exception as exc:
-        _log.exception(f"{_LOG_PREFIX} logs_tail_failed tenant=%s", tenant, exc_info=True)
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 @router.get("/client/{tenant}/catalog/csv")
-def catalog_csv_get(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    cfg = C.read_tenant_config(tenant)
-    try:
-        table = read_csv_table(tenant, cfg)
-    except FileNotFoundError:
-        return JSONResponse({"detail": "csv_not_ready"}, status_code=404)
-
-    return {"ok": True, **table}
+async def catalog_csv_get(tenant: int, request: Request):
+    return await client_catalog_runtime.catalog_csv_get(
+        tenant,
+        request,
+        deps=_client_catalog_runtime_deps(),
+    )
 
 
 @router.post("/client/{tenant}/catalog/csv")
 async def catalog_csv_save(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
-
-    payload = await request.json()
-    columns = payload.get("columns")
-    rows = payload.get("rows")
-
-    try:
-        written = write_csv_table(tenant, columns, rows)
-    except FileNotFoundError:
-        return JSONResponse({"detail": "csv_not_ready"}, status_code=404)
-    except ValueError as exc:
-        detail = str(exc) or "invalid_rows"
-        return JSONResponse({"detail": detail}, status_code=400)
-
-    return {"ok": True, "rows": written}
+    return await client_catalog_runtime.catalog_csv_save(
+        tenant,
+        request,
+        deps=_client_catalog_runtime_deps(),
+    )
 
 
 def _onboarding_error(reason: str, status_code: int = 400):
@@ -3678,9 +957,10 @@ async def _collect_onboarding_context(tenant: int):
 
 @router.get("/client/{tenant}/onboarding/state")
 async def onboarding_state(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
 
     checks, cfg, persona, convo = await _collect_onboarding_context(tenant)
     ready = preconditions_met(checks)
@@ -3702,9 +982,10 @@ async def onboarding_state(tenant: int, request: Request):
 
 @router.post("/client/{tenant}/onboarding/message")
 async def onboarding_message(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
 
     payload = await request.json()
     user_text = (payload.get("text") or "").strip()
@@ -3734,9 +1015,10 @@ async def onboarding_message(tenant: int, request: Request):
 
 @router.post("/client/{tenant}/onboarding/reset")
 async def onboarding_reset(tenant: int, request: Request):
-    key = _resolve_key(request, request.query_params.get("k"))
-    if not _auth(tenant, key):
-        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    auth = await _authorize_client_settings_request(request, tenant)
+    if isinstance(auth, Response):
+        return auth
+    tenant, key = auth
 
     reset_conversation(tenant)
     update_tenant_insights(tenant, "new", None)

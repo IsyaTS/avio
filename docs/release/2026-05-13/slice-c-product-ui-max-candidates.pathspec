@@ -1,0 +1,16 @@
+apps/api/static/js/
+apps/api/static/landing/lovable/
+apps/api/static/spa/client/
+apps/api/templates/admin/
+apps/api/templates/auth/
+apps/api/templates/client/
+apps/api/templates/connect/
+apps/api/templates/marketing/
+apps/frontend/client-portal/
+apps/maxworker/
+libs/core/services/max_personal_service.py
+libs/core/transport/max_personal.py
+docs/max_personal_transport.md
+docs/intervention_learning_v2.md
+package.json
+package-lock.json

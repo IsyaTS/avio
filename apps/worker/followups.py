@@ -64,6 +64,8 @@ log = logging.getLogger("followups")
 
 _rules_cache: Dict[int, Tuple[float, List[dict]]] = {}
 _RULES_CACHE_TTL = 30.0
+_ANY_CHANNELS = {"any", "*"}
+_MAX_CHANNELS = {"max", "max_personal"}
 
 
 def _now() -> float:
@@ -78,6 +80,45 @@ def _normalize_fact_key(raw: Any) -> str:
     if FACT_KEY_MAX_LEN and len(key) > FACT_KEY_MAX_LEN:
         key = key[:FACT_KEY_MAX_LEN]
     return key
+
+
+def _normalize_channel(raw: Any) -> str:
+    channel = str(raw or "").strip().lower()
+    if not channel:
+        return ""
+    channel = channel.replace("-", "_").replace(" ", "_")
+    aliases = {
+        "tg": "telegram",
+        "wa": "whatsapp",
+        "maxpersonal": "max_personal",
+        "max_personal_qr": "max_personal",
+        "max_qr": "max_personal",
+    }
+    return aliases.get(channel, channel)
+
+
+def _channel_matches_rule(rule_channel: Any, actual_channel: Any) -> bool:
+    rule_norm = _normalize_channel(rule_channel) or "any"
+    actual_norm = _normalize_channel(actual_channel)
+    if rule_norm in _ANY_CHANNELS:
+        return True
+    if not actual_norm:
+        return False
+    if rule_norm == actual_norm:
+        return True
+    # UI and tenant configs use "MAX", while QR transport is "max_personal".
+    # Treat them as one product channel for follow-up applicability only.
+    return rule_norm in _MAX_CHANNELS and actual_norm in _MAX_CHANNELS
+
+
+def _job_channel_for_rule(rule_channel: Any, actual_channel: Any) -> str:
+    rule_norm = _normalize_channel(rule_channel) or "any"
+    actual_norm = _normalize_channel(actual_channel)
+    if rule_norm in _ANY_CHANNELS:
+        return actual_norm or "whatsapp"
+    if rule_norm in _MAX_CHANNELS and actual_norm in _MAX_CHANNELS:
+        return actual_norm
+    return rule_norm
 
 
 def _normalize_phrase_list(raw: Any) -> List[str]:
@@ -389,8 +430,8 @@ async def capture_followup_answer(tenant_id: int, lead_id: int, text: str, chann
 def _valid_rule(rule: Mapping[str, Any]) -> Optional[dict]:
     if not isinstance(rule, Mapping):
         return None
-    channel = str(rule.get("channel") or "").strip().lower() or "any"
-    if channel not in {"any", "*", "whatsapp", "telegram", "avito", "max"}:
+    channel = _normalize_channel(rule.get("channel")) or "any"
+    if channel not in {"any", "*", "whatsapp", "telegram", "avito", "max", "max_personal"}:
         channel = "any"
     try:
         delay_minutes = int(rule.get("delay_minutes") or 0)
@@ -459,14 +500,14 @@ async def schedule_followups(tenant_id: int, lead_id: int, incoming_channel: str
     rules = _load_rules(tenant_id)
     if not rules:
         return
-    channel_norm = (incoming_channel or "").strip().lower()
+    channel_norm = _normalize_channel(incoming_channel)
     pipe = r.pipeline()
     now_ts = _now()
     for idx, rule in enumerate(rules):
         if rule.get("trigger_on_answer"):
             continue
         rule_channel = rule.get("channel") or "any"
-        if rule_channel not in {channel_norm, "any", "*"}:
+        if not _channel_matches_rule(rule_channel, channel_norm):
             continue
         dedup_key = f"{FOLLOWUP_SCHEDULED_PREFIX}:{tenant_id}:{lead_id}:{idx}"
         already = await r.get(dedup_key)
@@ -479,7 +520,7 @@ async def schedule_followups(tenant_id: int, lead_id: int, incoming_channel: str
             "id": job_id,
             "tenant_id": str(int(tenant_id)),
             "lead_id": str(int(lead_id)),
-            "channel": rule_channel if rule_channel not in {"any", "*"} else channel_norm or "whatsapp",
+            "channel": _job_channel_for_rule(rule_channel, channel_norm),
             "text": rule["text"],
             "schedule_at": str(int(schedule_at)),
             "rule_id": str(idx),
@@ -615,6 +656,23 @@ async def _resolve_target(job: Mapping[str, Any]) -> Tuple[Optional[dict], Optio
             "tenant_id": tenant_id,
             "channel": "max",
             "ch": "max",
+            "text": job.get("text") or "",
+            "peer": chat_id,
+            "peer_id": chat_id,
+            "chat_id": chat_id,
+            "origin": "followup",
+        }
+        return payload, None
+    if channel == "max_personal":
+        chat_id = await get_lead_peer(lead_id, channel="max_personal")
+        if not chat_id:
+            return None, "missing_chat"
+        payload = {
+            "lead_id": lead_id,
+            "tenant": tenant_id,
+            "tenant_id": tenant_id,
+            "channel": "max_personal",
+            "ch": "max_personal",
             "text": job.get("text") or "",
             "peer": chat_id,
             "peer_id": chat_id,
@@ -781,7 +839,7 @@ async def _trigger_followups_on_answer(
     rules = _load_rules(tenant_id)
     if not rules:
         return
-    channel_norm = (channel or "").strip().lower()
+    channel_norm = _normalize_channel(channel)
     candidates: list[tuple[int, dict]] = []
     fact_key_norm = str(fact_key or "").strip().lower()
     for idx, rule in enumerate(rules):
@@ -793,20 +851,20 @@ async def _trigger_followups_on_answer(
             continue
         if not any(str(cond.get("key") or "").strip().lower() == fact_key_norm for cond in conditions):
             continue
-        rule_channel = (rule.get("channel") or "any").strip().lower()
-        if rule_channel not in {channel_norm, "any", "*"}:
+        rule_channel = _normalize_channel(rule.get("channel")) or "any"
+        if not _channel_matches_rule(rule_channel, channel_norm):
             continue
         candidates.append((idx, rule))
     if not candidates:
         return
     candidates.sort(key=lambda item: item[0])
     for idx, rule in candidates:
-        rule_channel = (rule.get("channel") or "any").strip().lower()
+        rule_channel = _normalize_channel(rule.get("channel")) or "any"
         condition = rule.get("condition")
         job_payload = {
             "tenant_id": tenant_id,
             "lead_id": lead_id,
-            "channel": rule_channel if rule_channel not in {"any", "*"} else channel_norm,
+            "channel": _job_channel_for_rule(rule_channel, channel_norm),
             "text": rule.get("text") or "",
             "rule_id": idx,
             "max_attempts": int(rule.get("max_attempts") or 1),

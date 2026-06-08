@@ -7,6 +7,8 @@ import types
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
@@ -542,6 +544,7 @@ async def test_ask_llm_uses_planner(monkeypatch):
     )
 
     state = core.SalesState(tenant=1, contact_id=2)
+
     def fake_load_state(tenant, contact):
         assert int(tenant or 0) == state.tenant
         assert int(contact or 0) == state.contact_id

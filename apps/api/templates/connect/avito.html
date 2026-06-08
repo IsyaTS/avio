@@ -109,6 +109,7 @@
   const baseParams = new URLSearchParams({ tenant: tenant, k: key });
   const statusUrl = `/v1/oauth/avito/status?${baseParams.toString()}`;
   const authorizeUrl = `/v1/oauth/avito/authorize?${baseParams.toString()}`;
+  const authorizeRedirectUrl = `/v1/oauth/avito/authorize?${baseParams.toString()}&redirect=1`;
   const disconnectUrl = `/v1/oauth/avito/disconnect?${baseParams.toString()}`;
   const webhookUrl = `/v1/oauth/avito/webhook?${baseParams.toString()}`;
 
@@ -220,31 +221,7 @@
   async function startAuthorization() {
     if (connectButton) connectButton.disabled = true;
     setMessage('Открываем окно авторизации…', 'muted');
-    try {
-      const response = await fetch(authorizeUrl, { cache: 'no-store' });
-      if (!response.ok) {
-        throw new Error((await response.text()) || 'Не удалось получить ссылку авторизации');
-      }
-      const data = await response.json();
-      const authUrl = data.authorize_url || data.url;
-      if (!authUrl) {
-        throw new Error('Ссылка авторизации не получена');
-      }
-      const popup = window.open(
-        authUrl,
-        'avito-oauth',
-        'width=640,height=760,noopener=yes,noreferrer=yes'
-      );
-      if (!popup) {
-        window.location.href = authUrl;
-      } else {
-        setMessage('Если окно не открылось, разрешите всплывающие окна и попробуйте снова.', 'muted');
-      }
-    } catch (error) {
-      setMessage(`Ошибка авторизации Avito: ${error && error.message ? error.message : error}`, 'alert');
-    } finally {
-      if (connectButton) connectButton.disabled = false;
-    }
+    window.location.href = authorizeRedirectUrl;
   }
 
   async function disconnect() {

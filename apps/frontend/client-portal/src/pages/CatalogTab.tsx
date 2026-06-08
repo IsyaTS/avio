@@ -38,6 +38,17 @@ type PhotoEntry = {
   priority?: number;
 };
 
+type AssetEntry = {
+  asset_id: string;
+  legacy_photo_id?: string;
+  status?: string;
+  ai_metadata?: {
+    confidence?: number;
+    needs_review?: boolean;
+    human_summary?: string;
+  };
+};
+
 const PHOTO_MAX_BYTES = 24 * 1024 * 1024;
 const PHOTO_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.heic'];
 
@@ -54,6 +65,7 @@ const CatalogTab: React.FC = () => {
   const [photoFiles, setPhotoFiles] = useState<File[]>([]);
   const [photoStatus, setPhotoStatus] = useState('');
   const [photos, setPhotos] = useState<PhotoEntry[]>([]);
+  const [assets, setAssets] = useState<AssetEntry[]>([]);
   const [photoDraftInitialized, setPhotoDraftInitialized] = useState(false);
   const [photoTagInputs, setPhotoTagInputs] = useState<Record<string, string>>({});
   const [showPhotoList, setShowPhotoList] = useState(false);
@@ -67,6 +79,10 @@ const CatalogTab: React.FC = () => {
   const photosUploadUrl = useMemo(() => buildUrl('/pub/files/photos/upload', api), [api]);
   const photosDeleteTemplate = '/pub/files/photos/{photo_id}';
   const photosMetaTemplate = '/pub/files/photos/{photo_id}/meta';
+  const assetsUrl = useMemo(
+    () => buildUrl(`/client/${api.tenantId}/assets`, api),
+    [api]
+  );
 
   const internalDownloadUrl = (path?: string) => {
     if (!path || !api.webhookSecret || !api.tenantId) return '';
@@ -112,6 +128,19 @@ const CatalogTab: React.FC = () => {
   useEffect(() => {
     fetchPhotos().catch(() => undefined);
   }, [photosListUrl]);
+
+  const fetchAssets = async () => {
+    try {
+      const data = await requestJson<{ assets: AssetEntry[] }>(assetsUrl);
+      setAssets(data.assets || []);
+    } catch (error) {
+      setAssets([]);
+    }
+  };
+
+  useEffect(() => {
+    fetchAssets().catch(() => undefined);
+  }, [assetsUrl]);
 
   useEffect(() => {
     setPhotoTagInputs((prev) => {
@@ -314,14 +343,24 @@ const CatalogTab: React.FC = () => {
           channels: photo.channels || [],
           auto: Boolean(photo.auto),
           priority: photo.priority || 0,
+          compile: Boolean(photo.auto),
         }),
       });
       toast.success('Фото обновлено');
       fetchPhotos().catch(() => undefined);
+      fetchAssets().catch(() => undefined);
     } catch (error) {
       toast.error('Не удалось сохранить фото');
     }
   };
+
+  const assetByPhotoId = useMemo(() => {
+    const map = new Map<string, AssetEntry>();
+    assets.forEach((asset) => {
+      if (asset.legacy_photo_id) map.set(asset.legacy_photo_id, asset);
+    });
+    return map;
+  }, [assets]);
 
   const handleAddRow = () => {
     setCsvRows((prev) => [...prev, csvColumns.map(() => '')]);
@@ -410,6 +449,34 @@ const CatalogTab: React.FC = () => {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {photos.map((photo) => (
                   <div key={photo.id} className="rounded-2xl border border-slate-200 bg-white p-3 space-y-2">
+                    {(() => {
+                      const asset = assetByPhotoId.get(photo.id);
+                      const status = asset?.status || (photo.auto ? 'draft' : 'disabled');
+                      const summary = asset?.ai_metadata?.human_summary || '';
+                      const needsReview = status === 'needs_review' || asset?.ai_metadata?.needs_review;
+                      return (
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span
+                            className={`rounded-full px-2 py-1 font-semibold ${
+                              status === 'active'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : needsReview
+                                ? 'bg-amber-50 text-amber-700'
+                                : 'bg-slate-100 text-slate-600'
+                            }`}
+                          >
+                            {status === 'active'
+                              ? 'Активно'
+                              : needsReview
+                              ? 'Нужно проверить'
+                              : status === 'disabled'
+                              ? 'Выключено'
+                              : 'Черновик'}
+                          </span>
+                          {summary && <span className="text-slate-500">{summary}</span>}
+                        </div>
+                      );
+                    })()}
                     {photo.url && (
                       <button
                         type="button"
