@@ -5,6 +5,9 @@
 - `apps/worker/` — фоновые обработчики и очереди (`main.py`, `http.py`, `outbox.py`).
 - `apps/tgworker/` — отдельный Telegram transport (FastAPI + Telethon).
 - `apps/waweb/` — WhatsApp bridge (Node.js + puppeteer).
+- `apps/maxworker/` — Playwright-based personal WhatsApp worker (Node.js).
+- `apps/frontend/client-portal/` — клиентский SPA (Vite + React + TS + Tailwind).
+- `apps/api/static/spa/client/` — собранная SPA-статика.
 - `libs/core/` — общая доменная логика, интеграции, репозитории, сервисы.
 - `db/init/` — SQL-инициализация PostgreSQL.
 - `tests/` — `pytest`-тесты.
@@ -12,13 +15,16 @@
 
 ## Build, Test, and Development Commands
 - `docker-compose up app worker waweb redis postgres` — поднять основной стек локально.
+- `docker-compose.override.yml` монтирует исходники в контейнеры для hot-reload в dev.
+- Воркер (`avio-worker-1`) работает в dual-mode: `uvicorn apps.worker.http:app` (HTTP health + RPC) + `python -m apps.worker.main` (Redis loop) одновременно.
 - `uvicorn apps.api.main:app --reload --port 8000` — быстрый запуск только API.
 - `python -m apps.worker.main` — запуск воркера при API-only разработке.
 - `cd apps/waweb && npm install && node index.js` — запуск WhatsApp bridge.
 - `pytest tests -q` — запуск Python-тестов.
 - `.venv/bin/pytest -q` — предпочтительный полный локальный pytest в подготовленном окружении.
-- `.venv/bin/ruff check --select E,F --ignore E402,E501 apps/tgworker tests apps/api/web/public.py tests/conftest.py tests/test_main_webhook.py tests/test_public_tg.py scripts/inbox_worker_smoke.py scripts/restart_persistence_smoke.py scripts/critical_smoke.py` — lint как в CI.
-- `.venv/bin/flake8 --select=E,F --extend-ignore=E402,E501 apps/tgworker tests apps/api/web/public.py tests/conftest.py tests/test_main_webhook.py tests/test_public_tg.py scripts/inbox_worker_smoke.py scripts/restart_persistence_smoke.py scripts/critical_smoke.py` — flake8 как в CI.
+- `cd apps/frontend/client-portal && npm ci && npm run build` — сборка клиентского SPA (артефакт в `apps/api/static/spa/client/`).
+- `.venv/bin/ruff check --select E,F --ignore E402,E501 apps/tgworker tests apps/api/web/public.py tests/conftest.py tests/test_main_webhook.py tests/test_public_tg.py scripts/runtime_log_guard.py scripts/ui_http_smoke.py scripts/release_scope_guard.py` — lint как в CI.
+- `.venv/bin/flake8 --select=E,F --extend-ignore=E402,E501 apps/tgworker tests apps/api/web/public.py tests/conftest.py tests/test_main_webhook.py tests/test_public_tg.py scripts/runtime_log_guard.py scripts/ui_http_smoke.py scripts/release_scope_guard.py` — flake8 как в CI.
 - `python scripts/monolith_guard.py` — обязательный gate против возврата крупных функций в guarded runtime surfaces; также фиксирует file-line budgets для бывших крупных entrypoint-файлов, чтобы они больше не росли.
 - `python scripts/test_truth_audit.py tests` — аудит тестов на mock-heavy критичные проверки; для CI/release предпочтительно использовать fail-gate режим, если он включён в скрипте.
 - `python scripts/release_scope_guard.py` — read-only отчёт по release slice manifests; перед prod используйте `--strict`.

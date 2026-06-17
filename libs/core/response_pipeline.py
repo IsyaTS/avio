@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -13,6 +16,7 @@ from libs.core.sales_core import ask_llm, build_llm_messages, read_tenant_config
 from libs.core.common import default_fallback_reply
 from libs.core.training import dialog_retriever
 from libs.core.training import retriever as training_retriever
+from libs.core.reply_trace import ReplyTrace
 
 _LOCATION_INTENT_RE = re.compile(r"\b(?:где|адрес|магазин|посмотреть|находитесь|выбрать|шоурум)\b", re.I)
 _CITY_HINT_RE = re.compile(r"\b(?:уф[аеыу]?|стерлитамак[аеу]?|салават[аеу]?|ишимба[йеяю]|оренбург[аеу]?|казан[ьи]|в городе|мой город|наш город|район)\b", re.I)
@@ -48,6 +52,71 @@ class PipelineResult:
     reply_text: str
     photos: list[PipelinePhoto] = field(default_factory=list)
     source: str = "llm"
+    trace: ReplyTrace | None = None
+
+
+def _preview(text: str, limit: int = 220) -> str:
+    text = str(text or "").replace("\n", " ").replace("\r", " ").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…"
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_model_hint(tenant_id: int) -> str | None:
+    try:
+        cfg = read_tenant_config(int(tenant_id))
+        if not isinstance(cfg, Mapping):
+            return None
+        behavior = cfg.get("behavior")
+        if not isinstance(behavior, Mapping):
+            return None
+        model = behavior.get("smart_reply_model") or behavior.get("llm_model")
+        return str(model) if model else None
+    except Exception:
+        return None
+
+
+def _log_trace(
+    log_fn: Callable[[str], Any] | None,
+    trace: ReplyTrace | None,
+    *,
+    contextual_block_applied: bool,
+    policy_hint_applied: bool,
+    dialog_examples_applied: bool,
+    legacy_examples_applied: bool,
+) -> None:
+    if not log_fn or trace is None:
+        return
+    payload = trace.to_dict()
+    log_fn(
+        "event=reply_trace "
+        + " ".join(
+            f"{key}={value!s}"
+            for key, value in (
+                ("trace_id", payload.get("trace_id")),
+                ("tenant_id", payload.get("tenant_id")),
+                ("lead_id", payload.get("lead_id")),
+                ("channel", payload.get("channel")),
+                ("source", payload.get("pipeline_source")),
+                ("fallback", int(bool(payload.get("fallback_used")))),
+                ("fallback_source", payload.get("fallback_source") or "-"),
+                ("contextual_block", int(bool(contextual_block_applied))),
+                ("dialog_examples", int(bool(dialog_examples_applied))),
+                ("legacy_examples", int(bool(legacy_examples_applied))),
+                ("policy_hint", int(bool(policy_hint_applied))),
+                ("catalog_context_count", payload.get("catalog_context_count")),
+                ("latency_ms", payload.get("latency_ms")),
+                ("user_preview", _preview(str(payload.get("user_text") or ""), limit=80)),
+                ("reply_preview", _preview(str(payload.get("reply_text") or ""))),
+                ("quality_violations", ",".join(payload.get("quality_violations") or [])),
+            )
+            if value is not None
+        )
+    )
 
 
 def _photo_auto_config(tenant_id: int) -> tuple[bool, int]:
@@ -213,7 +282,18 @@ async def run_response_pipeline(
     timeout_seconds: float | None = None,
     log_fn: Callable[[str], Any] | None = None,
 ) -> PipelineResult:
+    trace_id = str(uuid.uuid4())
+    start_ts = time.perf_counter()
+    lead_id = int(contact_id or 0)
+    contextual_used = False
+    dialog_examples_used = False
+    legacy_examples_used = False
+    policy_hint_used = False
+    catalog_context_count = None
+    fallback_source: str | None = None
+
     normalized_history = _normalize_history(history)
+    history_count = len(normalized_history)
     try:
         base_messages = await build_llm_messages(
             contact_id,
@@ -238,6 +318,7 @@ async def run_response_pipeline(
         contextual_ctx = {"enabled": False, "applied": False, "block": ""}
     contextual_block = str(contextual_ctx.get("block") or "").strip()
     if contextual_block:
+        contextual_used = True
         _append_system_block(messages[0], contextual_block)
 
     try:
@@ -248,6 +329,7 @@ async def run_response_pipeline(
     except Exception:
         dialog_block = ""
     if dialog_block:
+        dialog_examples_used = True
         _append_system_block(messages[0], dialog_block)
 
     examples_block = ""
@@ -260,6 +342,7 @@ async def run_response_pipeline(
         except Exception:
             examples_block = ""
     if examples_block:
+        legacy_examples_used = True
         _append_system_block(messages[0], examples_block)
 
     try:
@@ -275,6 +358,7 @@ async def run_response_pipeline(
         policy_ctx = {"enabled": False, "policy_block": ""}
     policy_block = str(policy_ctx.get("policy_block") or "").strip()
     if policy_block:
+        policy_hint_used = True
         _append_system_block(messages[0], policy_block)
     messages.extend(normalized_history)
     messages.append({"role": "user", "content": user_text})
@@ -296,6 +380,7 @@ async def run_response_pipeline(
             )
         reply = ""
         source = "fallback_timeout"
+        fallback_source = "timeout"
     except Exception as exc:
         if log_fn:
             log_fn(
@@ -304,15 +389,31 @@ async def run_response_pipeline(
             )
         reply = ""
         source = "fallback_error"
+        fallback_source = "exception"
+    reply_metadata = getattr(reply, "reply_metadata", None)
+    if isinstance(reply_metadata, Mapping):
+        metadata_source = str(reply_metadata.get("source") or "").strip()
+        if metadata_source:
+            source = metadata_source
+        metadata_fallback_source = str(reply_metadata.get("fallback_source") or "").strip()
+        if metadata_fallback_source and fallback_source is None:
+            fallback_source = metadata_fallback_source
+    else:
+        reply_metadata = {}
     reply_text = str(reply or "").strip()
     if not reply_text:
         reply_text = default_fallback_reply(tenant_id)
         if source == "llm":
             source = "fallback_empty"
-    guarded_reply = _guard_unsafe_dialog_training_reply(user_text=user_text, reply_text=reply_text)
+            fallback_source = "empty"
+    guarded_reply = reply_text
+    if source != "rule_fallback":
+        guarded_reply = _guard_unsafe_dialog_training_reply(user_text=user_text, reply_text=reply_text)
     if guarded_reply != reply_text:
         reply_text = guarded_reply
         source = "guarded_location_context"
+        if fallback_source is None:
+            fallback_source = "guarded_location_context"
 
     photos: list[PipelinePhoto] = []
     auto_enabled, max_count = _photo_auto_config(tenant_id)
@@ -321,6 +422,7 @@ async def run_response_pipeline(
     if auto_enabled and max_count > 0:
         candidates = _normalize_photo_candidates(tenant_id, channel)
         selected = _select_photos_by_tags(candidates, user_text, reply_text, max_count)
+        catalog_context_count = len(candidates)
         for photo in selected:
             photos.append(
                 PipelinePhoto(
@@ -330,8 +432,40 @@ async def run_response_pipeline(
                     mime=str(photo.get("mime") or _guess_photo_mime(photo)),
                 )
             )
-
-    return PipelineResult(reply_text=reply_text, photos=photos, source=source)
+    latency_ms = int((time.perf_counter() - start_ts) * 1000)
+    fallback_used = (
+        bool(reply_metadata.get("fallback_used")) if isinstance(reply_metadata, Mapping) else False
+    ) or source.startswith("fallback") or source == "guarded_location_context"
+    quality_violations = ["fallback_used"] if fallback_used else []
+    trace = ReplyTrace(
+        trace_id=trace_id,
+        tenant_id=int(tenant_id),
+        lead_id=lead_id if lead_id > 0 else None,
+        channel=str(channel).strip(),
+        user_text=str(user_text or ""),
+        history_count=history_count,
+        pipeline_source=source,
+        reply_text=reply_text,
+        fallback_used=fallback_used,
+        fallback_source=fallback_source,
+        catalog_context_count=catalog_context_count,
+        dialog_examples_used=dialog_examples_used,
+        legacy_examples_used=legacy_examples_used,
+        policy_hint_used=policy_hint_used,
+        prompt_hash=_hash_text(_system_prompt_only(messages).get("content", "")),
+        model=_resolve_model_hint(int(tenant_id)),
+        latency_ms=latency_ms,
+        quality_violations=quality_violations,
+    )
+    _log_trace(
+        log_fn,
+        trace,
+        contextual_block_applied=contextual_used,
+        policy_hint_applied=policy_hint_used,
+        dialog_examples_applied=dialog_examples_used,
+        legacy_examples_applied=legacy_examples_used,
+    )
+    return PipelineResult(reply_text=reply_text, photos=photos, source=source, trace=trace)
 
 
 def _build_dialog_training_block(*, tenant_id: int, user_text: str) -> str:

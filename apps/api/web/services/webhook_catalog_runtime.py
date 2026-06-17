@@ -308,6 +308,104 @@ def _attachment_stats(attachment: Any) -> tuple[int, int]:
         return 0, 0
 
 
+def _log_catalog_request(ctx: CatalogFlowContext, *, deps: CatalogFlowDeps, forced: bool) -> None:
+    if not ctx.text:
+        return
+    deps.logger.info(
+        "event=catalog_flow_request channel=%s tenant=%s lead_id=%s query=%s forced=%s",
+        ctx.provider,
+        ctx.tenant,
+        ctx.lead_id,
+        str(ctx.text)[:220],
+        forced,
+    )
+
+
+def _log_catalog_skip(ctx: CatalogFlowContext, *, deps: CatalogFlowDeps, reason: str) -> None:
+    deps.logger.info(
+        "event=catalog_flow_skip channel=%s tenant=%s lead_id=%s source=catalog reason=%s",
+        ctx.provider,
+        ctx.tenant,
+        ctx.lead_id,
+        reason,
+    )
+
+
+def _log_catalog_sent(
+    ctx: CatalogFlowContext,
+    *,
+    deps: CatalogFlowDeps,
+    attachment: Any,
+    state: _CatalogState,
+) -> None:
+    deps.logger.info(
+        "event=catalog_flow_sent channel=%s tenant=%s lead_id=%s source=catalog matched_attachment=%s file_link=%s relevance=%s",
+        ctx.provider,
+        ctx.tenant,
+        ctx.lead_id,
+        bool(attachment),
+        bool(state.use_file_link),
+        state.should_send_catalog,
+    )
+
+
+def _log_price_request(ctx: CatalogFlowContext, *, deps: CatalogFlowDeps) -> None:
+    if not ctx.text:
+        return
+    deps.logger.info(
+        "event=price_flow_request channel=%s tenant=%s lead_id=%s query=%s",
+        ctx.provider,
+        ctx.tenant,
+        ctx.lead_id,
+        str(ctx.text)[:220],
+    )
+
+
+def _log_price_skip(
+    ctx: CatalogFlowContext,
+    *,
+    deps: CatalogFlowDeps,
+    reason: str,
+    title: str = "",
+) -> None:
+    if title:
+        deps.logger.info(
+            "event=price_flow_skip channel=%s tenant=%s lead_id=%s reason=%s title=%s",
+            ctx.provider,
+            ctx.tenant,
+            ctx.lead_id,
+            reason,
+            title[:140],
+        )
+        return
+    deps.logger.info(
+        "event=price_flow_skip channel=%s tenant=%s lead_id=%s reason=%s",
+        ctx.provider,
+        ctx.tenant,
+        ctx.lead_id,
+        reason,
+    )
+
+
+def _log_price_sent(
+    ctx: CatalogFlowContext,
+    *,
+    deps: CatalogFlowDeps,
+    title: str,
+    price: str,
+    has_stock: bool,
+) -> None:
+    deps.logger.info(
+        "event=price_flow_sent channel=%s tenant=%s lead_id=%s title=%s price=%s has_stock=%s",
+        ctx.provider,
+        ctx.tenant,
+        ctx.lead_id,
+        title[:140],
+        price,
+        has_stock,
+    )
+
+
 async def _maybe_send_catalog(
     ctx: CatalogFlowContext,
     *,
@@ -319,6 +417,7 @@ async def _maybe_send_catalog(
     caption: str,
     state: _CatalogState,
 ) -> bool:
+    _log_catalog_request(ctx, deps=deps, forced=state.forced_catalog)
     if state.forced_catalog and cache_key:
         await deps.reset_catalog_cache_fn(cache_key)
     if state.use_file_link:
@@ -345,6 +444,7 @@ async def _maybe_send_catalog(
         catalog_out["to"] = ctx.whatsapp_phone
         deps.assign_whatsapp_to_jid_fn(catalog_out, ctx.resolved_provider, ctx.sender_jid_value)
     if not should_send_catalog:
+        _log_catalog_skip(ctx, deps=deps, reason="no_send")
         return False
     dedup_ok = await deps.catalog_message_mark_once_fn(
         tenant=int(ctx.tenant),
@@ -367,6 +467,7 @@ async def _maybe_send_catalog(
     else:
         await deps.push_json_left_fn(deps.redis_queue, deps.outbox_queue_key, catalog_out)
     await deps.mark_catalog_sent_fn(cache_key)
+    _log_catalog_sent(ctx, deps=deps, attachment=attachment, state=state)
     try:
         deps.core_module.record_bot_reply(
             ctx.refer_id,
@@ -386,24 +487,35 @@ async def _maybe_send_price_reply(
     deps: CatalogFlowDeps,
     cfg: Mapping[str, Any] | None,
 ) -> bool:
+    _log_price_request(ctx, deps=deps)
     if not deps.smart_reply_enabled_fn(ctx.tenant):
+        _log_price_skip(ctx, deps=deps, reason="smart_reply_disabled")
         return False
     try:
         catalog_matches = deps.core_module.search_catalog({}, limit=5, tenant=ctx.tenant, query=ctx.text or "")
     except Exception:
         catalog_matches = []
     if not catalog_matches:
+        _log_price_skip(ctx, deps=deps, reason="no_catalog_matches")
         return False
     best = catalog_matches[0]
     if not _has_relevance(ctx.text or "", best):
+        _log_price_skip(
+            ctx,
+            deps=deps,
+            reason="low_relevance",
+            title=str(best.get("title") or best.get("name") or "").strip(),
+        )
         return False
     formatted_price = _format_price(best.get("price"))
     if not formatted_price:
+        _log_price_skip(ctx, deps=deps, reason="no_formatted_price")
         return False
     title_hint = str(best.get("title") or best.get("name") or "").strip()
     reply_price = title_hint or "Эта модель"
     reply_text = f"{reply_price} стоит {formatted_price} ₽."
     stock_value = best.get("stock")
+    has_stock = False
     if stock_value not in (None, "", "0"):
         try:
             stock_int = int(str(stock_value).strip())
@@ -411,6 +523,8 @@ async def _maybe_send_price_reply(
             stock_int = None
         if stock_int is not None and stock_int > 0:
             reply_text += " В наличии."
+            has_stock = True
+    _log_price_sent(ctx, deps=deps, title=title_hint, price=formatted_price, has_stock=has_stock)
     price_out = _base_outbox(ctx, text=reply_text, attachments=[])
     if ctx.resolved_provider == "telegram":
         _apply_telegram_target(ctx, price_out)

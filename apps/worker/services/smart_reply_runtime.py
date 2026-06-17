@@ -223,6 +223,9 @@ async def generate_reply_text(
 ) -> tuple[str, Any]:
     reply: Any = ""
     reply_text = ""
+    trace = None
+    source = "llm"
+    fallback_used = False
     try:
         result = await deps.run_response_pipeline_fn(
             tenant_id=tenant_id,
@@ -236,6 +239,8 @@ async def generate_reply_text(
         reply_text = str(result.reply_text or "").strip()
         reply = result.reply_text
         source = str(getattr(result, "source", "llm") or "llm").strip().lower()
+        trace = getattr(result, "trace", None)
+        fallback_used = source.startswith("fallback") or source == "guarded_location_context"
         if source != "llm":
             deps.log_fn(
                 "event=smart_reply_quality_signal channel=%s tenant=%s lead_id=%s signal=pipeline_fallback source=%s"
@@ -260,6 +265,21 @@ async def generate_reply_text(
         )
         if not reply_text:
             reply_text = deps.default_fallback_reply_fn(tenant_id)
+            fallback_used = True
+            source = "fallback_sanitized_empty"
+    if trace is not None:
+        deps.log_fn(
+            "event=smart_reply_pipeline_trace channel=%s tenant=%s lead_id=%s source=%s trace_id=%s fallback=%s sanitized=%s fallback_source=%s"
+            % (
+                channel,
+                tenant_id,
+                lead_id,
+                source,
+                getattr(trace, "trace_id", "-"),
+                int(bool(fallback_used)),
+                getattr(trace, "fallback_source", "-") if trace else "-",
+            )
+        )
     deps.log_smart_reply_diag_fn(channel, tenant_id, lead_id, reply)
     return reply_text, reply
 

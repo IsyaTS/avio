@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 class LLMReply(str):
     """String wrapper that carries planner/enforcement diagnostics for logging."""
 
-    __slots__ = ("llm_plan", "llm_raw_answer")
+    __slots__ = ("llm_plan", "llm_raw_answer", "reply_metadata")
 
     def __new__(
         cls,
@@ -16,10 +16,12 @@ class LLMReply(str):
         *,
         plan: Optional[Dict[str, Any]] = None,
         raw_answer: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> "LLMReply":
         obj = str.__new__(cls, content)
         obj.llm_plan = plan
         obj.llm_raw_answer = raw_answer
+        obj.reply_metadata = metadata if metadata is not None else {}
         return obj
 
 
@@ -38,6 +40,7 @@ class ReplyRuntime:
         *,
         plan: Optional[Any] = None,
         raw_answer: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> LLMReply:
         text = _limit_final_questions(str(text or ""), max_questions=1)
         plan_payload: Optional[Dict[str, Any]] = None
@@ -50,7 +53,10 @@ class ReplyRuntime:
                 except Exception:
                     plan_payload = None
         return LLMReply(
-            text, plan=plan_payload, raw_answer=raw_answer if raw_answer is not None else text
+            text,
+            plan=plan_payload,
+            raw_answer=raw_answer if raw_answer is not None else text,
+            metadata=metadata,
         )
 
     def build_human_mode_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:

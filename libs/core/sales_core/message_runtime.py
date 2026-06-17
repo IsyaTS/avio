@@ -401,14 +401,24 @@ class MessageRuntime:
                     user_text=last_user_message,
                     grounding=grounding,
                 )
-                return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+                return _wrap_llm_reply(
+                    fallback,
+                    plan=None,
+                    raw_answer=fallback,
+                    metadata={"source": "rule_fallback", "fallback_used": True},
+                )
             logger.exception("direct llm call failed", exc_info=exc)
             raise
         fallback = _llm_unavailable_reply(
             user_text=last_user_message,
             grounding=grounding,
         )
-        return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+        return _wrap_llm_reply(
+            fallback,
+            plan=None,
+            raw_answer=fallback,
+            metadata={"source": "rule_fallback", "fallback_used": True},
+        )
 
     async def human_llm_reply(
         self,
@@ -482,14 +492,24 @@ class MessageRuntime:
                     user_text=last_user_message,
                     grounding=grounding,
                 )
-                return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+                return _wrap_llm_reply(
+                    fallback,
+                    plan=None,
+                    raw_answer=fallback,
+                    metadata={"source": "rule_fallback", "fallback_used": True},
+                )
             logger.exception("human llm failed", exc_info=exc)
             raise
         fallback = _llm_unavailable_reply(
             user_text=last_user_message,
             grounding=grounding,
         )
-        return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+        return _wrap_llm_reply(
+            fallback,
+            plan=None,
+            raw_answer=fallback,
+            metadata={"source": "rule_fallback", "fallback_used": True},
+        )
 
     async def ask_llm(
         self,
@@ -560,7 +580,12 @@ class MessageRuntime:
             _update_fact_memory(state, fallback)
             _remember_questions_from_reply(state, fallback)
             save_sales_state(state)
-            return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+            return _wrap_llm_reply(
+                fallback,
+                plan=None,
+                raw_answer=fallback,
+                metadata={"source": "rule_fallback", "fallback_used": True},
+            )
 
         try:
             if openai is not None:
@@ -606,6 +631,11 @@ class MessageRuntime:
                 fallback = _llm_unavailable_reply(
                     user_text=last,
                 )
-                return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+                return _wrap_llm_reply(
+                    fallback,
+                    plan=None,
+                    raw_answer=fallback,
+                    metadata={"source": "rule_fallback", "fallback_used": True},
+                )
             logger.exception("ask_llm unified path failed", exc_info=exc)
             raise

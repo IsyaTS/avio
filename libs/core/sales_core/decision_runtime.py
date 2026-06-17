@@ -2894,13 +2894,23 @@ class DecisionRuntime:
                 fallback = _llm_unavailable_reply(
                     user_text=last_user_message,
                 )
-                return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+                return _wrap_llm_reply(
+                    fallback,
+                    plan=None,
+                    raw_answer=fallback,
+                    metadata={"source": "rule_fallback", "fallback_used": True},
+                )
             logger.exception("single llm failed", exc_info=exc)
             raise
         fallback = _llm_unavailable_reply(
             user_text=last_user_message,
         )
-        return _wrap_llm_reply(fallback, plan=None, raw_answer=fallback)
+        return _wrap_llm_reply(
+            fallback,
+            plan=None,
+            raw_answer=fallback,
+            metadata={"source": "rule_fallback", "fallback_used": True},
+        )
 
     async def audit_and_rewrite_persona_reply(
         self,

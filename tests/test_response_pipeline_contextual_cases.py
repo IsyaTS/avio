@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from libs.core import response_pipeline
+from libs.core.sales_core.reply_runtime import LLMReply
 
 
 pytestmark = pytest.mark.unit
@@ -71,6 +72,29 @@ async def test_retrieval_failure_does_not_break_pipeline(monkeypatch: pytest.Mon
     monkeypatch.setattr(response_pipeline, "ask_llm", _ask)
     result = await response_pipeline.run_response_pipeline(tenant_id=7, channel="avito", user_text="цена?")
     assert result.reply_text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_preserves_rule_fallback_source_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(response_pipeline, "build_llm_messages", lambda *_a, **_k: [{"role": "system", "content": "base"}])
+    monkeypatch.setattr(response_pipeline.training_retriever, "build_examples_block_async", lambda *_a, **_k: "")
+    monkeypatch.setattr(response_pipeline, "prepare_runtime_policy_hint", lambda **_k: {"policy_block": ""})
+
+    async def _contextual(**_kwargs):
+        return {"enabled": False, "applied": False, "block": ""}
+
+    async def _ask(_messages, **_kwargs):
+        return LLMReply(
+            "Точную стоимость без проверки модели не назову.",
+            metadata={"source": "rule_fallback", "fallback_used": True},
+        )
+
+    monkeypatch.setattr(response_pipeline, "build_contextual_cases_block_for_runtime", _contextual)
+    monkeypatch.setattr(response_pipeline, "ask_llm", _ask)
+    result = await response_pipeline.run_response_pipeline(tenant_id=7, channel="avito", user_text="Сколько стоит?")
+    assert result.source == "rule_fallback"
+    assert result.trace is not None
+    assert result.trace.fallback_used is True
 
 
 def test_dialog_dataset_requires_explicit_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

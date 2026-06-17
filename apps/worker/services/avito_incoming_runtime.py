@@ -828,6 +828,9 @@ async def _handle_photo_handoff(state: AvitoIncomingState, *, deps: AvitoIncomin
 
 async def _handle_static_auto_reply(state: AvitoIncomingState, *, deps: AvitoIncomingDeps) -> bool:
     if not state.auto_reply_text:
+        deps.log_fn(
+            f"event=avito_static_auto_reply_skip reason=no_text tenant={state.tenant_id} lead_id={state.lead_id}"
+        )
         return False
     auto_reply_dedup_key = f"avito:auto_reply_sent:{state.tenant_id}:{state.lead_id}"
     try:
@@ -861,11 +864,18 @@ async def _handle_static_auto_reply(state: AvitoIncomingState, *, deps: AvitoInc
         state.lead_id,
         reason="avito_auto_reply",
     )
+    deps.log_fn(
+        f"event=avito_static_auto_reply_applied tenant={state.tenant_id} lead_id={state.lead_id} "
+        f"chat_id={state.chat_id} channel=avito"
+    )
     return True
 
 
 async def _maybe_enqueue_smart_reply(state: AvitoIncomingState, *, deps: AvitoIncomingDeps) -> None:
     if not state.text:
+        deps.log_fn(
+            f"event=smart_reply_skip tenant={state.tenant_id} lead_id={state.lead_id} reason=empty_text channel=avito"
+        )
         return
     if await deps.is_handoff_silenced_fn(state.tenant_id, state.lead_id):
         deps.log_fn(
@@ -878,7 +888,13 @@ async def _maybe_enqueue_smart_reply(state: AvitoIncomingState, *, deps: AvitoIn
             reason="silenced",
         )
         return
+    deps.log_fn(
+        f"event=smart_reply_allowed channel=avito tenant={state.tenant_id} lead_id={state.lead_id}"
+    )
     if not _smart_reply_allowed(state, deps=deps):
+        deps.log_fn(
+            f"event=smart_reply_not_allowed channel=avito tenant={state.tenant_id} lead_id={state.lead_id}"
+        )
         return
     refer_id = state.contact_id if state.contact_id and state.contact_id > 0 else state.lead_id
     reply_context = _smart_reply_context(state)
@@ -891,6 +907,9 @@ async def _maybe_enqueue_smart_reply(state: AvitoIncomingState, *, deps: AvitoIn
         context=reply_context,
     )
     if delayed:
+        deps.log_fn(
+            f"event=smart_reply_enqueue_result channel=avito tenant={state.tenant_id} lead_id={state.lead_id} result=delayed"
+        )
         return
     await deps.produce_and_enqueue_smart_reply_fn(
         tenant_id=state.tenant_id,
@@ -900,6 +919,9 @@ async def _maybe_enqueue_smart_reply(state: AvitoIncomingState, *, deps: AvitoIn
         user_text=state.text,
         context=reply_context,
         delayed=False,
+    )
+    deps.log_fn(
+        f"event=smart_reply_enqueue_result channel=avito tenant={state.tenant_id} lead_id={state.lead_id} result=immediate"
     )
 
 
