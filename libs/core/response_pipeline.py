@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from libs.core.learning.service import prepare_runtime_policy_hint
 from libs.core.services.contextual_prompt_builder import build_contextual_cases_block_for_runtime
+from libs.core.services.niche_brain_v2 import NicheBrainV2Context, build_niche_brain_v2_block
 from libs.core.sales_core import ask_llm, build_llm_messages, read_tenant_config, tenant_dir
 from libs.core.common import default_fallback_reply
 from libs.core.training import dialog_retriever
@@ -360,6 +361,26 @@ async def run_response_pipeline(
     if policy_block:
         policy_hint_used = True
         _append_system_block(messages[0], policy_block)
+
+    try:
+        niche_ctx = NicheBrainV2Context(
+            tenant_id=int(tenant_id),
+            channel=channel,
+            user_text=user_text,
+            history=normalized_history,
+            contact_id=contact_id,
+            tenant_config=read_tenant_config(int(tenant_id)),
+        )
+        niche_result = build_niche_brain_v2_block(niche_ctx)
+        if niche_result.applied and niche_result.block:
+            _append_system_block(messages[0], niche_result.block)
+    except Exception as exc:
+        if log_fn:
+            log_fn(
+                "event=niche_brain_v2_failed tenant=%s channel=%s contact=%s error=%s"
+                % (tenant_id, channel, contact_id or 0, exc)
+            )
+
     messages.extend(normalized_history)
     messages.append({"role": "user", "content": user_text})
 
